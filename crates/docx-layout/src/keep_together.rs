@@ -300,6 +300,7 @@ fn table_leading_slice(
             .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height());
     if headers == 0 && !measure.rows.is_empty() && (split_first_row || oversized_first_row) {
         first = breaks.fresh_slice(0, 0.0, capacity);
+        first = first.min(breaks.first_cell_slice(0, 0.0, capacity).unwrap_or(first));
     } else if headers > 0
         && headers < measure.rows.len()
         && !block
@@ -315,6 +316,11 @@ fn table_leading_slice(
         };
         if breaks.kept_oversized(headers, 0.0, body) {
             first = band + breaks.fresh_slice(headers, 0.0, body);
+        }
+        if band <= capacity
+            && let Some(slice) = breaks.first_cell_slice(headers, 0.0, body)
+        {
+            first = first.min(band + slice);
         }
     }
     let mut top = 0.0;

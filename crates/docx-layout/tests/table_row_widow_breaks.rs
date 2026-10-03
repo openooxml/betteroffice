@@ -456,3 +456,376 @@ fn a_kept_row_stays_when_the_next_row_cannot_split_on_any_page() {
     let fragments = fragments(vec![json!({"block": block, "measure": measure}), table]);
     assert_eq!(fragments[0].0, 0);
 }
+
+fn two_cell_table(spec: &[(usize, f64, Value)]) -> Value {
+    let (mut cells, mut measures) = (Vec::new(), Vec::new());
+    let mut row_height = 0.0_f64;
+    for (cell, (lines, before, attrs)) in spec.iter().enumerate() {
+        let (mut block, measure) = paragraph(10 + cell, *lines, attrs.clone());
+        block["attrs"]["spacing"] = json!({"before": before});
+        let height = 20.0 * *lines as f64 + before;
+        row_height = row_height.max(height);
+        cells.push(json!({"id": cell, "blocks": [block]}));
+        measures.push(json!({"width": 100, "height": height, "blocks": [measure]}));
+    }
+    json!({
+        "block": {"kind": "table", "id": "table", "columnWidths": [100, 100],
+            "rows": [{"id": 0, "cells": cells}]},
+        "measure": {"kind": "table", "columnWidths": [100, 100], "totalWidth": 200,
+            "totalHeight": row_height, "rows": [{"height": row_height, "cells": measures}]}
+    })
+}
+
+fn after_filler(lines: usize, table: Value) -> Vec<Value> {
+    let (block, measure) = paragraph(1, lines, json!({}));
+    vec![json!({"block": block, "measure": measure}), table]
+}
+
+fn cell_windows(fragment: &Value) -> Vec<(f64, f64)> {
+    fragment["cellClips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(cell, clip)| {
+            assert_eq!(clip["cell"], cell);
+            (
+                clip["top"].as_f64().unwrap(),
+                clip["bottom"].as_f64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+fn placed_cell_lines(measured: &[Value]) -> Vec<Vec<(usize, std::ops::Range<usize>)>> {
+    use docx_layout::placement::{PlacedItem, PlacementInput, place_layout};
+    let mut input: docx_layout::types::Input = serde_json::from_value(json!({
+        "measured": measured, "options": {"pageSize": {"w": 200, "h": 120},
+            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
+    }))
+    .unwrap();
+    let layout = docx_layout::compute_layout_input(&mut input).unwrap();
+    let placed = place_layout(&PlacementInput {
+        layout: &layout,
+        measured: &input.measured,
+        headers_footers: None,
+        bands_composed: false,
+        notes: &[],
+    });
+    assert!(placed.issues.is_empty());
+    placed
+        .pages
+        .iter()
+        .map(|page| {
+            page.regions
+                .iter()
+                .flat_map(|region| &region.items)
+                .filter_map(|item| match item {
+                    PlacedItem::Paragraph(paragraph) => {
+                        let id = serde_json::to_value(&paragraph.block.id)
+                            .unwrap()
+                            .as_u64()? as usize;
+                        (id >= 10).then_some((id - 10, paragraph.lines.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn offset_cell_line_grids_split_and_resume_at_independent_boundaries() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(6, 0.0, json!({})), (6, 4.4, json!({}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(
+        result.iter().map(|(page, _)| *page).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 44.4)]);
+    assert_eq!(cell_windows(&result[1].1), [(60.0, 120.0), (44.4, 124.4)]);
+    assert_eq!(result[0].1["height"], 60);
+    assert_eq!(result[1].1["height"], 80);
+    let lines = placed_cell_lines(&measured);
+    assert_eq!(
+        lines,
+        [vec![(0, 0..3), (1, 0..2)], vec![(0, 3..6), (1, 2..6)]]
+    );
+    for cell in 0..2 {
+        let seen: Vec<_> = lines
+            .iter()
+            .flatten()
+            .filter(|(index, _)| *index == cell)
+            .flat_map(|(_, lines)| lines.clone())
+            .collect();
+        assert_eq!(seen, (0..6).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn a_four_line_cell_splits_two_and_two_while_the_other_cell_finishes() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(4, 0.0, json!({})), (2, 4.4, json!({}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 44.4)]);
+    assert_eq!(cell_windows(&result[1].1), [(40.0, 80.0), (44.4, 44.4)]);
+    assert_eq!(
+        placed_cell_lines(&measured),
+        [vec![(0, 0..2), (1, 0..2)], vec![(0, 2..4)]]
+    );
+}
+
+#[test]
+fn a_three_line_widow_controlled_cell_stays_whole_while_another_splits() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 0.0)]);
+    assert_eq!(cell_windows(&result[1].1), [(40.0, 80.0), (0.0, 64.4)]);
+    assert_eq!(
+        placed_cell_lines(&measured),
+        [vec![(0, 0..2)], vec![(0, 2..4), (1, 0..3)]]
+    );
+}
+
+#[test]
+fn per_cell_continuations_keep_each_cursor_across_three_pages() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(10, 0.0, json!({})), (10, 4.4, json!({}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(result.len(), 3);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 44.4)]);
+    assert_eq!(cell_windows(&result[1].1), [(60.0, 160.0), (44.4, 144.4)]);
+    assert_eq!(cell_windows(&result[2].1), [(160.0, 200.0), (144.4, 204.4)]);
+    assert_eq!(
+        placed_cell_lines(&measured),
+        [
+            vec![(0, 0..3), (1, 0..2)],
+            vec![(0, 3..8), (1, 2..7)],
+            vec![(0, 8..10), (1, 7..10)],
+        ]
+    );
+}
+
+#[test]
+fn matching_cell_boundaries_keep_the_exact_legacy_fragments() {
+    let one = table_fragments(after_filler(2, table(6, json!({}))), None);
+    let two = table_fragments(
+        after_filler(
+            2,
+            two_cell_table(&[(6, 0.0, json!({})), (6, 0.0, json!({}))]),
+        ),
+        None,
+    );
+    for ((one_page, one), (two_page, two)) in one.iter().zip(&two) {
+        assert_eq!(one_page, two_page);
+        let mut expected = one.clone();
+        expected["width"] = json!(200);
+        assert_eq!(
+            serde_json::to_string(two).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+        assert!(two.get("cellClips").is_none());
+    }
+    assert_eq!(two.len(), 2);
+    assert_eq!(two[0].1["clipBottom"], 60);
+    assert_eq!(two[1].1["clipTop"], 60);
+    assert!(two[1].1.get("clipBottom").is_none());
+}
+
+#[test]
+fn unsupported_cell_windows_preserve_the_legacy_row_path() {
+    let original = two_cell_table(&[(4, 0.0, json!({})), (4, 4.4, json!({}))]);
+    for exclusion in [
+        "cantSplit",
+        "exact",
+        "minimum",
+        "header",
+        "span",
+        "center",
+        "bottom",
+        "rotated",
+        "footnote",
+        "endnote",
+    ] {
+        let mut table = original.clone();
+        match exclusion {
+            "cantSplit" => table["block"]["rows"][0]["cantSplit"] = json!(true),
+            "exact" => {
+                table["block"]["rows"][0]["height"] = json!(84.4);
+                table["block"]["rows"][0]["heightRule"] = json!("exact");
+            }
+            "minimum" => {
+                table["block"]["rows"][0]["height"] = json!(90);
+                table["measure"]["rows"][0]["height"] = json!(90);
+                table["measure"]["totalHeight"] = json!(90);
+            }
+            "header" => table["block"]["rows"][0]["isHeader"] = json!(true),
+            "span" => table["block"]["rows"][0]["cells"][0]["rowSpan"] = json!(2),
+            "center" | "bottom" => {
+                table["block"]["rows"][0]["cells"][0]["verticalAlign"] = json!(exclusion)
+            }
+            "rotated" => table["block"]["rows"][0]["cells"][0]["textDirection"] = json!("tbRl"),
+            "footnote" | "endnote" => {
+                let key = if exclusion == "footnote" {
+                    "footnoteRefId"
+                } else {
+                    "endnoteRefId"
+                };
+                table["block"]["rows"][0]["cells"][0]["blocks"][0]["runs"][0][key] = json!(1);
+            }
+            _ => unreachable!(),
+        }
+        let result = table_fragments(after_filler(2, table), None);
+        assert!(!result.is_empty(), "{exclusion}");
+        assert!(
+            result
+                .iter()
+                .all(|(_, fragment)| fragment.get("cellClips").is_none()),
+            "{exclusion}"
+        );
+        if exclusion == "bottom" {
+            assert_eq!(result[0].0, 0);
+            assert_eq!(result[0].1["clipBottom"], 44.4);
+            assert_eq!(result[1].1["clipTop"], 44.4);
+        } else {
+            assert_eq!(result[0].0, 1, "{exclusion}");
+        }
+    }
+}
+
+#[test]
+fn a_nested_table_stays_atomic_when_another_cell_splits() {
+    let mut nested = table(3, json!({}));
+    nested["block"]["id"] = json!("nested");
+    nested["block"]["rows"][0]["cells"][0]["blocks"][0]["id"] = json!(50);
+    let mut outer = two_cell_table(&[(6, 0.0, json!({})), (3, 4.4, json!({}))]);
+    let (lead, lead_measure) = paragraph(20, 1, json!({}));
+    outer["block"]["rows"][0]["cells"][1]["blocks"] = json!([lead, nested["block"]]);
+    outer["measure"]["rows"][0]["cells"][1]["height"] = json!(80);
+    outer["measure"]["rows"][0]["cells"][1]["blocks"] = json!([lead_measure, nested["measure"]]);
+    let measured = after_filler(2, outer);
+    let result = table_fragments(measured, None);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 20.0)]);
+    assert_eq!(cell_windows(&result[1].1), [(60.0, 120.0), (20.0, 80.0)]);
+}
+
+#[test]
+fn repeated_headers_reserve_their_band_before_per_cell_cuts() {
+    let header = table_rows(&[(1, json!({}), json!({"isHeader": true}))]);
+    let mut table = two_cell_table(&[(6, 0.0, json!({})), (6, 4.4, json!({}))]);
+    table["block"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, header["block"]["rows"][0].clone());
+    table["measure"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, header["measure"]["rows"][0].clone());
+    table["measure"]["totalHeight"] = json!(144.4);
+    let result = table_fragments(after_filler(1, table), None);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(result[0].1["height"], 80);
+    assert_eq!(result[1].1["height"], 100);
+    assert_eq!(result[1].1["headerRowCount"], 1);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 44.4)]);
+    assert_eq!(cell_windows(&result[1].1), [(60.0, 120.0), (44.4, 124.4)]);
+    assert!(
+        result
+            .iter()
+            .all(|(_, fragment)| fragment["cellClips"][0]["row"] == 1)
+    );
+}
+
+#[test]
+fn keep_lines_in_one_cell_does_not_block_another_cells_split() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(6, 0.0, json!({})), (4, 4.4, json!({"keepLines": true}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    assert_eq!(
+        placed_cell_lines(&measured),
+        [vec![(0, 0..3)], vec![(0, 3..6), (1, 0..4)]]
+    );
+}
+
+#[test]
+fn per_cell_oversized_kept_remainders_yield_to_lines_and_terminate() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(6, 0.0, json!({})), (12, 4.4, json!({"keepLines": true}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(result.len(), 5);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    assert!(result.iter().all(|(_, fragment)| {
+        cell_windows(fragment)
+            .iter()
+            .any(|(top, bottom)| bottom > top)
+    }));
+    let lines = placed_cell_lines(&measured);
+    for (cell, count) in [(0, 6), (1, 12)] {
+        let seen: Vec<_> = lines
+            .iter()
+            .flatten()
+            .filter(|(index, _)| *index == cell)
+            .flat_map(|(_, lines)| lines.clone())
+            .collect();
+        assert_eq!(seen, (0..count).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn an_unfinished_cell_can_progress_beyond_an_existing_shared_cut() {
+    let mut table = two_cell_table(&[(8, 0.0, json!({})), (6, 0.0, json!({}))]);
+    let (first, first_measure) = paragraph(11, 2, json!({}));
+    let (last, last_measure) = paragraph(12, 4, json!({"spacing": {"before": 4.4}}));
+    table["block"]["rows"][0]["cells"][1]["blocks"] = json!([first, last]);
+    table["measure"]["rows"][0]["cells"][1]["blocks"] = json!([first_measure, last_measure]);
+    table["measure"]["rows"][0]["cells"][1]["height"] = json!(124.4);
+    let result = table_fragments(after_filler(1, table), None);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 80.0), (0.0, 40.0)]);
+    assert_eq!(cell_windows(&result[1].1), [(80.0, 160.0), (40.0, 124.4)]);
+}
+
+#[test]
+fn a_keep_next_heading_stays_with_a_per_cell_leading_slice() {
+    let table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    assert_eq!(heading_and_table_pages_after(2, table), (Some(0), Some(0)));
+}
+
+#[test]
+fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
+    let heading = table_rows(&[(1, json!({"keepNext": true}), json!({}))]);
+    let mut table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    table["block"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, heading["block"]["rows"][0].clone());
+    table["measure"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, heading["measure"]["rows"][0].clone());
+    table["measure"]["totalHeight"] = json!(100);
+    let result = table_fragments(after_filler(2, table), None);
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(result[0].1["rowStart"], 0);
+    assert_eq!(result[0].1["rowEnd"], 2);
+    assert_eq!(result[0].1["height"], 60);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 0.0)]);
+}

@@ -1006,6 +1006,7 @@ mod tests {
                 header_row_count: None,
                 clip_top: None,
                 clip_bottom: None,
+                cell_clips: None,
             })
         };
         let pages = vec![

@@ -2984,6 +2984,8 @@ pub(crate) struct TableFragmentIn {
     #[serde(default)]
     pub(crate) clip_bottom: Option<f64>,
     #[serde(default)]
+    pub(crate) cell_clips: Option<Vec<crate::types::CellClip>>,
+    #[serde(default)]
     pub(crate) header_row_count: Option<usize>,
     #[serde(default)]
     pub(crate) carried_from_prev: Option<bool>,
@@ -4494,6 +4496,7 @@ fn emit_note_item(
                     row_end: block.rows.len(),
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                     header_row_count: None,
                     carried_from_prev: None,
                     carried_to_next: None,
@@ -4884,6 +4887,7 @@ fn recompose_hf_region(
                     row_end: block.rows.len(),
                     clip_top: None,
                     clip_bottom: None,
+                    cell_clips: None,
                     header_row_count: None,
                     carried_from_prev: None,
                     carried_to_next: None,
@@ -9008,6 +9012,7 @@ struct VisibleRow {
     row_index: usize,
     frag_y: f64,
     is_first_in_fragment: bool,
+    band_height: Option<f64>,
 }
 
 /// A cell a table fragment paints: a grid cell, its box in fragment coordinates, and whether it
@@ -9076,7 +9081,9 @@ impl TablePaintPlan {
         let win_top =
             row_tops.get(frag.row_start).copied().unwrap_or(0.0) + frag.clip_top.unwrap_or(0.0);
         let to_frag_y = |full_y: f64| header_height + (full_y - win_top);
-        let visible_height = if full_bottom_border {
+        let visible_height = if frag.cell_clips.is_some() {
+            frag.height
+        } else if full_bottom_border {
             frag.height
         } else if frag.clip_bottom.is_some() {
             frag.height.round()
@@ -9094,20 +9101,45 @@ impl TablePaintPlan {
                     row_index: r,
                     frag_y: hy,
                     is_first_in_fragment: r == 0,
+                    band_height: None,
                 });
                 hy += measure.rows[r].height;
             }
         }
+        let mut row_shift = 0.0;
         for row_index in frag.row_start..frag.row_end.min(block.rows.len()) {
             let is_first_in_fragment = if header_row_count > 0 {
                 false
             } else {
                 carried && row_index == frag.row_start && frag.clip_top.unwrap_or(0.0) == 0.0
             };
+            let band_height = frag.cell_clips.as_ref().and_then(|clips| {
+                clips
+                    .iter()
+                    .filter(|clip| clip.row == row_index)
+                    .map(|clip| clip.bottom - clip.top)
+                    .reduce(f64::max)
+            });
+            let mut frag_y = to_frag_y(row_tops.get(row_index).copied().unwrap_or(0.0));
+            if frag.cell_clips.is_some() {
+                frag_y += row_shift;
+            }
+            if let Some(height) = band_height {
+                let skipped = if row_index == frag.row_start {
+                    frag.clip_top.unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                frag_y += skipped;
+                let row_h = row_tops.get(row_index + 1).copied().unwrap_or(0.0)
+                    - row_tops.get(row_index).copied().unwrap_or(0.0);
+                row_shift += height - (row_h - skipped);
+            }
             visible.push(VisibleRow {
                 row_index,
-                frag_y: to_frag_y(row_tops.get(row_index).copied().unwrap_or(0.0)),
+                frag_y,
                 is_first_in_fragment,
+                band_height,
             });
         }
 
@@ -9141,8 +9173,10 @@ impl TablePaintPlan {
             });
         }
         for vr in &visible {
-            let row_h = row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
-                - row_tops.get(vr.row_index).copied().unwrap_or(0.0);
+            let row_h = vr.band_height.unwrap_or_else(|| {
+                row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
+                    - row_tops.get(vr.row_index).copied().unwrap_or(0.0)
+            });
             for (grid_index, g) in grid.iter().enumerate() {
                 if g.row_index != vr.row_index {
                     continue;
@@ -9183,6 +9217,28 @@ impl TablePaintPlan {
             self.clip_top_y
         } else {
             self.clip_top_y + self.header_height
+        }
+    }
+
+    fn cell_content_window(
+        &self,
+        frag: &TableFragmentIn,
+        g: &GridCell,
+        paint: &CellPaint,
+    ) -> (f64, f64, f64) {
+        let cy = frag.y + paint.cell_y;
+        if let Some(clip) = frag.cell_clips.as_ref().and_then(|clips| {
+            clips
+                .iter()
+                .find(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+        }) {
+            (
+                cy - clip.top,
+                cy.max(self.cell_clip_top(g)),
+                (cy + (clip.bottom - clip.top)).min(self.clip_bottom_y),
+            )
+        } else {
+            (cy, self.cell_clip_top(g), self.clip_bottom_y)
         }
     }
 }
@@ -9260,8 +9316,10 @@ pub(crate) fn emit_table_fragment(
                 continue;
             };
             let full_top = frag.y + vr.frag_y;
-            let row_h = row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
-                - row_tops.get(vr.row_index).copied().unwrap_or(0.0);
+            let row_h = vr.band_height.unwrap_or_else(|| {
+                row_tops.get(vr.row_index + 1).copied().unwrap_or(0.0)
+                    - row_tops.get(vr.row_index).copied().unwrap_or(0.0)
+            });
             let t = full_top.max(clip_top_y);
             let b = (full_top + row_h).min(clip_bottom_y);
             if b - t <= 0.0 {
@@ -9476,22 +9534,31 @@ pub(crate) fn emit_table_fragment(
             }
         }
 
-        emit_cell_content(
-            prims,
-            cell,
-            measure,
-            &CellPaintRef::from(p.g),
-            cx,
-            cy,
-            p.cell_h,
-            is_first_col,
-            clip_top_y,
-            clip_bottom_y,
-            ctx,
-            p.selectable,
-            &cell_ref,
-            &block_ref,
-        );
+        let (content_y, content_clip_top, content_clip_bottom) =
+            plan.cell_content_window(frag, g, paint);
+        if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
+            emit_cell_content(
+                prims,
+                cell,
+                measure,
+                &CellPaintRef::from(p.g),
+                cx,
+                content_y,
+                p.cell_h,
+                is_first_col,
+                content_clip_top,
+                content_clip_bottom,
+                frag.cell_clips.as_ref().is_some_and(|clips| {
+                    clips
+                        .iter()
+                        .any(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+                }),
+                ctx,
+                p.selectable,
+                &cell_ref,
+                &block_ref,
+            );
+        }
 
         let cell_clip_top = cy.max(clip_top_y);
         let cell_clip_bottom = (cy + p.cell_h).min(clip_bottom_y);
@@ -9803,6 +9870,7 @@ fn emit_cell_content(
     is_first_col: bool,
     clip_top_y: f64,
     clip_bottom_y: f64,
+    windowed_lines: bool,
     ctx: &RenderCtx<'_>,
     selectable: bool,
     cell_ref: &TableCellRef,
@@ -9864,18 +9932,35 @@ fn emit_cell_content(
             // y of this paragraph's first line = the collapsed-spacing stack
             // offset computed above (block_tops is index-aligned with cell.blocks)
             let para_y = content_top + block_tops[i];
+            let (lines, para_y, total_height) = if windowed_lines {
+                let Some((lines, _)) = shown_line_window(pm, para_y, clip_top_y, clip_bottom_y)
+                else {
+                    continue;
+                };
+                let skipped: f64 = pm.lines[..lines.start]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                let height = pm.lines[lines.clone()]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum();
+                (lines, para_y + skipped, height)
+            } else {
+                (0..pm.lines.len(), para_y, total_height)
+            };
             let synthetic = ParagraphFragmentIn {
                 block_id: pb.id.clone(),
                 x: content_x,
                 y: para_y,
                 width: content_width,
                 height: total_height,
-                from_line: 0,
-                to_line: pm.lines.len(),
+                from_line: lines.start,
+                to_line: lines.end,
                 pm_start: if selectable { pb.pm_start } else { None },
                 pm_end: if selectable { pb.pm_end } else { None },
-                carried_from_prev: None,
-                carried_to_next: None,
+                carried_from_prev: windowed_lines.then_some(lines.start > 0),
+                carried_to_next: windowed_lines.then_some(lines.end < pm.lines.len()),
             };
             let before = prims.len();
             emit_paragraph_fragment(
@@ -9903,6 +9988,7 @@ fn emit_cell_content(
                 row_end: tb.rows.len(),
                 clip_top: None,
                 clip_bottom: None,
+                cell_clips: None,
                 header_row_count: None,
                 carried_from_prev: None,
                 carried_to_next: None,
@@ -10047,6 +10133,17 @@ fn emit_cell_content(
         selectable,
         false,
     );
+    if windowed_lines {
+        let mut index = stamp_from;
+        while index < prims.len() {
+            let (top, bottom) = primitive_v_extent(&prims[index]);
+            if bottom <= clip_top_y || top >= clip_bottom_y {
+                prims.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
     }
@@ -10333,6 +10430,33 @@ fn emit_cell_floating_images(
 /// clean row breaks on rounded row offsets leave slivers that thin.
 const MIN_SHOWN_PX: f64 = 1.0;
 
+fn shown_line_window(
+    extent: &ParagraphExtentIn,
+    y: f64,
+    top: f64,
+    bottom: f64,
+) -> Option<(std::ops::Range<usize>, bool)> {
+    let mut line_top = y;
+    let mut first = None;
+    let mut last = 0;
+    let mut clipped = false;
+    for (line_index, line) in extent.lines.iter().enumerate() {
+        line_top += line.float_skip_before.unwrap_or(0.0);
+        let inside = (line_top + line.line_height).min(bottom) - line_top.max(top);
+        if inside > MIN_SHOWN_PX.min(line.line_height / 2.0) {
+            first.get_or_insert(line_index);
+            last = line_index + 1;
+            clipped |= inside < line.line_height - MIN_SHOWN_PX;
+        }
+        line_top += line.line_height;
+    }
+    match first {
+        Some(first) => Some((first..last, clipped)),
+        None if extent.lines.is_empty() && y >= top && y < bottom => Some((0..0, false)),
+        None => None,
+    }
+}
+
 /// What of one table cell block a table fragment shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ShownPart {
@@ -10399,8 +10523,9 @@ fn visit_table_fragment(
             continue;
         };
         let cy = frag.y + paint.cell_y;
-        let clip_top = plan.cell_clip_top(g).max(band.0);
-        let clip_bottom = plan.clip_bottom_y.min(band.1);
+        let (content_y, clip_top, clip_bottom) = plan.cell_content_window(frag, g, paint);
+        let clip_top = clip_top.max(band.0);
+        let clip_bottom = clip_bottom.min(band.1);
         let (top, bottom) = (cy.max(clip_top), (cy + paint.cell_h).min(clip_bottom));
         if bottom <= top {
             continue;
@@ -10410,7 +10535,7 @@ fn visit_table_fragment(
             measure,
             &CellPaintRef::from(g),
             frag.x + g.x,
-            cy,
+            content_y,
             paint.cell_h,
             is_first_grid_column(g, block, measure),
             clip_top,
@@ -10437,26 +10562,8 @@ fn visit_table_fragment(
             path.push((g.row_index, g.cell_index, index));
             let shown = match (cell_block, cell_block_measure) {
                 (BlockIn::Paragraph(_), MeasureIn::Paragraph(extent)) => {
-                    let mut line_top = y;
-                    let mut first = None;
-                    let mut last = 0;
-                    let mut clipped = false;
-                    for (line_index, line) in extent.lines.iter().enumerate() {
-                        line_top += line.float_skip_before.unwrap_or(0.0);
-                        if let Some(cut) = shown(line_top, line.line_height) {
-                            first.get_or_insert(line_index);
-                            last = line_index + 1;
-                            clipped |= cut;
-                        }
-                        line_top += line.line_height;
-                    }
-                    match first {
-                        Some(first) => Some(ShownPart::Lines(first..last, clipped)),
-                        None if extent.lines.is_empty() && y >= top && y < bottom => {
-                            Some(ShownPart::Lines(0..0, false))
-                        }
-                        None => None,
-                    }
+                    shown_line_window(extent, y, top, bottom)
+                        .map(|(lines, clipped)| ShownPart::Lines(lines, clipped))
                 }
                 (BlockIn::Table(nested), MeasureIn::Table(nested_measure)) => {
                     let fragment = TableFragmentIn {
@@ -10470,6 +10577,7 @@ fn visit_table_fragment(
                         row_end: nested.rows.len(),
                         clip_top: None,
                         clip_bottom: None,
+                        cell_clips: None,
                         header_row_count: None,
                         carried_from_prev: None,
                         carried_to_next: None,
