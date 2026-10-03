@@ -77,6 +77,7 @@ import {
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
+import { useViewerSession } from './DocxEditor/internals/viewerSession';
 import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
@@ -1242,7 +1243,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // A read-only worker-open document keeps host proposals in the worker until the replica loads.
   const workerProposals = modeReadOnly && !collaboration;
   // A viewer session holds no document here: selection, copy and point reads go to the worker.
-  const viewerSession = Boolean(experimentalWorkerOpen) && workerProposals;
+  const viewerSession = useViewerSession(Boolean(experimentalWorkerOpen), workerProposals, yrsSeedGeneration);
   // Hit testing answers from the first painted page once the query engine has loaded.
   useEffect(() => {
     if (viewerSession) void loadRustDisplayListQueryEngine().catch(() => {});
