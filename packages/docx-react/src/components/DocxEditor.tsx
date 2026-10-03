@@ -623,7 +623,7 @@ export interface DocxEditorRef {
   replyToComment: (commentId: number, text: string, author: string) => number | null;
   /** Resolve (mark as done) a comment. */
   resolveComment: (commentId: number) => void;
-  /** @deprecated Use {@link proposeChanges}. */
+  /** @deprecated In a viewer session it queues the change through the worker and returns true; use {@link proposeChanges} for the result. */
   proposeChange: (options: {
     paraId: string;
     search: string;

@@ -1135,7 +1135,10 @@ for (const viewer of [false, true]) {
     } as unknown as PagedEditorRef;
     const pages = document.createElement('div');
     const source = queries();
-    const dom = createRenderedDomContext(pages, 1, { displayListQueries: source });
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source,
+      projector: createCanvasHostProjector(pages, source, 1),
+    });
     const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
     const geometry = createPluginGeometry(layout, dom, document.createElement('div'), () => true,
       () => hit, source, () => null, () => false,
@@ -1150,7 +1153,10 @@ for (const change of ['id', 'version', 'zoom'] as const) {
   test(`async point geometry discards a worker hit when layout ${change} changes during the await`, async () => {
     const pages = document.createElement('div');
     const source = queries();
-    const dom = createRenderedDomContext(pages, 1, { displayListQueries: source });
+    const dom = createRenderedDomContext(pages, 1, {
+      displayListQueries: source,
+      projector: createCanvasHostProjector(pages, source, 1),
+    });
     const layout = { id: 'layout', version: 'v', previewVersion: 0, zoom: 1, pageCount: 1 };
     let current = { ...layout };
     let resolve!: (hit: DocxPointPosition | null) => void;

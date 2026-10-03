@@ -1,4 +1,6 @@
 import type {
+  DocxFindTextRequest,
+  DocxFindTextResult,
   DocxFindParagraphsOptions,
   DocxParagraphMatch,
   DocxParagraphAnchor,
@@ -85,6 +87,10 @@ export interface WorkerProposalAuthority {
     options: DocxFindParagraphsOptions | undefined,
     main: () => Promise<DocxParagraphMatch[]>
   ): Promise<DocxParagraphMatch[]>;
+  findText(
+    request: DocxFindTextRequest,
+    main: () => Promise<DocxFindTextResult>
+  ): Promise<DocxFindTextResult>;
   /** Resolves against the document the host sees now. */
   navigationTarget(
     story: string,
@@ -304,6 +310,11 @@ export function registerWorkerProposalAuthority(
     }, () => main(anchors)),
     findParagraphs: (query, options, main) => route(async () => {
       const read = await worker.documentRead({ kind: 'findParagraphs', query, ...options });
+      assertCurrent();
+      return read.value;
+    }, main),
+    findText: (request, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findText', request });
       assertCurrent();
       return read.value;
     }, main),

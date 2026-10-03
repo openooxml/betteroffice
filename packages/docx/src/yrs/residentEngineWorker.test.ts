@@ -2645,6 +2645,10 @@ describe('worker proposals during sliced completion', () => {
       const revision = main.listRevisions().find((candidate) => candidate.kind === 'insertion')!;
       const requests: Array<{ read: ResidentDocumentRead; value?: unknown; text?: string }> = [
         {
+          read: { kind: 'findText', request: { text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 } },
+          value: main.findText({ text: 'phrase', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 1 }),
+        },
+        {
           read: { kind: 'findParagraphs', query: 'phrase', caseSensitive: true, limit: 1 },
           value: [{ paraId: '00000100', match: 'phrase', before: 'Before the ', after: ' new after' }],
         },

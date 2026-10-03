@@ -526,6 +526,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'readParagraphs':
         value = engine.readParagraphs(request.read.request);
         break;
+      case 'findText':
+        value = engine.findText(request.read.request);
+        break;
       case 'navigationTarget':
         value = resolveNavigationTarget(
           session.geometryReader,

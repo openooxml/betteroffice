@@ -1,4 +1,4 @@
-import { useImperativeHandle, useMemo } from 'react';
+import { useImperativeHandle, useMemo, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
@@ -191,9 +191,13 @@ const VIEWER_NAVIGATION = {
   scrollToChangeId: 'scrollToChange',
 } as const;
 
-export function routeViewerRefAccess(api: DocxEditorRef, viewer: () => boolean): DocxEditorRef {
+export function routeViewerRefAccess(
+  api: DocxEditorRef,
+  viewer: () => boolean,
+  viewerApi: Partial<DocxEditorRef> = {}
+): DocxEditorRef {
   const routed = { ...api };
-  const members = [...Object.keys(DOCX_REF_ASYNC_TWINS), ...DOCX_REF_ASYNC_TWIN_EXEMPTIONS];
+  const members = new Set([...Object.keys(DOCX_REF_ASYNC_TWINS), ...DOCX_REF_ASYNC_TWIN_EXEMPTIONS, ...Object.keys(viewerApi)]);
   for (const name of members) {
     const member = name as keyof DocxEditorRef;
     const twin = member in DOCX_REF_ASYNC_TWINS
@@ -207,15 +211,19 @@ export function routeViewerRefAccess(api: DocxEditorRef, viewer: () => boolean):
         if (!viewer()) return Reflect.apply(api[member] as Function, api, args);
         const behaviour = VIEWER_REF_ROUTING[member] === 'async-only' ? 'throws DocxAsyncOnlyError in viewer sessions'
           : navigation ? 'starts async navigation and returns true in viewer sessions'
+          : member === 'proposeChange' && viewerApi.proposeChange ? 'queues allowed host proposals through the worker in viewer sessions'
           : member === 'onContentChange' ? 'does not fire in viewer sessions'
           : member === 'getSelectionInfo' ? 'returns null in viewer sessions'
           : 'keeps its synchronous behaviour in viewer sessions';
-        warnDeprecatedViewerMember(member, behaviour, use);
+        if (member in DOCX_REF_ASYNC_TWINS || DOCX_REF_ASYNC_TWIN_EXEMPTIONS.has(member)) {
+          warnDeprecatedViewerMember(member, behaviour, use);
+        }
         if (VIEWER_REF_ROUTING[member] === 'async-only') throw new DocxAsyncOnlyError(member, use);
         if (navigation) {
           void Reflect.apply(routed[navigation], routed, args).catch(() => {});
           return true;
         }
+        if (viewerApi[member]) return Reflect.apply(viewerApi[member] as Function, viewerApi, args);
         return Reflect.apply(api[member] as Function, api, args);
       },
     });
@@ -540,6 +548,7 @@ export function useDocxEditorRefApi({
   experimentalWorkerOpen?: boolean;
   hostSearch: DocxHostSearch;
 }) {
+  const proposalWarningRef = useRef(false);
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
     () => ({
@@ -588,7 +597,7 @@ export function useDocxEditorRefApi({
       const result = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
       if (!result.ok && result.code !== 'editor-unavailable') throw result.error;
     };
-    const api: DocxEditorRef = gateReplicaAccess({
+    const direct: DocxEditorRef = {
       commands,
       getDocument: () =>
         opening() ? null : (pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document),
@@ -643,7 +652,13 @@ export function useDocxEditorRefApi({
         (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options),
       findContentControls: async (query, options) =>
         (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options),
-      findText: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request),
+      findText: (request) => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request);
+        const session = pagedEditorRef.current?.getYrsSession();
+        const authority = viewer() && session ? registeredWorkerProposalAuthority(session) : null;
+        return authority ? authority.findText(request, main) : main();
+      },
       validateEdits: async (request) => {
         const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
         return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
@@ -941,8 +956,51 @@ export function useDocxEditorRefApi({
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
       ...hostSearch,
-    }, pagedEditorRef, experimentalWorkerOpen);
-    return routeViewerRefAccess(api, viewer);
+    };
+    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen);
+    const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
+      const session = pagedEditorRef.current?.getYrsSession();
+      return session ? modeRefusal(session, modeRef.current, request) : null;
+    };
+    return routeViewerRefAccess(api, viewer, {
+      applyEdits: async (request) => editRefusal(request) ?? api.applyEdits(request),
+      validateEdits: async (request) => editRefusal(request) ?? api.validateEdits(request),
+      findText: direct.findText,
+      proposeChange: (options) => {
+        if (!hostProposalsAllowed()) return api.proposeChange(options);
+        if (!options.search && !options.replaceWith) return false;
+        void (async () => {
+          const session = pagedEditorRef.current?.getYrsSession();
+          const authority = session ? registeredWorkerProposalAuthority(session) : null;
+          if (!session || !authority) throw new Error('The worker proposal authority is unavailable');
+          const identities = await authority.paragraphIdentities(async () =>
+            (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.paragraphIdentities()
+          );
+          const paragraph = identities.paragraphs.find(({ session: anchor }) =>
+            anchor?.paraId === options.paraId && (anchor.story === 'body' || anchor.story.startsWith('body:'))
+          )?.session;
+          if (!paragraph) throw new Error(`Paragraph ${options.paraId} was not found`);
+          if (pagedEditorRef.current?.getYrsSession() !== session) throw new Error('The document changed while proposing a change');
+          const result = await direct.proposeChanges({
+            expectVersion: authority.geometry()?.version ?? session.version(),
+            proposals: [{
+              id: crypto.randomUUID(),
+              paragraph: { kind: 'session', sessionId: identities.sessionId, story: paragraph.story, paraId: options.paraId },
+              suggest: { author: options.author, date: new Date().toISOString() },
+              ...(options.search
+                ? { op: 'replaceText', search: options.search, replaceWith: options.replaceWith }
+                : { op: 'insertText', at: 'end', text: options.replaceWith }),
+            }],
+          });
+          if (!result.ok) throw new Error(result.failure.message);
+        })().catch((error: unknown) => {
+          if (proposalWarningRef.current) return;
+          proposalWarningRef.current = true;
+          console.warn('[DocxEditor] proposeChange:', error);
+        });
+        return true;
+      },
+    });
   };
   useImperativeHandle(
     ref,

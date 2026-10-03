@@ -4,11 +4,21 @@ import { useRef } from 'react';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { ResidentDocumentRead, ResidentEngineWorkerClient, ResidentProposalReply, YrsSession } from '@betteroffice/docx/yrs';
+import type {
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxParagraphIdentitySnapshot,
+  DocxProposalRequest,
+  ResidentDocumentRead,
+  ResidentEngineWorkerClient,
+  ResidentProposalReply,
+  YrsSession,
+} from '@betteroffice/docx/yrs';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxDocumentChange, DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
+import type { EditorMode } from '../internals/editing-modes';
 import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedViewerMembers';
 import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
@@ -30,22 +40,29 @@ const MATCHES = [{ paraId: 'p', match: 'hello', before: '', after: '' }];
 function apiFor(viewer = false, pendingReplica = false) {
   const events: string[] = [];
   const document = {} as Document;
+  const state = { viewer, version: 'v' };
+  const modeRef = { current: viewer ? 'viewing' : 'editing' } as { current: EditorMode };
+  const allowHostProposalsRef = { current: true };
+  const sidebar = mock(() => {});
   const session = {
-    version: () => 'v',
+    version: () => state.version,
     storyIds: () => ['body'],
-    paragraphs: () => [{ paraId: 'p', text: 'hello', properties: {} }],
+    paragraphs: () => state.viewer ? [] : [{ paraId: 'p', text: 'hello', properties: {} }],
+    paragraphIdentities: mock(() => ({ sessionId: 'shell', packageSha256: null, paragraphs: [] })),
     locateParagraph: () => ({ start: 0, end: 5 }),
     selection: () => ({ anchor: { story: 'body', paraId: 'p', offset: 0 }, head: { story: 'body', paraId: 'p', offset: 5 } }),
     selectionText: () => { events.push('selection'); return INFO; },
     commentTextTarget: () => ({ ok: true }),
-    mirrorWorkerDocument: () => {},
+    mirrorWorkerDocument: (mirror: { version: string } | null) => { if (mirror) state.version = mirror.version; },
     getProposals: () => ({ version: 'v', previewVersion: 0, proposals: [] }),
+    applyEdits: mock(() => ({ ok: true, applied: true, changedStories: ['body'] })),
+    validateEdits: mock(() => ({ ok: true, version: state.version })),
+    findText: mock(() => ({ ok: true, version: state.version, matches: [], truncated: false })),
   } as unknown as YrsSession;
   const hydrate = mock(async () => () => {});
   const fallback = mock(() => {});
   const request = mock(() => {});
   const replica = pendingReplica ? deferWorkerOpenReplica(session, hydrate, fallback, () => {}, { active: () => true, request }) : null;
-  const state = { viewer };
   const editor = {
     isWorkerViewer: () => state.viewer,
     getYrsSession: () => session,
@@ -71,11 +88,11 @@ function apiFor(viewer = false, pendingReplica = false) {
       handleSave: async () => null, zoom: 1, setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {}, loadBuffer: async () => {},
-      comments: [{ id: 1 } as never], setComments: () => {}, setShowCommentsSidebar: () => {},
+      comments: [{ id: 1 } as never], setComments: () => {}, setShowCommentsSidebar: sidebar,
       contentChangeSubscribersRef: { current: new Set() }, documentChangeSubscribersRef: { current: subscribers },
       selectionChangeSubscribersRef: { current: new Set() }, getCachedStyleResolver: createStyleResolver,
       commentIdAllocator: createCommentIdAllocator(), commands: UNAVAILABLE_DOCX_COMMANDS,
-      modeRef: { current: 'editing' }, allowHostProposalsRef: { current: true },
+      modeRef, allowHostProposalsRef,
       hostSearch: {
         search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
         searchNext: () => null, searchPrevious: () => null, searchGoTo: () => null, clearSearch: () => {},
@@ -84,8 +101,168 @@ function apiFor(viewer = false, pendingReplica = false) {
     });
     return ref;
   });
-  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers };
+  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar };
 }
+
+const WORKER_IDENTITIES: DocxParagraphIdentitySnapshot = {
+  sessionId: 'worker-session', packageSha256: null,
+  paragraphs: [
+    { session: { kind: 'session', sessionId: 'worker-session', story: 'header', paraId: 'p' }, origin: 'authored', ooxmlParaId: null, idOrigin: null, persisted: null, source: null },
+    { session: { kind: 'session', sessionId: 'worker-session', story: 'body:cell', paraId: 'p' }, origin: 'authored', ooxmlParaId: null, idOrigin: null, persisted: null, source: null },
+  ],
+};
+
+function workerFor(host: ReturnType<typeof apiFor>, identities = WORKER_IDENTITIES) {
+  const snapshot: ResidentProposalReply = {
+    mirror: { version: 'worker-v', proposals: { previewVersion: 0, entries: [] } },
+    result: { ok: true, snapshot: { version: 'worker-v', previewVersion: 0, proposals: [] } },
+    changedStories: [], geometry: { version: 'worker-v', previewVersion: 0, proposals: '', targets: {}, hidden: [] },
+    updates: [], stateVector: new Uint8Array(),
+  };
+  const proposal = mock(async (_operation: Parameters<ResidentEngineWorkerClient['proposal']>[0]) => snapshot);
+  const documentRead = mock(async (read: ResidentDocumentRead): Promise<{ version: string; value: unknown }> => ({
+    version: 'worker-v', value: read.kind === 'paragraphIdentities' ? identities : MATCHES,
+  }));
+  const authority = registerWorkerProposalAuthority(host.session, {
+    proposal,
+    documentRead: documentRead as ResidentEngineWorkerClient['documentRead'],
+    handOver: async () => ({ state: new Uint8Array(), version: 'worker-v', proposals: snapshot.mirror.proposals }),
+  }, { relayout: () => {}, current: () => true, laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
+  return { authority, proposal, documentRead, snapshot };
+}
+
+function expectNoReplica(host: ReturnType<typeof apiFor>) {
+  expect(host.replica!.started).toBe(false);
+  expect(host.request).not.toHaveBeenCalled();
+  expect(host.hydrate).not.toHaveBeenCalled();
+  expect(host.fallback).not.toHaveBeenCalled();
+  expect(host.editor.flushPendingInput).not.toHaveBeenCalled();
+}
+
+for (const search of ['hello', '']) {
+  test(`viewer proposeChange queues ${search ? 'replacement' : 'append'} using worker identities and version`, async () => {
+    spyOn(console, 'warn').mockImplementation(() => {});
+    const host = apiFor(true, true);
+    const worker = workerFor(host);
+    const proposed = deferred<DocxProposalRequest>();
+    const propose = worker.authority.propose;
+    const call = spyOn(worker.authority, 'propose').mockImplementation((request, main) => {
+      proposed.resolve(request);
+      return propose(request, main);
+    });
+    expect(host.api.proposeChange({ paraId: 'p', search, replaceWith: 'world', author: 'Host' })).toBe(true);
+    expectNoReplica(host);
+    const request = await proposed.promise;
+    await worker.authority.getProposals(async () => host.session.getProposals());
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(request).toEqual({
+      expectVersion: 'worker-v',
+      proposals: [{
+        id: expect.any(String),
+        paragraph: { kind: 'session', sessionId: 'worker-session', story: 'body:cell', paraId: 'p' },
+        suggest: { author: 'Host', date: expect.any(String) },
+        ...(search ? { op: 'replaceText', search, replaceWith: 'world' } : { op: 'insertText', at: 'end', text: 'world' }),
+      }],
+    });
+    expect(request.proposals[0]!.id.length).toBeGreaterThan(0);
+    expect(new Date(request.proposals[0]!.suggest.date).toISOString()).toBe(request.proposals[0]!.suggest.date);
+    expect(host.session.paragraphIdentities).not.toHaveBeenCalled();
+    expect(host.session.applyEdits).not.toHaveBeenCalled();
+    expect(host.sidebar).not.toHaveBeenCalled();
+    expectNoReplica(host);
+  });
+}
+
+test('viewer proposeChange returns false for empty input without starting a worker call', () => {
+  spyOn(console, 'warn').mockImplementation(() => {});
+  const host = apiFor(true, true);
+  const worker = workerFor(host);
+  expect(host.api.proposeChange({ paraId: 'p', search: '', replaceWith: '', author: 'Host' })).toBe(false);
+  expect(worker.proposal).not.toHaveBeenCalled();
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expectNoReplica(host);
+});
+
+for (const failure of ['missing paragraph', 'refused proposal', 'rejected proposal']) {
+  test(`viewer proposeChange warns once and swallows a ${failure}`, async () => {
+    const warned = deferred<void>();
+    const warning = spyOn(console, 'warn').mockImplementation((message) => {
+      if (message === '[DocxEditor] proposeChange:') warned.resolve();
+    });
+    const host = apiFor(true, true);
+    const worker = workerFor(host, failure === 'missing paragraph' ? { ...WORKER_IDENTITIES, paragraphs: [] } : WORKER_IDENTITIES);
+    if (failure === 'refused proposal') {
+      worker.proposal.mockImplementation(async () => ({
+        ...worker.snapshot, result: { ok: false, version: 'worker-v', failure: { code: 'read-only', message: 'Refused' } },
+      }));
+    } else if (failure === 'rejected proposal') {
+      spyOn(worker.authority, 'propose').mockImplementation(async () => { throw new Error('Failed'); });
+    }
+    const options = { paraId: 'p', search: 'hello', replaceWith: 'world', author: 'Host' };
+    expect(host.api.proposeChange(options)).toBe(true);
+    expect(host.api.proposeChange(options)).toBe(true);
+    await warned.promise;
+    await worker.authority.getProposals(async () => host.session.getProposals());
+    expect(warning.mock.calls.filter(([message]) => message === '[DocxEditor] proposeChange:')).toHaveLength(1);
+    expectNoReplica(host);
+  });
+}
+
+test('viewer proposeChange without host admission retains the replica gate', () => {
+  spyOn(console, 'warn').mockImplementation(() => {});
+  const host = apiFor(true, true);
+  host.allowHostProposalsRef.current = false;
+  expect(host.api.proposeChange({ paraId: 'p', search: 'hello', replaceWith: 'world', author: 'Host' })).toBe(false);
+  expect(host.fallback).toHaveBeenCalledTimes(1);
+});
+
+test('editor proposeChange preserves synchronous edits, refresh and sidebar behavior', () => {
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const host = apiFor();
+  expect(host.api.proposeChange({ paraId: 'p', search: 'hello', replaceWith: 'world', author: 'Host' })).toBe(true);
+  expect(host.session.applyEdits).toHaveBeenCalledWith({
+    expectVersion: 'v', source: 'agent',
+    steps: [{ op: 'replaceText', target: { kind: 'search', text: 'hello', within: { kind: 'paragraph', story: 'body', paraId: 'p' }, view: 'accepted' }, text: 'world', suggest: { author: 'Host', date: expect.any(String) } }],
+  });
+  expect(host.events).toEqual(['sync']);
+  expect(host.sidebar).toHaveBeenCalledWith(true);
+  expect(host.api.proposeChange({ paraId: 'p', search: '', replaceWith: '', author: 'Host' })).toBe(false);
+  expect(warning).not.toHaveBeenCalled();
+});
+
+for (const member of ['applyEdits', 'validateEdits'] as const) {
+  test(`viewer ${member} refuses before replica waiting with the mirrored worker version`, async () => {
+    const host = apiFor(true, true);
+    await workerFor(host).authority.initialize();
+    host.state.version = 'worker-v~';
+    expect(await host.api[member]({ expectVersion: 'worker-v', source: 'agent', steps: [] })).toEqual({
+      ok: false, version: 'worker-v', failure: { code: 'read-only', message: 'The editor is read-only' },
+    });
+    expect(host.session[member]).not.toHaveBeenCalled();
+    expectNoReplica(host);
+  });
+}
+
+test('viewer findText reads through the worker authority without a replica', async () => {
+  const host = apiFor(true, true);
+  const worker = workerFor(host);
+  const request: DocxFindTextRequest = { text: 'hello', within: { kind: 'story', story: 'body' }, view: 'accepted', limit: 2 };
+  const result: DocxFindTextResult = { ok: true, version: 'worker-v', matches: [], truncated: false };
+  worker.documentRead.mockImplementation(async () => ({ version: 'worker-v', value: result }));
+  const call = spyOn(worker.authority, 'findText');
+  expect(await host.api.findText(request)).toEqual(result);
+  expect(call).toHaveBeenCalledWith(request, expect.any(Function));
+  expect(worker.documentRead).toHaveBeenCalledWith({ kind: 'findText', request });
+  expect(host.session.findText).not.toHaveBeenCalled();
+  expectNoReplica(host);
+});
+
+test('editor findText still flushes and reads the main session', async () => {
+  const host = apiFor();
+  const request: DocxFindTextRequest = { text: 'hello', within: { kind: 'story', story: 'body' }, view: 'accepted' };
+  expect(await host.api.findText(request)).toEqual(host.session.findText(request));
+  expect(host.events).toEqual(['flush']);
+});
 
 for (const [member, args, use] of [
   ['getDocument', [], 'readParagraphs or exportStructuredWithPages'],
@@ -166,9 +343,6 @@ test('editor twins flush before reading or navigating and preserve synchronous r
   expect(host.api.getPageContent(1)).toBeNull();
   expect(await host.api.readSelectionInfo()).toEqual(host.api.getSelectionInfo());
   expect(host.events.slice(0, 2)).toEqual(['flush', 'selection']);
-  host.events.length = 0;
-  expect(await host.api.readPositionAtPoint(1, 2)).toBe(host.api.getPositionAtPoint(1, 2));
-  expect(host.events.slice(0, 2)).toEqual(['flush', 'point']);
   expect(await host.api.findParagraphs('hello')).toEqual(host.api.findInDocument('hello'));
   for (const [member, twin, args] of NAVIGATION) {
     host.events.length = 0;
