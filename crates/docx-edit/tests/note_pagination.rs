@@ -73,9 +73,7 @@ fn a_body_edit_beside_notes_repaginates_incrementally_as_a_fresh_layout_would() 
         .unwrap();
 
     fresh
-
         .doc()
-
         .set_note_separator_state(engine.doc().note_separator_state().unwrap());
     assert_eq!(
         fresh.layout_document_with_regions_json(&request).unwrap(),
@@ -148,9 +146,7 @@ fn a_body_edit_beside_floats_remeasures_only_its_flow_segment_as_a_fresh_layout_
         .unwrap();
 
     fresh
-
         .doc()
-
         .set_note_separator_state(engine.doc().note_separator_state().unwrap());
     assert_eq!(
         fresh.layout_document_with_regions_json(&request).unwrap(),
