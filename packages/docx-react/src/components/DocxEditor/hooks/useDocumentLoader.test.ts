@@ -1,5 +1,7 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, spyOn, test } from 'bun:test';
+import type { FontOption } from '@betteroffice/docx/utils/fontOptions';
+import type { YrsDocxHost } from '@betteroffice/docx/yrs';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -7,9 +9,15 @@ const { act, cleanup, renderHook, waitFor } = await import('@testing-library/rea
 const { createFontLoadScope, isFontLoaded, registerDocumentFaces } = await import(
   '@betteroffice/docx/utils'
 );
-const { useDocumentLoader } = await import('./useDocumentLoader');
+const { PICKER_FONTS_FALLBACK_MS, useDocumentLoader } = await import('./useDocumentLoader');
+const fontLoader = await import('@betteroffice/docx/utils/fontLoader');
+const { resolveFontFamily } = await import('@betteroffice/docx/utils/fontResolver');
+const restorePicker: Array<() => void> = [];
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  for (const restore of restorePicker.splice(0)) restore();
+});
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
@@ -114,6 +122,193 @@ async function fontsLoadedFor(
 
 const loadCount = (asked: string[], family: string) =>
   asked.filter((name) => name === family).length;
+
+function pickerLoader() {
+  let nextFrame = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  const probe = spyOn(fontLoader, 'canRenderFont').mockImplementation(
+    (family) => family !== 'Picker Missing'
+  );
+  const fontScope = createFontLoadScope();
+  const loadFonts = mock(async (_families: string[]) => {});
+  fontScope.loadFontsWithMapping = loadFonts;
+  const fonts = mock((_fonts: FontOption[]) => {});
+  const hook = renderHook(() => useDocumentLoader({
+    ...loaderOptions(fontScope),
+    initialDocument: null,
+    setDocumentFonts: fonts,
+  }));
+  const load = () => {
+    act(() => { void hook.result.current.loadBuffer(new ArrayBuffer(4)); });
+    return hook.result.current.yrsSeedGeneration;
+  };
+  const frame = () => act(() => {
+    const pending = [...frames];
+    for (const [id, callback] of pending) {
+      if (!frames.delete(id)) continue;
+      callback(performance.now());
+    }
+  });
+  const task = () => act(async () => {
+    await new Promise((done) => setTimeout(done, 0));
+  });
+  restorePicker.push(() => {
+    requestFrame.mockRestore();
+    probe.mockRestore();
+    fontScope.dispose();
+  });
+  return { hook, load, frame, task, probe, fonts, loadFonts, frames };
+}
+
+function pickerHost(family: string): YrsDocxHost {
+  return {
+    document: {
+      package: {
+        document: { content: [] },
+        theme: { fontScheme: { majorFont: { latin: family } } },
+      },
+    } as YrsDocxHost['document'],
+    referencedFonts: [family],
+    embeddedFonts: new Map(),
+  };
+}
+
+test('host acceptance prepares layout fonts immediately and probes picker fonts after presentation', async () => {
+  const h = pickerLoader();
+  const generation = h.load();
+  const session = updateSource();
+  const host = pickerHost('Picker Available');
+  host.document.package.theme!.fontScheme!.minorFont = { latin: 'Picker Missing' };
+  host.document.package.fontTable = {
+    fonts: [{ name: 'Picker Embedded', embedRegular: { relId: 'rId1' } }],
+  };
+  host.referencedFonts = [
+    'picker available', 'Picker Embedded', 'Picker Missing', 'Picker Reference', 'sans-serif',
+  ];
+
+  act(() => h.hook.result.current.acceptHostDocument(host, generation, session));
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(h.fonts).not.toHaveBeenCalled();
+  await waitFor(() => expect(h.loadFonts).toHaveBeenCalledTimes(2));
+  expect(h.loadFonts.mock.calls).toEqual([
+    [host.referencedFonts],
+    [['Picker Embedded']],
+  ]);
+  expect(h.probe).not.toHaveBeenCalled();
+
+  act(() => h.hook.result.current.notifyDocumentFramePresented(updateSource()));
+  expect(h.frames.size).toBe(0);
+  act(() => {
+    h.hook.result.current.notifyDocumentFramePresented(session);
+    h.hook.result.current.notifyDocumentFramePresented(session);
+  });
+  expect(h.frames.size).toBe(1);
+  expect(h.probe).not.toHaveBeenCalled();
+  h.frame();
+  await h.task();
+  expect(h.probe).not.toHaveBeenCalled();
+  h.frame();
+  expect(h.probe).not.toHaveBeenCalled();
+  await h.task();
+
+  expect(h.fonts.mock.calls).toEqual([
+    [['picker available', 'Picker Embedded', 'Picker Reference'].map((name) => ({
+      name,
+      fontFamily: resolveFontFamily(name).cssFallback,
+      category: 'other',
+    }))],
+  ]);
+  expect(h.probe).not.toHaveBeenCalledWith('Picker Embedded');
+  act(() => h.hook.result.current.notifyDocumentFramePresented(session));
+  expect(h.frames.size).toBe(0);
+});
+
+test('a picker task queued for a replaced load neither probes nor publishes its fonts', async () => {
+  const h = pickerLoader();
+  const first = h.load();
+  const firstSession = updateSource();
+  act(() => {
+    h.hook.result.current.acceptHostDocument(pickerHost('Picker Old'), first, firstSession);
+    h.hook.result.current.notifyDocumentFramePresented(firstSession);
+  });
+  h.frame();
+  h.frame();
+
+  const next = h.load();
+  const nextSession = updateSource();
+  act(() => h.hook.result.current.acceptHostDocument(pickerHost('Picker New'), next, nextSession));
+  await h.task();
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(h.fonts).not.toHaveBeenCalled();
+
+  act(() => h.hook.result.current.notifyDocumentFramePresented(firstSession));
+  expect(h.frames.size).toBe(0);
+  act(() => h.hook.result.current.notifyDocumentFramePresented(nextSession));
+  h.frame();
+  h.frame();
+  await h.task();
+  expect(h.fonts.mock.calls[0]![0].map((font) => font.name)).toEqual(['Picker New']);
+  expect(h.probe).not.toHaveBeenCalledWith('Picker Old');
+});
+
+test("a full host replaces its preview's pending picker discovery within the same load", async () => {
+  const h = pickerLoader();
+  const generation = h.load();
+  const previewSession = updateSource();
+  act(() => {
+    h.hook.result.current.acceptHostDocument(
+      pickerHost('Picker Preview'), generation, previewSession, { preview: true }
+    );
+    h.hook.result.current.notifyDocumentFramePresented(previewSession);
+  });
+  h.frame();
+  h.frame();
+
+  const fullSession = updateSource();
+  act(() => h.hook.result.current.acceptHostDocument(pickerHost('Picker Full'), generation, fullSession));
+  await h.task();
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(h.fonts).not.toHaveBeenCalled();
+  act(() => h.hook.result.current.notifyDocumentFramePresented(fullSession));
+  h.frame();
+  h.frame();
+  await h.task();
+  expect(h.fonts.mock.calls[0]![0].map((font) => font.name)).toEqual(['Picker Full']);
+  expect(h.probe).not.toHaveBeenCalledWith('Picker Preview');
+});
+
+test('picker fonts still arrive once when no frame is presented', () => {
+  const realSetTimeout = globalThis.setTimeout;
+  const fallbacks: Array<() => void> = [];
+  const timer = spyOn(globalThis, 'setTimeout').mockImplementation(((
+    callback: () => void,
+    ms?: number
+  ) => {
+    if (ms !== PICKER_FONTS_FALLBACK_MS) return realSetTimeout(callback, ms);
+    fallbacks.push(callback);
+    return 0;
+  }) as unknown as typeof setTimeout);
+  restorePicker.push(() => timer.mockRestore());
+  const h = pickerLoader();
+  const generation = h.load();
+  act(() =>
+    h.hook.result.current.acceptHostDocument(pickerHost('Picker Unshown'), generation, updateSource())
+  );
+  expect(h.probe).not.toHaveBeenCalled();
+  expect(fallbacks).toHaveLength(1);
+
+  act(() => fallbacks[0]!());
+  expect(h.fonts.mock.calls.map(([fonts]) => fonts.map((font) => font.name))).toEqual([
+    ['Picker Unshown'],
+  ]);
+  act(() => fallbacks[0]!());
+  expect(h.fonts).toHaveBeenCalledTimes(1);
+});
 
 test('a seeded document loads none of the fonts it names only for script text it lacks', async () => {
   const skipped = ['Batang', '바탕'];
