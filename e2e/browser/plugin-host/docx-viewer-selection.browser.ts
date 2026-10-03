@@ -112,10 +112,11 @@ async function copiedNow(page: Page): Promise<string> {
   }, SENTINEL);
   await page.keyboard.press('ControlOrMeta+C');
   await page.waitForTimeout(200);
-  return page.evaluate(async () => {
+  return page.evaluate(async (sentinel) => {
     const copies = (window as unknown as ViewerWindow).__viewerSelectionProbe.copies;
-    return copies.at(-1) ?? (await navigator.clipboard.readText());
-  });
+    const clipboard = await navigator.clipboard.readText();
+    return clipboard !== sentinel ? clipboard : (copies.filter((text) => text !== '').at(-1) ?? sentinel);
+  }, SENTINEL);
 }
 
 async function paragraph(page: Page, index: number) {
