@@ -331,7 +331,7 @@ fn table_leading_slice(
         .zip(crate::hooks::row_keep_chains(block, measure))
         .take(headers + 1)
     {
-        let keep = crate::hooks::row_keep_height(keep, block, measure, &breaks, capacity);
+        let keep = crate::hooks::row_keep_height(keep, block, measure, &breaks, capacity, false);
         if keep > 0.0 && top + keep <= capacity {
             slice = slice.max(top + keep);
         }

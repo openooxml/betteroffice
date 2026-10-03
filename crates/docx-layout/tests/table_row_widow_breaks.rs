@@ -606,6 +606,70 @@ fn offset_cell_line_grids_move_the_whole_row_below_a_float_band_on_the_same_page
     assert!(fragment["cellClips"].is_null());
 }
 
+fn offset_cell_float_band_fragments(leading_row: Value) -> Vec<Value> {
+    let mut table = two_cell_table(&[(6, 0.0, json!({})), (6, 4.4, json!({}))]);
+    table["block"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, leading_row["block"]["rows"][0].clone());
+    table["measure"]["rows"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, leading_row["measure"]["rows"][0].clone());
+    table["measure"]["totalHeight"] = json!(144.4);
+    let input = json!({
+        "measured": after_filler(6, table),
+        "options": {
+            "pageSize": {"w": 240, "h": 500},
+            "margins": {"top": 20, "right": 10, "bottom": 10, "left": 10},
+            "sectionPageFloatBands": [{"default": [], "first": [{"top": 200, "bottom": 250}]}],
+        },
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let pages = layout["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    pages[0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fragment| fragment["kind"] == "table")
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn repeated_headers_move_with_offset_cells_below_a_float_band_on_the_same_page() {
+    let header = table_rows(&[(1, json!({}), json!({"isHeader": true}))]);
+    let fragments = offset_cell_float_band_fragments(header);
+    assert_eq!(fragments.len(), 1);
+    let fragment = &fragments[0];
+    assert_eq!(fragment["y"], 250);
+    assert!((fragment["height"].as_f64().unwrap() - 144.4).abs() < 0.01);
+    assert_eq!(fragment["rowStart"], 0);
+    assert_eq!(fragment["rowEnd"], 2);
+    assert!(fragment["headerRowCount"].is_null());
+    assert!(fragment["clipTop"].is_null());
+    assert!(fragment["clipBottom"].is_null());
+    assert!(fragment["cellClips"].is_null());
+}
+
+#[test]
+fn keep_next_rows_move_with_offset_cells_below_a_float_band_on_the_same_page() {
+    let kept = table_rows(&[(1, json!({"keepNext": true}), json!({}))]);
+    let fragments = offset_cell_float_band_fragments(kept);
+    assert_eq!(fragments.len(), 1);
+    let fragment = &fragments[0];
+    assert_eq!(fragment["y"], 250);
+    assert!((fragment["height"].as_f64().unwrap() - 144.4).abs() < 0.01);
+    assert_eq!(fragment["rowStart"], 0);
+    assert_eq!(fragment["rowEnd"], 2);
+    assert!(fragment["clipTop"].is_null());
+    assert!(fragment["clipBottom"].is_null());
+    assert!(fragment["cellClips"].is_null());
+}
+
 #[test]
 fn a_four_line_cell_splits_two_and_two_while_the_other_cell_finishes() {
     let measured = after_filler(

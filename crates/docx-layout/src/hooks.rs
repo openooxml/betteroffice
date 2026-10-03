@@ -180,16 +180,19 @@ pub(crate) fn row_keep_height(
     measure: &TableExtent,
     breaks: &RowBreaks,
     capacity: f64,
+    limited_by_float: bool,
 ) -> f64 {
     let Some((rows, follower)) = chain else {
         return 0.0;
     };
-    let slice = minimum_row_slice(block, measure, &breaks.kept, follower, 0.0);
-    let slice = slice.min(
-        breaks
-            .first_cell_slice(follower, 0.0, capacity)
-            .unwrap_or(slice),
-    );
+    let mut slice = minimum_row_slice(block, measure, &breaks.kept, follower, 0.0);
+    if !limited_by_float {
+        slice = slice.min(
+            breaks
+                .first_cell_slice(follower, 0.0, capacity)
+                .unwrap_or(slice),
+        );
+    }
     rows + if slice <= capacity {
         slice
     } else {
@@ -260,6 +263,9 @@ fn layout_table_with_position(
 
     'rows: while row_index < rows.len() {
         let state_idx = paginator.get_current();
+        let available_height = paginator.get_available_height();
+        let limited_by_float = available_height
+            < paginator.state(state_idx).content_limit - paginator.state(state_idx).pen_y;
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         // The tallest stretch a fresh column offers between float bands.
         let column_capacity = paginator.get_column_capacity();
@@ -290,7 +296,7 @@ fn layout_table_with_position(
             .is_some_and(|row| row.is_exact_height());
         if (row_cant_split || row_is_exact)
             && consumed == 0.0
-            && row_remaining_at_start > paginator.get_available_height()
+            && row_remaining_at_start > available_height
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
             && fit_moved_cursor(paginator, row_remaining_at_start)
         {
@@ -313,8 +319,8 @@ fn layout_table_with_position(
                 .get(header_row_count)
                 .is_some_and(|row| row.cant_split.unwrap_or(false))
             && breaks.kept_oversized(header_row_count, 0.0, body_capacity);
-        let header_budget = paginator.get_available_height() - pending_spacing - header_rows_height;
-        let cell_header_slice = if is_first_fragment && header_row_count > 0 {
+        let header_budget = available_height - pending_spacing - header_rows_height;
+        let cell_header_slice = if is_first_fragment && header_row_count > 0 && !limited_by_float {
             breaks.cell_slice(
                 header_row_count,
                 0.0,
@@ -339,7 +345,7 @@ fn layout_table_with_position(
         if is_first_fragment
             && header_row_count > 0
             && (header_start_height <= column_capacity || first_body_kept_oversized)
-            && header_start_height + pending_spacing > paginator.get_available_height()
+            && header_start_height + pending_spacing > available_height
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
             && fit_moved_cursor(paginator, header_start_height + pending_spacing)
         {
@@ -351,6 +357,7 @@ fn layout_table_with_position(
         );
         if !is_first_fragment
             && cell_tops.is_none()
+            && !limited_by_float
             && header_row_count > 0
             && let Some(slice) = breaks.cell_slice(
                 row_index,
@@ -373,9 +380,6 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        let available_height = paginator.get_available_height();
-        let limited_by_float = available_height
-            < paginator.state(state_idx).content_limit - paginator.state(state_idx).pen_y;
         let available_height = available_height - pending_spacing - header_overhead;
 
         let start_row = row_index;
@@ -399,8 +403,14 @@ fn layout_table_with_position(
             } else {
                 column_capacity - header_overhead
             };
-            let keep_height =
-                row_keep_height(keep_chains[cur], block, measure, &breaks, chain_room);
+            let keep_height = row_keep_height(
+                keep_chains[cur],
+                block,
+                measure,
+                &breaks,
+                chain_room,
+                limited_by_float,
+            );
             if (cur > start_row || consumed == 0.0)
                 && keep_height > available_height - used
                 && keep_height <= chain_room
