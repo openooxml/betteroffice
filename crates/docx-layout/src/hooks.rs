@@ -273,6 +273,9 @@ fn layout_table_with_position(
     let mut cell_tops: Option<Vec<f64>> = None;
 
     'rows: while row_index < rows.len() {
+        breaks.set_every_cell_starts(
+            !paginator.has_float_bands() && !paginator.next_page_may_be_shorter(),
+        );
         let state_idx = paginator.get_current();
         let available_height = paginator.get_available_height();
         let limited_by_float = available_height
@@ -563,7 +566,6 @@ fn layout_table_with_position(
             let cell_slice = match cell_slice {
                 Some(slice)
                     if slice.starved
-                        && !paginator.has_float_bands()
                         && breaks
                             .every_cell_start(cur, start_off, row_capacity)
                             .is_some() =>

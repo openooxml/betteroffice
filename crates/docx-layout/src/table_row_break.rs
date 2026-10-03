@@ -1,6 +1,6 @@
 //! Whole-line table row-break geometry.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 
 use serde::Serialize;
 
@@ -198,6 +198,7 @@ pub(crate) struct RowBreaks<'a> {
     pub(crate) kept: TableRowBreakInfo,
     lines: OnceCell<TableRowBreakInfo>,
     cells: OnceCell<Vec<Option<Vec<CellBreaks>>>>,
+    every_cell_starts: Cell<bool>,
 }
 
 impl<'a> RowBreaks<'a> {
@@ -208,7 +209,15 @@ impl<'a> RowBreaks<'a> {
             kept: row_break_info(block, measure, block.floating.is_none()),
             lines: OnceCell::new(),
             cells: OnceCell::new(),
+            every_cell_starts: Cell::new(true),
         }
+    }
+
+    /// Whether [`Self::every_cell_start`] may hold a row back for a later
+    /// column; off on pages with float bands and where the next page can be
+    /// shorter than the current column.
+    pub(crate) fn set_every_cell_starts(&self, enabled: bool) {
+        self.every_cell_starts.set(enabled);
     }
 
     pub(crate) fn lines(&self) -> &TableRowBreakInfo {
@@ -334,6 +343,9 @@ impl<'a> RowBreaks<'a> {
     /// first unbreakable stretch of every cell with content left, when a column
     /// `capacity` tall holds it.
     pub(crate) fn every_cell_start(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
+        if !self.every_cell_starts.get() {
+            return None;
+        }
         let minimum = self
             .cells(row)?
             .iter()
@@ -353,9 +365,10 @@ impl<'a> RowBreaks<'a> {
             .max_by(f64::total_cmp)?;
         let shared = snap_row_break(&self.kept, row, consumed, minimum);
         (minimum <= capacity
-            && self
-                .cell_slice(row, consumed, None, minimum, shared, false, capacity)
-                .is_some_and(|slice| !slice.starved))
+            && (minimum - shared < 1e-6
+                || self
+                    .cell_slice(row, consumed, None, minimum, shared, false, capacity)
+                    .is_some_and(|slice| !slice.starved)))
         .then_some(minimum)
     }
 

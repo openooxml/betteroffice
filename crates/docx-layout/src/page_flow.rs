@@ -103,6 +103,20 @@ fn calculate_column_width(
     (content_width - total_gaps) / columns.count
 }
 
+/// The tallest stretch between `top` and `limit` that `bands` (sorted by top)
+/// leave free.
+fn band_free_capacity(mut top: f64, limit: f64, bands: &[PageFloatBand]) -> f64 {
+    let mut capacity = f64::NEG_INFINITY;
+    for band in bands {
+        if band.bottom <= top || band.top >= limit {
+            continue;
+        }
+        capacity = capacity.max(band.top.min(limit) - top);
+        top = top.max(band.bottom);
+    }
+    capacity.max(limit - top)
+}
+
 fn effective_margins(margins: PageMargins) -> PageMargins {
     PageMargins {
         top: margins.top.abs(),
@@ -786,16 +800,11 @@ impl Paginator {
             return capacity;
         }
         let state = &self.states[idx];
-        let mut top = state.content_top;
-        let mut capacity = f64::NEG_INFINITY;
-        for band in self.float_bands(idx) {
-            if band.bottom <= top || band.top >= state.content_limit {
-                continue;
-            }
-            capacity = capacity.max(band.top.min(state.content_limit) - top);
-            top = top.max(band.bottom);
-        }
-        let capacity = capacity.max(state.content_limit - top);
+        let capacity = band_free_capacity(
+            state.content_top,
+            state.content_limit,
+            self.float_bands(idx),
+        );
         self.column_capacities[idx] = Some(capacity);
         capacity
     }
@@ -809,6 +818,23 @@ impl Paginator {
     pub fn get_column_capacity(&mut self) -> f64 {
         let idx = self.get_current();
         self.column_capacity(idx)
+    }
+
+    /// Whether a fresh page after the current one can give the flow less room
+    /// than the current column: through pending section geometry, or its
+    /// margins, page float bands or note reservation.
+    pub fn next_page_may_be_shorter(&mut self) -> bool {
+        if self.pending_page_size.is_some() || self.pending_margins.is_some() {
+            return true;
+        }
+        let idx = self.get_current();
+        let current = self.column_capacity(idx);
+        let number = self.start_page_number + self.pages.len() as u32;
+        let bands = self.page_float_bands(false, number);
+        let (margins, body_margins, _) = self.page_geometry(false, number, &bands);
+        let flow = body_margins.as_ref().unwrap_or(&margins);
+        let (limit, _) = self.content_bottom(self.page_size.h - flow.bottom, number, &bands);
+        band_free_capacity(flow.top, limit, &bands) < current - 1e-6
     }
 
     pub fn has_float_bands(&mut self) -> bool {

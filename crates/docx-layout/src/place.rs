@@ -866,6 +866,7 @@ fn place<F: PartialEq>(
             // between float bands a table row's first slice may not share a gap
             // with the run, so a table follower keeps its whole first row there
             let split_first_row = !paginator.has_float_bands();
+            let every_cell_starts = split_first_row && !paginator.next_page_may_be_shorter();
             let group_height = measure_keep_with_next_group_witnessing(
                 group,
                 measured,
@@ -873,6 +874,7 @@ fn place<F: PartialEq>(
                 paginator.state(state_idx).deferred_spacing,
                 page_content_height,
                 split_first_row,
+                every_cell_starts,
             );
             let fresh_page_height = measure_keep_with_next_group_witnessing(
                 group,
@@ -881,6 +883,7 @@ fn place<F: PartialEq>(
                 0.0,
                 page_content_height,
                 split_first_row,
+                every_cell_starts,
             );
             let must_advance = hooks::keep_with_next_group_must_advance_from(
                 group_height,

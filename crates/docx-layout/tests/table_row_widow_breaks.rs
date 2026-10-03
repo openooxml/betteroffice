@@ -57,7 +57,11 @@ fn table_fragments(measured: Vec<Value>, columns: Option<Value>) -> Vec<(usize, 
     if let Some(columns) = columns {
         options["columns"] = columns;
     }
-    let input = json!({"measured":measured,"options":options});
+    layout_table_fragments(json!({"measured":measured,"options":options}))
+}
+
+/// Returns each table fragment of the laid-out `input` with its page index.
+fn layout_table_fragments(input: Value) -> Vec<(usize, Value)> {
     let layout: Value =
         serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
             .unwrap();
@@ -1248,28 +1252,83 @@ fn pages_with_float_bands_keep_the_per_cell_split() {
             "sectionPageFloatBands": [{"default": [], "first": [{"top": 20, "bottom": 30}]}],
         },
     });
-    let layout: Value =
-        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
-            .unwrap();
-    let tables: Vec<_> = layout["pages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .flat_map(|(page, value)| {
-            value["fragments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|fragment| fragment["kind"] == "table")
-                .map(move |fragment| (page, fragment.clone()))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let tables = layout_table_fragments(input);
     assert_eq!(tables.len(), 2);
     assert_eq!(tables[0].0, 0);
     assert_eq!(cell_windows(&tables[0].1), [(0.0, 40.0), (0.0, 0.0)]);
     assert_eq!(cell_windows(&tables[1].1), [(40.0, 80.0), (0.0, 64.4)]);
+}
+
+/// The page of the first fragment of a table whose 120px exact-height
+/// keep-next row is followed by a row of `cells`, after `filler` 20px lines on
+/// pages with a 200px body and the given extra layout options; a `section`
+/// option is a section break placed after the filler, with a 120px paragraph
+/// after the table.
+fn keep_next_exact_row_page(filler: usize, cells: &[(usize, f64, Value)], extra: Value) -> usize {
+    let kept = table_rows(&[(
+        6,
+        json!({"keepNext": true}),
+        json!({"height": 120, "heightRule": "exact"}),
+    )]);
+    let mut table = two_cell_table(cells);
+    for key in ["block", "measure"] {
+        table[key]["rows"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, kept[key]["rows"][0].clone());
+    }
+    table["measure"]["totalHeight"] = json!(240);
+    let mut options = json!({"pageSize": {"w": 240, "h": 220},
+        "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}});
+    options
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let mut measured = after_filler(filler, table);
+    if let Some(section) = options.as_object_mut().unwrap().remove("section") {
+        let (block, measure) = paragraph(3, 6, json!({}));
+        measured.insert(
+            1,
+            json!({"block": section, "measure": {"kind": "sectionBreak"}}),
+        );
+        measured.push(json!({"block": block, "measure": measure}));
+    }
+    let tables = layout_table_fragments(json!({"measured": measured, "options": options}));
+    assert_eq!(tables[0].1["rowStart"], 0);
+    tables[0].0
+}
+
+#[test]
+fn a_keep_next_row_stays_on_the_page_when_later_pages_have_less_room() {
+    let bands = json!({"sectionPageFloatBands":
+        [{"default": [{"top": 10, "bottom": 110}], "first": []}]});
+    assert_eq!(
+        keep_next_exact_row_page(2, &[(6, 0.0, json!({})), (3, 4.4, json!({}))], bands),
+        0
+    );
+    let even = json!({"sectionPageMargins":
+        [{"even": {"top": 110, "right": 10, "bottom": 10, "left": 10}}]});
+    assert_eq!(
+        keep_next_exact_row_page(2, &[(6, 0.0, json!({})), (3, 0.0, json!({}))], even),
+        0
+    );
+    let columns = json!({"section": {"kind": "sectionBreak", "id": 2, "type": "continuous",
+        "margins": {"top": 110, "right": 10, "bottom": 10, "left": 10},
+        "columns": {"count": 2, "gap": 20}}});
+    assert_eq!(
+        keep_next_exact_row_page(2, &[(6, 0.0, json!({})), (3, 0.0, json!({}))], columns),
+        0
+    );
+    let first_page_band = json!({"sectionPageFloatBands":
+        [{"default": [], "first": [{"top": 10, "bottom": 30}]}]});
+    assert_eq!(
+        keep_next_exact_row_page(
+            1,
+            &[(6, 0.0, json!({})), (3, 0.0, json!({}))],
+            first_page_band
+        ),
+        0
+    );
 }
 
 #[test]
