@@ -320,7 +320,6 @@ for (const [member, args, use] of [
       let caught: unknown;
       try { Reflect.apply(host.api[member], host.api, args); } catch (error) { caught = error; }
       expect(caught).toBeInstanceOf(DocxAsyncOnlyError);
-      expect(caught).toBeInstanceOf(DocxReplicaNotReadyError);
       expect((caught as DocxAsyncOnlyError).member).toBe(member);
       expect((caught as DocxAsyncOnlyError).use).toBe(use);
       expect((caught as Error).message).toBe(`${member} cannot read the document synchronously in a viewer session; use ${use}`);
@@ -336,6 +335,27 @@ for (const [member, args, use] of [
     expect(warning).toHaveBeenCalledTimes(1);
   });
 }
+
+test('a host retrying DocxReplicaNotReadyError after flushPendingInput gets DocxAsyncOnlyError from a viewer at once', async () => {
+  spyOn(console, 'warn').mockImplementation(() => {});
+  const host = apiFor(true);
+  for (const [member, args] of [['getDocument', []], ['getPageContent', [1]], ['findInDocument', ['hello']]] as const) {
+    let attempts = 0;
+    let surfaced: unknown;
+    while (surfaced === undefined && attempts < 5) {
+      attempts += 1;
+      try {
+        Reflect.apply(host.api[member], host.api, args);
+      } catch (error) {
+        if (error instanceof DocxReplicaNotReadyError) await host.api.flushPendingInput();
+        else surfaced = error;
+      }
+    }
+    expect(surfaced).toBeInstanceOf(DocxAsyncOnlyError);
+    expect(attempts).toBe(1);
+  }
+  expect(host.editor.flushPendingInput).not.toHaveBeenCalled();
+});
 
 const NAVIGATION = [
   ['scrollToParaId', 'scrollToParagraph', ['p', { highlight: { color: 'red' } }]],

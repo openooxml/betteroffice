@@ -167,12 +167,14 @@ export class DocxReplicaNotReadyError extends Error {
   }
 }
 
-/** A synchronous viewer read with an async replacement; retrying does not help. */
-export class DocxAsyncOnlyError extends DocxReplicaNotReadyError {
-  constructor(member: string, readonly use: string) {
-    super(member);
+/**
+ * A synchronous viewer read with an async replacement. Retrying does not help, so it is not a
+ * {@link DocxReplicaNotReadyError}.
+ */
+export class DocxAsyncOnlyError extends Error {
+  constructor(readonly member: string, readonly use: string) {
+    super(`${member} cannot read the document synchronously in a viewer session; use ${use}`);
     this.name = 'DocxAsyncOnlyError';
-    this.message = `${member} cannot read the document synchronously in a viewer session; use ${use}`;
   }
 }
 

@@ -73,8 +73,11 @@ test('deprecated props and plugin geometry retain their replacements', () => {
 });
 
 test('errors and new public types are exported from the root', () => {
-  const constructors: [typeof import('./index').DocxAsyncOnlyError, typeof import('./index').DocxReplicaNotReadyError] = [DocxAsyncOnlyError, DocxReplicaNotReadyError];
-  expect(new constructors[0]('getDocument', 'readParagraphs')).toBeInstanceOf(constructors[1]);
+  const [AsyncOnly, NotReady]: [typeof import('./index').DocxAsyncOnlyError, typeof import('./index').DocxReplicaNotReadyError] = [DocxAsyncOnlyError, DocxReplicaNotReadyError];
+  const asyncOnly = new AsyncOnly('getDocument', 'readParagraphs');
+  expect(asyncOnly).toBeInstanceOf(Error);
+  expect(asyncOnly).not.toBeInstanceOf(NotReady);
+  expect(new NotReady('getDocument')).not.toBeInstanceOf(AsyncOnly);
   const names = ['DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
