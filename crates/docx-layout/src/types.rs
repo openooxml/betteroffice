@@ -1951,6 +1951,8 @@ pub struct LayoutOptions {
     pub title_page: Option<bool>,
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_separator_heights: Option<crate::footnotes::NoteSeparatorHeights>,
     pub body_break_type: Option<SectionBreakType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
@@ -2071,6 +2073,15 @@ pub struct ParagraphFragment {
     pub resolved_lines: Option<Vec<ResolvedLine>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CellClip {
+    pub row: usize,
+    pub cell: usize,
+    pub top: f64,
+    pub bottom: f64,
+}
+
 /// One page's slice of a table: rows `[row_start, row_end)`, plus
 /// `clip_top` / `clip_bottom` when the boundary cuts through a row that broke
 /// mid-content, and `header_row_count` when this fragment repeats the header
@@ -2101,6 +2112,8 @@ pub struct TableFragment {
     pub clip_top: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clip_bottom: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_clips: Option<Vec<CellClip>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
