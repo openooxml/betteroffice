@@ -2643,7 +2643,7 @@ describe('worker proposals during sliced completion', () => {
         story: 'body', paraId: '00000100', offset,
       })!;
       const revision = main.listRevisions().find((candidate) => candidate.kind === 'insertion')!;
-      const requests: Array<{ read: ResidentDocumentRead; value: unknown }> = [
+      const requests: Array<{ read: ResidentDocumentRead; value?: unknown; text?: string }> = [
         {
           read: { kind: 'findParagraphs', query: 'phrase', caseSensitive: true, limit: 1 },
           value: [{ paraId: '00000100', match: 'phrase', before: 'Before the ', after: ' new after' }],
@@ -2656,17 +2656,28 @@ describe('worker proposals during sliced completion', () => {
         },
         {
           read: { kind: 'commentTarget', story: 'body', commentId: '1', expectVersion: version },
-          value: { anchor: position(7), head: position(17) },
+          text: 'the phrase',
         },
         {
           read: { kind: 'revisionTarget', story: 'body', revisionId: revision.revisionId, expectVersion: version },
-          value: { anchor: position(18), head: position(21) },
+          text: 'new',
         },
       ];
-      for (const { read, value } of requests) {
+      for (const { read, value, text } of requests) {
         const reply = await w.send({ type: 'documentRead', read });
         expect(reply.ok).toBe(true);
-        expect(reply.ok && reply.read).toEqual({ version, value });
+        if (text === undefined) {
+          expect(reply.ok && reply.read).toEqual({ version, value });
+        } else {
+          const range = reply.ok ? (reply.read!.value as { anchor: number; head: number } | null) : null;
+          expect(reply.ok && reply.read!.version).toBe(version);
+          expect(range).not.toBeNull();
+          const covered = await w.send({
+            type: 'documentRead',
+            read: { kind: 'selectionText', story: 'body', anchor: range!.anchor, head: range!.head, expectVersion: version },
+          });
+          expect(covered.ok && (covered.read!.value as { text: string } | null)?.text).toBe(text);
+        }
         if ('expectVersion' in read) {
           const stale = await w.send({ type: 'documentRead', read: { ...read, expectVersion: `${version}-stale` } });
           expect(stale.ok).toBe(true);

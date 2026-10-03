@@ -70,6 +70,7 @@ export type ResidentDocumentRead =
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
   | { kind: 'selectionInfo'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'paragraphTarget'; story: string; paraId: string; expectVersion: string }
   | { kind: 'commentTarget'; story: string; commentId: string; expectVersion: string }
   | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
@@ -87,6 +88,7 @@ export interface ResidentDocumentReadValues {
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
   selectionInfo: YrsSelectionText | null;
+  paragraphTarget: DocxDisplayRange | null;
   commentTarget: DocxDisplayRange | null;
   revisionTarget: DocxDisplayRange | null;
   bookmarkPosition: number | null;

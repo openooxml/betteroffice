@@ -40,7 +40,7 @@ import {
   type DocxPluginHost,
 } from './createDocxPluginHost';
 import { resolveParagraph } from './createPluginClients';
-import { createPluginGeometry, pluginLayout } from './geometry';
+import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
 import { currentPreviewKey } from './proposalPreview';
 import type {
@@ -355,7 +355,8 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         heldCandidate() === created &&
         latest.current.zoom === currentLayout.zoom &&
         dom.context.pagesContainer.isConnected &&
-        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current)
+        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
+      (clientX, clientY) => readPluginPositionAtPoint(latest.current.pagedEditorRef, clientX, clientY)
     );
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.

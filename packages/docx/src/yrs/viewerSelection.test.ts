@@ -11,6 +11,7 @@ import { createProposalRegistry } from './proposals';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
+  resolveParagraphTarget,
   resolveRevisionTarget,
   resolveSelectionInfo,
   resolveSelectionText,
@@ -252,6 +253,23 @@ describe('viewer selection reads', () => {
     expect(resolveSelectionInfo(index, 'missing', 0, 1, version)).toBeNull();
     expect(resolveSelectionInfo(index, 'body', -1, at('00000001', 1), version)).toBeNull();
     expect(resolveSelectionInfo(index, 'body', 0, index.projection('body')!.size + 1, version)).toBeNull();
+  });
+
+  test('paragraph targets include table cells and reject unknown, outside and stale targets', () => {
+    const version = resident.geometryReader.version();
+    for (const paraId of ['00000001', '00000003', '00000006']) {
+      const story = resident.geometryReader.storyIds().find((id) => resident.geometryReader.paragraphs(id).some((paragraph) => paragraph.paraId === paraId))!;
+      const span = resident.geometryReader.locateParagraph(story, paraId);
+      const anchor = index.positionOf({ story, paraId, offset: 0 }, 'body');
+      const head = index.positionOf({ story, paraId, offset: span.end - span.start }, 'body');
+      expect(anchor).not.toBeNull();
+      expect(head).not.toBeNull();
+      expect(resolveParagraphTarget(index, 'body', paraId, version)).toEqual({ anchor: anchor!, head: head! });
+      expect(resolveParagraphTarget(index, 'missing', paraId, version)).toBeNull();
+      expect(resolveParagraphTarget(index, 'body', paraId, `${version}-stale`)).toBeNull();
+    }
+    expect(resolveParagraphTarget(index, 'body', 'missing', version)).toBeNull();
+    expect(resolveParagraphTarget(index, cellStory('00000003'), '00000001', version)).toBeNull();
   });
 
   test('comment targets map the anchored phrase and reject unknown, outside and stale targets', async () => {

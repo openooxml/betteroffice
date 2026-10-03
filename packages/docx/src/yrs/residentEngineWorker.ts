@@ -22,6 +22,7 @@ import { resolveYrsPointPosition } from './pointPosition';
 import {
   resolveBookmarkPosition,
   resolveCommentTarget,
+  resolveParagraphTarget,
   resolveRevisionTarget,
   resolveSelectionInfo,
   resolveSelectionText,
@@ -586,6 +587,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.story,
           request.read.anchor,
           request.read.head,
+          request.read.expectVersion
+        );
+        break;
+      case 'paragraphTarget':
+        value = resolveParagraphTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.paraId,
           request.read.expectVersion
         );
         break;

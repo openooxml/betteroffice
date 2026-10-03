@@ -257,6 +257,23 @@ function displayRange(
   return anchor === null || head === null ? null : { anchor, head };
 }
 
+/** @internal The paragraph range across stories, mapped into the root layout. */
+export function resolveParagraphTarget(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  paraId: string,
+  expectVersion: string
+): DocxDisplayRange | null {
+  if (index.reader.version() !== expectVersion) return null;
+  for (const story of index.reader.storyIds()) {
+    if (!index.reader.paragraphs(story).some((paragraph) => paragraph.paraId === paraId)) continue;
+    const span = index.reader.locateParagraph(story, paraId);
+    return displayRange(index, rootStory, { story, paraId, offset: 0 },
+      { story, paraId, offset: Math.max(0, span.end - span.start) });
+  }
+  return null;
+}
+
 /** @internal The first comment anchor in the root story's display positions. */
 export function resolveCommentTarget(
   index: DisplayPositionIndex,
