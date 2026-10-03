@@ -17,10 +17,15 @@ import {
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import { readResidentSearch } from './residentSearch';
+import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
 import {
   resolveBookmarkPosition,
+  resolveCommentTarget,
+  resolveParagraphTarget,
+  resolveRevisionTarget,
+  resolveSelectionInfo,
   resolveSelectionText,
   resolveSelectionUnit,
 } from './viewerSelection';
@@ -69,6 +74,7 @@ function displayPositionIndex(current: ResidentEngineSession): DisplayPositionIn
       index: new DisplayPositionIndex({
         ...current.geometryReader,
         selectionText: current.selectionText,
+        resolveComment: current.resolveComment,
       }),
     };
   }
@@ -580,6 +586,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'readParagraphs':
         value = engine.readParagraphs(request.read.request);
         break;
+      case 'findText':
+        value = engine.findText(request.read.request);
+        break;
       case 'navigationTarget':
         value = resolveNavigationTarget(
           session.geometryReader,
@@ -606,6 +615,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.expectVersion
         );
         break;
+      case 'findParagraphs':
+        value = findParagraphs(session.geometryReader, request.read.query, request.read);
+        break;
       case 'selectionUnit':
         value = resolveSelectionUnit(
           displayPositionIndex(session),
@@ -629,6 +641,39 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           displayPositionIndex(session),
           request.read.story,
           request.read.name,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionInfo':
+        value = resolveSelectionInfo(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.anchor,
+          request.read.head,
+          request.read.expectVersion
+        );
+        break;
+      case 'paragraphTarget':
+        value = resolveParagraphTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.paraId,
+          request.read.expectVersion
+        );
+        break;
+      case 'commentTarget':
+        value = resolveCommentTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.commentId,
+          request.read.expectVersion
+        );
+        break;
+      case 'revisionTarget':
+        value = resolveRevisionTarget(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.revisionId,
           request.read.expectVersion
         );
         break;

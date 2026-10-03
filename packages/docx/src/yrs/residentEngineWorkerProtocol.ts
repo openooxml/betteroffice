@@ -10,11 +10,13 @@ import type { PointPosition } from '../plugin-api';
 import type { DocxResolvedPointPosition } from './pointPosition';
 import type {
   DocxDisplayRange,
+  DocxDisplaySelectionInfo,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
 import type { CollaborationCursor } from '../collaboration/types';
 import type { ResidentSearchResult } from './residentSearch';
+import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type {
@@ -29,7 +31,7 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
-import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
+import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 
 /** @internal */
@@ -60,7 +62,9 @@ export type ResidentDocumentRead =
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'findText'; request: DocxFindTextRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
@@ -72,6 +76,10 @@ export type ResidentDocumentRead =
       expectVersion: string;
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'selectionInfo'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'paragraphTarget'; story: string; paraId: string; expectVersion: string }
+  | { kind: 'commentTarget'; story: string; commentId: string; expectVersion: string }
+  | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
   | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
 
 /** @internal */
@@ -79,12 +87,18 @@ export interface ResidentDocumentReadValues {
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
+  findText: DocxFindTextResult;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
+  findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
   pointPosition: DocxResolvedPointPosition | null;
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
+  selectionInfo: DocxDisplaySelectionInfo | null;
+  paragraphTarget: DocxDisplayRange | null;
+  commentTarget: DocxDisplayRange | null;
+  revisionTarget: DocxDisplayRange | null;
   bookmarkPosition: number | null;
 }
 

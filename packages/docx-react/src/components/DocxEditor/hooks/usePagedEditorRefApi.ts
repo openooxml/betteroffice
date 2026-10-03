@@ -67,6 +67,7 @@ export interface PagedEditorCommandBridge {
 }
 
 interface RefApiInputs {
+  navigationEpochRef: React.MutableRefObject<number>;
   bumpInputEpochRef: React.RefObject<(() => void) | undefined>;
   inputEpochRef: React.RefObject<(() => number) | undefined>;
   readerSurfaceRef: React.RefObject<(() => HTMLElement | null) | undefined>;
@@ -97,6 +98,7 @@ interface RefApiInputs {
   displayPositionToYrsLocRef: React.MutableRefObject<PagedEditorRef['displayPositionToYrsLoc']>;
   getPositionAtPointRef: React.MutableRefObject<PagedEditorRef['getPositionAtPoint']>;
   readPositionAtPointRef: React.MutableRefObject<PagedEditorRef['readPositionAtPoint']>;
+  viewerReadsRef: React.RefObject<Pick<UsePagedEditorRefApiOptions, 'readViewerSelectionInfo' | 'navigateViewer'>>;
   /** The input holds the selection in root display positions, with no document here. */
   viewerSelectionRef: React.MutableRefObject<boolean>;
 }
@@ -147,6 +149,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     displayPositionToYrsLocRef,
     getPositionAtPointRef,
     readPositionAtPointRef,
+    viewerReadsRef,
     viewerSelectionRef,
   } = inputs;
 
@@ -170,6 +173,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
 
   /** Navigation supersedes pending editor input; in a viewer it leaves the selection and its gesture alone. */
   const beforeNavigation = (): void => {
+    inputs.navigationEpochRef.current += 1;
     if (!viewerSelectionRef.current) bumpInputEpochRef.current?.();
   };
 
@@ -243,6 +247,17 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     displayPositionToYrsLoc: (position) => displayPositionToYrsLocRef.current(position),
     getPositionAtPoint: (clientX, clientY) => getPositionAtPointRef.current(clientX, clientY),
     readPositionAtPoint: (clientX, clientY) => readPositionAtPointRef.current(clientX, clientY),
+    isWorkerViewer: () => viewerSelectionRef.current,
+    readViewerSelectionInfo: () => viewerReadsRef.current.readViewerSelectionInfo?.() ?? Promise.resolve(null),
+    navigateViewer: (target, options) => {
+      const epoch = ++inputs.navigationEpochRef.current;
+      const input = yrsInputRef.current;
+      const gesture = input?.currentGesture?.();
+      return viewerReadsRef.current.navigateViewer?.(target, options, () =>
+        inputs.navigationEpochRef.current === epoch &&
+        (gesture === undefined || (yrsInputRef.current === input && input?.isGestureCurrent?.(gesture) === true))
+      ) ?? Promise.resolve(false);
+    },
     getYrsSession: () => yrsSessionRef.current,
     flushPendingInput: async () => {
       const session = yrsSessionRef.current;
@@ -390,6 +405,8 @@ export interface UsePagedEditorRefApiOptions {
   getPositionAtPoint: PagedEditorRef['getPositionAtPoint'];
   readPositionAtPoint?: PagedEditorRef['readPositionAtPoint'];
   viewerSelection?: boolean;
+  readViewerSelectionInfo?: PagedEditorRef['readViewerSelectionInfo'];
+  navigateViewer?: (target: Parameters<PagedEditorRef['navigateViewer']>[0], options?: ScrollToParaIdOptions, current?: () => boolean) => Promise<boolean>;
 }
 
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
@@ -443,6 +460,8 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   const getPositionAtPointRef = useRef(getPositionAtPoint);
   const readPositionAtPointRef = useRef(readPositionAtPoint);
   const viewerSelectionRef = useRef(viewerSelection);
+  const viewerReadsRef = useRef(opts);
+  viewerReadsRef.current = opts;
   documentFromYrsRef.current = documentFromYrs;
   yrsSessionRef.current = yrsSession;
   yrsLocToDisplayPositionRef.current = yrsLocToDisplayPosition;
@@ -456,7 +475,9 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   readPositionAtPointRef.current = readPositionAtPoint;
   viewerSelectionRef.current = viewerSelection;
 
+  const navigationEpochRef = useRef(0);
   const inputs = {
+    navigationEpochRef,
     bumpInputEpochRef,
     inputEpochRef,
     readerSurfaceRef,
@@ -481,6 +502,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     displayPositionToYrsLocRef,
     getPositionAtPointRef,
     readPositionAtPointRef,
+    viewerReadsRef,
     viewerSelectionRef,
   };
 

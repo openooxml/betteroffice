@@ -1,6 +1,7 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type {
   DocxDisplayRange,
+  DocxDisplaySelectionText,
   DocxSelectionUnit,
   ResidentEngineWorkerClient,
 } from '@betteroffice/docx/yrs';
@@ -23,10 +24,14 @@ interface Token {
   version: string;
 }
 
-interface Capture {
+interface Capture extends DocxDisplaySelectionText {
   revision: number;
   version: string;
-  text: string;
+}
+
+export interface ViewerSelectionChange {
+  displayRange: { story: string; from: number; to: number; layoutId: string } | null;
+  isMultiParagraph: boolean;
 }
 
 interface ReadTask<V> {
@@ -89,9 +94,9 @@ export class ViewerSelectionController {
   private frame: WorkerFrameProvenance | null = null;
   private selection: Selection | null = null;
   private capture: Capture | null = null;
-  private captureRead: ReadTask<{ text: string } | null> | null = null;
+  private captureRead: ReadTask<DocxDisplaySelectionText | null> | null = null;
   private readonly unit = new ReadChannel<DocxDisplayRange | null>();
-  private readonly captures = new ReadChannel<{ text: string } | null>();
+  private readonly captures = new ReadChannel<DocxDisplaySelectionText | null>();
   private readonly listeners = new Set<() => void>();
   private readonly waiters = new Set<Waiter>();
   private gesture = 0;
@@ -162,13 +167,17 @@ export class ViewerSelectionController {
   }
 
   settledText(gesture = this.gesture): string | null {
+    return this.settledCapture(gesture)?.text ?? null;
+  }
+
+  settledCapture(gesture = this.gesture): DocxDisplaySelectionText | null {
     const selection = this.selection;
     const capture = this.capture;
     const frame = this.frame;
     return selection && capture && frame && this.isCurrent(gesture) && selection.gesture === gesture &&
       !selection.unitPending && selection.frame.version === frame.version &&
       capture.revision === selection.revision && capture.version === frame.version
-      ? capture.text
+      ? { text: capture.text, range: capture.range }
       : null;
   }
 
@@ -340,7 +349,8 @@ export class ViewerSelectionController {
       kind: 'selectionText', story: this.options.story, anchor, head, expectVersion: token.version,
     }), (outcome) => {
       if (!this.applies(token, outcome)) return;
-      this.capture = { revision: token.revision!, version: token.version, text: outcome.value?.text ?? '' };
+      this.capture = { revision: token.revision!, version: token.version,
+        text: outcome.value?.text ?? '', range: outcome.value?.range ?? null };
       this.emit();
     });
   }

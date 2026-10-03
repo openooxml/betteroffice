@@ -11,9 +11,10 @@ import {
 import { createPortal } from 'react-dom';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import { layoutIdOf } from '../../plugins/geometry';
 import type { YrsInputRef } from './YrsInput';
 import { presentedWorkerFrame } from './internals/layoutProvenance';
-import { ViewerSelectionController } from './internals/viewerSelectionController';
+import { ViewerSelectionController, type ViewerSelectionChange } from './internals/viewerSelectionController';
 
 const STYLE: CSSProperties = {
   position: 'fixed',
@@ -44,7 +45,7 @@ export interface ViewerInputProps {
   queries: DisplayListQueries | null;
   document: { isDisplayOnly(): boolean } | null;
   /** The selection or its visibility changed. */
-  onSelectionChange(): void;
+  onSelectionChange(selection: ViewerSelectionChange): void;
   onFocusChange?(focused: boolean): void;
 }
 
@@ -68,12 +69,28 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
   }), [story]);
 
   useLayoutEffect(() => {
-    const unsubscribe = controller.subscribe(() => onChangeRef.current());
+    const unsubscribe = controller.subscribe(() => {
+      const range = controller.displaySelection();
+      const queries = queriesRef.current;
+      const capture = controller.settledCapture();
+      const selection: ViewerSelectionChange = {
+        displayRange: range && queries ? {
+          story,
+          from: Math.min(range.anchor, range.head),
+          to: Math.max(range.anchor, range.head),
+          layoutId: layoutIdOf(queries),
+        } : null,
+        isMultiParagraph: capture ? (capture.range
+          ? capture.range.start.paraId !== capture.range.end.paraId
+          : /[\r\n\t]/.test(capture.text)) : false,
+      };
+      onChangeRef.current(selection);
+    });
     return () => {
       unsubscribe();
       controller.reset();
     };
-  }, [controller]);
+  }, [controller, story]);
   useLayoutEffect(() => {
     const previous = documentRef.current;
     if (previous === documentKey) return;
@@ -159,6 +176,7 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     runAfterPendingInput: async (operation) => operation(),
     hasPendingInput: () => false,
     beginGesture: () => controller.beginGesture(),
+    currentGesture: () => controller.currentGesture(),
     isGestureCurrent: (gesture) => controller.isCurrent(gesture),
     setSelectionFromDisplay: (anchor, head = anchor, _story, gesture) => controller.select(anchor, head, gesture),
     selectWordAtDisplay: (position) => controller.expand(position, 'word'),

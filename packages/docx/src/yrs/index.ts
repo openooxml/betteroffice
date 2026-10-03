@@ -80,6 +80,7 @@ import type {
 export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
+export * from './findParagraphs';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
@@ -88,6 +89,7 @@ export type { DocxResolvedPointPosition } from './pointPosition';
 export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
 export type {
   DocxDisplayRange,
+  DocxDisplaySelectionInfo,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
