@@ -3555,11 +3555,12 @@ impl EngineSession {
             return Ok(Some(Rc::clone(blocks)));
         }
         let mut local = crate::bridge::local::LocalLowering::new(false);
-        let (_, _, revealable) = yrs_doc_to_mapped_layout_blocks_with_revealable(
+        let (_, _, revealable, _) = crate::bridge::preview::lower_recorded(
             &cached.doc,
             kind,
             render_env,
             &mut local,
+            false,
         )
         .map_err(|error| error.to_string())?;
         let revealable = Rc::new(revealable);
