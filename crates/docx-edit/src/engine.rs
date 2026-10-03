@@ -2053,10 +2053,10 @@ impl EngineSession {
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
         let before = self.doc_epoch();
-        let paragraph_epoch = (self.local_lowering.get()
+        let index_epoch = (self.local_lowering.get()
             && (text.is_none() || range.start == range.end))
             .then(|| self.doc.committed_epoch());
-        let plain_text_delete = if paragraph_epoch.is_some() && text.is_none() {
+        let plain_text_delete = if index_epoch.is_some() && text.is_none() {
             let segments = self.doc.segment_index(&range.story)?;
             segments.is_text_range(range.start, range.end)
                 && (segments
@@ -2070,7 +2070,7 @@ impl EngineSession {
         } else {
             false
         };
-        let length_before = if plain_text_delete {
+        let length_before = if plain_text_delete || (index_epoch.is_some() && text.is_some()) {
             Some(self.doc.story_len(&range.story)?)
         } else {
             None
@@ -2087,15 +2087,23 @@ impl EngineSession {
             )?,
             None => self.doc.delete_range(&ctx, range.clone())?,
         };
-        if let Some(before) = paragraph_epoch {
+        if let Some(before) = index_epoch {
             match text {
-                Some(text) => self.doc.advance_paragraph_index_after_text_insert(
-                    &range.story,
-                    before,
-                    self.doc.committed_epoch(),
-                    range.start,
-                    text.encode_utf16().count() as u32,
-                ),
+                Some(text)
+                    if length_before
+                        .zip(self.doc.story_len(&range.story).ok())
+                        .is_some_and(|(before, after)| {
+                            after.checked_sub(before) == Some(text.encode_utf16().count() as u32)
+                        }) =>
+                {
+                    self.doc.advance_indexes_after_text_insert(
+                        &range.story,
+                        before,
+                        self.doc.committed_epoch(),
+                        range.start,
+                        text,
+                    );
+                }
                 None if plain_text_delete
                     && receipt.new_para_ids.is_empty()
                     && receipt.revision_ids.is_empty()
@@ -2105,7 +2113,7 @@ impl EngineSession {
                             before.checked_sub(after) == Some(range.end - range.start)
                         }) =>
                 {
-                    self.doc.advance_paragraph_index_after_text_delete(
+                    self.doc.advance_indexes_after_text_delete(
                         &range.story,
                         before,
                         self.doc.committed_epoch(),
@@ -2113,7 +2121,7 @@ impl EngineSession {
                         range.end,
                     );
                 }
-                None => {}
+                _ => {}
             }
         }
         let mut render = self.render.borrow_mut();
@@ -10714,6 +10722,7 @@ mod tests {
         engine.set_display_window(Some(caret_page..caret_page + 1));
         engine.set_windowed_incremental_builds(true);
         engine.doc().paragraph_index("body").unwrap();
+        engine.doc().segment_index("body").unwrap();
         let mut retained = HashMap::new();
         let initial = crate::frame_delta::apply_placeholder_test_frame(&initial, &mut retained);
         assert_eq!(initial, full_display_build(&engine, "{}"));
@@ -10743,12 +10752,23 @@ mod tests {
                 .unwrap()
                 .get("body", after)
                 .expect("the delete advances the cached paragraph index");
+            let shifted_segments = engine
+                .doc()
+                .segment_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .expect("the delete advances the cached segment index");
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
             assert!(engine.pagination.borrow().last_incremental);
             assert!(Arc::ptr_eq(
                 &shifted,
                 &engine.doc().paragraph_index("body").unwrap(),
+            ));
+            assert!(Arc::ptr_eq(
+                &shifted_segments,
+                &engine.doc().segment_index("body").unwrap(),
             ));
             let expected = full_display_build(&engine, "{}");
             assert_eq!(engine.with_display_list(Clone::clone).unwrap(), expected);
@@ -10760,9 +10780,9 @@ mod tests {
         docx_layout::clear_measure_fonts();
     }
 
-    /// Embed removals and paragraph merges leave the paragraph cache stale.
+    /// Embed removals and paragraph merges leave the story caches stale.
     #[test]
-    fn resident_structural_deletes_do_not_advance_the_paragraph_index() {
+    fn resident_structural_deletes_do_not_advance_the_story_indexes() {
         for (kind, start, end) in [("sdt", 1, 2), ("pilcrow", 1, 2), ("pageBreak", 0, 1)] {
             let engine = EngineSession::new(222);
             engine.set_local_lowering(true);
@@ -10792,6 +10812,7 @@ mod tests {
                     .unwrap();
             }
             engine.doc().paragraph_index("body").unwrap();
+            engine.doc().segment_index("body").unwrap();
             let before = engine.doc().committed_epoch();
             engine
                 .edit_resident_text(crate::StoryRange::new("body", start, end), None, true)
@@ -10806,6 +10827,126 @@ mod tests {
                     .unwrap()
                     .get("body", after)
                     .is_none()
+            );
+            assert!(
+                engine
+                    .doc()
+                    .segment_indexes
+                    .lock()
+                    .unwrap()
+                    .get("body", after)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn resident_random_text_edits_keep_story_indexes_exact() {
+        use crate::segments::tests::{
+            Unit, assert_paragraph_indexes_eq, assert_segment_invariants, next_random, random_text,
+            seed_text_stream, units,
+        };
+
+        for seed in [1, 7, 42, 0x1234_5678] {
+            let engine = EngineSession::new(224);
+            engine.set_local_lowering(true);
+            seed_text_stream(engine.doc());
+            let mut random = seed;
+            let mut steps = 0;
+            let mut plain_edits = 0;
+            let mut advanced_both = 0;
+            let mut deleted_pilcrow = false;
+            let mut deleted_embed = false;
+            let mut deleted_surrogate_pair = false;
+            for step in 0..200 {
+                let doc = engine.doc();
+                let segments = doc.segment_index("body").unwrap();
+                doc.paragraph_index("body").unwrap();
+                let before_units = units(&segments);
+                let before = doc.committed_epoch();
+                let len = doc.story_len("body").unwrap();
+                let (start, end, text) = if step < 3 {
+                    let start = before_units
+                        .iter()
+                        .position(|unit| match step {
+                            0 => matches!(unit, Unit::Text(value) if (0xd800..=0xdbff).contains(value)),
+                            1 => matches!(unit, Unit::Embed),
+                            _ => matches!(unit, Unit::Pilcrow),
+                        })
+                        .unwrap() as u32;
+                    (start, start + 1 + u32::from(step == 0), None)
+                } else if next_random(&mut random) % 3 != 0 {
+                    let start = next_random(&mut random) % (len + 1);
+                    let start = start - u32::from(!segments.is_char_boundary(start));
+                    (start, start, Some(random_text(&mut random)))
+                } else {
+                    let start = next_random(&mut random) % len;
+                    let start = start - u32::from(!segments.is_char_boundary(start));
+                    let end = (start + 1 + next_random(&mut random) % 3).min(len);
+                    let end = end + u32::from(!segments.is_char_boundary(end));
+                    (start, end, None)
+                };
+                if engine
+                    .edit_resident_text(crate::StoryRange::new("body", start, end), text, true)
+                    .is_err()
+                {
+                    continue;
+                }
+                if text.is_none() {
+                    let removed = &before_units[start as usize..end as usize];
+                    deleted_pilcrow |= removed.iter().any(|unit| matches!(unit, Unit::Pilcrow));
+                    deleted_embed |= removed.iter().any(|unit| matches!(unit, Unit::Embed));
+                    deleted_surrogate_pair |= step == 0;
+                }
+                let after = doc.committed_epoch();
+                let after_len = doc.story_len("body").unwrap();
+                let plain = match text {
+                    Some(text) => {
+                        after_len.checked_sub(len) == Some(text.encode_utf16().count() as u32)
+                    }
+                    None => {
+                        segments.is_text_range(start, end)
+                            && len.checked_sub(after_len) == Some(end - start)
+                    }
+                };
+                let cached_segments = doc.segment_indexes.lock().unwrap().get("body", after);
+                let cached_paragraphs = doc.paragraph_indexes.lock().unwrap().get("body", after);
+                if after != before {
+                    steps += 1;
+                    if plain {
+                        plain_edits += 1;
+                        advanced_both +=
+                            usize::from(cached_segments.is_some() && cached_paragraphs.is_some());
+                    }
+                }
+                let txn = doc.yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                let (cold_segments, cold_paragraphs) = crate::segments::build_indexes(&story, &txn);
+                drop(txn);
+                assert_segment_invariants(&cold_segments);
+                if let Some(cached) = cached_segments {
+                    assert_eq!(
+                        units(&cached),
+                        units(&cold_segments),
+                        "seed {seed}, step {step}"
+                    );
+                    assert_segment_invariants(&cached);
+                }
+                if let Some(cached) = cached_paragraphs {
+                    assert_paragraph_indexes_eq(&cached, &cold_paragraphs);
+                }
+                doc.segment_index("body").unwrap();
+                doc.paragraph_index("body").unwrap();
+            }
+            assert!(deleted_pilcrow && deleted_embed && deleted_surrogate_pair);
+            assert!(steps > 150, "seed {seed}: {steps} committed edits");
+            assert!(
+                advanced_both * 2 > plain_edits,
+                "seed {seed}: {advanced_both}/{plain_edits} plain edits advanced both indexes"
+            );
+            assert!(
+                advanced_both * 5 > steps * 2,
+                "seed {seed}: {advanced_both}/{steps} edits advanced both indexes"
             );
         }
     }

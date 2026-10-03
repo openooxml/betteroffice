@@ -709,13 +709,11 @@ impl EditingDoc {
     /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
-        // Sampling before the read txn lets a racing commit tag the fresh index
-        // stale rather than serve a pre-commit snapshot as current.
         let epoch = self.committed_epoch();
         if let Some(index) = self.segment_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
-        self.build_story_indexes(story_id, epoch)
+        self.build_story_indexes(story_id)
             .map(|(segments, _)| segments)
     }
 
@@ -724,16 +722,18 @@ impl EditingDoc {
         if let Some(index) = self.paragraph_indexes.lock().unwrap().get(story_id, epoch) {
             return Ok(index);
         }
-        self.build_story_indexes(story_id, epoch)
+        self.build_story_indexes(story_id)
             .map(|(_, paragraphs)| paragraphs)
     }
 
     fn build_story_indexes(
         &self,
         story_id: &str,
-        epoch: u64,
     ) -> EditResult<(Arc<SegmentIndex>, Arc<ParagraphIndex>)> {
         let txn = self.doc.transact();
+        // Commits bump the epoch while they hold the store's write lock, so this read txn pins it
+        // to the snapshot being indexed.
+        let epoch = self.committed_epoch();
         let story = story_ref(&txn, story_id)?;
         let (segments, paragraphs) = build_indexes(&story, &txn);
         drop(txn);
@@ -750,28 +750,37 @@ impl EditingDoc {
         Ok((segments, paragraphs))
     }
 
-    pub(crate) fn advance_paragraph_index_after_text_insert(
+    pub(crate) fn advance_indexes_after_text_insert(
         &self,
         story_id: &str,
         before: u64,
         after: u64,
         index: u32,
-        units: u32,
+        text: &str,
     ) {
         if before.checked_add(1) != Some(after) {
             return;
         }
-        let mut indexes = self.paragraph_indexes.lock().unwrap();
-        let Some(mut paragraphs) = indexes.take(story_id, before) else {
-            return;
-        };
-        if Arc::make_mut(&mut paragraphs).shift_for_text_insert(index, units) {
-            indexes.insert(story_id, after, paragraphs);
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                if Arc::make_mut(&mut paragraphs)
+                    .shift_for_text_insert(index, text.encode_utf16().count() as u32)
+                {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            if Arc::make_mut(&mut segments).shift_for_text_insert(index, text) {
+                indexes.insert(story_id, after, segments);
+            }
         }
     }
 
-    /// Advances the cached paragraph index after a single plain text deletion.
-    pub(crate) fn advance_paragraph_index_after_text_delete(
+    /// Advances cached story indexes after a single plain text deletion.
+    pub(crate) fn advance_indexes_after_text_delete(
         &self,
         story_id: &str,
         before: u64,
@@ -782,12 +791,19 @@ impl EditingDoc {
         if before.checked_add(1) != Some(after) {
             return;
         }
-        let mut indexes = self.paragraph_indexes.lock().unwrap();
-        let Some(mut paragraphs) = indexes.take(story_id, before) else {
-            return;
-        };
-        if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
-            indexes.insert(story_id, after, paragraphs);
+        {
+            let mut indexes = self.paragraph_indexes.lock().unwrap();
+            if let Some(mut paragraphs) = indexes.take(story_id, before) {
+                if Arc::make_mut(&mut paragraphs).shift_for_text_delete(start, end) {
+                    indexes.insert(story_id, after, paragraphs);
+                }
+            }
+        }
+        let mut indexes = self.segment_indexes.lock().unwrap();
+        if let Some(mut segments) = indexes.take(story_id, before) {
+            if Arc::make_mut(&mut segments).shift_for_text_delete(start, end) {
+                indexes.insert(story_id, after, segments);
+            }
         }
     }
 

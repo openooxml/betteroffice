@@ -17,6 +17,13 @@ import {
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import { readResidentSearch } from './residentSearch';
+import { DisplayPositionIndex } from './displayPositionIndex';
+import { resolveYrsPointPosition } from './pointPosition';
+import {
+  resolveBookmarkPosition,
+  resolveSelectionText,
+  resolveSelectionUnit,
+} from './viewerSelection';
 import { createResidentScheduler, type SchedulerMessage } from './residentScheduler';
 import { hasCachedYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -53,6 +60,20 @@ const scope = self as unknown as DedicatedWorkerGlobalScope;
 let resolveHostEditModule: (module: WebAssembly.Module | null) => void;
 let hostEditModule = nextHostEditModule();
 let session: ResidentEngineSession | null = null;
+let positionIndex: { session: ResidentEngineSession; index: DisplayPositionIndex } | null = null;
+
+function displayPositionIndex(current: ResidentEngineSession): DisplayPositionIndex {
+  if (positionIndex?.session !== current) {
+    positionIndex = {
+      session: current,
+      index: new DisplayPositionIndex({
+        ...current.geometryReader,
+        selectionText: current.selectionText,
+      }),
+    };
+  }
+  return positionIndex.index;
+}
 let proposals: DocxProposalRegistry | null = null;
 let lastProposalMirrorVersion: string | null = null;
 let fontRequirements: {
@@ -72,6 +93,11 @@ let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string }
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+let openedVersion: string | null | undefined;
+/** A change before the whole document's first frame leaves no frame as opened. */
+function noteDocumentChange(): void {
+  if (openedVersion === undefined) openedVersion = null;
+}
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
@@ -331,6 +357,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     proposals?.destroy();
     proposals = null;
     session = opening;
+    if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;
     const stateVector = exactBuffer(session.encodeStateVector());
@@ -340,6 +367,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'bootstrap') {
     if (!request.opened) {
       destroySession(request.keepSurfaces === true);
+      openedVersion = null;
       // The worker is a genuine yrs peer. Reusing the main replica's client id
       // makes a fast structural input race overlap one client's clock range and
       // corrupt the update; a fresh id lets yrs merge queued/local operations
@@ -570,6 +598,39 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.carry
         );
         break;
+      case 'pointPosition':
+        value = resolveYrsPointPosition(
+          displayPositionIndex(session),
+          request.read.hit,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionUnit':
+        value = resolveSelectionUnit(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.position,
+          request.read.unit,
+          request.read.expectVersion
+        );
+        break;
+      case 'selectionText':
+        value = resolveSelectionText(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.anchor,
+          request.read.head,
+          request.read.expectVersion
+        );
+        break;
+      case 'bookmarkPosition':
+        value = resolveBookmarkPosition(
+          displayPositionIndex(session),
+          request.read.story,
+          request.read.name,
+          request.read.expectVersion
+        );
+        break;
       case 'stickyAnchors': {
         const currentSession = session;
         value = request.read.locs.map((loc) => {
@@ -746,6 +807,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'applyUpdate') {
+    noteDocumentChange();
     fontRequirements = null;
     session.applyUpdate(request.update);
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
@@ -784,6 +846,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  noteDocumentChange();
   fontRequirements = null;
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;
@@ -875,6 +938,7 @@ function hydrate(
   clearProvisionalFinalPages();
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) {
+    noteDocumentChange();
     fontRequirements = null;
     session.loadState(snapshot.state);
   }
@@ -1330,7 +1394,9 @@ function destroySession(keepSurfaces = false): void {
   session?.destroy();
   lastProposalMirrorVersion = null;
   session = null;
+  positionIndex = null;
   openedDocument = null;
+  openedVersion = undefined;
   previewing = false;
   previewFinalPages = null;
   clearProvisionalFinalPages();
@@ -1387,6 +1453,13 @@ async function replyFrame(
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null
 ): Promise<void> {
+  const documentVersion = session?.proposalEngine.version();
+  const documentPreview = previewing;
+  if (!previewing && openedVersion === undefined && documentVersion !== undefined) {
+    openedVersion = documentVersion;
+  }
+  const documentAsOpened =
+    !previewing && documentVersion !== undefined && documentVersion === openedVersion;
   applyWorkerFrame(bytes);
   const limit = provisionalFinalPages;
   if (session && limit !== null && retainedFrame) {
@@ -1450,6 +1523,9 @@ async function replyFrame(
       replayMs,
       replayedPages,
       layoutRevision,
+      ...(documentVersion === undefined ? {} : { documentVersion }),
+      ...(documentPreview ? { documentPreview: true } : {}),
+      ...(documentAsOpened ? { documentAsOpened: true } : {}),
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),

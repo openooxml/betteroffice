@@ -1,8 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
-import { useState } from 'react';
+import { createElement, createRef, useState } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
+import { ViewerInput } from '../ViewerInput';
+import { stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import type { YrsInputRef } from '../YrsInput';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
 import { partEditStory, type PartEdit } from '../partEdit';
@@ -10,7 +12,7 @@ import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer'
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook } = await import('@testing-library/react');
 
 const PAGE = { width: 800, height: 1000 };
 const HEADER_BOTTOM = 80;
@@ -112,6 +114,141 @@ afterAll(async () => {
 });
 
 const canvasOf = () => host.firstElementChild as HTMLCanvasElement;
+
+test('P1-6: a pending viewer bookmark cannot override a newer keyboard selection', async () => {
+  const linked = fakeQueries();
+  linked.isReady = () => true;
+  linked.visualLinesOnPage = (pageIndex) => (pageIndex === 0 ? [{ pageIndex: 0, from: 1, to: 80 }] : []) as unknown as
+    ReturnType<DisplayListQueries['visualLinesOnPage']>;
+  linked.visualLineAtPosition = (position) => (position >= 1 && position <= 80
+    ? { pageIndex: 0, from: 1, to: 80 }
+    : null) as
+    ReturnType<DisplayListQueries['visualLineAtPosition']>;
+  (linked.displayList.pages[0] as { primitives: unknown[] }).primitives = [{
+    kind: 'text', text: 'linked text', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 80, href: '#target',
+  }];
+  stampWorkerFrameVersion(linked, 'A', false, false);
+  const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
+  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+    pending.push({ request, resolve });
+  })) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const ref = createRef<YrsInputRef>();
+  const input = render(createElement(ViewerInput, {
+    ref, read, story: 'body', queries: linked, document: { isDisplayOnly: () => false },
+    onSelectionChange: () => {},
+  }));
+  const scrolled: number[] = [];
+  const { opts } = options({
+    viewerSelection: true,
+    yrsSession: null,
+    yrsInputRef: ref,
+    displayListQueries: linked,
+    getYrsPositionProjection: () => null,
+    scrollToPositionImpl: (position) => { scrolled.push(position); },
+    resolveBookmarkPosition: async (name) => (await read({
+      kind: 'bookmarkPosition', story: 'body', name, expectVersion: 'A',
+    })).value,
+  });
+  renderHook(() => usePagesPointer(opts));
+  mouse('mousedown', 200, 405, canvasOf(), 1);
+  mouse('mouseup', 200, 405, window, 1);
+  mouse('click', 200, 405, canvasOf(), 1);
+  const bookmark = pending.find((entry) => entry.request.kind === 'bookmarkPosition');
+  expect(bookmark).toBeDefined();
+  fireEvent.keyDown(input.getByTestId('yrs-input'), { key: 'ArrowRight', shiftKey: true });
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 21 });
+  await act(async () => { bookmark!.resolve({ version: 'A', value: 60 }); });
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 21 });
+  expect(scrolled).toEqual([]);
+});
+
+test('a right-click inside a viewer selection keeps it for the context-menu copy', async () => {
+  const queries = fakeQueries();
+  stampWorkerFrameVersion(queries, 'A', false, false);
+  const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
+  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+    pending.push({ request, resolve });
+  })) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const ref = createRef<YrsInputRef>();
+  render(createElement(ViewerInput, {
+    ref, read, story: 'body', queries, document: { isDisplayOnly: () => false },
+    onSelectionChange: () => {},
+  }));
+  let gesture = 0;
+  const beginGesture = ref.current!.beginGesture!;
+  ref.current!.beginGesture = () => { gesture = beginGesture(); return gesture; };
+  const { opts } = options({
+    viewerSelection: true,
+    yrsSession: null,
+    yrsInputRef: ref,
+    displayListQueries: queries,
+    getYrsPositionProjection: () => null,
+  });
+  renderHook(() => usePagesPointer(opts));
+  mouse('mousedown', 200, 400, canvasOf());
+  mouse('mousemove', 450, 600, window);
+  await nextFrame();
+  mouse('mouseup', 450, 600, window);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 45 });
+  const selectionGesture = gesture;
+  expect(ref.current!.isGestureCurrent!(selectionGesture)).toBe(true);
+  const pendingCopy = ref.current!.readSelectedText!()!.catch((error: Error) => error);
+  fireEvent.mouseDown(canvasOf(), { button: 2, clientX: 300, clientY: 400 });
+  expect(gesture).toBe(selectionGesture);
+  expect(ref.current!.isGestureCurrent!(selectionGesture)).toBe(true);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 45 });
+  const copy = ref.current!.readSelectedText!()!;
+  const caret = pending.shift()!;
+  expect(caret.request).toEqual({
+    kind: 'selectionText', story: 'body', anchor: 20, head: 20, expectVersion: 'A',
+  });
+  await act(async () => { caret.resolve({ version: 'A', value: { text: '', range: null } }); });
+  const range = pending.shift()!;
+  expect(range.request).toEqual({
+    kind: 'selectionText', story: 'body', anchor: 20, head: 45, expectVersion: 'A',
+  });
+  await act(async () => { range.resolve({ version: 'A', value: { text: 'selected text', range: null } }); });
+  expect(await pendingCopy).toBe('selected text');
+  expect(await copy).toBe('selected text');
+});
+
+const ignoredInputs: Array<[string, (handleEditorKeyDown: (e: never) => void) => void]> = [
+  ['a header press', () => mouse('mousedown', 50, 40, canvasOf())],
+  ['a footnote press', () => mouse('mousedown', 50, 950, canvasOf())],
+  ['a middle-button press', () => { fireEvent.mouseDown(canvasOf(), { button: 1, clientX: 300, clientY: 400 }); }],
+  ['a key outside the hidden input', (handleEditorKeyDown) => {
+    act(() => handleEditorKeyDown({ target: document.body } as never));
+  }],
+];
+for (const [name, ignore] of ignoredInputs) {
+  test(`${name} hides the viewer selection it does not replace`, async () => {
+    const queries = fakeQueries();
+    stampWorkerFrameVersion(queries, 'A', false, false);
+    const read = (() => new Promise(() => {})) as unknown as ResidentEngineWorkerClient['documentRead'];
+    const ref = createRef<YrsInputRef>();
+    render(createElement(ViewerInput, {
+      ref, read, story: 'body', queries, document: { isDisplayOnly: () => false },
+      onSelectionChange: () => {},
+    }));
+    const { opts } = options({
+      viewerSelection: true,
+      yrsSession: null,
+      yrsInputRef: ref,
+      displayListQueries: queries,
+      getYrsPositionProjection: () => null,
+    });
+    const { result } = renderHook(() => usePagesPointer(opts));
+    mouse('mousedown', 200, 400, canvasOf());
+    mouse('mousemove', 450, 600, window);
+    await nextFrame();
+    mouse('mouseup', 450, 600, window);
+    expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 45 });
+    ignore(result.current.handleEditorKeyDown);
+    expect(ref.current!.displaySelection()).toBeNull();
+    expect(ref.current!.readSelectedText!()).toBeNull();
+  });
+}
 
 test('a read-only press places the caret and a drag extends the selection', async () => {
   const { opts, selections, focused } = options();

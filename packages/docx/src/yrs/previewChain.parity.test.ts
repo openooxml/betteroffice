@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
-import type { DisplayPage } from '../layout/render/displayList';
+import type { DisplayPage, DisplayPrimitive } from '../layout/render/displayList';
 import { applyFrameDelta, decodeFrameDelta } from '../layout/render/frameDelta';
 import {
   encodeDisplayListFrameExtras,
@@ -12,7 +12,9 @@ import {
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { FLAVOURS, syntheticDocx } from './__fixtures__/previewChain';
-import { decodeDocxHostJson, type YrsRenderEnv } from './index';
+import { decodeDocxHostJson, type YrsLoc, type YrsRenderEnv } from './index';
+import { DisplayPositionIndex } from './displayPositionIndex';
+import { displayPositionToYrsLoc } from './inputPositionMap';
 import { finalPreviewDisplayWindow, finalPreviewPageCount } from './previewDisplayWindow';
 import { createResidentEngineSession } from './residentEngineSession';
 
@@ -46,6 +48,10 @@ interface Built {
   provisional: boolean;
   layoutPages: number;
   pages: DisplayPage[];
+  positions: Array<{
+    pageIndex: number;
+    regions: Array<{ story: string; from: number; locs: Array<YrsLoc | null> }>;
+  }>;
 }
 
 async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
@@ -53,7 +59,7 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
   try {
     const hostJson = preview ? session.openDocxPreview(bytes, 200) : session.openDocx(bytes);
     if (hostJson === null) {
-      return { refused: true, wholeBody: false, provisional: false, layoutPages: 0, pages: [] };
+      return { refused: true, wholeBody: false, provisional: false, layoutPages: 0, pages: [], positions: [] };
     }
     const host = decodeDocxHostJson(hostJson, bytes);
     const document = host.document;
@@ -99,12 +105,49 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
       ...(retained === undefined ? {} : { headersFooters: JSON.parse(retained) }),
     } as DisplayListBuildInputs);
     const frame = session.buildDisplayListFrame(extras, 0);
+    const pages = applyFrameDelta(null, decodeFrameDelta(frame)).displayList.pages;
+    const index = new DisplayPositionIndex({
+      ...session.geometryReader,
+      selectionText: session.selectionText,
+    });
+    const positions = pages.filter((page) => !page.unbuilt).map((page) => {
+      const region = (story: string, primitives: DisplayPrimitive[]) => {
+        const projection = index.projection(story)!;
+        const starts = primitives.flatMap((primitive) =>
+          [primitive.docStart, primitive.fragmentDocStart].filter((position): position is number => position !== undefined));
+        const ends = primitives.flatMap((primitive) =>
+          [primitive.docEnd, primitive.fragmentDocEnd].filter((position): position is number => position !== undefined));
+        const from = page.pageIndex === 0 || story !== 'body' ? 0 : Math.min(...starts);
+        const to = Math.min(projection.size, Math.max(...ends) + 1);
+        const locs: Array<YrsLoc | null> = [];
+        for (let position = from; position <= to; position += 1) {
+          const target = projection.targetAt(position);
+          const map = index.inputMap(target.story);
+          locs.push(map ? displayPositionToYrsLoc(map, target.displayPosition) : null);
+        }
+        return { story, from, locs };
+      };
+      const regions = [region('body', page.primitives)];
+      for (const band of [page.header, page.footer]) {
+        if (band) regions.push(region(`hf:${band.rId}`, band.primitives));
+      }
+      for (const area of page.noteAreas ?? []) {
+        for (const id of area.noteIds ?? []) {
+          const story = `${area.kind === 'endnote' ? 'en' : 'fn'}:${id}`;
+          const paraIds = new Set(session.geometryReader.paragraphSpans(story).map((paragraph) => paragraph.paraId));
+          regions.push(region(story, (area.primitives ?? []).filter((primitive) =>
+            primitive.paraId !== undefined && paraIds.has(primitive.paraId))));
+        }
+      }
+      return { pageIndex: page.pageIndex, regions };
+    });
     return {
       refused: false,
       wholeBody: host.wholeBody === true,
       provisional: layout.provisional === true,
       layoutPages: layout.layout.pages.length,
-      pages: applyFrameDelta(null, decodeFrameDelta(frame)).displayList.pages,
+      pages,
+      positions,
     };
   } finally {
     session.destroy();
@@ -123,6 +166,9 @@ async function comparePreview(
     expect(twin).toBeDefined();
     expect(twin?.unbuilt).not.toBe(true);
     expect(page).toEqual(twin);
+    expect(preview.positions.find((entry) => entry.pageIndex === page.pageIndex)).toEqual(
+      full.positions.find((entry) => entry.pageIndex === page.pageIndex)
+    );
   }
   if (preview.wholeBody) {
     // A cut that holds the whole body shows the window's pages, as the whole document does.

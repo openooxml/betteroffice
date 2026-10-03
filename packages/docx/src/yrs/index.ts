@@ -82,6 +82,14 @@ export * from './readTypes';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
+export * from './storyPlainText';
+export type { DocxResolvedPointPosition } from './pointPosition';
+export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
+export type {
+  DocxDisplayRange,
+  DocxDisplaySelectionText,
+  DocxSelectionUnit,
+} from './viewerSelection';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
