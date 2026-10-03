@@ -78,7 +78,7 @@ import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayT
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
 import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
-import { useViewerSession } from './DocxEditor/internals/viewerSession';
+import { useViewerSession, viewerReadsWorker } from './DocxEditor/internals/viewerSession';
 import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
@@ -1253,7 +1253,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const workerProposals = modeReadOnly && !collaboration;
   // A viewer session holds no document here: selection, copy and point reads go to the worker.
   const viewerSession = useViewerSession(Boolean(experimentalWorkerOpen), workerProposals, yrsSeedGeneration);
-  viewerOutlineRef.current = viewerSession;
   // Hit testing answers from the first painted page once the query engine has loaded.
   useEffect(() => {
     if (viewerSession) void loadRustDisplayListQueryEngine().catch(() => {});
@@ -1296,6 +1295,9 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       mediaTokens,
     }
   );
+  // A viewer whose document fell back to this thread reads the copy it holds here.
+  const viewerReads = viewerSession && viewerReadsWorker(canvasRenderer.queries, yrsCore.session);
+  viewerOutlineRef.current = viewerReads;
   // Until the full session's pages are shown, the editor takes no input and its
   // API and commands see a document that is still loading.
   const opening = yrsCore.opening;
@@ -1424,7 +1426,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     parseError: state.parseError,
     document: history.state,
     session: yrsCore.session,
-    viewerSession,
+    viewerSession: viewerReads,
     readOnly: readOnlyProp || opening,
     mode: editingMode,
     modeControlled: modeProp !== undefined,
@@ -1518,8 +1520,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (cleanOrphanedCommentsTimerRef.current) {
       clearTimeout(cleanOrphanedCommentsTimerRef.current);
     }
-    if (!viewerSession) cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
-  }, [cleanOrphanedComments, refreshHeadings, showOutlineRef, viewerSession]);
+    if (!viewerReads) cleanOrphanedCommentsTimerRef.current = setTimeout(cleanOrphanedComments, 300);
+  }, [cleanOrphanedComments, refreshHeadings, showOutlineRef, viewerReads]);
 
   const scheduleLegacyProjection = useCallback((project: () => void) => {
     if (legacyProjectionTimerRef.current !== null) {
@@ -1663,7 +1665,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // Navigate to a heading from the outline
   const handleHeadingInfoClick = useCallback((pmPos: number) => {
-    if (viewerSession) {
+    if (viewerReads) {
       navigateViewerHeading(pmPos);
       return;
     }
@@ -1671,7 +1673,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // Also set selection to the heading
     pagedEditorRef.current?.setSelection(pmPos + 1);
     pagedEditorRef.current?.focus();
-  }, [viewerSession, navigateViewerHeading]);
+  }, [viewerReads, navigateViewerHeading]);
 
   // Handle shape insertion
   // Handle image wrap type change
@@ -1842,7 +1844,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         : null,
     loadGeneration: yrsSeedGeneration,
     queries: canvasRenderer.queries,
-    viewerDocumentRead: viewerSession ? canvasRenderer.readWorkerDocument : undefined,
+    viewerDocumentRead: viewerReads ? canvasRenderer.readWorkerDocument : undefined,
     layoutError: canvasRenderer.error,
     zoom: state.zoom,
     canvasHostRef: canvasRenderer.canvasHostRef,
@@ -1910,7 +1912,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (expandedSidebarItem.startsWith('comment-')) {
       const id = parseInt(expandedSidebarItem.slice('comment-'.length), 10);
       if (!Number.isFinite(id)) return null;
-      if (viewerSession) {
+      if (viewerReads) {
         const range = viewerCommentRanges.get(id);
         return range ? { ...range, variant: 'comment' } : null;
       }
@@ -1942,7 +1944,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       return { from: tc.from, to: tc.to, variant: isDeletion ? 'deletion' : 'insertion' };
     }
     return null;
-  }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, viewerSession, viewerCommentRanges]);
+  }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, viewerReads, viewerCommentRanges]);
 
   // Expose ref methods
   const hostSearch = useHostSearch({
@@ -2052,7 +2054,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       const target = comments.find((c) => c.id === id);
       setComments((prev) => prev.filter((c) => c.id !== id && c.parentId !== id));
       const editor = pagedEditorRef.current;
-      const session = viewerSession ? null : editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       if (session) {
         try {
           session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
@@ -2066,7 +2068,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onAddComment: (addText) => {
       const comment = createComment(commentIdAllocatorRef.current, addText, author);
       const editor = pagedEditorRef.current;
-      const session = viewerSession ? null : editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       if (editor && session && commentSelectionRange) {
         const { from, to } = commentSelectionRange;
         const start = editor.displayPositionToYrsLoc(from);
@@ -2099,7 +2101,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onAcceptChange: (from, to) => {
       if (readOnly) return;
       const editor = pagedEditorRef.current;
-      const session = viewerSession ? null : editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       const range = editor ? displayRangeToYrsRange(editor, from, to) : null;
       if (!session || !range) return;
       session.acceptChange(range);
@@ -2109,7 +2111,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     onRejectChange: (from, to) => {
       if (readOnly) return;
       const editor = pagedEditorRef.current;
-      const session = viewerSession ? null : editor?.getYrsSession();
+      const session = viewerReads ? null : editor?.getYrsSession();
       const range = editor ? displayRangeToYrsRange(editor, from, to) : null;
       if (!session || !range) return;
       session.rejectChange(range);
@@ -2117,7 +2119,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       refreshTrackedChanges(session);
     },
     onAcceptChangeById: (revisionId) => {
-      if (viewerSession) return;
+      if (viewerReads) return;
       const revision = pagedEditorRef.current
         ?.getYrsSession()
         ?.listRevisions()
@@ -2127,7 +2129,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
     },
     onRejectChangeById: (revisionId) => {
-      if (viewerSession) return;
+      if (viewerReads) return;
       const revision = pagedEditorRef.current
         ?.getYrsSession()
         ?.listRevisions()
@@ -2239,15 +2241,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const replicaWanted =
     (!(experimentalWorkerOpen && workerProposals) &&
       ((plugins?.length ?? 0) > 0 || Boolean(onRenderedDomContextReady))) ||
-    (!viewerSession && (showCommentsSidebar || sidebarOpen || showOutline));
+    (!viewerReads && (showCommentsSidebar || sidebarOpen || showOutline));
   useEffect(() => {
     if (replicaPending && replicaWanted) requestReplica();
   }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
   // An outline opened before the replica loaded reads its headings once it has.
   const replicaReady = yrsCore.replicaReady;
   useEffect(() => {
-    if (!viewerSession && experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
-  }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef, viewerSession]);
+    if (!viewerReads && experimentalWorkerOpen && replicaReady && showOutlineRef.current) refreshHeadings();
+  }, [experimentalWorkerOpen, replicaReady, refreshHeadings, showOutlineRef, viewerReads]);
   // A tap asks through its gesture, the input for itself.
   useEffect(() => {
     const content = editorContentRef.current;
@@ -2303,7 +2305,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     // state deduplication.
     canvasA11yNotifyRef.current?.();
     pluginHost.publishSelection();
-    if (viewerSession) return;
+    if (viewerReads) return;
     const session = pagedEditorRef.current?.getYrsSession();
     const head = session?.selection()?.head;
     if (!session || !head) return;
@@ -2355,7 +2357,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     }
     setExpandedSidebarItem(cursorSidebarItem);
   }, [
-    viewerSession,
+    viewerReads,
     comments,
     resolvedCommentIds,
     commentSidebarItems,
