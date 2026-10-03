@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
+use ooxml_opc::PackageBytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -212,10 +213,11 @@ pub fn parse_docx_s9_wire_parts_with_limits(
 /// their `data:` URLs. Returns the parts the parse inflated and the media
 /// table.
 pub fn parse_docx_s9_wire_with_media_table(
-    data: Arc<[u8]>,
+    data: impl Into<PackageBytes>,
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let data: PackageBytes = data.into();
     let (parts, table) = media_table_parts(&data)?;
     let envelope = parse_s9_package(&parts, &data, options, limits, None, Some(&table))?
         .expect("a whole body is never refused");
@@ -224,7 +226,7 @@ pub fn parse_docx_s9_wire_with_media_table(
 
 /// The package's parts other than its media, inflated, and its media table.
 pub fn media_table_parts(
-    data: &Arc<[u8]>,
+    data: &(impl Clone + Into<PackageBytes>),
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
     media_table_parts_within(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
 }
@@ -232,13 +234,14 @@ pub fn media_table_parts(
 /// Bounded extraction before transcoding, reserving compressed images' sizes.
 #[doc(hidden)]
 pub fn media_table_parts_within(
-    data: &Arc<[u8]>,
+    data: &(impl Clone + Into<PackageBytes>),
     budget: u64,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let data: PackageBytes = data.clone().into();
     let package =
-        ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
+        ooxml_opc::RetainedPackage::from_bytes(data.clone()).map_err(ParseError::Container)?;
     let scan = MediaScan::new(package, budget).map_err(ParseError::Container)?;
-    let mut parts = ooxml_opc::unzip_parts_where(data, scan.remaining_budget(), |path| {
+    let mut parts = ooxml_opc::unzip_parts_where(&data, scan.remaining_budget(), |path| {
         !scan.keeps_compressed(path)
     })
     .map_err(ParseError::Container)?;
