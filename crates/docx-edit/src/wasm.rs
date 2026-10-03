@@ -312,6 +312,7 @@ fn embed_at(doc: &EditingDoc, story: &str, index: u32) -> Result<bool, JsValue> 
 /// Per-peer selection state. These sticky positions are deliberately held
 /// outside the yrs document: an awareness transport may publish them, but they
 /// are never serialized as document content or included in save updates.
+#[derive(Clone)]
 struct LocalSelection {
     story: String,
     anchor: StickyIndex,
@@ -1957,7 +1958,7 @@ impl EditSession {
             ));
         }
 
-        let selection = self.selection.borrow();
+        let selection = self.selection.borrow().clone();
         let selection = selection
             .as_ref()
             .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
@@ -1986,9 +1987,11 @@ impl EditSession {
             ));
         }
 
-        self.engine
+        let receipt = self
+            .engine
             .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
             .map_err(js_err)?;
+        self.settle_snapped_input(&story, &loc, &receipt)?;
         self.engine
             .apply_and_layout(&story, expected_frame_epoch as u64)
             .map_err(js_err)
@@ -2021,7 +2024,7 @@ impl EditSession {
         }
 
         let started = performance_now();
-        let selection = self.selection.borrow();
+        let selection = self.selection.borrow().clone();
         let selection = selection
             .as_ref()
             .ok_or_else(|| js_err("apply_input requires a resident selection"))?;
@@ -2052,9 +2055,11 @@ impl EditSession {
         let selection_ms = performance_now() - started;
 
         let started = performance_now();
-        self.engine
+        let receipt = self
+            .engine
             .edit_resident_text(StoryRange::new(&story, head, head), Some(text), true)
             .map_err(js_err)?;
+        self.settle_snapped_input(&story, &loc, &receipt)?;
         let edit_ms = performance_now() - started;
         let (frame, engine_profile) = self
             .engine
@@ -2702,6 +2707,34 @@ impl EditSession {
     ) -> Result<(), JsValue> {
         let anchor_index = loc_index(self.engine.doc(), story, anchor_para, anchor_offset)?;
         let head_index = loc_index(self.engine.doc(), story, head_para, head_offset)?;
+        self.select_indexes(story, anchor_index, head_index)
+    }
+
+    /// Typing with the caret inside a surrogate pair lands before the pair,
+    /// while the sticky head stays inside it: collapse the selection after the
+    /// inserted text instead.
+    fn settle_snapped_input(
+        &self,
+        story: &str,
+        requested: &IndexedLoc,
+        receipt: &crate::Receipt,
+    ) -> Result<(), JsValue> {
+        let Some(range) = receipt.range.as_ref() else {
+            return Ok(());
+        };
+        if range.start.para == requested.para_id && range.start.offset == requested.offset {
+            return Ok(());
+        }
+        let end = self.engine.doc().locate_range(range).map_err(js_err)?.end;
+        self.select_indexes(story, end, end)
+    }
+
+    fn select_indexes(
+        &self,
+        story: &str,
+        anchor_index: u32,
+        head_index: u32,
+    ) -> Result<(), JsValue> {
         let txn = self.engine.doc().yrs_doc().transact();
         let text = story_ref(&txn, story).map_err(js_err)?;
         let anchor = text
@@ -3518,8 +3551,8 @@ impl EditSession {
     /// Inserts one inline image embed at `(story, para_id, offset)`.
     /// `payload_json` is the image's authored payload object, stored as given.
     /// The embed occupies one story unit. Receipt:
-    /// `{"revisionId": string|null}`. Errors when the payload is not an
-    /// object.
+    /// `{"revisionId": string|null, "range"}`, the range being where the image
+    /// landed. Errors when the payload is not an object.
     #[allow(clippy::too_many_arguments)]
     pub fn insert_image(
         &self,
@@ -3548,7 +3581,7 @@ impl EditSession {
                     .collect(),
             )
             .map_err(js_err)?;
-        Ok(json!({ "revisionId": receipt.revision_ids.into_iter().next() }).to_string())
+        Ok(text_receipt_json(receipt))
     }
 
     /// Sets the authored `value` (any JSON) on the content-control embed
@@ -6150,6 +6183,12 @@ mod tests {
         let session = resident_surrogate_session(25.0);
         session.apply_input("x", 1.0).unwrap();
         assert_resident_surrogate_texts(&session, &["ax😀", "b"]);
+        assert_eq!(
+            session.collapsed_resident_input_selection().unwrap(),
+            ("body".into(), "p0".into(), 2)
+        );
+        session.delete_resident_units("backward", 1).unwrap();
+        assert_resident_surrogate_texts(&session, &["a😀", "b"]);
     }
 
     #[test]

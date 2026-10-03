@@ -83,4 +83,17 @@ describe('code point edit ranges', () => {
       });
     });
   });
+
+  it('reports an image inserted inside a surrogate pair before the emoji', async () => {
+    await withStory((session, at) => {
+      const { paraId } = at(2);
+      const receipt = session.insertImage(at(2), { rId: 'rIdImage' });
+      expect(texts(session)).toEqual(['a😀', 'b']);
+      expect(receipt.range).toEqual({
+        story: 'body',
+        start: { paraId, offset: 1 },
+        end: { paraId, offset: 2 },
+      });
+    });
+  });
 });

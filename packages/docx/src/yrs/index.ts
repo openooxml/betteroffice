@@ -1208,7 +1208,7 @@ export interface YrsSession extends CollaborationReplica {
     at: YrsLoc,
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
-  ): YrsRevisionReceipt;
+  ): YrsReplaceReceipt;
   /**
    * Sets the value of a content-control embed addressed by stable payload id. A string fills a
    * text control's content as one version-checked step and throws when the fill is refused.
@@ -2466,7 +2466,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     setContentControlValue: (embedId, value) => {
