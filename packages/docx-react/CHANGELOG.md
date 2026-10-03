@@ -1,5 +1,37 @@
 # @betteroffice/docx-react
 
+## 0.5.0
+
+### Minor Changes
+
+- 9d5732d: The editor ref adds async twins for its synchronous document members (`readSelectionInfo`, `findParagraphs`, `scrollToParagraph`, `scrollToComment`, `scrollToChange`, `insertComment`, `insertCommentReply`, `onDocumentChange`) and deprecates the originals. In viewer sessions selections reach `onSelectionChange` and plugins, and `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, which `DocxReplicaNotReadyError` retry loops do not catch.
+
+### Patch Changes
+
+- 4e03a24: Jumping to a heading, paragraph, comment or change on a page that has not been drawn yet settles on the target line sooner.
+- 47601c1: Jumping to a heading or position that a large document has not paginated yet scrolls there once pagination reaches it.
+- 2ade521: In viewer sessions `exportStructuredWithPages` reads from the document worker without a main-thread document copy, and its result now includes comment authors and dates and source page-break positions.
+- 44872e9: Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+- 893351b: In viewer sessions `listContentControls`, `findContentControls` and the built-in Find read from the document worker without a main-thread document copy, and tracked-change accept and reject commands refuse at once.
+- Updated dependencies [de864b6]
+- Updated dependencies [899ca8f]
+- Updated dependencies [0650355]
+- Updated dependencies [13d91c2]
+- Updated dependencies [a41dc2e]
+- Updated dependencies [9d5732d]
+- Updated dependencies [2ade521]
+- Updated dependencies [44872e9]
+- Updated dependencies [893351b]
+- Updated dependencies [8470707]
+- Updated dependencies [2f97c01]
+- Updated dependencies [e6f0556]
+- Updated dependencies [452f8d7]
+- Updated dependencies [49e6237]
+- Updated dependencies [bbf6885]
+- Updated dependencies [403e502]
+  - @betteroffice/docx@0.5.0
+  - @betteroffice/docx-i18n@0.5.0
+
 ## 0.4.3
 
 ### Patch Changes

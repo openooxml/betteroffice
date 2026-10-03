@@ -1,5 +1,26 @@
 # @betteroffice/docx
 
+## 0.5.0
+
+### Patch Changes
+
+- de864b6: Accepting or rejecting the first suggestion that needs a new font face is faster.
+- 899ca8f: Edits that start or end inside an emoji, such as deleting or typing over a double-clicked emoji, now apply to the whole emoji.
+- 0650355: Footnote and endnote areas now take the height of the document's own separator, so pages with notes break where Word breaks them.
+- 13d91c2: Deleting text in long documents is faster.
+- a41dc2e: Accepting or rejecting a suggestion repaints faster.
+- 9d5732d: The editor ref adds async twins for its synchronous document members (`readSelectionInfo`, `findParagraphs`, `scrollToParagraph`, `scrollToComment`, `scrollToChange`, `insertComment`, `insertCommentReply`, `onDocumentChange`) and deprecates the originals. In viewer sessions selections reach `onSelectionChange` and plugins, and `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, which `DocxReplicaNotReadyError` retry loops do not catch.
+- 2ade521: In viewer sessions `exportStructuredWithPages` reads from the document worker without a main-thread document copy, and its result now includes comment authors and dates and source page-break positions.
+- 44872e9: Documents opened read-only or for viewing with `experimentalWorkerOpen` select, copy and resolve points through the document worker, without a main-thread document copy. Adds `readPositionAtPoint` to the editor ref.
+- 893351b: In viewer sessions `listContentControls`, `findContentControls` and the built-in Find read from the document worker without a main-thread document copy, and tracked-change accept and reject commands refuse at once.
+- 8470707: Structured exports of documents opened with `experimentalWorkerOpen` keep their comments' authors and dates.
+- 2f97c01: Tall table rows now split at each cell's own line boundary at the page bottom, like Word, instead of moving whole to the next page when the cells' lines don't line up.
+- e6f0556: Background page building in long documents is faster, in both editor modes.
+- 452f8d7: Accepting or rejecting a suggestion in a long document repaints faster.
+- 49e6237: Typing, proposal decisions and document reads stay responsive while a large document finishes laying out in the background.
+- bbf6885: Paged structured exports of documents whose footnote placement alternates between layouts now succeed instead of returning `layout-not-converged`, with a `note-layout-fallback` diagnostic on each page that keeps extra note space.
+- 403e502: Run font sizes outside Word's 1–1638 pt range, such as `w:sz="0"`, now lay out and paint at the nearest size in that range, so paged structured exports of such documents succeed instead of returning `layout-unavailable`.
+
 ## 0.4.3
 
 ### Patch Changes
