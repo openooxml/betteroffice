@@ -150,6 +150,8 @@ impl BoundaryState {
 pub(crate) struct PreviewUnits {
     records: Vec<UnitRecord>,
     comments: Rc<Vec<CommentInterval>>,
+    /// The lowering numbered SEQ fields across the whole body.
+    sequences: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -338,7 +340,8 @@ impl UnitRecorder {
         self.units.comments = comments;
     }
 
-    pub(super) fn finish(self) -> PreviewUnits {
+    pub(super) fn finish(mut self, sequences: bool) -> PreviewUnits {
+        self.units.sequences = sequences;
         self.units
     }
 }
@@ -402,6 +405,7 @@ pub(crate) fn replay(
     env: &RenderEnv,
     units: &PreviewUnits,
     changed: &BTreeSet<String>,
+    current: &[LayoutBlock],
 ) -> Option<Vec<Replay>> {
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
@@ -465,6 +469,11 @@ pub(crate) fn replay(
                 .iter()
                 .any(|(pm, _)| !record.pm.contains(pm))
             || output.tables.iter().any(|(pm, ..)| !record.pm.contains(pm))
+            || units.sequences
+                && current.get(record.blocks.clone()).is_none_or(|previous| {
+                    docx_layout::sequence_fields::reads_sequence_fields(previous)
+                        || docx_layout::sequence_fields::reads_sequence_fields(&replacement)
+                })
         {
             return None;
         }

@@ -117,6 +117,15 @@ pub fn number_sequence_fields_with_opaque(
     }
 }
 
+/// Whether numbering `blocks` reads any of their fields: a SEQ field, or a
+/// field nesting a sequence.
+pub fn reads_sequence_fields(blocks: &[LayoutBlock]) -> bool {
+    let mut blocks = blocks.to_vec();
+    let (mut fields, mut nested) = (Vec::new(), HashSet::new());
+    collect_blocks(&mut blocks, &mut fields, &mut nested);
+    !fields.is_empty() || !nested.is_empty()
+}
+
 fn collect_blocks<'a>(
     blocks: &'a mut [LayoutBlock],
     fields: &mut Vec<&'a mut FieldRun>,

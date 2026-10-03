@@ -2182,7 +2182,13 @@ impl EngineSession {
             }
             let units = lowered.preview.as_ref()?;
             if crate::bridge::preview::targets(units, &changed) {
-                let replays = crate::bridge::preview::replay(&self.doc, env, units, &changed)?;
+                let replays = crate::bridge::preview::replay(
+                    &self.doc,
+                    env,
+                    units,
+                    &changed,
+                    &lowered.blocks,
+                )?;
                 let mut units = units.as_ref().clone();
                 crate::bridge::preview::splice(
                     replays,
@@ -13379,7 +13385,7 @@ mod tests {
             (preview_fixture::drawings(), true, false),
             (preview_fixture::fields(), true, true),
             (preview_fixture::hidden_fields(), false, true),
-            (preview_fixture::sequence(), false, false),
+            (preview_fixture::sequence(), false, true),
         ] {
             for seed in 0..40 {
                 let engine = preview_seeded(&bytes);
@@ -13714,7 +13720,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
     #[test]
-    fn preview_local_empty_sequence_metadata_falls_back() {
+    fn preview_local_sequence_marker_without_fields_patches() {
         use yrs::{Map, ReadTxn};
         let engine = preview_seeded(&preview_fixture::plain());
         let mut txn = engine.doc().transact_for(&crate::EditCtx::system(""));
@@ -13726,7 +13732,7 @@ mod tests {
         );
         drop(txn);
         preview_mapped_oracle(&engine, &RenderEnv::default());
-        assert!(engine.render.borrow().stories["body"].preview.is_none());
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
         let before = engine.stats();
         preview_mapped_oracle(
             &engine,
@@ -13734,11 +13740,7 @@ mod tests {
         );
         assert_eq!(
             engine.stats().lower_preview_patches,
-            before.lower_preview_patches
-        );
-        assert_eq!(
-            engine.stats().lower_preview_fallbacks,
-            before.lower_preview_fallbacks + 1
+            before.lower_preview_patches + 1
         );
     }
 

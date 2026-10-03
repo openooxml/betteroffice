@@ -408,8 +408,8 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         })
         .unwrap_or_default();
     local.blocked |= has_sequence_metadata;
-    let mut recording = (story_id == "body" && !has_sequence_metadata && preview_units.is_some())
-        .then(preview::UnitRecorder::new);
+    let mut recording =
+        (story_id == "body" && preview_units.is_some()).then(preview::UnitRecorder::new);
     let _reads = recording.as_ref().map(|_| preview::ReadGuard::new());
     let (mut blocks, _) = lower_story_with_preview(
         &txn,
@@ -425,7 +425,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         local,
         recording.as_mut(),
     )?;
-    *preview_units = recording.map(|recording| recording.finish());
+    *preview_units = recording.map(|recording| recording.finish(has_sequence_metadata));
     // Word numbers SEQ fields in the main text only.
     if story_id == "body" && has_sequence_metadata {
         docx_layout::sequence_fields::number_sequence_fields_with_opaque(

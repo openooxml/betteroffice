@@ -107,19 +107,28 @@ fn preview_local_fields_inside_revisions() {
 }
 
 #[test]
-fn preview_local_sequence_metadata_falls_back() {
-    let engine = seeded(&fixture::sequence());
-    let mut env = RenderEnv::default();
-    oracle(&engine, &env);
-    for decision in [Accepted, Rejected] {
-        env.revision_preview.insert("1".to_owned(), decision);
-        let before = engine.stats();
+fn preview_local_sequence_fields_patch_only_units_without_them() {
+    decision_stream(&fixture::sequence(), false, true);
+    for (id, patches) in [("1", 1), ("3", 0), ("field-2", 0)] {
+        let engine = seeded(&fixture::sequence());
+        fixture::stamp_fields(&engine);
+        let mut env = RenderEnv::default();
         oracle(&engine, &env);
-        assert_eq!(engine.stats().lower_preview_patches, 0);
-        assert_eq!(
-            engine.stats().lower_preview_fallbacks,
-            before.lower_preview_fallbacks + 1
-        );
+        for decision in [Accepted, Rejected] {
+            env.revision_preview.insert(id.to_owned(), decision);
+            let before = engine.stats();
+            oracle(&engine, &env);
+            assert_eq!(
+                engine.stats().lower_preview_patches,
+                before.lower_preview_patches + patches,
+                "{id}"
+            );
+            assert_eq!(
+                engine.stats().lower_preview_fallbacks,
+                before.lower_preview_fallbacks + 1 - patches,
+                "{id}"
+            );
+        }
     }
 }
 
