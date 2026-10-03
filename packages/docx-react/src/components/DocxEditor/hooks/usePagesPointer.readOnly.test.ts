@@ -1,9 +1,11 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
+import { useState } from 'react';
 import type { DisplayListQueries, DisplayListRegionHit } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { YrsInputRef } from '../YrsInput';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
+import { partEditStory, type PartEdit } from '../partEdit';
 import { usePagesPointer, type UsePagesPointerOptions } from './usePagesPointer';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -220,32 +222,90 @@ test('an editable double-click opens the header or footer it lands on and leaves
   }
 });
 
-test('a header double-click while the footer is open switches to the header', () => {
-  let caretMoved = () => false;
-  const bands = bandQueries(() => (caretMoved() ? NOTE_TOP : 0));
-  const opened: Array<['header' | 'footer', number | undefined]> = [];
+/**
+ * A host that opens whatever part the pointer asks for. Closing a part returns
+ * the body caret, which scrolls the page, so later presses land lower.
+ */
+function partHost(initial: PartEdit, queries: (shift: () => number) => DisplayListQueries) {
+  let scrolled = false;
   let closed = 0;
-  const { opts, selections } = options({
+  const opened: Array<['header' | 'footer', number | undefined]> = [];
+  const carets: Array<[number, string]> = [];
+  const words: Array<[number, string]> = [];
+  const input = {
+    focus: () => {},
+    displaySelection: () => null,
+    setSelectionFromDisplay: (anchor: number, _head: number, story: string) =>
+      carets.push([anchor, story]),
+    selectWordAtDisplay: (position: number, story: string) => words.push([position, story]),
+  } as unknown as YrsInputRef;
+  const bands = queries(() => (scrolled ? NOTE_TOP : 0));
+  bands.imageAtPoint = () => null;
+  const { opts } = options({
     readOnly: false,
     displayListQueries: bands,
-    onHeaderFooterDoubleClick: (region, pageNumber) => opened.push([region, pageNumber]),
-    onBodyClick: () => {
-      closed += 1;
-    },
+    yrsInputRef: { current: input },
+    getYrsPositionProjection: (story) =>
+      ({
+        size: 100,
+        targetAt: (displayPosition: number) => ({ story, displayPosition }),
+        tableAtPosition: () => null,
+        cellPosition: () => null,
+        nodeAt: () => null,
+      }) as unknown as YrsPositionProjection,
   });
-  caretMoved = () => selections.length > 0;
-  const view = renderHook(
-    ({ partEdit }: { partEdit: UsePagesPointerOptions['partEdit'] }) =>
-      usePagesPointer({ ...opts, partEdit }),
-    { initialProps: { partEdit: { kind: 'footer', rId: 'rId8' } } }
-  );
-  mouse('mousedown', 400, 40, canvasOf(), 1);
-  expect(closed).toBe(1);
-  view.rerender({ partEdit: null });
-  mouse('mouseup', 400, 40, window, 1);
-  mouse('click', 400, 40, canvasOf(), 1);
+  renderHook(() => {
+    const [partEdit, setPartEdit] = useState<PartEdit | null>(initial);
+    return usePagesPointer({
+      ...opts,
+      partEdit,
+      yrsRootStory: partEditStory(partEdit),
+      onBodyClick: () => {
+        closed += 1;
+        scrolled = true;
+        setPartEdit(null);
+      },
+      onHeaderFooterDoubleClick: (region, pageNumber) => {
+        opened.push([region, pageNumber]);
+        setPartEdit({ kind: region, rId: region === 'header' ? 'rId7' : 'rId8' });
+      },
+    });
+  });
+  return { opened, carets, words, closed: () => closed };
+}
+
+test('with the footer open, the header opens directly: no return to the body, no scroll', () => {
+  const { opened, carets, words, closed } = partHost({ kind: 'footer', rId: 'rId8' }, bandQueries);
+  press(40, 1);
   press(40, 2);
-  expect({ opened, selections }).toEqual({ opened: [['header', 1]], selections: [] });
+  expect({ opened, carets, words, closed: closed() }).toEqual({
+    opened: [['header', 1]],
+    carets: [
+      [1, 'hf:rId7'],
+      [1, 'hf:rId7'],
+    ],
+    words: [[1, 'hf:rId7']],
+    closed: 0,
+  });
+  press(950, 1);
+  expect(opened.at(-1)).toEqual(['footer', 1]);
+  expect(carets.at(-1)).toEqual([1, 'hf:rId8']);
+  press(400, 1);
+  expect(closed()).toBe(1);
+});
+
+test('with a note open, a band click leaves the note open and a double-click opens the band', () => {
+  const { opened, carets, closed } = partHost({ kind: 'footnote', noteId: 2 }, (shift) => {
+    const queries = fakeQueries();
+    const hitTest = queries.hitTestRegions;
+    queries.hitTestRegions = (pageIndex, x, y) => hitTest(pageIndex, x, y + shift());
+    return queries;
+  });
+  press(40, 1);
+  expect({ opened, carets, closed: closed() }).toEqual({ opened: [], carets: [], closed: 0 });
+  press(40, 1);
+  press(40, 2);
+  expect({ opened, closed: closed() }).toEqual({ opened: [['header', 1]], closed: 0 });
 });
 
 test('the table insert button hides and inserts nothing once the editor turns read-only', () => {
