@@ -26,6 +26,7 @@ import {
   type YrsStoredFormatting,
 } from './YrsInput';
 import { ViewerInput } from './ViewerInput';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
 import { RemotePresenceOverlay } from './overlays/RemotePresenceOverlay';
 import { CanvasCellSelectionOverlay } from './overlays/CanvasCellSelectionOverlay';
@@ -233,6 +234,7 @@ export interface PagedEditorProps {
   onSelectionChange?: (from: number, to: number) => void;
   /** Yrs-authoritative toolbar state, emitted while standard yrs input is active. */
   onYrsSelectionChange?: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   /** Callback when editor is ready. */
   onReady?: (ref: PagedEditorRef) => void;
   /** Callback when rendered DOM context is ready. */
@@ -534,6 +536,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
+      onViewerSelectionChange,
       onYrsPartSelectionChange,
       onReady,
       onRenderedDomContextReady,
@@ -687,6 +690,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
+    const onViewerSelectionChangeRef = useRef(onViewerSelectionChange);
     const onYrsPartSelectionChangeRef = useRef(onYrsPartSelectionChange);
     const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
@@ -694,6 +698,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
+    onViewerSelectionChangeRef.current = onViewerSelectionChange;
     onYrsPartSelectionChangeRef.current = onYrsPartSelectionChange;
     onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
@@ -822,13 +827,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     });
     const updateSelectionOverlayRef = useRef(updateSelectionOverlay);
     updateSelectionOverlayRef.current = updateSelectionOverlay;
-    const handleViewerSelectionChange = useCallback(() => {
+    const handleViewerSelectionChange = useCallback((selection: ViewerSelectionChange) => {
       if (yrsInputRef.current?.displaySelection()) {
         updateSelectionOverlayRef.current();
       } else {
         setSelectionRects((current) => (current.length === 0 ? current : []));
         setCaretPosition((current) => (current === null ? current : null));
       }
+      onViewerSelectionChangeRef.current?.(selection);
     }, [setCaretPosition, setSelectionRects]);
     const viewerDocumentReadRef = useRef(viewerDocumentRead);
     viewerDocumentReadRef.current = viewerDocumentRead;

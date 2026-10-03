@@ -40,7 +40,7 @@ export async function readPluginPositionAtPoint(
 const layoutIds = new WeakMap<DisplayListQueries, string>();
 let nextLayoutId = 0;
 
-function layoutIdOf(queries: DisplayListQueries): string {
+export function layoutIdOf(queries: DisplayListQueries): string {
   let id = layoutIds.get(queries);
   if (!id) {
     nextLayoutId += 1;

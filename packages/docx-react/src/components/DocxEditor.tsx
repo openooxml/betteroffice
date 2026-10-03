@@ -55,7 +55,13 @@ import type {
   SelectionState,
   TableContextInfo,
 } from './DocxEditor/types';
-import { isPresented, onPresented, onReplayFailed, workerFrameVersionOf } from './DocxEditor/internals/layoutProvenance';
+import {
+  isPresented,
+  onPresented,
+  onReplayFailed,
+  presentedWorkerVersion,
+  workerFrameVersionOf,
+} from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
 import { useOutlineSidebar } from './DocxEditor/hooks/useOutlineSidebar';
 import { useKeyboardShortcuts } from './DocxEditor/hooks/useKeyboardShortcuts';
@@ -76,10 +82,11 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
+import { requestWorkerOpenReplica, workerOpenReplicaPending } from './DocxEditor/internals/workerOpenReplica';
 import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
 import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
 import { useViewerSession } from './DocxEditor/internals/viewerSession';
+import type { ViewerSelectionChange } from './DocxEditor/internals/viewerSelectionController';
 import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
 import { useDocxEditorRefApi } from './DocxEditor/hooks/useDocxEditorRefApi';
@@ -1632,7 +1639,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     displayListQueries: canvasRenderer.queries,
   });
 
-  const { handleYrsSelectionChange } = useSelectionTracker({
+  const { handleYrsSelectionChange, handleViewerSelectionChange } = useSelectionTracker({
     borderSpecRef,
     theme,
     setFloatingCommentBtn,
@@ -1844,6 +1851,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     mode: editingMode,
     readOnly,
     commands: commandController,
+    viewerSelection: viewerSession && !(
+      canvasRenderer.queries &&
+      presentedWorkerVersion(canvasRenderer.queries) === null &&
+      yrsCore.session &&
+      !workerOpenReplicaPending(yrsCore.session)
+    ),
     session:
       yrsCore.session &&
       !opening &&
@@ -2306,6 +2319,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ? Math.round(sectionPropsPageWidth / 15)
     : DEFAULT_PAGE_WIDTH;
 
+  const handlePagedViewerSelectionChange = useCallback((selection: ViewerSelectionChange) => {
+    pluginHost.publishViewerSelection(selection);
+    handleViewerSelectionChange(selection);
+  }, [handleViewerSelectionChange, pluginHost.publishViewerSelection]);
+
   // PagedEditor selection callback: resolve sticky comment/revision coverage
   // from Yrs so the matching sidebar card opens as the caret moves.
   const handlePagedSelectionChange = useCallback(() => {
@@ -2609,6 +2627,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onYrsContentChange={handleYrsContentChange}
               onPagedSelectionChange={handlePagedSelectionChange}
               onYrsSelectionChange={handleYrsToolbarSelectionChange}
+              onViewerSelectionChange={handlePagedViewerSelectionChange}
               onRenderedDomContextReady={
                 pluginHost.managed || onRenderedDomContextReady
                   ? pluginHost.onRenderedDomContext
