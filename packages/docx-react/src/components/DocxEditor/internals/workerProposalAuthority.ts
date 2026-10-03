@@ -1,4 +1,15 @@
 import type {
+  DocxContentControlQuery,
+  DocxContentControlsOptions,
+  DocxContentControlsResult,
+  DocxExportResult,
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxFindParagraphsOptions,
+  DocxParagraphMatch,
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
@@ -78,6 +89,33 @@ export interface WorkerProposalAuthority {
       results: DocxParagraphAnchorResult[];
     }>
   ): Promise<{ version: string; results: DocxParagraphAnchorResult[] }>;
+  findParagraphs(
+    query: string,
+    options: DocxFindParagraphsOptions | undefined,
+    main: () => Promise<DocxParagraphMatch[]>
+  ): Promise<DocxParagraphMatch[]>;
+  findText(
+    request: DocxFindTextRequest,
+    main: () => Promise<DocxFindTextResult>
+  ): Promise<DocxFindTextResult>;
+  listContentControls(
+    options: DocxContentControlsOptions | undefined,
+    main: () => Promise<DocxContentControlsResult>
+  ): Promise<DocxContentControlsResult>;
+  findContentControls(
+    query: DocxContentControlQuery,
+    options: DocxContentControlsOptions | undefined,
+    main: () => Promise<DocxContentControlsResult>
+  ): Promise<DocxContentControlsResult>;
+  /**
+   * Reads the layout request after the calls ahead of it, then the worker's export for it; null
+   * when there is no request yet.
+   */
+  exportStructuredWithPages(
+    options: DocxPageExportOptions,
+    currentRequest: () => Promise<string | null>,
+    main: () => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>
+  ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> | null>;
   /** Resolves against the document the host sees now. */
   navigationTarget(
     story: string,
@@ -295,6 +333,36 @@ export function registerWorkerProposalAuthority(
       assertCurrent();
       return { version: read.version, results: read.value.results };
     }, () => main(anchors)),
+    findParagraphs: (query, options, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findParagraphs', query, ...options });
+      assertCurrent();
+      return read.value;
+    }, main),
+    findText: (request, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findText', request });
+      assertCurrent();
+      return read.value;
+    }, main),
+    listContentControls: (options, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'listContentControls', options: options ?? {} });
+      assertCurrent();
+      return read.value;
+    }, main),
+    findContentControls: (query, options, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'findContentControls', query, options: options ?? {} });
+      assertCurrent();
+      return read.value;
+    }, main),
+    exportStructuredWithPages: (options, currentRequest, main) => route<
+      DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> | null
+    >(async () => {
+      const request = await currentRequest();
+      assertCurrent();
+      if (request === null) return null;
+      const read = await worker.documentRead({ kind: 'exportStructuredWithPages', options, currentRequest: request });
+      assertCurrent();
+      return JSON.parse(read.value) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+    }, main),
     navigationTarget: (story, paraId, main) => route(async () => {
       const local = resolveMirroredNavigationTarget(geometry, session.getProposals(), story, paraId);
       if (local !== null) return { version: geometry!.version, target: local };

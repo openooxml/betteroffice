@@ -101,6 +101,7 @@ test('a worker document mirror survives hydration and hands proposal decisions t
     expect(snapshot.state).toEqual(new Uint8Array(0));
     expect(snapshot.selection).toBeNull();
     expect(snapshot).not.toHaveProperty('mediaSources');
+    expect(snapshot).not.toHaveProperty('noteSeparators');
 
     const state = worker.encodeState();
     main.openDocx(bytes, false);

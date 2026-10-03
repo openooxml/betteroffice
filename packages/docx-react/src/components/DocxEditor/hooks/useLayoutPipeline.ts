@@ -140,6 +140,7 @@ export interface UseLayoutPipelineReturn {
    * `null` while it has no session or the fonts the document needs are not ready.
    */
   getLayoutRequest: () => string | null;
+  readLayoutRequest: () => Promise<string | null>;
 }
 
 /** Whether `next` measures as `last` does and only adds font chains. */
@@ -939,6 +940,22 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     return JSON.stringify(request);
   }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
 
+  const readLayoutRequest = useCallback(async (): Promise<string | null> => {
+    if (!session) return null;
+    const request = buildResidentRegionLayoutRequest(
+      document,
+      pageGap,
+      workerProposalRenderEnv(session, renderEnv)
+    );
+    if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
+    const requirements = await fontRequirementsInWorkerRef.current?.(session, JSON.stringify(request));
+    if (requirements == null) return null;
+    const measurement = residentMeasurementConfig(JSON.parse(requirements) as ResidentFontRequirement[]);
+    if (!measurement) return null;
+    request.measurement = measurement;
+    return JSON.stringify(request);
+  }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
+
   const navigationEpoch = useCallback(() => navigationEpochRef.current, []);
 
   return {
@@ -949,5 +966,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     cancelPendingScrollRestore,
     navigationEpoch,
     getLayoutRequest,
+    readLayoutRequest,
   };
 }

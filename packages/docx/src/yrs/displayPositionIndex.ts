@@ -10,11 +10,15 @@ import {
 export type DisplayPositionReader = Pick<
   YrsSession,
   | 'version'
+  | 'storyIds'
+  | 'paragraphs'
   | 'hasStory'
   | 'storySegments'
   | 'paragraphSpans'
   | 'locateParagraph'
   | 'selectionText'
+  | 'resolveComment'
+  | 'listRevisions'
 >;
 
 /**

@@ -1,17 +1,20 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { createRef, useRef, type RefObject } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
+import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import { ViewerInput, type ViewerInputProps } from './ViewerInput';
 import type { YrsInputRef } from './YrsInput';
 import { usePagedEditorRefApi } from './hooks/usePagedEditorRefApi';
 import { stampWorkerFrameVersion } from './internals/layoutProvenance';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
+import { layoutIdOf } from '../../plugins/geometry';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook } = await import('@testing-library/react');
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalClipboardItem = globalThis.ClipboardItem;
 
@@ -24,6 +27,43 @@ afterEach(() => {
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
+
+for (const viewerSelection of [true, false]) {
+  test(`${viewerSelection ? 'viewer' : 'editor'} readiness ${viewerSelection ? 'uses layout' : 'waits for the replica'}`, () => {
+    const onReady = mock((_ref: PagedEditorRef) => {});
+    const session = {} as YrsSession;
+    const layout = {} as Layout;
+    const runLayoutPipeline = () => {};
+    const scrollToParaIdImpl = () => false;
+    const scrollToPageImpl = () => {};
+    const hook = renderHook(({ layout, replicaReady }: { layout: Layout | null; replicaReady: boolean }) => {
+      const ref = useRef<PagedEditorRef>(null);
+      usePagedEditorRefApi({
+        ref, viewerSelection, yrsInputRef: { current: null }, layout, yrsSession: session, replicaReady,
+        runLayoutPipeline, getLayoutRequest: () => null, readLayoutRequest: async () => null,
+        scrollToPositionImpl: () => {}, revealPositionImpl: () => 'layout-unavailable',
+        scrollToParaIdImpl, scrollToPageImpl, setIsFocused: () => {},
+        onReadyRef: { current: onReady }, documentFromYrs: () => null,
+        yrsLocToDisplayPosition: () => null, syncYrsInputState: () => true,
+        applyYrsFormatting: () => false, applyYrsCommand: () => false,
+        getYrsPositionProjection: () => null, displayPositionToYrsLoc: () => null,
+        getPositionAtPoint: () => null,
+      });
+      return ref;
+    }, { initialProps: { layout: null as Layout | null, replicaReady: false } });
+    expect(onReady).not.toHaveBeenCalled();
+    hook.rerender({ layout, replicaReady: false });
+    if (viewerSelection) {
+      expect(onReady).toHaveBeenCalledTimes(1);
+      expect(onReady.mock.calls[0]![0].isWorkerViewer()).toBe(true);
+    } else {
+      expect(onReady).not.toHaveBeenCalled();
+      hook.rerender({ layout, replicaReady: true });
+      expect(onReady).toHaveBeenCalledTimes(1);
+      expect(onReady.mock.calls[0]![0].isWorkerViewer()).toBe(false);
+    }
+  });
+}
 
 function frame(version: string, preview = false, asOpened = false): DisplayListQueries {
   const lines = [{ pageIndex: 0, from: 1, to: 30 }];
@@ -56,7 +96,7 @@ function NavigatingViewer({ props, inputRef, pagedRef }: {
     yrsInputRef: inputRef,
     layout: null,
     runLayoutPipeline: () => {},
-    getLayoutRequest: () => null,
+    getLayoutRequest: () => null, readLayoutRequest: async () => null,
     scrollToPositionImpl: () => {},
     revealPositionImpl: () => 'layout-unavailable',
     scrollToParaIdImpl: () => true,
@@ -72,6 +112,7 @@ function NavigatingViewer({ props, inputRef, pagedRef }: {
     getYrsPositionProjection: () => null,
     displayPositionToYrsLoc: () => null,
     getPositionAtPoint: () => null,
+    navigateViewer: async () => false,
   });
   return <ViewerInput {...props} ref={inputRef} />;
 }
@@ -79,7 +120,8 @@ function NavigatingViewer({ props, inputRef, pagedRef }: {
 function mount(
   queries: DisplayListQueries,
   documentKey: ViewerInputProps['document'] = { isDisplayOnly: () => false },
-  pagedRef?: RefObject<PagedEditorRef | null>
+  pagedRef?: RefObject<PagedEditorRef | null>,
+  onSelectionChange: ViewerInputProps['onSelectionChange'] = () => {}
 ) {
   const pending: Array<{
     request: ResidentDocumentRead;
@@ -89,7 +131,7 @@ function mount(
     pending.push({ request, resolve });
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();
-  let props: ViewerInputProps = { read, story: 'body', queries, document: documentKey, onSelectionChange: () => {} };
+  let props: ViewerInputProps = { read, story: 'body', queries, document: documentKey, onSelectionChange };
   const element = () => pagedRef
     ? <NavigatingViewer props={props} inputRef={ref} pagedRef={pagedRef} />
     : <ViewerInput {...props} ref={ref} />;
@@ -109,6 +151,65 @@ function mount(
     entry.request.kind === kind && 'expectVersion' in entry.request && entry.request.expectVersion === version);
   return { ref, view, show, answer, has, textarea: view.getByTestId('yrs-input') as HTMLTextAreaElement };
 }
+
+test('a missing viewer navigation leaves the selection gesture and pending copy untouched', async () => {
+  const pagedRef = createRef<PagedEditorRef>();
+  const { ref, answer } = mount(frame('A'), undefined, pagedRef);
+  act(() => ref.current!.setSelectionFromDisplay(1, 6));
+  const gesture = ref.current!.currentGesture!();
+  const copy = ref.current!.readSelectedText!()!;
+  expect(await pagedRef.current!.navigateViewer({ kind: 'paragraphTarget', paraId: 'missing' })).toBe(false);
+  expect(ref.current!.currentGesture!()).toBe(gesture);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 1, head: 6 });
+  await answer('selectionText', 'A', 'A', text('Alpha'));
+  expect(await copy).toBe('Alpha');
+});
+
+test('viewer publication uses ordered display positions, worker paragraph identity and the presented layout', async () => {
+  const queries = frame('A');
+  const changes: ViewerSelectionChange[] = [];
+  const { ref, show, answer, has } = mount(queries, undefined, undefined, (selection) => changes.push(selection));
+  act(() => ref.current!.setSelectionFromDisplay(12, 1));
+  expect(changes.at(-1)).toEqual({
+    displayRange: { story: 'body', from: 1, to: 12, layoutId: layoutIdOf(queries) },
+    isMultiParagraph: false,
+  });
+  const count = changes.length;
+  await answer('selectionText', 'A', 'A', {
+    text: 'AlphaBeta', range: { story: 'body', view: 'accepted',
+      start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000002', offset: 4 } },
+  });
+  expect(changes).toHaveLength(count + 1);
+  expect(changes.at(-1)?.isMultiParagraph).toBe(true);
+  const next = frame('A');
+  show(next);
+  expect(changes.at(-1)).toEqual({
+    displayRange: { story: 'body', from: 1, to: 12, layoutId: layoutIdOf(next) },
+    isMultiParagraph: true,
+  });
+  expect(has('selectionText', 'A')).toBe(false);
+  show(frame('B'));
+  expect(changes.at(-1)).toEqual({ displayRange: null, isMultiParagraph: false });
+});
+
+test.each([
+  ['Alpha\nBeta', null, true],
+  ['Alpha\tBeta', null, true],
+  ['Alpha', null, false],
+  ['Alpha\nBeta', {
+    story: 'body', view: 'accepted',
+    start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 10 },
+  }, false],
+] satisfies Array<[string, DocxDisplaySelectionText['range'], boolean]>)(
+  'viewer capture classifies paragraph coverage for %p', async (value, range, isMultiParagraph) => {
+    const changes: ViewerSelectionChange[] = [];
+    const { ref, answer } = mount(frame('A'), undefined, undefined, (selection) => changes.push(selection));
+    act(() => ref.current!.setSelectionFromDisplay(1, 12));
+    expect(changes.at(-1)?.isMultiParagraph).toBe(false);
+    await answer('selectionText', 'A', 'A', { text: value, range });
+    expect(changes.at(-1)?.isMultiParagraph).toBe(isMultiParagraph);
+  }
+);
 
 test('a version change clears a viewer selection and rejects its pending copy', async () => {
   const { ref, show, answer, has } = mount(frame('A'));

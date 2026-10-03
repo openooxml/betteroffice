@@ -29,6 +29,14 @@ export interface DocxDisplaySelectionText {
   range: DocxTextRange | null;
 }
 
+export interface DocxDisplaySelectionInfo {
+  paraId: string | null;
+  selectedText: string;
+  paragraphText: string;
+  before: string;
+  after: string;
+}
+
 interface ResolvedPosition {
   target: YrsPointerProjectionTarget;
   loc: YrsLoc;
@@ -196,6 +204,126 @@ export function resolveSelectionText(
   const endOffset = rootStoryOffset(index, rootStory, end, to, 'end');
   if (startOffset === null || endOffset === null) return null;
   return { text: storyPlainText(reader, rootStory, startOffset, endOffset), range: null };
+}
+
+/** @internal The selection info for a display range. */
+export function resolveSelectionInfo(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  anchor: number,
+  head: number,
+  expectVersion: string
+): DocxDisplaySelectionInfo | null {
+  const reader = index.reader;
+  if (reader.version() !== expectVersion) return null;
+  const a = resolvePosition(index, rootStory, anchor);
+  const b = resolvePosition(index, rootStory, head);
+  if (!a || !b) return null;
+  if (a.loc.story !== b.loc.story) {
+    const selection = resolveSelectionText(index, rootStory, anchor, head, expectVersion);
+    return selection ? {
+      paraId: null, selectedText: selection.text, paragraphText: '', before: '', after: '',
+    } : null;
+  }
+  const [start, end] =
+    storyOffsetForLoc(reader, a.loc) <= storyOffsetForLoc(reader, b.loc)
+      ? [a.loc, b.loc]
+      : [b.loc, a.loc];
+  try {
+    return reader.selectionText({
+      story: start.story,
+      start: { paraId: start.paraId, offset: start.offset },
+      end: { paraId: end.paraId, offset: end.offset },
+    });
+  } catch {
+    return null;
+  }
+}
+
+function storyOffsetToLoc(index: DisplayPositionIndex, story: string, offset: number): YrsLoc | null {
+  const paragraphs = index.inputMap(story)?.paragraphs;
+  if (!paragraphs?.length) return null;
+  for (const paragraph of paragraphs) {
+    const span = index.reader.locateParagraph(story, paragraph.paraId);
+    if (offset <= span.end) {
+      return {
+        story,
+        paraId: paragraph.paraId,
+        offset: Math.min(Math.max(0, offset - span.start), span.end - span.start),
+      };
+    }
+  }
+  const last = paragraphs[paragraphs.length - 1];
+  const span = index.reader.locateParagraph(story, last.paraId);
+  return { story, paraId: last.paraId, offset: span.end - span.start };
+}
+
+function displayRange(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  start: YrsLoc,
+  end: YrsLoc
+): DocxDisplayRange | null {
+  const projection = index.projection(rootStory);
+  if (!projection) return null;
+  const anchor = projection.positionForLoc(start);
+  const head = projection.positionForLoc(end);
+  return anchor === null || head === null ? null : { anchor, head };
+}
+
+/** @internal The paragraph range across stories, mapped into the root layout. */
+export function resolveParagraphTarget(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  paraId: string,
+  expectVersion: string
+): DocxDisplayRange | null {
+  if (index.reader.version() !== expectVersion) return null;
+  for (const story of index.reader.storyIds()) {
+    if (!index.reader.paragraphs(story).some((paragraph) => paragraph.paraId === paraId)) continue;
+    const span = index.reader.locateParagraph(story, paraId);
+    return displayRange(index, rootStory, { story, paraId, offset: 0 },
+      { story, paraId, offset: Math.max(0, span.end - span.start) });
+  }
+  return null;
+}
+
+/** @internal The first comment anchor in the root story's display positions. */
+export function resolveCommentTarget(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  commentId: string,
+  expectVersion: string
+): DocxDisplayRange | null {
+  if (index.reader.version() !== expectVersion) return null;
+  try {
+    const anchor = index.reader.resolveComment(commentId)[0];
+    if (!anchor) return null;
+    const start = storyOffsetToLoc(index, anchor.story, anchor.start);
+    const end = storyOffsetToLoc(index, anchor.story, anchor.end);
+    return start && end ? displayRange(index, rootStory, start, end) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** @internal The revision range in the root story's display positions. */
+export function resolveRevisionTarget(
+  index: DisplayPositionIndex,
+  rootStory: string,
+  revisionId: string,
+  expectVersion: string
+): DocxDisplayRange | null {
+  if (index.reader.version() !== expectVersion) return null;
+  const revision = index.reader.listRevisions().find((candidate) => candidate.revisionId === revisionId);
+  return revision
+    ? displayRange(
+        index,
+        rootStory,
+        { story: revision.story, ...revision.range.start },
+        { story: revision.story, ...revision.range.end }
+      )
+    : null;
 }
 
 /** @internal The display position of bookmark `name` in root story `rootStory`, or null. */

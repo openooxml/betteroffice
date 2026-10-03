@@ -43,6 +43,7 @@ import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -87,6 +88,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange,
   onPagedSelectionChange,
   onYrsSelectionChange,
+  onViewerSelectionChange,
   onRenderedDomContextReady,
   pluginOverlays,
   onHyperlinkClick,
@@ -103,6 +105,8 @@ export function DocxEditorPagedArea({
   anchorPositions,
   onAnchorPositionsChange,
   onYrsTrackedChangesChange,
+  onViewerCommentRangesChange,
+  viewerSidebarActive,
   pluginRenderedDomContext,
   pageWidthPx,
   expandedSidebarItem,
@@ -172,6 +176,7 @@ export function DocxEditorPagedArea({
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
   onYrsSelectionChange: (selection: YrsToolbarSelection) => void;
+  onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
   onRenderedDomContextReady:
     | ((ctx: RenderedDomContext, queries: DisplayListQueries) => void)
     | undefined;
@@ -199,6 +204,8 @@ export function DocxEditorPagedArea({
   anchorPositions: Map<string, number>;
   onAnchorPositionsChange: (positions: Map<string, number>) => void;
   onYrsTrackedChangesChange: (result: TrackedChangesResult) => void;
+  onViewerCommentRangesChange?: PagedEditorProps['onViewerCommentRangesChange'];
+  viewerSidebarActive?: boolean;
   pluginRenderedDomContext: RenderedDomContext | null | undefined;
   pageWidthPx: number;
   expandedSidebarItem: string | null;
@@ -465,6 +472,7 @@ export function DocxEditorPagedArea({
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}
         onYrsSelectionChange={onYrsSelectionChange}
+        onViewerSelectionChange={onViewerSelectionChange}
         onYrsPartSelectionChange={(part, selection) => {
           if (partEditStory(part) === partStory) setPartSelection(selection);
         }}
@@ -482,6 +490,8 @@ export function DocxEditorPagedArea({
         onAnchorPositionsChange={onAnchorPositionsChange}
         sidebarCommentIds={sidebarCommentIds}
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
+        onViewerCommentRangesChange={onViewerCommentRangesChange}
+        viewerSidebarActive={viewerSidebarActive}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
         layoutInWorker={layoutInWorker}

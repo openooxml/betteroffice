@@ -109,6 +109,7 @@ async function build(bytes: Uint8Array, preview: boolean): Promise<Built> {
     const index = new DisplayPositionIndex({
       ...session.geometryReader,
       selectionText: session.selectionText,
+      resolveComment: session.resolveComment,
     });
     const positions = pages.filter((page) => !page.unbuilt).map((page) => {
       const region = (story: string, primitives: DisplayPrimitive[]) => {

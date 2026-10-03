@@ -164,6 +164,7 @@ export class ResidentEngineWorkerClient {
   /** Id of the last snapshot request sent; replies to earlier requests must
    * not replace the state it recorded. */
   private lastSnapshotId = 0;
+  private lastFailedFontsSnapshotId = 0;
   private keepSurfaces = false;
   private bootstrapWaiters: Array<() => void> = [];
   private lastMemory: WasmModuleMemory[] | null = null;
@@ -196,7 +197,13 @@ export class ResidentEngineWorkerClient {
       this.pending.delete(response.id);
       if (this.pending.size === 0) this.disarmWatchdog();
       if (response.ok) pending.resolve(response);
-      else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+      else {
+        if (pending.type === 'bootstrap' || pending.type === 'sync') {
+          this.appliedFontsRevision = null;
+          this.lastFailedFontsSnapshotId = this.nextId - 1;
+        }
+        pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+      }
     };
     this.worker.onerror = (event) => {
       this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
@@ -277,7 +284,7 @@ export class ResidentEngineWorkerClient {
     this.bootstrapped = false;
     this.remoteVector = null;
     this.appliedFontsRevision = null;
-    this.lastSnapshotId = 0;
+    this.lastSnapshotId = this.nextId;
     this.revision = 0;
     this.keepSurfaces = true;
     // The bootstrap it asks for frees the worker's document, opened there or not.
@@ -823,7 +830,9 @@ export class ResidentEngineWorkerClient {
     response: ResidentEngineWorkerResponse & { ok: true },
     fontsRevision: number
   ): void {
-    if (response.id >= this.lastSnapshotId) this.appliedFontsRevision = fontsRevision;
+    if (response.id >= this.lastSnapshotId && response.id > this.lastFailedFontsSnapshotId) {
+      this.appliedFontsRevision = fontsRevision;
+    }
   }
 
   private fail(error: Error, notify = true): void {

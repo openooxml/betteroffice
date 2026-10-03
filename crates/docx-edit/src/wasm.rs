@@ -2381,6 +2381,32 @@ impl EditSession {
         Ok(())
     }
 
+    /// The separator notes for another replica; empty when the package has none.
+    pub fn note_separators_state(&self) -> Result<Vec<u8>, JsValue> {
+        self.engine
+            .doc()
+            .note_separator_state()
+            .map(|state| state.map_or_else(Vec::new, |state| state.to_vec()))
+            .map_err(|error| js_err(&error))
+    }
+
+    /// Loads separator notes from a yrs v1 update; empty clears them.
+    pub fn load_note_separators(&self, state: &[u8]) -> Result<(), JsValue> {
+        if self.engine.doc().has_note_separator_state(state) {
+            return Ok(());
+        }
+        let state = if state.is_empty() {
+            None
+        } else {
+            EditingDoc::new(1)
+                .apply_update_v1(state)
+                .map_err(|error| js_err(&error.to_string()))?;
+            Some(Arc::from(state))
+        };
+        self.engine.doc().set_note_separator_state(state);
+        Ok(())
+    }
+
     /// Marks whether the session's document is part of a package, as a
     /// replica of a preview is: its layouts render NUMPAGES empty.
     pub fn set_partial_document(&self, partial: bool) {
