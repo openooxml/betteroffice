@@ -127,6 +127,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     createDocxPluginHost({
       pagedEditorRef: options.pagedEditorRef,
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
+      viewer: () => latest.current.viewerDocumentRead !== undefined,
       commands: () => latest.current.commands,
       translate: (key) => translateRef.current(key),
       geometry: () => geometryRef.current,
