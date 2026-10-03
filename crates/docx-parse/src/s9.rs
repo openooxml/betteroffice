@@ -401,7 +401,7 @@ fn parse_s9_package_impl(
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
     let document_part = find_part(parts, &document_path);
-    let mut warnings = Vec::new();
+    let mut warnings = crate::package_integrity::package_warnings(parts, limits);
     let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
             let mut scanned_budget = body_blocks
@@ -602,7 +602,7 @@ fn parse_s9_package_impl(
         remove_orphan_comment_ranges(&mut note.content, &comment_ids);
     }
 
-    dedupe_package_paragraph_ids(
+    let repeated_para_ids = dedupe_package_paragraph_ids(
         &mut body,
         headers.as_mut(),
         footers.as_mut(),
@@ -611,6 +611,11 @@ fn parse_s9_package_impl(
         footnote_separators.as_mut(),
         endnote_separators.as_mut(),
     );
+    if repeated_para_ids > 0 {
+        warnings.push(format!(
+            "BetterOffice found {repeated_para_ids} paragraphs sharing a `w14:paraId` on open. A host addressing paragraphs by that raw Word ID should not assume it is unique; prefer a session anchor with `resolveParagraphAnchor()` or call `persistParagraphIds()` to repair the duplicates."
+        ));
+    }
 
     let template_variables = options
         .detect_variables
@@ -695,14 +700,14 @@ fn dedupe_package_paragraph_ids(
     endnotes: Option<&mut Vec<Note>>,
     footnote_separators: Option<&mut Vec<Note>>,
     endnote_separators: Option<&mut Vec<Note>>,
-) {
+) -> usize {
     let mut seen = HashSet::new();
-    dedupe_blocks(&mut body.content, &mut seen);
+    let mut repeated = dedupe_blocks(&mut body.content, &mut seen);
     for story in headers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen);
+        repeated += dedupe_blocks(&mut story.content, &mut seen);
     }
     for story in footers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen);
+        repeated += dedupe_blocks(&mut story.content, &mut seen);
     }
     for note in footnotes
         .into_iter()
@@ -719,33 +724,42 @@ fn dedupe_package_paragraph_ids(
                 .flat_map(|notes| notes.iter_mut()),
         )
     {
-        dedupe_blocks(&mut note.content, &mut seen);
+        repeated += dedupe_blocks(&mut note.content, &mut seen);
     }
+    repeated
 }
 
-fn dedupe_blocks(blocks: &mut [BlockContent], seen: &mut HashSet<u32>) {
+fn dedupe_blocks(blocks: &mut [BlockContent], seen: &mut HashSet<u32>) -> usize {
+    let mut repeated = 0;
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => dedupe_paragraph(Arc::make_mut(paragraph), seen),
+            BlockContent::Paragraph(paragraph) => {
+                repeated += dedupe_paragraph(Arc::make_mut(paragraph), seen);
+            }
             BlockContent::Table(table) => {
                 for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
-                        dedupe_blocks(&mut cell.content, seen);
+                        repeated += dedupe_blocks(&mut cell.content, seen);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut Arc::make_mut(sdt).content, seen),
+            BlockContent::BlockSdt(sdt) => {
+                repeated += dedupe_blocks(&mut Arc::make_mut(sdt).content, seen);
+            }
             BlockContent::RawXml(_) => {}
         }
     }
+    repeated
 }
 
-fn dedupe_paragraph(paragraph: &mut Paragraph, seen: &mut HashSet<u32>) {
+fn dedupe_paragraph(paragraph: &mut Paragraph, seen: &mut HashSet<u32>) -> usize {
     if let Some(id) = paragraph.para_id.as_deref().and_then(parse_paragraph_id)
         && !seen.insert(id)
     {
         paragraph.repeated_para_id = Some(true);
+        return 1;
     }
+    0
 }
 
 fn canonical_document(
