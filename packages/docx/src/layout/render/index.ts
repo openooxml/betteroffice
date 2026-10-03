@@ -80,6 +80,7 @@ export {
   buildRustDisplayList,
   buildRustDisplayFrame,
   loadRustDisplayListQueryEngine,
+  loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
   type DisplayListHeadersFooters,
   type DisplayListHfVariant,

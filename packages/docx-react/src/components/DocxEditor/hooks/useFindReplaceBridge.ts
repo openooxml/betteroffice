@@ -166,12 +166,16 @@ export function useFindReplaceBridge({
           search.options
         ).find((candidate) => selects(selection, candidate.yrsRange));
         if (!match) throw new DocxCommandAdmissionError('target-changed');
-        session.replaceRange(match.yrsRange, replaceText);
-        session.setSelection({
-          story: match.yrsRange.story,
-          paraId: match.yrsRange.start.paraId,
-          offset: match.yrsRange.start.offset + replaceText.length,
-        });
+        const landed = session.replaceRange(match.yrsRange, replaceText).range;
+        session.setSelection(
+          landed
+            ? { story: landed.story, ...landed.end }
+            : {
+                story: match.yrsRange.story,
+                paraId: match.yrsRange.start.paraId,
+                offset: match.yrsRange.start.offset + replaceText.length,
+              }
+        );
         return commandOutcome(editor.syncYrsInputState(true));
       });
       return result.ok && result.status === 'executed';
@@ -193,15 +197,20 @@ export function useFindReplaceBridge({
           options
         );
         if (matches.length === 0) return commandOutcome(false);
+        let landed: YrsStoryRange | undefined;
         for (const match of [...matches].sort((a, b) => b.displayFrom - a.displayFrom)) {
-          session.replaceRange(match.yrsRange, replaceText);
+          landed = session.replaceRange(match.yrsRange, replaceText).range;
         }
         const first = matches[0];
-        session.setSelection({
-          story: first.yrsRange.story,
-          paraId: first.yrsRange.start.paraId,
-          offset: first.yrsRange.start.offset + replaceText.length,
-        });
+        session.setSelection(
+          landed
+            ? { story: landed.story, ...landed.end }
+            : {
+                story: first.yrsRange.story,
+                paraId: first.yrsRange.start.paraId,
+                offset: first.yrsRange.start.offset + replaceText.length,
+              }
+        );
         editor.syncYrsInputState(true);
         findResultRef.current = null;
         findReplace.setMatches([], 0);

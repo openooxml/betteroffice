@@ -27,6 +27,9 @@ fn fresh(engine: &EngineSession, request: &str, client_id: u64) -> (String, Valu
         .doc()
         .apply_update_v1(&engine.doc().encode_state_as_update_v1())
         .unwrap();
+    fresh
+        .doc()
+        .set_note_separator_state(engine.doc().note_separator_state().unwrap());
     let layout = fresh.layout_document_with_regions_json(request).unwrap();
     fresh.build_display_list_frame(&extras(request), 0).unwrap();
     (layout, display(&fresh))
@@ -68,6 +71,10 @@ fn a_body_edit_beside_notes_repaginates_incrementally_as_a_fresh_layout_would() 
         .doc()
         .apply_update_v1(&engine.doc().encode_state_as_update_v1())
         .unwrap();
+
+    fresh
+        .doc()
+        .set_note_separator_state(engine.doc().note_separator_state().unwrap());
     assert_eq!(
         fresh.layout_document_with_regions_json(&request).unwrap(),
         edited
@@ -137,6 +144,10 @@ fn a_body_edit_beside_floats_remeasures_only_its_flow_segment_as_a_fresh_layout_
         .doc()
         .apply_update_v1(&engine.doc().encode_state_as_update_v1())
         .unwrap();
+
+    fresh
+        .doc()
+        .set_note_separator_state(engine.doc().note_separator_state().unwrap());
     assert_eq!(
         fresh.layout_document_with_regions_json(&request).unwrap(),
         edited

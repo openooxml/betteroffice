@@ -273,7 +273,8 @@ export class EditSession {
      * Deletes `[start, end)`. Because a range crossing a paragraph boundary
      * includes the boundary pilcrow, a plain delete also merges those
      * paragraphs. Suggesting mode removes nothing and stamps the content
-     * `del` instead. Receipt: `{"revisionId": string|null}`.
+     * `del` instead. Receipt: `{"revisionId": string|null, "range"}`, the
+     * range being what the delete left.
      */
     delete_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -480,8 +481,8 @@ export class EditSession {
      * Inserts one inline image embed at `(story, para_id, offset)`.
      * `payload_json` is the image's authored payload object, stored as given.
      * The embed occupies one story unit. Receipt:
-     * `{"revisionId": string|null}`. Errors when the payload is not an
-     * object.
+     * `{"revisionId": string|null, "range"}`, the range being where the image
+     * landed. Errors when the payload is not an object.
      */
     insert_image(story: string, para_id: string, offset: number, payload_json: string, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -508,10 +509,10 @@ export class EditSession {
     /**
      * Inserts `text` at `(story, para_id, offset)`. It must contain no
      * paragraph or line breaks, and it inherits the formatting at the
-     * insertion point. Receipt: `{"revisionId": string|null}` — non-null in
-     * suggesting mode, where the text is stamped `ins` and coalesces into an
-     * adjacent insertion by the same author rather than opening a second
-     * revision.
+     * insertion point. Receipt: `{"revisionId": string|null, "range"}` —
+     * the id is non-null in suggesting mode, where the text is stamped `ins`
+     * and coalesces into an adjacent insertion by the same author rather than
+     * opening a second revision; the range is where the text landed.
      */
     insert_text(story: string, para_id: string, offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -579,10 +580,8 @@ export class EditSession {
      */
     list_revisions(): string;
     /**
-     * Hydrates this replica from an encoded yrs v1 update, typically another
-     * replica's [`EditSession::encode_state`] output. Identical to
-     * [`EditSession::apply_update`]; the separate name marks the initial-load
-     * call site. Errors on a malformed update.
+     * Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
+     * comment writes and marks loaded fields differing from seed placeholders as authored.
      */
     load(update: Uint8Array): void;
     /**
@@ -602,6 +601,10 @@ export class EditSession {
      * another replica seeded them from.
      */
     load_media_sources(json: string): void;
+    /**
+     * Loads separator notes from a yrs v1 update; empty clears them.
+     */
+    load_note_separators(state: Uint8Array): void;
     /**
      * `{"start","end"}` — the paragraph's span in story-global UTF-16 units.
      * `end` is the index of its own pilcrow, so `end - start` is the
@@ -665,6 +668,10 @@ export class EditSession {
      * Errors unless it is a non-negative safe integer.
      */
     constructor(client_id: number);
+    /**
+     * The separator notes for another replica; empty when the package has none.
+     */
+    note_separators_state(): Uint8Array;
     /**
      * Parses a DOCX package, optionally seeds its editable stories into this
      * replica, and retains the source bytes for
@@ -1612,6 +1619,7 @@ export interface InitOutput {
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_load_media_sources: (a: number, b: number, c: number) => [number, number];
+    readonly editsession_load_note_separators: (a: number, b: number, c: number) => [number, number];
     readonly editsession_locate_paragraph: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_materialize_docx: (a: number) => [number, number, number, number];
     readonly editsession_measure_paragraph_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1622,6 +1630,7 @@ export interface InitOutput {
     readonly editsession_merge_cells: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_merge_paragraphs: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_new: (a: number) => [number, number, number];
+    readonly editsession_note_separators_state: (a: number) => [number, number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];

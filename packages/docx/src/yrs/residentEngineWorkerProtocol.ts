@@ -6,6 +6,14 @@ import type {
   YrsSelection,
   YrsStickyPosition,
 } from './index';
+import type { PointPosition } from '../plugin-api';
+import type { DocxResolvedPointPosition } from './pointPosition';
+import type {
+  DocxDisplayRange,
+  DocxDisplaySelectionText,
+  DocxSelectionUnit,
+} from './viewerSelection';
+import type { CollaborationCursor } from '../collaboration/types';
 import type { ResidentSearchResult } from './residentSearch';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
@@ -54,7 +62,17 @@ export type ResidentDocumentRead =
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
-  | { kind: 'navigationTarget'; story: string; paraId: string };
+  | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
+  | {
+      kind: 'selectionUnit';
+      story: string;
+      position: number;
+      unit: DocxSelectionUnit;
+      expectVersion: string;
+    }
+  | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -64,6 +82,10 @@ export interface ResidentDocumentReadValues {
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
   stickyAnchors: Array<YrsStickyPosition | null>;
+  pointPosition: DocxResolvedPointPosition | null;
+  selectionUnit: DocxDisplayRange | null;
+  selectionText: DocxDisplaySelectionText | null;
+  bookmarkPosition: number | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */
@@ -122,7 +144,13 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
-  | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
+  | {
+      id: number;
+      type: 'documentRead';
+      read: ResidentDocumentRead;
+      /** Answered `superseded` instead when the document's version differs. */
+      expectVersion?: string;
+    }
   | {
       id: number;
       type: 'sync';
@@ -236,11 +264,18 @@ export type ResidentEngineWorkerResponse = (
       engineProfile?: YrsEngineApplyProfile;
       caret?: YrsResidentCaretSnapshot;
       selection?: YrsSelection | null;
+      /** The same selection as sticky positions, for the host to resolve against its content. */
+      selectionCursor?: CollaborationCursor | null;
       /** The presented frame carries the worker-painted caret line. */
       caretPainted?: boolean;
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;
+      /** The document version the frame lays out. */
+      documentVersion?: string;
+      documentPreview?: boolean;
+      /** The frame lays out the whole document as opened, before any change. */
+      documentAsOpened?: boolean;
       /** Characters an applyDelete removed. */
       deletedUnits?: number;
       /** The worker replica's yrs state vector after this operation, so the

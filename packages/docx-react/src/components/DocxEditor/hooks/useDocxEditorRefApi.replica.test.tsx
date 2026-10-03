@@ -234,7 +234,7 @@ test('every public ref API is classified for replica access', async () => {
     'getPositionAtPoint', 'getProposals', 'getSearchState', 'getSelectionInfo', 'getTotalPages', 'getZoom',
     'highlightRange', 'insertBreak', 'listContentControls', 'loadDocument', 'loadDocumentBuffer',
     'onContentChange', 'onSearchChange', 'onSelectionChange', 'openPrintPreview', 'print', 'proposeChange',
-    'proposeChanges', 'readParagraphs', 'replyToComment', 'resolveComment', 'resolveParagraphAnchors', 'save',
+    'proposeChanges', 'readParagraphs', 'readPositionAtPoint', 'replyToComment', 'resolveComment', 'resolveParagraphAnchors', 'save',
     'search', 'searchGoTo', 'searchNext', 'searchPrevious',
     'scrollToChangeId', 'scrollToCommentId', 'scrollToPage', 'scrollToParaId', 'scrollToPosition',
     'setParagraphStyle', 'setProposalStates', 'setZoom', 'validateEdits', 'whenLayoutComplete',
@@ -401,17 +401,16 @@ test('getSelectionInfo returns null without starting an on-demand replica', asyn
   expect(replica.pending).toBe(true);
 });
 
-test('getPositionAtPoint requests an on-demand replica and returns null', async () => {
+test('getPositionAtPoint answers without starting an on-demand replica', async () => {
   const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
   let requests = 0;
   replica.onDemand!.request = () => { requests += 1; replica.start(); };
   expect(api.getPositionAtPoint(0, 0)).toBeNull();
-  expect(requests).toBe(1);
+  expect(requests).toBe(0);
+  expect(replica.started).toBe(false);
+  await act(async () => { release(); });
   expect(opens).toEqual([]);
   expect(replica.pending).toBe(true);
-  await act(async () => { release(); await replica.ready; });
-  expect(opens).toEqual([false]);
-  expect(replica.pending).toBe(false);
 });
 
 test.each([
@@ -531,14 +530,11 @@ test('selection and point reads return null while proposals are held in the work
   expect(requests).toBe(0);
   expect(replica.started).toBe(false);
   expect(api.getPositionAtPoint(0, 0)).toBeNull();
-  expect(requests).toBe(1);
-  expect(replica.started).toBe(true);
-  expect(replica.pending).toBe(true);
+  expect(requests).toBe(0);
+  expect(replica.started).toBe(false);
+  await act(async () => { release(); });
+  expect(transport.handOver).not.toHaveBeenCalled();
   expect(opens).toEqual([]);
-  await act(async () => { release(); await replica.ready; });
-  expect(transport.handOver).toHaveBeenCalledTimes(1);
-  expect(opens).toEqual([false]);
-  expect(replica.pending).toBe(false);
 });
 
 test('focus stays direct while proposals are held in the worker', async () => {

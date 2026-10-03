@@ -76,6 +76,7 @@ export const DOCX_REF_REPLICA_ACCESS = {
   getProposals: 'await',
   exportStructuredWithPages: 'await',
   getPositionAtPoint: 'sync',
+  readPositionAtPoint: 'independent',
   addComment: 'sync',
   replyToComment: 'independent',
   resolveComment: 'independent',
@@ -115,7 +116,7 @@ const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'uns
   print: 'direct',
   highlightRange: 'direct',
   getSelectionInfo: 'unselected',
-  getPositionAtPoint: 'request',
+  getPositionAtPoint: 'direct',
 };
 
 /**
@@ -582,6 +583,8 @@ export function useDocxEditorRefApi({
       exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
+      readPositionAtPoint: async (clientX, clientY) =>
+        (await pagedEditorRef.current?.readPositionAtPoint(clientX, clientY)) ?? null,
 
       addComment: (options) => {
         const editor = pagedEditorRef.current;
