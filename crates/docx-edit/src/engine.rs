@@ -79,6 +79,7 @@ struct LoweredNoteSeparators {
     doc: EditingDoc,
     env: RenderEnv,
     blocks: HashMap<String, Rc<Vec<LayoutBlock>>>,
+    revealable: HashMap<String, Rc<Vec<LayoutBlock>>>,
 }
 
 #[derive(Debug)]
@@ -2447,6 +2448,11 @@ impl EngineSession {
                 {
                     if cache_key.is_some() {
                         collector.collect_preview(blocks.iter(), default_family);
+                        if let Some(revealable) =
+                            self.note_separator_revealable(name, &render_env)?
+                        {
+                            collector.collect_preview(revealable.iter(), default_family);
+                        }
                     } else {
                         collector.collect(blocks.iter(), default_family);
                     }
@@ -3309,6 +3315,7 @@ impl EngineSession {
                 doc: scratch,
                 env: render_env.clone(),
                 blocks: HashMap::new(),
+                revealable: HashMap::new(),
             });
         }
         let cached = cache.as_mut().expect("separator cache initialized");
@@ -3324,6 +3331,35 @@ impl EngineSession {
         );
         cached.blocks.insert(kind.to_owned(), Rc::clone(&blocks));
         Ok(Some(blocks))
+    }
+
+    /// The separator blocks a revision preview can reveal, for the preview font superset.
+    fn note_separator_revealable(
+        &self,
+        kind: &str,
+        render_env: &RenderEnv,
+    ) -> Result<Option<Rc<Vec<LayoutBlock>>>, String> {
+        if self.lower_note_separator(kind, render_env)?.is_none() {
+            return Ok(None);
+        }
+        let mut cache = self.note_separators.borrow_mut();
+        let cached = cache.as_mut().expect("separator cache initialized");
+        if let Some(blocks) = cached.revealable.get(kind) {
+            return Ok(Some(Rc::clone(blocks)));
+        }
+        let mut local = crate::bridge::local::LocalLowering::new(false);
+        let (_, _, revealable) = yrs_doc_to_mapped_layout_blocks_with_revealable(
+            &cached.doc,
+            kind,
+            render_env,
+            &mut local,
+        )
+        .map_err(|error| error.to_string())?;
+        let revealable = Rc::new(revealable);
+        cached
+            .revealable
+            .insert(kind.to_owned(), Rc::clone(&revealable));
+        Ok(Some(revealable))
     }
 
     fn measure_note_separators(
