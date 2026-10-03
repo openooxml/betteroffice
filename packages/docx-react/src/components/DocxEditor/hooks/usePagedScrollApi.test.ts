@@ -7,6 +7,7 @@ import type {
   DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { DisplayPageNavigation } from './useDisplayList';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -129,7 +130,24 @@ function unbuiltQueries(built: boolean | number[], anchor: DisplayListRect): Dis
   } as unknown as DisplayListQueries;
 }
 
-function revealApi() {
+function fakePageNavigation() {
+  const builds: number[][] = [];
+  let listener: ((queries: DisplayListQueries) => void) | null = null;
+  const pageNavigation: DisplayPageNavigation = {
+    buildPages(pages) {
+      builds.push([...pages]);
+    },
+    subscribeFrames(next) {
+      listener = next;
+      return () => {
+        listener = null;
+      };
+    },
+  };
+  return { pageNavigation, builds, publish: (queries: DisplayListQueries) => listener?.(queries) };
+}
+
+function revealApi(pageNavigation?: DisplayPageNavigation) {
   const { scroller, host, scrolls } = pagedDom();
   const placeholder = { pageIndex: 6, x: 20, y: 20, width: 0, height: 0 };
   const match = { pageIndex: 6, x: 20, y: 900, width: 0, height: 16 };
@@ -142,11 +160,68 @@ function revealApi() {
         yrsLocToDisplayPosition: () => null,
         getScrollContainer: () => scroller,
         displayListQueries,
+        pageNavigation,
       }),
     { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
   );
   return { ...hook, scroller, scrolls, placeholder, match };
 }
+
+test('a position navigation requests its unbuilt page alongside the guess scroll', () => {
+  const { pageNavigation, builds } = fakePageNavigation();
+  const { result, scroller, scrolls } = revealApi(pageNavigation);
+  act(() => {
+    result.current.scrollToPositionImpl(500);
+    expect(scrolls).toHaveLength(1);
+    expect(builds).toEqual([[6]]);
+  });
+  scroller.remove();
+});
+
+test('a published frame refines a position before its queries render, only once', () => {
+  const { pageNavigation, builds, publish } = fakePageNavigation();
+  const { result, rerender, scroller, scrolls, match } = revealApi(pageNavigation);
+  act(() => result.current.scrollToPositionImpl(500));
+  const built = unbuiltQueries(true, match);
+  act(() => publish(built));
+  expect(scrolls).toHaveLength(2);
+  expect(builds).toEqual([[6], []]);
+  const matchTop = 6000 - scroller.scrollTop + match.y;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop + match.height).toBeLessThanOrEqual(400);
+
+  rerender({ displayListQueries: built });
+  expect(scrolls).toHaveLength(2);
+  scroller.remove();
+});
+
+test('a user scroll withdraws the page request and ignores later frames', () => {
+  const { pageNavigation, builds, publish } = fakePageNavigation();
+  const { result, scroller, scrolls, match } = revealApi(pageNavigation);
+  act(() => result.current.scrollToPositionImpl(500));
+  scroller.dispatchEvent(new Event('wheel'));
+  expect(builds).toEqual([[6], []]);
+  act(() => publish(unbuiltQueries(true, match)));
+  expect(scrolls).toHaveLength(1);
+  scroller.remove();
+});
+
+test('a published frame requests the new unbuilt page holding the position', () => {
+  const { pageNavigation, builds, publish } = fakePageNavigation();
+  const { result, scroller, scrolls, placeholder, match } = revealApi(pageNavigation);
+  act(() => result.current.scrollToPositionImpl(700));
+  act(() => publish(unbuiltQueries([0, 1, 2, 3, 4, 5, 6, 7], { ...placeholder, pageIndex: 8 })));
+  expect(builds).toEqual([[6], [8]]);
+  expect(scrolls).toHaveLength(2);
+
+  act(() => publish(unbuiltQueries(true, { ...match, pageIndex: 8 })));
+  expect(builds).toEqual([[6], [8], []]);
+  expect(scrolls).toHaveLength(3);
+  const matchTop = 8000 - scroller.scrollTop + match.y;
+  expect(matchTop).toBeGreaterThanOrEqual(0);
+  expect(matchTop + match.height).toBeLessThanOrEqual(400);
+  scroller.remove();
+});
 
 test('a reveal follows an unbuilt page past three seconds only with a signal', async () => {
   let now = 0;

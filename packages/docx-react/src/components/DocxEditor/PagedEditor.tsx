@@ -92,7 +92,12 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import { workerOpenReplicaPending } from './internals/workerOpenReplica';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
@@ -329,6 +334,7 @@ export interface PagedEditorProps {
    */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -541,6 +547,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       rustFontChainsProviderRef,
       displayListQueries = null,
       resolveDisplayListQueries,
+      pageNavigation,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -1395,6 +1402,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        pageNavigation,
         layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,

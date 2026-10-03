@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
 import {
@@ -13,6 +14,7 @@ import {
   stampRevisionPreviewKey,
   stampSourceVersion,
 } from '../internals/layoutProvenance';
+import { displayWindowOf } from '../internals/displayWindow';
 import { useRustDisplayList } from './useDisplayList';
 import { EngineWorker, lazyFixture, PREVIEW } from './__fixtures__/lazyPages';
 
@@ -117,6 +119,47 @@ test('a worker frame builds only the pages near the viewport', async () => {
     expect(settled!.pages.map((page) => page.primitives.length)).toEqual(
       full.pages.map((page) => (page as { primitives: unknown[] }).primitives.length)
     );
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('navigation builds a distant page immediately and publishes its queries', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    await waitFor(() => expect(result.current.queries?.isReady()).toBe(true));
+    const before = result.current.frame!;
+    const last = before.displayList.pages.length - 1;
+    const [start, end] = before.displayList.pages[last]!.positionSpan!;
+    const position = Math.floor((start + end) / 2);
+    const navigation = result.current.pageNavigation;
+    const frames: DisplayListQueries[] = [];
+    const unsubscribe = navigation.subscribeFrames((queries) => {
+      frames.push(queries);
+    });
+
+    act(() => {
+      navigation.buildPages([last]);
+      expect(EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')).toEqual([
+        expect.objectContaining({ pages: [last] }),
+      ]);
+    });
+    await waitFor(() => {
+      expect(result.current.displayList!.pages[last]!.unbuilt).toBeFalsy();
+      expect(frames).toHaveLength(1);
+    });
+    expect(result.current.pageNavigation).toBe(navigation);
+    expect(displayWindowOf(result.current.queries)!.read()).toEqual([0, 5]);
+    expect(result.current.displayList!.pages.slice(5, last).every((page) => page.unbuilt)).toBe(true);
+    expect(frames[0]!.displayList.pages[last]!.unbuilt).toBeFalsy();
+    expect(frames[0]!.anchorRect(position)?.pageIndex).toBe(last);
+    unsubscribe();
     unmount();
   } finally {
     engine.free();
