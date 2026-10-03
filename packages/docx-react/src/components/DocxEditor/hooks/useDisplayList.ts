@@ -344,6 +344,13 @@ function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask 
 }
 
 /** A page build queued on a timer, which runs sooner than an idle-time build. */
+function samePageSizes(shown: DisplayList | null, next: DisplayList | null): boolean {
+  return Boolean(shown && next) && shown!.pages.length === next!.pages.length &&
+    shown!.pages.every((page, index) =>
+      page.width === next!.pages[index]!.width && page.height === next!.pages[index]!.height
+    );
+}
+
 function pageBuildTimerQueued(scheduled: PageBuildTimer | null): boolean {
   return scheduled !== null && !isPageBuildTask(scheduled);
 }
@@ -1004,18 +1011,17 @@ export function useRustDisplayList(
           queries,
           frameEpoch: nextSnapshot.frame?.frameEpoch ?? null,
         });
-        const shown = shownDisplayListRef.current;
-        const next = nextSnapshot.displayList;
-        if (
-          frameListenersRef.current.size > 0 &&
-          shown && next &&
-          shown.pages.length === next.pages.length &&
-          shown.pages.every((page, index) =>
-            page.width === next.pages[index]!.width && page.height === next.pages[index]!.height
-          )
-        ) {
-          for (const listener of frameListenersRef.current) queueMicrotask(() => listener(queries));
-        }
+        if (frameListenersRef.current.size === 0) return;
+        queueMicrotask(() => {
+          if (
+            snapshotRef.current !== nextSnapshot ||
+            contentEpoch !== contentEpochRef.current ||
+            !samePageSizes(shownDisplayListRef.current, nextSnapshot.displayList)
+          ) {
+            return;
+          }
+          for (const listener of [...frameListenersRef.current]) listener(queries);
+        });
       };
       if (queries.isReady()) {
         publish();
