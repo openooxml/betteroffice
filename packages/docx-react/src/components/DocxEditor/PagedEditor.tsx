@@ -25,6 +25,13 @@ import {
   type YrsInputRef,
   type YrsStoredFormatting,
 } from './YrsInput';
+import { useViewerSidebarAnchors } from './hooks/useViewerSidebarAnchors';
+import {
+  sidebarAnchorProjectY,
+  SIDEBAR_ANCHOR_EMIT_MS,
+  SIDEBAR_ANCHOR_STALE_MS,
+} from './internals/sidebarAnchorProjection';
+import { EMPTY_TRACKED_CHANGES_RESULT, type ViewerCommentRanges } from './internals/viewerSidebarReads';
 import { ViewerInput } from './ViewerInput';
 import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
@@ -41,13 +48,9 @@ import {
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import {
   computeAnchorPositionsFromYrs,
-  displayPageCanvases,
-  effectiveZoom,
-  resolveDisplayPageClientRect,
   type TrackedChangesResult,
   type DisplayList,
   type DisplayListQueries,
-  type DisplayListRect,
 } from '@betteroffice/docx/layout/render';
 import type { ParagraphHighlightOptions, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 
@@ -220,6 +223,9 @@ export interface PagedEditorProps {
    * document on this thread: selection, copy and point reads go to the worker.
    */
   viewerDocumentRead?: ResidentEngineWorkerClient['documentRead'];
+  onViewerCommentRangesChange?: (ranges: ViewerCommentRanges) => void;
+  /** Whether a viewer session's sidebar is shown, so its cards read from the worker. */
+  viewerSidebarActive?: boolean;
   /** Gap between pages in pixels. */
   pageGap?: number;
   /** Zoom level (1 = 100%). */
@@ -507,13 +513,6 @@ export interface PagedEditorRef {
 // COMPONENT (module-scope helpers live in per-domain files — see imports)
 // =============================================================================
 
-const SIDEBAR_ANCHOR_EMIT_MS = 150;
-const SIDEBAR_ANCHOR_STALE_MS = 400;
-const EMPTY_TRACKED_CHANGES_RESULT: TrackedChangesResult = {
-  entries: [],
-  commentToRevision: new Map(),
-};
-
 /**
  * PagedEditor - Main paginated editing component.
  */
@@ -531,6 +530,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageFooterContent,
       readOnly = false,
       viewerDocumentRead: viewerDocumentReadProp,
+      onViewerCommentRangesChange,
+      viewerSidebarActive = true,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
       showHiddenText = false,
@@ -1795,9 +1796,23 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
+    useViewerSidebarAnchors({
+      read: viewerSidebarActive ? viewerDocumentRead : undefined,
+      queries: displayListQueries,
+      commentIds: sidebarCommentIds,
+      zoom,
+      canvasHostRef,
+      pagesContainerRef,
+      overlayTarget: canvasOverlayTarget,
+      document,
+      onPositions: onAnchorPositionsChange,
+      onTracked: onYrsTrackedChangesChange,
+      onRanges: onViewerCommentRangesChange,
+    });
     const sidebarReadsRef = useRef<SidebarRevisionReads | null>(null);
     sidebarReadsRef.current ??= new SidebarRevisionReads();
     useEffect(() => {
+      if (viewerDocumentRead) return;
       const session = yrsCore.session;
       if (!session || !yrsCore.replicaReady || !displayListQueries || !onAnchorPositionsChange) {
         return;
@@ -1814,24 +1829,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
-        const targetRect = target.getBoundingClientRect();
-        const targetZoom = effectiveZoom(target);
-        const canvasByPage = new Map<number, HTMLCanvasElement>();
-        for (const canvas of displayPageCanvases(host)) {
-          const pageIndex = Number(canvas.dataset.pageIndex);
-          if (Number.isFinite(pageIndex)) canvasByPage.set(pageIndex, canvas);
-        }
-        const projectY = (rect: DisplayListRect): number | null => {
-          const pageRect =
-            canvasByPage.get(rect.pageIndex)?.getBoundingClientRect() ??
-            resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
-          const pageSize = displayListQueries.pageSize(rect.pageIndex);
-          if (!pageRect || !pageSize || pageSize.height <= 0) return null;
-          return (
-            (pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height)) /
-            (zoom * targetZoom)
-          );
-        };
+        const projectY = sidebarAnchorProjectY(host, target, displayListQueries, zoom);
         const { version, revisions } = sidebarReads.revisions(session);
         if (sidebarCommentIds.length === 0 && revisions.length === 0) {
           sidebarReads.deliver(
@@ -1901,6 +1899,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
       };
     }, [
+      viewerDocumentRead,
       canvasHostRef,
       canvasOverlayTarget,
       currentStorySegments,
@@ -2259,7 +2258,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
           {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
-              session={yrsCore.session}
+              session={viewerDocumentRead ? null : yrsCore.session}
               positionProjection={getYrsPositionProjection('body')}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}

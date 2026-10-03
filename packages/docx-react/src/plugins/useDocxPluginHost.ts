@@ -20,13 +20,15 @@ import {
   type DisplayListQueries,
 } from '@betteroffice/docx/layout/render';
 import type { RenderedDomContext } from '@betteroffice/docx/plugin-api';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { ResidentDocumentReadValues } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type { ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import type { DocxCommandController } from '../commands/createDocxCommandStore';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import {
   isPresented,
   onPresented,
   sourceVersionOf,
+  presentedWorkerVersion,
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
@@ -68,6 +70,7 @@ export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   /** Changes whenever a new document load starts. */
   loadGeneration: number;
   queries: DisplayListQueries | null;
+  viewerDocumentRead?: ResidentEngineWorkerClient['documentRead'];
   layoutError: Error | null;
   zoom: number;
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
@@ -128,6 +131,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     createDocxPluginHost({
       pagedEditorRef: options.pagedEditorRef,
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
+      viewer: () => latest.current.viewerDocumentRead !== undefined,
       commands: () => latest.current.commands,
       translate: (key) => translateRef.current(key),
       geometry: () => geometryRef.current,
@@ -231,7 +235,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     const editor = latest.current.pagedEditorRef.current;
     const range = editor?.getSelectionRange() ?? null;
     const layout = layoutRef.current;
-    const story = editor?.getYrsSession()?.selection()?.head.story ?? 'body';
+    const story = latest.current.viewerDocumentRead
+      ? 'body'
+      : editor?.getYrsSession()?.selection()?.head.story ?? 'body';
     host.selectionChanged({
       formatting: formattingRef.current,
       displayRange:
@@ -430,16 +436,51 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     return () => cancelAnimationFrame(frame);
   }, [host, geometry, dom]);
 
+  const viewerTargets = useRef<{
+    read: ResidentEngineWorkerClient['documentRead'];
+    version: string;
+    targets: Map<string, ResidentDocumentReadValues['navigationTarget']>;
+    pending: Set<string>;
+  } | null>(null);
   const place = useCallback(
     (anchor: DocxPluginSidebarItem<unknown>['anchor']) => {
-      const { queries, zoom, canvasHostRef, overlayTarget } = latest.current;
-      const session = latest.current.pagedEditorRef.current?.getYrsSession() ?? null;
+      const { queries, zoom, canvasHostRef, overlayTarget, viewerDocumentRead } = latest.current;
       const pages = canvasHostRef.current;
-      if (!session || !queries || !pages || !overlayTarget) return null;
-      if (anchor.version !== host.version() || sourceVersionOf(queries) !== anchor.version) {
-        return null;
+      if (!queries || !pages || !overlayTarget) return null;
+      let resolved: ResidentDocumentReadValues['navigationTarget'];
+      if (viewerDocumentRead) {
+        const version = presentedWorkerVersion(queries);
+        if (version === null) return null;
+        if (viewerTargets.current?.version !== version || viewerTargets.current.read !== viewerDocumentRead) {
+          viewerTargets.current = { read: viewerDocumentRead, version, targets: new Map(), pending: new Set() };
+        }
+        if (anchor.version !== host.version() || anchor.version !== version) return null;
+        const cache = viewerTargets.current;
+        const key = `${anchor.version}\u0000${anchor.story}\u0000${anchor.paraId}`;
+        const target = cache.targets.get(key);
+        if (target === undefined) {
+          if (!cache.pending.has(key)) {
+            cache.pending.add(key);
+            void viewerDocumentRead({ kind: 'navigationTarget', story: anchor.story, paraId: anchor.paraId })
+              .then((reply) => {
+                if (viewerTargets.current !== cache || latest.current.viewerDocumentRead !== viewerDocumentRead ||
+                  presentedWorkerVersion(latest.current.queries) !== version || host.version() !== version ||
+                  reply.version !== version) return;
+                if (typeof reply.value === 'object' && reply.value !== null) {
+                  cache.targets.set(key, reply.value);
+                  setMoved((value) => value + 1);
+                }
+              }, () => undefined)
+              .finally(() => cache.pending.delete(key));
+          }
+          return null;
+        }
+        resolved = target;
+      } else {
+        const session = latest.current.pagedEditorRef.current?.getYrsSession() ?? null;
+        if (!session || anchor.version !== host.version() || sourceVersionOf(queries) !== anchor.version) return null;
+        resolved = resolveParagraph(session, anchor);
       }
-      const resolved = resolveParagraph(session, anchor);
       if (typeof resolved === 'string') return null;
       const rect = queries.anchorRect(resolved.position);
       if (!rect) return null;

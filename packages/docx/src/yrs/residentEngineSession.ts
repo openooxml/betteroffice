@@ -23,6 +23,7 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
+import type { DocxSidebarReader } from './sidebarReads';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
 import type { DocxPageExportOptions } from './pagedExport';
@@ -73,7 +74,7 @@ export type ResidentEngineSession = Pick<
   /** @internal */
   proposalEngine: DocxProposalSession;
   /** @internal */
-  geometryReader: ProposalGeometryReader;
+  geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
@@ -197,7 +198,9 @@ export async function createResidentEngineSession(
       : {}),
   };
 
-  const geometryReader: ProposalGeometryReader = {
+  const geometryReader: ProposalGeometryReader & DocxSidebarReader = {
+    resolveComment: (id) => JSON.parse(session.resolve_comment(id)),
+    headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyIds: () => session.story_ids(),
