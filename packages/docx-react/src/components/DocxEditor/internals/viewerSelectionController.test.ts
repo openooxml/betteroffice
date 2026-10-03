@@ -212,6 +212,20 @@ test('keyboard extension stops at the last built page', async () => {
   expect(controller.displaySelection()).toEqual({ anchor: 40, head: 41 });
 });
 
+test('a horizontal step in a split table row stays on the head page and the next one', () => {
+  const { controller } = setup(false, [
+    { pageIndex: 0, from: 4, to: 40 },
+    { pageIndex: 0, from: 508, to: 540 },
+    { pageIndex: 3, from: 124, to: 160 },
+  ]);
+  controller.select(40);
+  expect(controller.move('ArrowRight', true)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 40, head: 508 });
+  controller.select(508);
+  expect(controller.move('ArrowLeft', true)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 508, head: 40 });
+});
+
 test('a vertical move does not jump across unbuilt pages', () => {
   const { controller, queries, issued } = setup(false, [
     { pageIndex: 0, from: 1, to: 40 },

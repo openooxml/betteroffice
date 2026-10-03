@@ -168,6 +168,11 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     );
   };
 
+  /** Navigation supersedes pending editor input; in a viewer it leaves the selection and its gesture alone. */
+  const beforeNavigation = (): void => {
+    if (!viewerSelectionRef.current) bumpInputEpochRef.current?.();
+  };
+
   const selectLocRange = (start: YrsLoc, end: YrsLoc): boolean => {
     const session = yrsSessionRef.current;
     if (!session || start.story !== end.story) return false;
@@ -262,19 +267,19 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     relayout: runLayoutPipeline,
     refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
     scrollToPosition: (position) => {
-      bumpInputEpochRef.current?.();
+      beforeNavigation();
       scrollToPositionImpl(position);
     },
     revealDisplayPosition: (position, signal) => {
-      bumpInputEpochRef.current?.();
+      beforeNavigation();
       return revealPositionImpl(position, signal);
     },
     scrollToParaId: (paraId, options) => {
-      bumpInputEpochRef.current?.();
+      beforeNavigation();
       return scrollToParaIdImpl(paraId, options);
     },
     scrollToPage: (pageNumber) => {
-      bumpInputEpochRef.current?.();
+      beforeNavigation();
       scrollToPageImpl(pageNumber);
     },
     highlightRange: (from, to) => {
@@ -323,7 +328,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       );
     },
     scrollToCommentId: (commentId) => {
-      bumpInputEpochRef.current?.();
+      beforeNavigation();
       const session = yrsSessionRef.current;
       if (!session) return false;
       try {
@@ -337,7 +342,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       }
     },
     scrollToChangeId: (revisionId) => {
-      bumpInputEpochRef.current?.();
+      beforeNavigation();
       const revision = yrsSessionRef.current
         ?.listRevisions()
         .find((candidate) => candidate.revisionId === String(revisionId));

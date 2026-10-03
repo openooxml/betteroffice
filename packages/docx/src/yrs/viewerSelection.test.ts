@@ -138,7 +138,7 @@ describe('viewer selection reads', () => {
     );
   });
 
-  test('select-all and a drag from the start copy a leading table', async () => {
+  test('select-all, a drag from the start and the table alone copy a leading table', async () => {
     const table = `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>` +
       `<w:tr>${cell(p('00000003', r('A1')))}${cell(p('00000004', r('B1')))}</w:tr></w:tbl>`;
     await withDocument(table + p('00000007', r('Tail')), (resident, index) => {
@@ -148,6 +148,8 @@ describe('viewer selection reads', () => {
       expect(resolveSelectionText(index, 'body', all.anchor, all.head, version)?.text).toBe('A1\tB1\nTail');
       const tail = index.positionOf({ story: 'body', paraId: '00000007', offset: 3 }, 'body')!;
       expect(resolveSelectionText(index, 'body', 0, tail, version)?.text).toBe('A1\tB1\nTa');
+      const block = index.projection('body')!.tableAtStart(0)!;
+      expect(resolveSelectionText(index, 'body', 0, block.nodeSize, version)?.text).toBe('A1\tB1\n');
     });
   });
 

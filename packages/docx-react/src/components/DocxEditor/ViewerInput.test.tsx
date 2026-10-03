@@ -1,10 +1,12 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
-import { createRef } from 'react';
+import { createRef, useRef, type RefObject } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { DocxDisplaySelectionText, ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { PagedEditorRef } from './PagedEditor';
 import { ViewerInput, type ViewerInputProps } from './ViewerInput';
 import type { YrsInputRef } from './YrsInput';
+import { usePagedEditorRefApi } from './hooks/usePagedEditorRefApi';
 import { stampWorkerFrameVersion } from './internals/layoutProvenance';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -40,7 +42,45 @@ function text(value: string): DocxDisplaySelectionText {
   return { text: value, range: null };
 }
 
-function mount(queries: DisplayListQueries, documentKey: ViewerInputProps['document'] = { isDisplayOnly: () => false }) {
+/** A viewer input behind the editor ref, whose gestures begin the way the pointer hook begins them. */
+function NavigatingViewer({ props, inputRef, pagedRef }: {
+  props: ViewerInputProps;
+  inputRef: RefObject<YrsInputRef | null>;
+  pagedRef: RefObject<PagedEditorRef | null>;
+}) {
+  const onReadyRef = useRef<((ref: PagedEditorRef) => void) | undefined>(undefined);
+  usePagedEditorRefApi({
+    viewerSelection: true,
+    bumpInputEpoch: () => { inputRef.current?.beginGesture?.(); },
+    ref: pagedRef,
+    yrsInputRef: inputRef,
+    layout: null,
+    runLayoutPipeline: () => {},
+    getLayoutRequest: () => null,
+    scrollToPositionImpl: () => {},
+    revealPositionImpl: () => 'layout-unavailable',
+    scrollToParaIdImpl: () => true,
+    scrollToPageImpl: () => {},
+    setIsFocused: () => {},
+    onReadyRef,
+    documentFromYrs: () => null,
+    yrsSession: null,
+    yrsLocToDisplayPosition: () => null,
+    syncYrsInputState: () => true,
+    applyYrsFormatting: () => false,
+    applyYrsCommand: () => false,
+    getYrsPositionProjection: () => null,
+    displayPositionToYrsLoc: () => null,
+    getPositionAtPoint: () => null,
+  });
+  return <ViewerInput {...props} ref={inputRef} />;
+}
+
+function mount(
+  queries: DisplayListQueries,
+  documentKey: ViewerInputProps['document'] = { isDisplayOnly: () => false },
+  pagedRef?: RefObject<PagedEditorRef | null>
+) {
   const pending: Array<{
     request: ResidentDocumentRead;
     resolve(reply: { version: string; value: unknown }): void;
@@ -50,10 +90,13 @@ function mount(queries: DisplayListQueries, documentKey: ViewerInputProps['docum
   })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();
   let props: ViewerInputProps = { read, story: 'body', queries, document: documentKey, onSelectionChange: () => {} };
-  const view = render(<ViewerInput {...props} ref={ref} />);
+  const element = () => pagedRef
+    ? <NavigatingViewer props={props} inputRef={ref} pagedRef={pagedRef} />
+    : <ViewerInput {...props} ref={ref} />;
+  const view = render(element());
   const show = (queries: DisplayListQueries, document = props.document) => {
     props = { ...props, queries, document };
-    view.rerender(<ViewerInput {...props} ref={ref} />);
+    view.rerender(element());
   };
   const answer = async (kind: ResidentDocumentRead['kind'], expectVersion: string, version: string, value: unknown) => {
     const at = pending.findIndex((entry) => entry.request.kind === kind &&
@@ -80,6 +123,21 @@ test('a version change clears a viewer selection and rejects its pending copy', 
   expect(ref.current!.readSelectedText!()).toBeNull();
   expect(has('selectionText', 'B')).toBe(false);
   expect(has('selectionText', 'C')).toBe(false);
+});
+
+test('navigation leaves a viewer selection and its copy in place', async () => {
+  const pagedRef = createRef<PagedEditorRef>();
+  const { ref, answer } = mount(frame('A'), undefined, pagedRef);
+  act(() => ref.current!.setSelectionFromDisplay(1, 6));
+  await answer('selectionText', 'A', 'A', text('Alpha'));
+  act(() => {
+    pagedRef.current!.scrollToPage(2);
+    pagedRef.current!.scrollToPosition(10);
+    pagedRef.current!.revealDisplayPosition(10);
+    pagedRef.current!.scrollToParaId('00000001');
+  });
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 1, head: 6 });
+  expect(await ref.current!.readSelectedText!()).toBe('Alpha');
 });
 
 test('P1-2: a selection on presented preview pages waits for the full frame after the session handover', async () => {

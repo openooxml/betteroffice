@@ -91,6 +91,10 @@ const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
 let openedVersion: string | null | undefined;
+/** A change before the whole document's first frame leaves no frame as opened. */
+function noteDocumentChange(): void {
+  if (openedVersion === undefined) openedVersion = null;
+}
 // The opened document is a display-only preview that an `open` of the whole package replaces.
 let previewing = false;
 /** Pages of a cut preview's layout that match the whole document's; null for a whole document. */
@@ -727,6 +731,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   if (request.type === 'applyUpdate') {
+    noteDocumentChange();
     fontRequirements = null;
     session.applyUpdate(request.update);
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
@@ -765,6 +770,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     return;
   }
   await completeProvisionalLayout();
+  noteDocumentChange();
   fontRequirements = null;
   // The edit replaces the pagination a cached completion's frame would paint.
   completedLayout = null;

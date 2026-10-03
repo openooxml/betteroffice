@@ -1,9 +1,41 @@
 import { expect, test, type Page } from 'playwright/test';
-import type { DocxEditorRef } from '@betteroffice/docx-react';
+
+interface PointRead {
+  target: {
+    start: { paraId: string; offset: number };
+    end: { paraId: string; offset: number };
+  };
+}
+
+interface PersistedParagraph {
+  kind: 'persisted';
+  story: string;
+  paraId: string;
+}
+
+interface ViewerEditor {
+  readPositionAtPoint(clientX: number, clientY: number): Promise<PointRead | null>;
+  getPositionAtPoint(clientX: number, clientY: number): PointRead | null;
+  getParagraphIdentities(): Promise<{
+    paragraphs: Array<{ session?: { story: string }; persisted?: PersistedParagraph }>;
+  }>;
+  resolveParagraphAnchors(anchors: readonly PersistedParagraph[]): Promise<{ version: string }>;
+  proposeChanges(request: {
+    expectVersion: string;
+    proposals: readonly {
+      id: string;
+      paragraph: PersistedParagraph;
+      suggest: { author: string; date: string };
+      op: 'replaceText';
+      search: string;
+      replaceWith: string;
+    }[];
+  }): Promise<{ ok: boolean }>;
+}
 
 interface ViewerWindow {
   __viewerSelectionProbe: {
-    editor: DocxEditorRef | null;
+    editor: ViewerEditor | null;
     copies: string[];
     errors: string[];
     paragraphText(index: number): string;

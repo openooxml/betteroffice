@@ -44,6 +44,8 @@ function resolvePosition(
     return null;
   }
   const target = projection.targetAt(position);
+  const block = projection.blockBoundaryAt(position);
+  if (block) return { target, loc: block };
   const map = index.inputMap(target.story);
   const loc = map ? displayPositionToYrsLoc(map, target.displayPosition) : null;
   return loc ? { target, loc } : null;

@@ -387,18 +387,20 @@ export class ViewerSelectionController {
   }
 }
 
-/** The next caret position from `head`, within its page and the next one; null past the built pages. */
+/** The next caret position from `head` on its page or the next one; null past the built pages. */
 function horizontalStep(queries: DisplayListQueries, head: number, step: -1 | 1): number | null {
   const line = queries.visualLineAtPosition(head);
   if (!line) return null;
+  const pages = [line.pageIndex, line.pageIndex + step];
   let bound = step > 0 ? line.to : line.from;
-  for (const pageIndex of [line.pageIndex, line.pageIndex + step]) {
+  for (const pageIndex of pages) {
     for (const candidate of queries.visualLinesOnPage(pageIndex)) {
       bound = step > 0 ? Math.max(bound, candidate.to) : Math.min(bound, candidate.from);
     }
   }
   for (let next = head + step; step > 0 ? next <= bound : next >= bound; next += step) {
-    if (queries.visualLineAtPosition(next)) return next;
+    const target = queries.visualLineAtPosition(next);
+    if (target && pages.includes(target.pageIndex)) return next;
   }
   return null;
 }
