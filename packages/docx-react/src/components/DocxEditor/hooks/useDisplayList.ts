@@ -1214,9 +1214,10 @@ export function useRustDisplayList(
         const nextFrame = applyFrameDeltaOwned(previous.frame, delta);
         mainFrameRef.current = null;
         // Input moved off the middle of a surrogate pair leaves this peer's sticky caret inside
-        // it; take the worker's settled selection unless the caret moved meanwhile.
+        // it; take the worker's settled selection unless the caret or content moved meanwhile.
         if (
           unmoved &&
+          contentEpochRef.current === dispatchedEpoch &&
           result.selection &&
           !sameYrsSelection(result.selection, worker.engine.selection())
         ) {
