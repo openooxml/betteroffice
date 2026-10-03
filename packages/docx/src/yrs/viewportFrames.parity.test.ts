@@ -284,7 +284,7 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
       };
       const input = JSON.stringify(request);
       let mediaSources = '';
-      let noteSeparators = new Uint8Array(0);
+      let noteSeparators: Uint8Array = new Uint8Array(0);
       const main = await createYrsSession();
       try {
         main.openDocx(bytes, true);
