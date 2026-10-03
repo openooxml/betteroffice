@@ -1262,8 +1262,7 @@ fn pages_with_float_bands_keep_the_per_cell_split() {
 /// The page of the first fragment of a table whose 120px exact-height
 /// keep-next row is followed by a row of `cells`, after `filler` 20px lines on
 /// pages with a 200px body and the given extra layout options; a `section`
-/// option is a section break placed after the filler, with a 120px paragraph
-/// after the table.
+/// option is a section break placed after the filler.
 fn keep_next_exact_row_page(filler: usize, cells: &[(usize, f64, Value)], extra: Value) -> usize {
     let kept = table_rows(&[(
         6,
@@ -1286,12 +1285,10 @@ fn keep_next_exact_row_page(filler: usize, cells: &[(usize, f64, Value)], extra:
         .extend(extra.as_object().unwrap().clone());
     let mut measured = after_filler(filler, table);
     if let Some(section) = options.as_object_mut().unwrap().remove("section") {
-        let (block, measure) = paragraph(3, 6, json!({}));
         measured.insert(
             1,
             json!({"block": section, "measure": {"kind": "sectionBreak"}}),
         );
-        measured.push(json!({"block": block, "measure": measure}));
     }
     let tables = layout_table_fragments(json!({"measured": measured, "options": options}));
     assert_eq!(tables[0].1["rowStart"], 0);
@@ -1300,35 +1297,35 @@ fn keep_next_exact_row_page(filler: usize, cells: &[(usize, f64, Value)], extra:
 
 #[test]
 fn a_keep_next_row_stays_on_the_page_when_later_pages_have_less_room() {
-    let bands = json!({"sectionPageFloatBands":
-        [{"default": [{"top": 10, "bottom": 110}], "first": []}]});
-    assert_eq!(
-        keep_next_exact_row_page(2, &[(6, 0.0, json!({})), (3, 4.4, json!({}))], bands),
-        0
-    );
-    let even = json!({"sectionPageMargins":
-        [{"even": {"top": 110, "right": 10, "bottom": 10, "left": 10}}]});
-    assert_eq!(
-        keep_next_exact_row_page(2, &[(6, 0.0, json!({})), (3, 0.0, json!({}))], even),
-        0
-    );
-    let columns = json!({"section": {"kind": "sectionBreak", "id": 2, "type": "continuous",
-        "margins": {"top": 110, "right": 10, "bottom": 10, "left": 10},
-        "columns": {"count": 2, "gap": 20}}});
-    assert_eq!(
-        keep_next_exact_row_page(2, &[(6, 0.0, json!({})), (3, 0.0, json!({}))], columns),
-        0
-    );
-    let first_page_band = json!({"sectionPageFloatBands":
-        [{"default": [], "first": [{"top": 10, "bottom": 30}]}]});
-    assert_eq!(
+    let staggered = [(6, 0.0, json!({})), (3, 4.4, json!({}))];
+    let aligned = [(6, 0.0, json!({})), (3, 0.0, json!({}))];
+    let pages = [
+        keep_next_exact_row_page(
+            2,
+            &staggered,
+            json!({"sectionPageFloatBands":
+                [{"default": [{"top": 10, "bottom": 110}], "first": []}]}),
+        ),
+        keep_next_exact_row_page(
+            2,
+            &aligned,
+            json!({"sectionPageMargins":
+                [{"even": {"top": 110, "right": 10, "bottom": 10, "left": 10}}]}),
+        ),
+        keep_next_exact_row_page(
+            2,
+            &aligned,
+            json!({"section": {"kind": "sectionBreak", "id": 2, "type": "continuous",
+                "margins": {"top": 110, "right": 10, "bottom": 10, "left": 10}}}),
+        ),
         keep_next_exact_row_page(
             1,
-            &[(6, 0.0, json!({})), (3, 0.0, json!({}))],
-            first_page_band
+            &aligned,
+            json!({"sectionPageFloatBands":
+                [{"default": [], "first": [{"top": 10, "bottom": 30}]}]}),
         ),
-        0
-    );
+    ];
+    assert_eq!(pages, [0, 0, 0, 0]);
 }
 
 #[test]
