@@ -61,6 +61,8 @@ export interface SchedulerTask {
   run(budgetMs: number): Promise<TaskStep> | TaskStep;
   /** Hold the task until the user has been idle this long (ms after the last user input). */
   idleAfterInputMs?: number;
+  /** Hold the task until this time (`host.now()` clock), read each time the task is considered. */
+  notBefore?(): number;
   /**
    * The version or generation moved since the task was made: 'cancel' drops it
    * (after `cancel`), 'continue' runs it on with the current stamps.
@@ -188,7 +190,8 @@ export function createResidentScheduler(host: SchedulerHost): ResidentScheduler 
   }
 
   function readyAt(task: SchedulerTask): number {
-    return task.idleAfterInputMs === undefined ? Number.NEGATIVE_INFINITY : lastHoldAt + task.idleAfterInputMs;
+    const idle = task.idleAfterInputMs === undefined ? Number.NEGATIVE_INFINITY : lastHoldAt + task.idleAfterInputMs;
+    return Math.max(idle, task.notBefore?.() ?? Number.NEGATIVE_INFINITY);
   }
 
   async function runForeground(units: QueuedMessage[]): Promise<void> {

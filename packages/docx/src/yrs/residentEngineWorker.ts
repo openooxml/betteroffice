@@ -132,6 +132,11 @@ interface SlicedCompletion {
 let slicedCompletion: SlicedCompletion | null = null;
 const COMPLETION_RESTARTS = 3;
 const COMPLETION_IDLE_MS = 300;
+// A proposal that changed the content or the preview of a provisional layout:
+// the host lays out again next, which replaces the completion, so its steps
+// wait for that sync until this time.
+const RELAYOUT_WAIT_MS = 1000;
+let relayoutExpectedUntil = Number.NEGATIVE_INFINITY;
 const ALL_BLOCKS = 2 ** 32 - 1;
 
 interface BackgroundPageBuild {
@@ -441,6 +446,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const previousVersion = session.proposalEngine.version();
+      const previousPreview = JSON.stringify(proposalRevisionPreview(registry.snapshot()));
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       let result: DocxProposalResult | undefined;
       switch (request.operation.kind) {
@@ -495,6 +501,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           snapshot.version
         );
       }
+      if (
+        incompleteLayout &&
+        (changedStories.length > 0 || JSON.stringify(preview) !== previousPreview)
+      ) relayoutExpectedUntil = performance.now() + RELAYOUT_WAIT_MS;
       reply(
         {
           id: request.id,
@@ -857,6 +867,7 @@ function hydrate(
   if (!session) throw new Error('Resident engine worker is not initialized');
   supersedeSlicedCompletion();
   incompleteLayout = null;
+  relayoutExpectedUntil = Number.NEGATIVE_INFINITY;
   clearProvisionalFinalPages();
   completedLayout = null;
   if (loadState && !snapshot.workerAuthoritative) {
@@ -1138,6 +1149,7 @@ function scheduleCompletion(completion: SlicedCompletion): void {
   scheduler.schedule({
     kind: 'completion', version: scheduler.version, generation: scheduler.generation,
     idleAfterInputMs: COMPLETION_IDLE_MS,
+    notBefore: () => relayoutExpectedUntil,
     onStale: () => 'continue',
     fail: (error) => {
       if (slicedCompletion === completion) slicedCompletion = null;
