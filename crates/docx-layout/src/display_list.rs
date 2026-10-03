@@ -9941,6 +9941,19 @@ fn emit_cell_content(
         let Some(m) = cell_measure.blocks.get(i) else {
             continue;
         };
+        if windowed_lines && !matches!(cell_block, BlockIn::Paragraph(_)) {
+            let height = match m {
+                MeasureIn::Table(table) => table.total_height,
+                MeasureIn::Image(image) => image.height,
+                MeasureIn::TextBox(text_box) => text_box.height,
+                MeasureIn::Shape(shape) | MeasureIn::Chart(shape) => shape.height,
+                _ => 0.0,
+            };
+            let block_y = content_top + block_tops[i];
+            if block_y + height <= cull_top_y + 1e-6 || block_y >= cull_bottom_y - 1e-6 {
+                continue;
+            }
+        }
         if let (BlockIn::Paragraph(pb), MeasureIn::Paragraph(pm)) = (cell_block, m) {
             // cell paragraphs never split; fabricate a whole-paragraph fragment
             let total_height: f64 = pm

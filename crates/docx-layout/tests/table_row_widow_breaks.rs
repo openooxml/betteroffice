@@ -4,6 +4,9 @@
 
 use serde_json::{Value, json};
 
+#[path = "fixtures/nested_table_cell_window.rs"]
+mod nested_table_cell_window;
+
 fn paragraph(id: usize, lines: usize, attrs: Value) -> (Value, Value) {
     let rows: Vec<_> = (0..lines)
         .map(|_| {
@@ -975,15 +978,8 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
 
 #[test]
 fn a_nested_table_stays_atomic_when_another_cell_splits() {
-    let mut nested = table(3, json!({}));
-    nested["block"]["id"] = json!("nested");
-    nested["block"]["rows"][0]["cells"][0]["blocks"][0]["id"] = json!(50);
-    let mut outer = two_cell_table(&[(6, 0.0, json!({})), (3, 4.4, json!({}))]);
-    let (lead, lead_measure) = paragraph(20, 1, json!({}));
-    outer["block"]["rows"][0]["cells"][1]["blocks"] = json!([lead, nested["block"]]);
-    outer["measure"]["rows"][0]["cells"][1]["height"] = json!(80);
-    outer["measure"]["rows"][0]["cells"][1]["blocks"] = json!([lead_measure, nested["measure"]]);
-    let measured = after_filler(2, outer);
+    let input = nested_table_cell_window::input();
+    let measured = input["measured"].as_array().unwrap().clone();
     let result = table_fragments(measured, None);
     assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 20.0)]);
     assert_eq!(cell_windows(&result[1].1), [(60.0, 120.0), (20.0, 80.0)]);

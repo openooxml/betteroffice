@@ -31,6 +31,9 @@ use docx_layout::hit::{
     vertical_move,
 };
 
+#[path = "fixtures/nested_table_cell_window.rs"]
+mod nested_table_cell_window;
+
 const DEMO_FIXTURE: &str =
     include_str!("../../../packages/docx/src/layout/render/__fixtures__/displayList.demo.json");
 
@@ -3424,6 +3427,31 @@ fn per_cell_slices_paint_only_their_lines_and_hit_the_continued_paragraph() {
             );
         }
     }
+}
+
+#[test]
+fn per_cell_windows_paint_an_atomic_nested_table_only_on_the_continuation() {
+    let mut input = nested_table_cell_window::input();
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let nested: Vec<_> = dl
+        .pages
+        .iter()
+        .enumerate()
+        .flat_map(|(page_index, page)| {
+            page.primitives
+                .iter()
+                .filter_map(doc_attrs)
+                .filter(|attrs| {
+                    attrs.block_key.as_deref() == Some("nested")
+                        || attrs.block_id.as_ref().and_then(|id| id.as_u64()) == Some(50)
+                })
+                .map(move |attrs| (page_index, attrs.line_index))
+        })
+        .collect();
+    assert_eq!(nested, [(1, Some(0)), (1, Some(1)), (1, Some(2))]);
 }
 
 #[test]
