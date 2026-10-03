@@ -1902,6 +1902,7 @@ fn a_zero_font_size_lays_out_at_words_minimum_and_exports() {
         fixture::p("00000002", &sized(0)),
         fixture::p("00000003", &sized(2)),
         fixture::p("00000004", &fixture::r("after")),
+        r#"<w:sectPr><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720" w:header="300" w:footer="300" w:gutter="0"/></w:sectPr>"#.to_owned(),
     ]
     .concat();
     let bytes = fixture::with_body(&body);
