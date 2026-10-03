@@ -58,6 +58,8 @@ export interface DocxPendingCommand<K extends DocxCommandId> {
 
 /** Editor-owned implementation behind a command store. */
 export interface DocxCommandBinding {
+  /** Whether the document has no main-thread edit peer. */
+  isViewer?(): boolean;
   /** Gate inputs, read live; `executing` means preceding input has been applied. */
   environment(executing: boolean): DocxCommandEnvironment;
   /** Whether `id` must wait behind accepted input. */
@@ -331,6 +333,9 @@ export function createDocxCommandController(): DocxCommandController {
   ): Promise<DocxPluginCommandResult> {
     const current = binding;
     if (!current) return failure('editor-unavailable', null);
+    const mutating = isPluginCommandId(id)
+      ? pluginCommands.get(id)?.descriptor.mutatesDocument
+      : mutatingBuiltIn(id);
     const deferred = origin !== undefined;
     const attempt = (): DocxPluginCommandResult | Promise<DocxPluginCommandResult> => {
       if (deferred) {
@@ -347,6 +352,10 @@ export function createDocxCommandController(): DocxCommandController {
     };
     const ordered = !isPluginCommandId(id) && current.ordered(id, args as never);
     try {
+      if (mutating && current.isViewer?.()) {
+        const state = compute(id, args, environment(false));
+        if (!state.enabled) return { ok: false, failure: state.disabledReason };
+      }
       return await (deferred || ordered ? current.admit(attempt) : attempt());
     } catch (error) {
       if (error instanceof DocxCommandAdmissionError) return failure(error.code, environment(false));

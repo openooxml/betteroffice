@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, mock, test } from 'bun:test';
 import { en } from '@betteroffice/docx-i18n';
 import {
   createDocxCommandController,
@@ -162,6 +162,42 @@ describe('command store snapshots', () => {
 });
 
 describe('command store execution', () => {
+  for (const readOnly of [true, false]) {
+    test(`viewer mutations refuse ${readOnly ? 'read-only' : 'viewing-mode'} before a peer that never settles`, async () => {
+      const { store, controller, harness } = setup({ readOnly, mode: 'viewing' });
+      harness.binding.isViewer = () => true;
+      const admit = mock(() => new Promise<never>(() => {}));
+      harness.state.admission = admit;
+      const write = mock(() => ({ ok: true, status: 'executed' } as const));
+      const deferred = controller.defer('bold', null, 'selection');
+      const prepared = controller.prepare('reviewAccept', 'document');
+      const results = [
+        store.execute('bold', null),
+        store.execute('reviewAccept', { revisionId: 'r1' }),
+        store.execute('reviewReject', null),
+        deferred.complete(write),
+        prepared.execute({ revisionId: 'r1' }),
+      ];
+      expect(admit).not.toHaveBeenCalled();
+      for (const result of results) {
+        expect(await result).toMatchObject({ ok: false, failure: { code: readOnly ? 'read-only' : 'viewing-mode' } });
+      }
+      expect(write).not.toHaveBeenCalled();
+      expect(harness.calls).toEqual([]);
+      expect(await store.execute('zoom', { scale: 1.5 })).toEqual({ ok: true, status: 'executed' });
+      expect(admit).not.toHaveBeenCalled();
+    });
+  }
+
+  test('viewer non-mutating ordered commands retain input admission', async () => {
+    const { store, harness } = setup({ mode: 'viewing' });
+    harness.binding.isViewer = () => true;
+    const admit = mock(async () => {});
+    harness.state.admission = admit;
+    expect(await store.execute('reviewNext', null)).toEqual({ ok: true, status: 'executed' });
+    expect(admit).toHaveBeenCalledTimes(1);
+  });
+
   test('orders document commands behind input and runs the rest immediately', async () => {
     const { store, harness } = setup();
     const admitted: string[] = [];
