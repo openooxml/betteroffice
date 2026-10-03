@@ -671,6 +671,45 @@ fn keep_next_rows_move_with_offset_cells_below_a_float_band_on_the_same_page() {
 }
 
 #[test]
+fn a_keep_next_heading_moves_with_offset_cells_and_headers_below_a_float_band() {
+    let header = table_rows(&[(1, json!({}), json!({"isHeader": true}))]);
+    let mut table = two_cell_table(&[(6, 0.0, json!({})), (6, 4.4, json!({}))]);
+    table["block"]["rows"] = json!([header["block"]["rows"][0], table["block"]["rows"][0],]);
+    table["measure"]["rows"] = json!([header["measure"]["rows"][0], table["measure"]["rows"][0],]);
+    table["measure"]["totalHeight"] = json!(144.4);
+    let (block, measure) = paragraph(2, 1, json!({"keepNext": true}));
+    let mut measured = after_filler(5, json!({"block": block, "measure": measure}));
+    measured.push(table);
+    let input = json!({
+        "measured": measured,
+        "options": {
+            "pageSize": {"w": 240, "h": 500},
+            "margins": {"top": 20, "right": 10, "bottom": 10, "left": 10},
+            "sectionPageFloatBands": [{"default": [], "first": [{"top": 200, "bottom": 250}]}],
+        },
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let pages = layout["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    let fragments = pages[0]["fragments"].as_array().unwrap();
+    let heading = fragments
+        .iter()
+        .find(|fragment| fragment["blockId"] == 2)
+        .unwrap();
+    assert_eq!(heading["y"], 250);
+    let tables: Vec<_> = fragments
+        .iter()
+        .filter(|fragment| fragment["kind"] == "table")
+        .collect();
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0]["y"], 270);
+    assert_eq!(tables[0]["rowStart"], 0);
+    assert_eq!(tables[0]["rowEnd"], 2);
+}
+
+#[test]
 fn a_four_line_cell_splits_two_and_two_while_the_other_cell_finishes() {
     let measured = after_filler(
         2,
@@ -952,6 +991,58 @@ fn repeated_headers_reserve_their_band_before_per_cell_cuts() {
             .iter()
             .all(|(_, fragment)| fragment["cellClips"][0]["row"] == 1)
     );
+}
+
+#[test]
+fn repeated_headers_move_with_an_offset_cell_keep_next_chain_without_a_header_only_fragment() {
+    let ends = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({}), json!({})),
+    ]);
+    let mut table = two_cell_table(&[
+        (6, 0.0, json!({"keepNext": true})),
+        (6, 4.4, json!({"keepNext": true})),
+    ]);
+    table["block"]["rows"] = json!([
+        ends["block"]["rows"][0],
+        table["block"]["rows"][0],
+        ends["block"]["rows"][1],
+    ]);
+    table["measure"]["rows"] = json!([
+        ends["measure"]["rows"][0],
+        table["measure"]["rows"][0],
+        ends["measure"]["rows"][1],
+    ]);
+    table["measure"]["totalHeight"] = json!(164.4);
+    let input = json!({
+        "measured": after_filler(5, table),
+        "options": {"pageSize": {"w": 240, "h": 220},
+            "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}},
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let fragments: Vec<_> = layout["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .flat_map(|(page, value)| {
+            value["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|fragment| fragment["kind"] == "table")
+                .map(move |fragment| {
+                    (
+                        page,
+                        fragment["rowStart"].as_u64().unwrap(),
+                        fragment["rowEnd"].as_u64().unwrap(),
+                    )
+                })
+        })
+        .collect();
+    assert_eq!(fragments, [(1, 0, 3)]);
 }
 
 #[test]

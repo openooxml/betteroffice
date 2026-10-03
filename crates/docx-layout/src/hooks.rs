@@ -334,7 +334,20 @@ fn layout_table_with_position(
         };
         let header_start_height = if let Some(slice) = cell_header_slice {
             let tops: Vec<_> = slice.clips.iter().map(|clip| clip.top).collect();
-            header_rows_height + breaks.cell_fresh_slice(header_row_count, &tops, body_capacity)
+            let mut height = header_rows_height
+                + breaks.cell_fresh_slice(header_row_count, &tops, body_capacity);
+            let keep_height = row_keep_height(
+                keep_chains[header_row_count],
+                block,
+                measure,
+                &breaks,
+                body_capacity,
+                limited_by_float,
+            );
+            if keep_height > 0.0 && keep_height <= body_capacity {
+                height = height.max(header_rows_height + keep_height);
+            }
+            height
         } else if first_body_kept_oversized {
             header_rows_height + breaks.fresh_slice(header_row_count, 0.0, body_capacity)
         } else if first_fragment_height <= column_capacity {
