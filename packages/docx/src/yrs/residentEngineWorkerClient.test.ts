@@ -142,18 +142,20 @@ function setup() {
   return { worker, client };
 }
 
-test('pending proposal and navigation reads keep background page builds waiting', async () => {
+test('a pending proposal keeps every page build waiting, a pending read only background builds', async () => {
   const { worker, client } = setup();
   const bootstrap = client.bootstrap(snapshot, '');
   worker.reply(frameReply(worker.lastId()));
   await bootstrap;
   const proposal = client.proposal({ kind: 'snapshot' });
   expect(client.frameRequestPending()).toBe(true);
+  expect(client.frameRequestPending(false)).toBe(true);
   worker.reply({ id: worker.lastId(), ok: false, error: 'proposal failed' });
   await expect(proposal).rejects.toThrow('proposal failed');
   expect(client.frameRequestPending()).toBe(false);
   const read = client.documentRead({ kind: 'navigationTarget', story: 'body', paraId: 'p1' });
   expect(client.frameRequestPending()).toBe(true);
+  expect(client.frameRequestPending(false)).toBe(false);
   worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
   expect(await read).toEqual({ version: 'v1', value: 'missing-target' });
   expect(client.frameRequestPending()).toBe(false);

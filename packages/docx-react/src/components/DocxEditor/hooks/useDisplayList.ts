@@ -1895,8 +1895,10 @@ export function useRustDisplayList(
         }
       }
       // Behind a worker frame the display has not adopted, the pages would
-      // come back as a whole-document recovery frame: wait for it.
-      const framePending = worker?.client.frameRequestPending() ?? false;
+      // come back as a whole-document recovery frame: wait for it. A navigation's
+      // pages do not wait for document reads, which leave the frame as it is.
+      const navigationBuild = batch.some((index) => navigation.has(index));
+      const framePending = worker?.client.frameRequestPending(!navigationBuild) ?? false;
       if (
         worker && (framePending ||
           (!supersedingBackground && worker.client.answeredFrame() > frame.frameEpoch))
@@ -1950,7 +1952,8 @@ export function useRustDisplayList(
         (!workerOpen || (
           pageBuildInFlightRef.current === build &&
           ((worker && build.kind === 'release') ||
-            (contentEpochRef.current === dispatchedEpoch && !worker?.client.frameRequestPending())) &&
+            (contentEpochRef.current === dispatchedEpoch &&
+              !worker?.client.frameRequestPending(!navigationBuild))) &&
           (!background || snapshotRef.current.frame?.frameEpoch === buildBase.frameEpoch)
         ));
       const finish = (): void => {

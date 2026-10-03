@@ -201,6 +201,7 @@ test('navigation refines to a distant line from a published frame with frozen qu
   });
   try {
     await waitFor(() => expect(result.current.displayListQueries).not.toBeNull());
+    const frozen = result.current.displayListQueries;
     const pages = result.current.display.displayList!.pages;
     const last = pages.length - 1;
     const pageTop = (index: number) => pages.slice(0, index).reduce((top, page) => top + page.height + 24, 0);
@@ -230,7 +231,7 @@ test('navigation refines to a distant line from a published frame with frozen qu
     const lineTop = pageTop(last) - scroller.scrollTop + rect.y;
     expect(lineTop).toBeGreaterThanOrEqual(0);
     expect(lineTop + rect.height).toBeLessThanOrEqual(400);
-    expect(result.current.displayListQueries!.displayList.pages[last]!.unbuilt).toBe(true);
+    expect(result.current.displayListQueries).toBe(frozen);
     expect(displayWindowOf(display.queries)!.read()).toEqual([0, 5]);
   } finally {
     unmount();

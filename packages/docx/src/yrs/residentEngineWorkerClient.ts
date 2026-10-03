@@ -232,10 +232,10 @@ export class ResidentEngineWorkerClient {
     this.failureListener = listener;
   }
 
-  /** @internal Whether foreground document or frame work awaits its reply. */
-  frameRequestPending(): boolean {
+  /** @internal Whether foreground document or frame work awaits its reply; `reads: false` leaves document reads out. */
+  frameRequestPending(reads = true): boolean {
     for (const { type } of this.pending.values()) {
-      if (FRAME_REQUESTS.has(type)) return true;
+      if (FRAME_REQUESTS.has(type) && (reads || type !== 'documentRead')) return true;
     }
     return false;
   }
