@@ -10352,37 +10352,32 @@ mod tests {
 
     #[test]
     fn note_text_is_painted_below_the_measured_separator() {
-        let (engine, layout) = layout_with_note_separator(
-            "footnote",
-            Some(
-                r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#,
-            ),
-        );
-        let area = &layout["pages"][0]["noteAreas"][0];
-        let note = &area["notes"][0];
-        let ascent = note["measures"][0]["lines"][0]["ascent"].as_f64().unwrap();
-        engine.build_display_list_frame("{}", 0).unwrap();
-        let baseline = engine
-            .with_display_list(|list| {
-                list.pages[0].note_areas[0].primitives.iter().find_map(
-                    |primitive| match primitive {
-                        docx_layout::display_list::Primitive::Text(run) => {
-                            Some(run.baseline_y.clone())
-                        }
-                        docx_layout::display_list::Primitive::GlyphRun(run) => run
-                            .glyphs
-                            .first()
-                            .map(|glyph| docx_layout::display_list::px(glyph.y)),
-                        _ => None,
-                    },
-                )
-            })
-            .flatten()
-            .unwrap();
-        assert_eq!(
-            baseline,
-            docx_layout::display_list::px(area["y"].as_f64().unwrap() + 64.0 + ascent)
-        );
+        let text_offset = |separator: Option<&str>| {
+            let (engine, layout) = layout_with_note_separator("footnote", separator);
+            engine.build_display_list_frame("{}", 0).unwrap();
+            let baseline = engine
+                .with_display_list(|list| {
+                    list.pages[0].note_areas[0]
+                        .primitives
+                        .iter()
+                        .find_map(|primitive| match primitive {
+                            docx_layout::display_list::Primitive::Text(run) => {
+                                run.baseline_y.as_f64()
+                            }
+                            docx_layout::display_list::Primitive::GlyphRun(run) => {
+                                run.glyphs.first().map(|glyph| glyph.y)
+                            }
+                            _ => None,
+                        })
+                })
+                .flatten()
+                .unwrap();
+            baseline - layout["pages"][0]["noteAreas"][0]["y"].as_f64().unwrap()
+        };
+        let measured = text_offset(Some(
+            r#"<w:p><w:pPr><w:spacing w:line="960" w:lineRule="exact"/></w:pPr><w:r><w:separator/></w:r></w:p>"#,
+        ));
+        assert!((measured - text_offset(None) - (64.0 - 12.0)).abs() < 0.01);
     }
 
     #[test]
