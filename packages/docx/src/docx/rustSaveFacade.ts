@@ -66,8 +66,7 @@ export async function writeDocumentWithRust(
   paragraphIds?: RustParagraphIds,
   skipMutations = false
 ): Promise<RustSaveResult> {
-  await preloadOpcWasm();
-  await preloadParseWasm();
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const fixed =
     determinism ??
     ({
