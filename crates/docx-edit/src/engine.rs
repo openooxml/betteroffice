@@ -7314,8 +7314,17 @@ mod tests {
             .unwrap()
     }
 
+    fn note_words(count: usize) -> String {
+        ["ab", "cde", "fg", "hijk"]
+            .into_iter()
+            .cycle()
+            .take(count)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn note_boundary_prefix(suffix: &str, move_reference: Option<bool>) -> String {
-        let (engine, _) = note_typing_fixture(&"x".repeat(240), suffix);
+        let (engine, _) = note_typing_fixture(&note_words(37), suffix);
         let state = engine.regions.borrow();
         let measurement = state
             .as_ref()
@@ -7328,7 +7337,7 @@ mod tests {
         let pagination = engine.pagination.borrow();
         let measured = &pagination.input.as_ref().unwrap().measured[0];
         let width = pagination.measured_widths[0];
-        let signature = |count: usize| {
+        let signature = |prefix_text: &str| {
             let mut block = measured.block.clone();
             let LayoutBlock::Paragraph(paragraph) = &mut block else {
                 panic!("paragraph expected");
@@ -7336,8 +7345,10 @@ mod tests {
             let Run::Text(prefix) = &mut paragraph.runs[0] else {
                 panic!("text expected");
             };
-            prefix.text = "x".repeat(count);
-            prefix.pm_end = prefix.pm_start.map(|start| start + count as f64);
+            prefix.text = prefix_text.to_owned();
+            prefix.pm_end = prefix
+                .pm_start
+                .map(|start| start + prefix_text.encode_utf16().count() as f64);
             let mut position = prefix.pm_end.unwrap();
             for run in &mut paragraph.runs[1..] {
                 let Run::Text(text) = run else {
@@ -7352,20 +7363,26 @@ mod tests {
                 docx_layout::measure_blocks::measure_block(&mut block, width, &measurement).unwrap();
             pagination_signature(&MeasuredBlock { block, measure }).unwrap()
         };
-        for count in 30..180 {
-            let before = signature(count);
-            let after = signature(count + 1);
-            let before_lines = before["lines"].as_array().unwrap().len();
-            let after_lines = after["lines"].as_array().unwrap().len();
-            let matches = match move_reference {
-                Some(true) => {
-                    before_lines == after_lines && before["references"] != after["references"]
+        for tail_count in 0..60 {
+            let tail = note_words(tail_count);
+            for count in 0..16 {
+                let prefix = format!("{} {tail}", "x".repeat(8 + count));
+                let mut edited = prefix.clone();
+                edited.insert(8, 'x');
+                let before = signature(&prefix);
+                let after = signature(&edited);
+                let before_lines = before["lines"].as_array().unwrap().len();
+                let after_lines = after["lines"].as_array().unwrap().len();
+                let matches = match move_reference {
+                    Some(true) => {
+                        before_lines == after_lines && before["references"] != after["references"]
+                    }
+                    Some(false) => before_lines < after_lines,
+                    None => before == after,
+                };
+                if matches {
+                    return prefix;
                 }
-                Some(false) => before_lines < after_lines,
-                None => before == after,
-            };
-            if matches {
-                return "x".repeat(count);
             }
         }
         panic!("a measured line boundary must exist");
@@ -7396,7 +7413,7 @@ mod tests {
 
     #[test]
     fn footnote_reference_line_move_uses_full_layout() {
-        let suffix = "x".repeat(137);
+        let suffix = note_words(37);
         let prefix = note_boundary_prefix(&suffix, Some(true));
         let (engine, request) = note_typing_fixture(&prefix, &suffix);
         let line = note_body_reference_line(&engine);
@@ -7409,7 +7426,7 @@ mod tests {
 
     #[test]
     fn footnote_line_delete_uses_full_layout() {
-        let (engine, request) = note_typing_fixture(&"x".repeat(137), " tail");
+        let (engine, request) = note_typing_fixture(&note_words(37), " tail");
         let lines = note_body_lines(&engine);
         local_patch_step(&engine, &request, "body", (4, 44, None), false);
         assert!(note_body_lines(&engine) < lines);
@@ -7558,7 +7575,7 @@ mod tests {
             };
             engine
                 .doc()
-                .create_story(&format!("fn:{id}"), text, "Normal", "left")
+                .create_story(format!("fn:{id}"), text, "Normal", "left")
                 .unwrap();
         }
         engine
