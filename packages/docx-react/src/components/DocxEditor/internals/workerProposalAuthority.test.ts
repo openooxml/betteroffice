@@ -822,3 +822,41 @@ test('a call made before the hand-over began runs in the worker ahead of it', as
   expect((await after).version).toBe('main-3');
   expect(h.events).toEqual(['snapshot', 'propose', 'withdraw', 'handOver']);
 });
+
+test('paged exports send the current request and parse the worker result', async () => {
+  const h = harness();
+  const options = { revisionView: 'markup', expectLayoutVersion: 'layout-1' } as const;
+  const currentRequest = JSON.stringify({ renderEnv: {} });
+  const result = {
+    ok: true, version: 'worker-1',
+    content: { structured: {}, layout: { documentVersion: 'worker-1', layoutVersion: 'layout-1', pages: [] } },
+  };
+  h.worker.documentRead.mockImplementation(async (read) => {
+    h.events.push(read.kind);
+    return { version: 'worker-1', value: JSON.stringify(result) } as never;
+  });
+  expect(await h.authority.exportStructuredWithPages(options, currentRequest, unusedMain)).toEqual(result);
+  expect(h.worker.documentRead).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options, currentRequest });
+  expect(h.events).toEqual(['snapshot', 'exportStructuredWithPages']);
+});
+
+test('paged exports queued after hand-over run the main continuation', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  deferWorkerOpenReplica(h.session, async () => {
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.mainVersion('main-2'); handover.complete(); };
+  }, () => { throw new Error('unexpected fallback'); }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const result = {
+    ok: false, version: 'main-2',
+    failure: { code: 'layout-unavailable', target: null, message: 'No layout is ready.' },
+  } as const;
+  const main = mock(async () => result);
+  const exportResult = h.authority.exportStructuredWithPages({ revisionView: 'markup' }, '{}', main);
+  await ready;
+  expect(await exportResult).toEqual(result);
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.events).toEqual(['snapshot', 'handOver']);
+});

@@ -544,7 +544,8 @@ export interface DocxEditorRef {
    * fonts, when it was not. The references describe that layout, which a later edit may
    * supersede before it is painted. Refuses as data when no such layout is ready in time, and
    * never lays out again when `expectLayoutVersion` names a layout. Throws when the document is
-   * replaced meanwhile.
+   * replaced meanwhile. In a viewer session, reads the worker's layout and waits for the layout
+   * the editor runs on its own instead of laying out again.
    */
   exportStructuredWithPages: (
     options: DocxPageExportOptions

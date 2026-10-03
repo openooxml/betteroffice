@@ -76,6 +76,7 @@ interface RefApiInputs {
   layout: Layout | null;
   runLayoutPipeline: (options?: { onHost?: boolean }) => void;
   getLayoutRequest: () => string | null;
+  readLayoutRequest: () => Promise<string | null>;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   revealPositionImpl: (position: number, signal?: AbortSignal) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
@@ -133,6 +134,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     layout,
     runLayoutPipeline,
     getLayoutRequest,
+    readLayoutRequest,
     scrollToPositionImpl,
     revealPositionImpl,
     scrollToParaIdImpl,
@@ -279,6 +281,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
     getLayoutRequest,
+    readLayoutRequest,
     relayout: runLayoutPipeline,
     refreshWorkerLayout: () => refreshWorkerLayoutRef.current(),
     scrollToPosition: (position) => {
@@ -381,6 +384,7 @@ export interface UsePagedEditorRefApiOptions {
   layout: Layout | null;
   runLayoutPipeline: () => void;
   getLayoutRequest: () => string | null;
+  readLayoutRequest: () => Promise<string | null>;
   scrollToPositionImpl: (pmPos: number, forParaIdScroll?: boolean) => void;
   revealPositionImpl: (position: number, signal?: AbortSignal) => RevealPositionOutcome;
   scrollToParaIdImpl: (paraId: string, options?: ScrollToParaIdOptions) => boolean;
@@ -419,6 +423,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     getLayoutRequest,
+    readLayoutRequest,
     scrollToPositionImpl,
     revealPositionImpl,
     scrollToParaIdImpl,
@@ -486,6 +491,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     getLayoutRequest,
+    readLayoutRequest,
     scrollToPositionImpl,
     revealPositionImpl,
     scrollToParaIdImpl,
@@ -510,6 +516,7 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
     layout,
     runLayoutPipeline,
     getLayoutRequest,
+    readLayoutRequest,
     scrollToPositionImpl,
     revealPositionImpl,
     scrollToParaIdImpl,

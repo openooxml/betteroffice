@@ -457,6 +457,8 @@ export interface PagedEditorRef {
    * `null` while the fonts it needs are not ready. @internal
    */
   getLayoutRequest(): string | null;
+  /** @internal */
+  readLayoutRequest(): Promise<string | null>;
   /** Force re-layout; `onHost` keeps the pass on this thread. */
   relayout(options?: { onHost?: boolean }): void;
   /** Scroll the visible pages to bring a display position into view. */
@@ -767,6 +769,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       cancelPendingScrollRestore,
       navigationEpoch,
       getLayoutRequest,
+      readLayoutRequest,
     } = useLayoutPipeline({
       onError,
       document,
@@ -2027,6 +2030,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       layout,
       runLayoutPipeline,
       getLayoutRequest,
+      readLayoutRequest,
       scrollToPositionImpl,
       revealPositionImpl,
       scrollToParaIdImpl,

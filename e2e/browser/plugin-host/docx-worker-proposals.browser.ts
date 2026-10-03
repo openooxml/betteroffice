@@ -63,6 +63,14 @@ interface ViewState {
 interface WorkerProposalProbe {
   editor: {
     getTotalPages(): number;
+    exportStructuredWithPages(options: {
+      revisionView: 'markup';
+      stories: string[];
+      expectLayoutVersion?: string;
+    }): Promise<
+      | { ok: true; version: string; content: { layout: { documentVersion: string; layoutVersion: string; pages: unknown[] } } }
+      | { ok: false; version: string; failure: { code: string } }
+    >;
     getParagraphIdentities(): Promise<DocxParagraphIdentitySnapshot>;
     resolveParagraphAnchors(anchors: readonly DocxPersistedParagraphAnchor[]): Promise<{
       version: string;
@@ -613,4 +621,48 @@ test('a worker viewer reports a proposal through onDocumentChange without openin
   expect(current.sidebarOpen).toBe(false);
   expect(current.errors).toEqual([]);
   expect(current.unexpectedScrolls).toBe(0);
+});
+
+test('a worker viewer exports its retained page layout without opening the main-thread copy', async ({ page }) => {
+  await instrument(page);
+  await open(page, true);
+  const prepared = await prepare(page, true);
+  const exportPages = (expectLayoutVersion?: string) => page.evaluate(async (layoutVersion) => {
+    const result = await (window as unknown as ProbeWindow).__workerProposalProbe.editor!.exportStructuredWithPages({
+      revisionView: 'markup',
+      stories: ['body', 'headers', 'footers', 'footnotes', 'endnotes'],
+      ...(layoutVersion === null ? {} : { expectLayoutVersion: layoutVersion }),
+    });
+    return {
+      ok: result.ok,
+      version: result.version,
+      documentVersion: result.ok ? result.content.layout.documentVersion : null,
+      layoutVersion: result.ok ? result.content.layout.layoutVersion : null,
+      pages: result.ok ? result.content.layout.pages.length : 0,
+    };
+  }, expectLayoutVersion ?? null);
+  const first = await exportPages();
+  expect(first.ok).toBe(true);
+  expect(first.version).toBe(prepared.resolved.version);
+  expect(first.documentVersion).toBe(first.version);
+  expect(first.pages).toBeGreaterThan(0);
+  expect(first.layoutVersion).not.toBeNull();
+  const pinned = await exportPages(first.layoutVersion!);
+  expect(pinned.ok).toBe(true);
+  expect(pinned.layoutVersion).toBe(first.layoutVersion);
+  const result = await page.evaluate(
+    (request) => (window as unknown as ProbeWindow).__workerProposalProbe.editor!.proposeChanges(request),
+    { expectVersion: first.version, proposals: prepared.proposals.slice(0, 1) }
+  );
+  const proposed = snapshotOf(result);
+  expect(proposed.proposals.map(({ id }) => id)).toEqual([IDS[0]]);
+  expect(proposed.proposals[0]!.changed).toBe(true);
+  await expect.poll(async () => {
+    const current = await exportPages();
+    return current.ok && current.version !== first.version;
+  }).toBe(true);
+  const current = await status(page);
+  expect(current.openedInWorker).toBe(true);
+  expect(current.encodeState).toBe(0);
+  expect(current.errors).toEqual([]);
 });

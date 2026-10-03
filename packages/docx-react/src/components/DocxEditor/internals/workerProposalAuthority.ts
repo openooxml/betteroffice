@@ -1,4 +1,8 @@
 import type {
+  DocxExportResult,
+  DocxLayoutMap,
+  DocxPageExportOptions,
+  DocxPagedStructuredContent,
   DocxFindTextRequest,
   DocxFindTextResult,
   DocxFindParagraphsOptions,
@@ -91,6 +95,11 @@ export interface WorkerProposalAuthority {
     request: DocxFindTextRequest,
     main: () => Promise<DocxFindTextResult>
   ): Promise<DocxFindTextResult>;
+  exportStructuredWithPages(
+    options: DocxPageExportOptions,
+    currentRequest: string,
+    main: () => Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>
+  ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>>;
   /** Resolves against the document the host sees now. */
   navigationTarget(
     story: string,
@@ -317,6 +326,11 @@ export function registerWorkerProposalAuthority(
       const read = await worker.documentRead({ kind: 'findText', request });
       assertCurrent();
       return read.value;
+    }, main),
+    exportStructuredWithPages: (options, currentRequest, main) => route(async () => {
+      const read = await worker.documentRead({ kind: 'exportStructuredWithPages', options, currentRequest });
+      assertCurrent();
+      return JSON.parse(read.value) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
     }, main),
     navigationTarget: (story, paraId, main) => route(async () => {
       const local = resolveMirroredNavigationTarget(geometry, session.getProposals(), story, paraId);
