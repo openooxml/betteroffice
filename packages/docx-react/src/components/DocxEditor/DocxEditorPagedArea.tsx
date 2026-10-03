@@ -9,13 +9,18 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { type BundledFontProvider } from '@betteroffice/docx/layout';
-import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import { PagedEditor, type PagedEditorProps, type PagedEditorRef } from './PagedEditor';
 import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
@@ -76,6 +81,7 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  viewerDocumentRead,
   showHiddenText = false,
   onYrsContentChange,
   onYrsHistoryChange,
@@ -115,6 +121,7 @@ export function DocxEditorPagedArea({
   applyResidentDelete,
   displayListQueries,
   resolveDisplayListQueries,
+  pageNavigation,
   canvasDisplayList,
   displayListFrameEpoch,
   residentCaret,
@@ -158,6 +165,8 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
+  viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
   showHiddenText?: boolean;
   onYrsContentChange: () => void;
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
@@ -212,6 +221,7 @@ export function DocxEditorPagedArea({
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -449,6 +459,7 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        viewerDocumentRead={viewerDocumentRead}
         showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}
@@ -480,6 +491,7 @@ export function DocxEditorPagedArea({
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
         resolveDisplayListQueries={resolveDisplayListQueries}
+        pageNavigation={pageNavigation}
         canvasDisplayList={canvasDisplayList}
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}

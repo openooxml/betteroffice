@@ -15,7 +15,7 @@ import {
   type DisplayListTableRegion,
 } from '@betteroffice/docx/layout/render';
 import { sanitizeHref } from '@betteroffice/docx/utils';
-import type { YrsCellLoc, YrsSession } from '@betteroffice/docx/yrs';
+import type { YrsCellLoc, YrsPointerProjectionTarget, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { useDragAutoScroll } from '../../../hooks/useDragAutoScroll';
@@ -56,6 +56,13 @@ export interface UsePagesPointerOptions {
   yrsInputRef: React.RefObject<YrsInputRef | null>;
   yrsSession: YrsSession | null;
   yrsRootStory: string;
+  /**
+   * A viewer session: the input holds the selection in the presented frame's display positions,
+   * so gestures address them directly and wait on no document copy.
+   */
+  viewerSelection?: boolean;
+  /** A viewer session's bookmark lookup, in body display positions. */
+  resolveBookmarkPosition?: (name: string) => Promise<number | null>;
   getYrsPositionProjection: (rootStory: string) => YrsPositionProjection | null;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean) => boolean;
@@ -186,6 +193,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     yrsInputRef,
     yrsSession,
     yrsRootStory,
+    viewerSelection = false,
+    resolveBookmarkPosition,
     getYrsPositionProjection,
     applyYrsCommand,
     syncYrsInputState,
@@ -225,13 +234,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     pendingGestureCleanupRef.current = null;
   }, []);
   const bumpInputEpoch = useCallback(() => {
-    inputEpochRef.current += 1;
+    inputEpochRef.current = viewerSelection && yrsInputRef.current?.beginGesture
+      ? yrsInputRef.current.beginGesture()
+      : inputEpochRef.current + 1;
     if (pendingGestureRef.current) {
       isDraggingRef.current = false;
       dragAnchorRef.current = null;
       clearPendingGesture();
     }
-  }, [clearPendingGesture]);
+  }, [clearPendingGesture, viewerSelection, yrsInputRef]);
   const inputEpoch = useCallback(() => inputEpochRef.current, []);
   // A key at the hidden input follows a pending gesture; any other key in the editor replaces it.
   const handleEditorKeyDown = useCallback(
@@ -371,19 +382,23 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const resolveTarget = useCallback(
-    (position: number) => {
+    (position: number): YrsPointerProjectionTarget | null => {
+      if (viewerSelection) return { story: yrsRootStory, displayPosition: position };
       const projection = getYrsPositionProjection(yrsRootStory);
       return projection ? projection.targetAt(position) : null;
     },
-    [getYrsPositionProjection, yrsRootStory]
+    [getYrsPositionProjection, viewerSelection, yrsRootStory]
   );
 
   const setTextSelection = useCallback(
-    (anchor: number, head = anchor): void => {
+    (anchor: number, head = anchor, gesture?: number): void => {
       const input = yrsInputRef.current;
       const anchorTarget = resolveTarget(anchor);
       const headTarget = resolveTarget(head);
       if (!input || !anchorTarget || !headTarget || anchorTarget.story !== headTarget.story) return;
+      if (viewerSelection && input.beginGesture && gesture === undefined) {
+        gesture = inputEpochRef.current = input.beginGesture();
+      }
       if (
         yrsSession &&
         anchorTarget.cell &&
@@ -392,13 +407,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       ) {
         yrsSession.setCellSelection({ anchor: anchorTarget.cell, head: headTarget.cell });
       }
-      input.setSelectionFromDisplay(
-        anchorTarget.displayPosition,
-        headTarget.displayPosition,
-        anchorTarget.story
-      );
+      if (viewerSelection) {
+        input.setSelectionFromDisplay(anchorTarget.displayPosition, headTarget.displayPosition, anchorTarget.story, gesture);
+      } else {
+        input.setSelectionFromDisplay(anchorTarget.displayPosition, headTarget.displayPosition, anchorTarget.story);
+      }
     },
-    [resolveTarget, yrsInputRef, yrsSession]
+    [resolveTarget, viewerSelection, yrsInputRef, yrsSession]
   );
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
@@ -409,11 +424,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       yrsCellDraggingRef.current = false;
       isDraggingRef.current = true;
       dragAnchorRef.current = position;
-      if (!replicaPending?.()) setTextSelection(position);
+      if (!replicaPending?.()) setTextSelection(position, position, viewerSelection ? inputEpochRef.current : undefined);
       focusInput();
       if (!partEdit) setIsFocused(true);
     },
-    [focusInput, partEdit, replicaPending, resolveTarget, setIsFocused, setTextSelection]
+    [focusInput, partEdit, replicaPending, resolveTarget, setIsFocused, setTextSelection, viewerSelection]
   );
 
   const beginPendingGesture = useCallback(
@@ -529,7 +544,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      bumpInputEpoch();
+      // A right-click leaves a viewer selection in place, so its context menu acts on it.
+      if (!(viewerSelection && e.button === 2)) bumpInputEpoch();
       clearPendingGesture();
       pendingPartCaretRef.current = null;
       if (e.button === 2) {
@@ -658,6 +674,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setIsFocused,
       setSelectionRects,
       setTextSelection,
+      viewerSelection,
       yrsRootStory,
       yrsSession,
     ]
@@ -691,9 +708,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   dragExtendRef.current = (cx, cy) => {
     if (!isDraggingRef.current || dragAnchorRef.current == null) return;
+    if (viewerSelection && yrsInputRef.current?.isGestureCurrent?.(inputEpochRef.current) === false) return;
     const pmPos = getPositionFromMouse(cx, cy);
     if (pmPos == null || updatePendingGestureHead(pmPos) || extendCellSelection(pmPos)) return;
-    setTextSelection(dragAnchorRef.current, pmPos);
+    setTextSelection(dragAnchorRef.current, pmPos, viewerSelection ? inputEpochRef.current : undefined);
   };
 
   const dragRafRef = useRef<number | null>(null);
@@ -719,9 +737,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         dragRafRef.current = null;
         const point = pendingDragPointRef.current;
         if (!point || dragAnchorRef.current == null) return;
+        if (viewerSelection && yrsInputRef.current?.isGestureCurrent?.(inputEpochRef.current) === false) return;
         const pmPos = getPositionFromMouse(point.x, point.y);
         if (pmPos == null || extendCellSelection(pmPos)) return;
-        setTextSelection(dragAnchorRef.current, pmPos);
+        setTextSelection(dragAnchorRef.current, pmPos, viewerSelection ? inputEpochRef.current : undefined);
       });
     },
     [
@@ -730,6 +749,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTextSelection,
       updateDragScroll,
       updatePendingGestureHead,
+      viewerSelection,
+      yrsInputRef,
     ]
   );
 
@@ -904,7 +925,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // selection remains keyboard-ready even when the canvas host is outside
       // PagedEditor's React subtree.
       focusInput();
-      const projection = getYrsPositionProjection(yrsRootStory);
+      const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
       const queries = displayListQueries;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
@@ -936,8 +957,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
             )
           : null;
         const href = sanitizeHref(displayHit?.href ?? '');
-        if (href && (projection || replicaPending?.() || !href.startsWith('#'))) {
+        if (
+          href &&
+          (projection || replicaPending?.() || resolveBookmarkPosition || !href.startsWith('#'))
+        ) {
           e.preventDefault();
+          if (viewerSelection) bumpInputEpoch();
           const linkPosition = getPositionFromMouse(e.clientX, e.clientY);
           if (href.startsWith('#') && replicaPending?.()) {
             if (linkPosition != null) {
@@ -956,10 +981,24 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           if (pendingGestureRef.current?.kind !== 'caret' || !replicaPending?.()) {
             clearPendingGesture();
           }
-          if (linkPosition != null) setTextSelection(linkPosition);
+          if (linkPosition != null) setTextSelection(linkPosition, linkPosition,
+            viewerSelection ? inputEpochRef.current : undefined);
           if (href.startsWith('#')) {
             const bookmarkName = href.slice(1);
-            const targetPos = projection!.bookmarkPosition(bookmarkName);
+            if (!projection) {
+              const epoch = inputEpochRef.current;
+              void resolveBookmarkPosition?.(bookmarkName)
+                .then((targetPos) => {
+                  if (targetPos == null || (viewerSelection && yrsInputRef.current?.isGestureCurrent
+                    ? !yrsInputRef.current.isGestureCurrent(epoch)
+                    : epoch !== inputEpochRef.current)) return;
+                  scrollToPositionImpl(targetPos);
+                  setTextSelection(targetPos + 1, targetPos + 1, viewerSelection ? epoch : undefined);
+                })
+                .catch(() => {});
+              return;
+            }
+            const targetPos = projection.bookmarkPosition(bookmarkName);
             if (targetPos != null) {
               scrollToPositionImpl(targetPos);
               setTextSelection(targetPos + 1);
@@ -1018,10 +1057,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (!target) return;
       if (e.detail === 2) {
         clearPendingGesture();
+        if (viewerSelection && yrsInputRef.current?.beginGesture) inputEpochRef.current = yrsInputRef.current.beginGesture();
         yrsInputRef.current?.selectWordAtDisplay(target.displayPosition, target.story);
         focusInput();
       } else if (e.detail >= 3) {
         clearPendingGesture();
+        if (viewerSelection && yrsInputRef.current?.beginGesture) inputEpochRef.current = yrsInputRef.current.beginGesture();
         yrsInputRef.current?.selectParagraphAtDisplay(target.displayPosition, target.story);
         focusInput();
       }
@@ -1029,6 +1070,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [
       canvasHostRef,
       canvasOverlayTarget,
+      bumpInputEpoch,
       clearPendingGesture,
       displayListQueries,
       focusInput,
@@ -1049,6 +1091,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTextSelection,
       yrsInputRef,
       yrsRootStory,
+      viewerSelection,
     ]
   );
 
@@ -1056,10 +1099,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     (e: React.MouseEvent) => {
       if (!onContextMenu) return;
       e.preventDefault();
-      const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) return;
+      const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
+      if (!projection && !viewerSelection) return;
       const readImageNodeAt = (pos: number): ImageInfo | null => {
-        const node = projection.nodeAt(pos);
+        const node = projection?.nodeAt(pos);
         if (node?.kind !== 'image') return null;
         return {
           pos,
