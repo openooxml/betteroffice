@@ -6,6 +6,7 @@ import type {
   YrsParagraphSpan,
   YrsRegionLayoutProgress,
   YrsResidentCaretSnapshot,
+  YrsResolvedCommentAnchor,
   YrsRevisionInfo,
   YrsSelection,
   YrsSelectionText,
@@ -23,8 +24,11 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
+import type { DocxSidebarReader } from './sidebarReads';
 import type { ProposalGeometryReader, ProposalGeometryRevision } from './proposalGeometry';
 import type { DocxProposalSession } from './proposals';
+import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlsResult } from './contentControls';
 import type { YrsPositionOutline } from './yrsPositionProjection';
 import { resolveHostJsonCommentMedia } from './hostMedia';
 import { createEditSession, preloadEditWasm, setEditWasmHeapLimit } from './wasm/index';
@@ -44,10 +48,13 @@ export type ResidentEngineSession = Pick<
   | 'destroy'
   | 'encodeSelection'
   | 'encodeStateVector'
+  | 'findContentControls'
+  | 'listContentControls'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadMediaSources'
+  | 'loadNoteSeparators'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -60,6 +67,7 @@ export type ResidentEngineSession = Pick<
   | 'resumeRegionLayout'
   | 'selection'
   | 'selectionText'
+  | 'resolveComment'
   | 'searchText'
   | 'encodeStickyPosition'
   | 'resolveStickyPosition'
@@ -72,11 +80,13 @@ export type ResidentEngineSession = Pick<
   /** @internal */
   proposalEngine: DocxProposalSession;
   /** @internal */
-  geometryReader: ProposalGeometryReader;
+  geometryReader: ProposalGeometryReader & DocxSidebarReader;
   /** @internal The segments of the story's paragraphs at `indices`, each ending with its pilcrow. */
   paragraphSegments(story: string, indices: readonly number[]): YrsStorySegment[][];
   /** @internal */
   paragraphIdentities(): DocxParagraphIdentitySnapshot;
+  /** @internal */
+  exportStructuredWithPagesJson(options: DocxPageExportOptions, currentRequest: string): string;
   /** The region layout of only as much of the body as fills `pages` pages. */
   layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
   /** Limit incremental rebuilds to the display window and caret pages. Off by default. */
@@ -194,7 +204,9 @@ export async function createResidentEngineSession(
       : {}),
   };
 
-  const geometryReader: ProposalGeometryReader = {
+  const geometryReader: ProposalGeometryReader & DocxSidebarReader = {
+    resolveComment: (id) => JSON.parse(session.resolve_comment(id)),
+    headings: (story) => JSON.parse(session.headings_json(story)),
     version: () => session.version(),
     hasStory: (story) => !LONE_SURROGATE.test(story) && session.has_story(story),
     storyIds: () => session.story_ids(),
@@ -245,6 +257,8 @@ export async function createResidentEngineSession(
   return {
     proposalEngine,
     geometryReader,
+    resolveComment: (commentId) =>
+      JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     paragraphSegments: (story, indices) =>
       JSON.parse(session.story_segment_units(story, Uint32Array.from(indices))) as YrsStorySegment[][],
     searchText: (query, options = {}) => {
@@ -274,6 +288,16 @@ export async function createResidentEngineSession(
     },
     paragraphIdentities: () =>
       JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
+    exportStructuredWithPagesJson: (options, currentRequest) =>
+      session.export_structured_with_pages_json(JSON.stringify(options), currentRequest),
+    listContentControls: (options = {}) =>
+      JSON.parse(
+        session.list_content_controls_json(JSON.stringify(options))
+      ) as DocxContentControlsResult,
+    findContentControls: (query, options = {}) =>
+      JSON.parse(
+        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
+      ) as DocxContentControlsResult,
     storiesChangedSince: (since) =>
       JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
     openDocx: (bytes, digest, generation) => {
@@ -368,6 +392,7 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
       session.load(update);

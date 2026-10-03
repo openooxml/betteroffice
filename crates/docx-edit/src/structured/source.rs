@@ -423,6 +423,7 @@ pub(crate) struct ReadSource {
     story_index: HashMap<String, usize>,
     pub footnote_separators: usize,
     pub endnote_separators: usize,
+    pub note_separator_paragraphs: HashMap<String, Vec<Value>>,
     pub comments: Vec<SourceComment>,
     /// Comments seeding anchored into the comment store; the others never had a range.
     pub seeded_comments: HashSet<String>,
@@ -605,6 +606,23 @@ impl ReadSource {
             story_index,
             footnote_separators: array(field(package, "footnoteSeparators")).len(),
             endnote_separators: array(field(package, "endnoteSeparators")).len(),
+            note_separator_paragraphs: [
+                ("footnoteSeparators", "footnote"),
+                ("endnoteSeparators", "endnote"),
+            ]
+            .into_iter()
+            .filter_map(|(key, kind)| {
+                let note = array(field(package, key)).iter().find(|note| {
+                    note.get("noteType").and_then(Value::as_str) == Some("separator")
+                })?;
+                let paragraphs: Vec<_> = array(note.get("content"))
+                    .iter()
+                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("paragraph"))
+                    .cloned()
+                    .collect();
+                (!paragraphs.is_empty()).then(|| (kind.to_owned(), paragraphs))
+            })
+            .collect(),
             comments,
             seeded_comments: HashSet::new(),
             raw_block_anchors: HashMap::new(),

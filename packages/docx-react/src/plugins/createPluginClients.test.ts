@@ -140,6 +140,7 @@ async function setup(
       return state.anchorReady ? state.reveal : 'unsupported';
     },
     focus: () => events.push('focus'),
+    setSelection: (anchor: number) => events.push(`select:${anchor}`),
   } as unknown as PagedEditorRef;
   const pagedEditorRef = { current: editor as PagedEditorRef | null };
   const state = {
@@ -152,6 +153,7 @@ async function setup(
     queryState: 'ready' as 'loading' | 'ready' | 'error',
     reveal: 'scrolled' as 'scrolled' | 'layout-unavailable' | 'unsupported',
     ended: null as 'plugin-unavailable' | 'document-replaced' | null,
+    viewer: false,
   };
   const controller = new AbortController();
   const lifetimeController = new AbortController();
@@ -180,6 +182,7 @@ async function setup(
   const access = {
     pagedEditorRef,
     writeMode: () => state.mode,
+    viewer: () => state.viewer,
     commands: () => null,
     layout: () => ({
       queries: state.layoutReady ? queries : null,
@@ -613,6 +616,22 @@ describe('plugin read and navigation clients', () => {
     });
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(worker.flush).not.toHaveBeenCalled();
+  });
+
+  test('viewer navigation with focus selects in the viewer input without the replica', async () => {
+    const env = await setup();
+    env.state.viewer = true;
+    const worker = routeWorker(env);
+    const before = env.session.selection();
+    expect(
+      await env.clients.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: env.session.version(), focus: true }
+      )
+    ).toEqual({ ok: true });
+    expect(env.events).toEqual(['scroll:42', 'select:42', 'focus']);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(env.session.selection()).toEqual(before);
   });
 
   for (const during of ['target read', 'layout wait'] as const) {

@@ -23,10 +23,24 @@ import {
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
 import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
 
+import { flushEditorInput } from '../components/DocxEditor/editorBatches';
+import { isWorkerViewer } from '../components/DocxEditor/internals/workerViewer';
+
+export async function readPluginPositionAtPoint(
+  editorRef: React.RefObject<PagedEditorRef | null>,
+  clientX: number,
+  clientY: number
+): Promise<DocxPointPosition | null> {
+  if (isWorkerViewer(editorRef.current)) return editorRef.current?.readPositionAtPoint(clientX, clientY) ?? null;
+  const flushed = await flushEditorInput(editorRef);
+  if (!flushed.ok && flushed.code !== 'editor-unavailable') throw flushed.error;
+  return editorRef.current?.getPositionAtPoint(clientX, clientY) ?? null;
+}
+
 const layoutIds = new WeakMap<DisplayListQueries, string>();
 let nextLayoutId = 0;
 
-function layoutIdOf(queries: DisplayListQueries): string {
+export function layoutIdOf(queries: DisplayListQueries): string {
   let id = layoutIds.get(queries);
   if (!id) {
     nextLayoutId += 1;
@@ -167,7 +181,8 @@ export function createPluginGeometry(
   resolve: (hit: PointPosition | null) => DocxPointPosition | null,
   queries: DisplayListQueries,
   access: () => AnchorGeometryAccess | null,
-  held: () => boolean = () => false
+  held: () => boolean = () => false,
+  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -240,6 +255,14 @@ export function createPluginGeometry(
       if (!shown()) return null;
       const position = resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
       return position ? { ...position, layoutId: layout.id } : null;
+    },
+    async readPositionAtPoint(clientX, clientY) {
+      if (!shown()) return null;
+      const position = readPoint
+        ? await readPoint(clientX, clientY)
+        : resolve(dom.getPositionAtPoint?.(clientX, clientY) ?? null);
+      return shown() && position && position.version === layout.version
+        ? { ...position, layoutId: layout.id } : null;
     },
     getAnchorGeometry(target) {
       if (!shown()) return unavailable();

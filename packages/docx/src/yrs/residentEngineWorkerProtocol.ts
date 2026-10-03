@@ -10,11 +10,16 @@ import type { PointPosition } from '../plugin-api';
 import type { DocxResolvedPointPosition } from './pointPosition';
 import type {
   DocxDisplayRange,
+  DocxDisplaySelectionInfo,
   DocxDisplaySelectionText,
   DocxSelectionUnit,
 } from './viewerSelection';
+import type { FindOptions } from '../utils/findReplace';
+import type { DocxFindDisplayMatch } from './findMatches';
 import type { CollaborationCursor } from '../collaboration/types';
+import type { DocxSidebarRead, DocxOutlineHeading } from './sidebarReads';
 import type { ResidentSearchResult } from './residentSearch';
+import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
 import type {
@@ -29,8 +34,15 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
-import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
+import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
+
+/** @internal */
+export interface ResidentEngineWorkerFontSync {
+  fontsBaseRevision?: number;
+}
 
 /** @internal */
 export type ResidentProposalOperation =
@@ -52,10 +64,16 @@ export interface ResidentProposalResponse {
 
 /** @internal */
 export type ResidentDocumentRead =
+  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'listContentControls'; options: DocxContentControlsOptions }
+  | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'findText'; request: DocxFindTextRequest }
+  | { kind: 'findMatches'; searchText: string; options: FindOptions; expectVersion: string }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
@@ -67,20 +85,38 @@ export type ResidentDocumentRead =
       expectVersion: string;
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
-  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
+  | { kind: 'selectionInfo'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'paragraphTarget'; story: string; paraId: string; expectVersion: string }
+  | { kind: 'commentTarget'; story: string; commentId: string; expectVersion: string }
+  | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
+  | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
+  | { kind: 'headings'; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
+  exportStructuredWithPages: string;
+  listContentControls: DocxContentControlsResult;
+  findContentControls: DocxContentControlsResult;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
+  findText: DocxFindTextResult;
+  findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
+  findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
   pointPosition: DocxResolvedPointPosition | null;
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
+  selectionInfo: DocxDisplaySelectionInfo | null;
+  paragraphTarget: DocxDisplayRange | null;
+  commentTarget: DocxDisplayRange | null;
+  revisionTarget: DocxDisplayRange | null;
   bookmarkPosition: number | null;
+  sidebar: DocxSidebarRead | null;
+  headings: DocxOutlineHeading[] | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */

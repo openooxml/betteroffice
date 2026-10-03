@@ -198,12 +198,14 @@ async function coldFrame(
   input: string,
   fontChains: Record<string, number[]>,
   mediaSources: string,
+  noteSeparators: Uint8Array,
   pages: DisplayPage[]
 ): Promise<RetainedFrame> {
   const cold = await createResidentEngineSession();
   try {
     cold.loadState(session.encodeState());
     cold.loadMediaSources(mediaSources);
+    cold.loadNoteSeparators(noteSeparators);
     cold.registerFont(FONT);
     cold.layoutDocumentWithRegionsRetained(input);
     let oracle = applyFrameDelta(
@@ -282,11 +284,14 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
       };
       const input = JSON.stringify(request);
       let mediaSources = '';
+      let noteSeparators: Uint8Array = new Uint8Array(0);
       const main = await createYrsSession();
       try {
         main.openDocx(bytes, true);
         main.adoptResidentWorkerLayout!(input);
-        mediaSources = main.residentWorkerSnapshot()!.mediaSources ?? '';
+        const snapshot = main.residentWorkerSnapshot()!;
+        mediaSources = snapshot.mediaSources ?? '';
+        noteSeparators = snapshot.noteSeparators ?? new Uint8Array(0);
       } finally {
         main.destroy();
       }
@@ -336,6 +341,7 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
         input,
         fontChains,
         mediaSources,
+        noteSeparators,
         hosts.owned!.displayList.pages
       );
       try {
@@ -351,6 +357,7 @@ test('viewport frames match a cold rebuild after every resident edit and scroll'
           input,
           fontChains,
           mediaSources,
+          noteSeparators,
           hosts.owned!.displayList.pages
         );
         expectPages(

@@ -9,6 +9,7 @@ import type {
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
 import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
+import { workerProposalAuthority } from './internals/workerProposalAuthority';
 
 export type EditorFlush =
   | { ok: true; editor: PagedEditorRef; session: YrsSession }
@@ -75,7 +76,7 @@ export async function flushedSession(
 }
 
 function refusal(session: YrsSession, failure: DocxEditFailure): DocxEditRefusal {
-  return { ok: false, version: session.version(), failure };
+  return { ok: false, version: workerProposalAuthority(session)?.geometry()?.version ?? session.version(), failure };
 }
 
 /** Refuses writes the editor's mode does not allow; suggesting mode needs `suggest` on every step. */
@@ -121,6 +122,8 @@ export async function applyEditBatch<Refusal = never>(
       },
     };
   }
+  const early = modeRefusal(session, mode(), request);
+  if (early) return { result: early };
   const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
   if (ready) {
     try {
@@ -144,8 +147,6 @@ export async function applyEditBatch<Refusal = never>(
       };
     }
   }
-  const early = modeRefusal(session, mode(), request);
-  if (early) return { result: early };
   const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
   if (!flushed.ok) return { flush: flushed };
   if (flushed.session !== session || pagedEditorRef.current?.getYrsSession() !== session) {
