@@ -7,6 +7,7 @@ import type {
   DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import type { YrsInputRef } from '../YrsInput';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -306,19 +307,24 @@ test('aborting a reveal stops following an unbuilt page after three seconds', as
   }
 });
 
-function paginatingApi() {
+function paginatingApi(session?: YrsSession) {
   const { scroller, host, scrolls } = pagedDom();
   const navigation = { epoch: 0 };
+  const focused: number[] = [];
   const heading = { pageIndex: 8, x: 20, y: 500, width: 0, height: 16 };
-  const laidOut = { ...unbuiltQueries(true, heading), pageCount: () => 10 } as DisplayListQueries;
-  const paginating = { ...laidOut, anchorRect: () => null } as DisplayListQueries;
+  const laidOut = {
+    ...unbuiltQueries(true, heading),
+    pageCount: () => 10,
+    pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: 0, width: 800, height: 1000 }),
+  } as DisplayListQueries;
+  const paginating = { ...laidOut, pageCount: () => 7, anchorRect: () => null } as DisplayListQueries;
   const hook = renderHook(
     (props: Props) =>
       usePagedScrollApi({
         pagesContainerRef: { current: host },
-        yrsInputRef: { current: null },
+        yrsInputRef: { current: { focus: () => focused.push(1) } as unknown as YrsInputRef },
         yrsSession: props.session ?? null,
-        yrsLocToDisplayPosition: () => null,
+        yrsLocToDisplayPosition: () => 5000,
         getScrollContainer: () => scroller,
         displayListQueries: props.queries,
         layout: props.layout,
@@ -327,9 +333,9 @@ function paginatingApi() {
         },
         navigationEpoch: () => navigation.epoch,
       }),
-    { initialProps: { layout: layout(7, true), queries: paginating } as Props }
+    { initialProps: { layout: layout(7, true), queries: paginating, session } as Props }
   );
-  return { ...hook, scroller, scrolls, navigation, laidOut, paginating };
+  return { ...hook, scroller, scrolls, navigation, focused, laidOut, paginating };
 }
 
 test('a position past a partial layout is scrolled to once the layout reaches it', async () => {
@@ -348,21 +354,46 @@ test('a position past a partial layout is scrolled to once the layout reaches it
   scroller.remove();
 });
 
-test('a position waiting for the layout drops on a newer navigation, another session or a full layout without it', async () => {
+test('a waiting position drops on a newer navigation, another session or an edit', async () => {
+  let version = '1';
+  const session = { version: () => version } as unknown as YrsSession;
   const drops: Array<(api: ReturnType<typeof paginatingApi>) => void> = [
     ({ navigation }) => {
       navigation.epoch += 1;
     },
     ({ rerender, paginating }) =>
       rerender({ layout: layout(9, true), queries: paginating, session: {} as YrsSession }),
-    ({ rerender, paginating }) => rerender({ layout: layout(10), queries: paginating }),
+    () => {
+      version = '2';
+    },
+    ({ result }) => result.current.scrollToPageImpl(9),
   ];
   for (const drop of drops) {
-    const api = paginatingApi();
+    version = '1';
+    const api = paginatingApi(session);
     await act(async () => api.result.current.scrollToPositionImpl(5000));
     await act(async () => drop(api));
-    await act(async () => api.rerender({ layout: layout(10), queries: api.laidOut }));
-    expect(api.scrolls).toHaveLength(0);
+    await act(async () => api.rerender({ layout: layout(10), queries: api.laidOut, session }));
+    expect(api.scrolls).toEqual(drop === drops[3] ? [8300] : []);
     api.scroller.remove();
   }
+});
+
+test('a paragraph navigation that waits for the layout still focuses the input', async () => {
+  const session = {
+    version: () => '1',
+    storyIds: () => ['body'],
+    paragraphs: () => [{ paraId: 'P1' }],
+    locateParagraph: () => ({ start: 0, end: 4 }),
+    setSelection: () => {},
+  } as unknown as YrsSession;
+  const { result, rerender, scroller, scrolls, focused, laidOut } = paginatingApi(session);
+  await act(async () => {
+    result.current.scrollToParaIdImpl('P1');
+  });
+  await act(async () => rerender({ layout: layout(10), queries: laidOut, session }));
+  await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+  expect(scrolls).toHaveLength(1);
+  expect(focused).toHaveLength(1);
+  scroller.remove();
 });

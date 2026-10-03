@@ -66,11 +66,6 @@ function isUnbuiltPage(queries: DisplayListQueries, pageIndex: number): boolean 
   return queries.displayList?.pages[pageIndex]?.unbuilt === true;
 }
 
-/** The full layout is on screen, so a position it doesn't place never will be. */
-function isLaidOut(layout: Layout, queries: DisplayListQueries): boolean {
-  return !layout.partial && queries.pageCount() === layout.pages.length;
-}
-
 export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrollApiReturn {
   const {
     pagesContainerRef,
@@ -171,6 +166,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     scrollRectIntoView(rect, false);
   }, [clearPendingRefine, displayListQueries, scrollRectIntoView, yrsSession]);
 
+  // A position the layout does not place yet (still paginating) is scrolled to once it does.
   const pendingPositionRef = useRef<{
     position: number;
     forParaIdScroll: boolean;
@@ -189,7 +185,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const rect = displayListQueries.anchorRect(pmPos);
       if (rect) {
         scrollAnchorIntoView(displayListQueries, rect, pmPos, !forParaIdScroll);
-      } else if (layout && !isLaidOut(layout, displayListQueries)) {
+      } else {
         pendingPositionRef.current = {
           position: pmPos,
           forParaIdScroll,
@@ -202,7 +198,6 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [
       clearPendingRefine,
       displayListQueries,
-      layout,
       navigationEpoch,
       onNavigationIntent,
       scrollAnchorIntoView,
@@ -221,15 +216,16 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       pendingPositionRef.current = null;
       return;
     }
-    if (displayListQueries.anchorRect(pending.position)) {
-      scrollToPositionImpl(pending.position, pending.forParaIdScroll);
-    } else if (layout && isLaidOut(layout, displayListQueries)) {
-      pendingPositionRef.current = null;
-    }
-  }, [displayListQueries, layout, navigationEpoch, scrollToPositionImpl, yrsSession]);
+    const rect = displayListQueries.anchorRect(pending.position);
+    if (!rect) return;
+    pendingPositionRef.current = null;
+    onNavigationIntent?.();
+    scrollAnchorIntoView(displayListQueries, rect, pending.position, !pending.forParaIdScroll);
+  }, [displayListQueries, navigationEpoch, onNavigationIntent, scrollAnchorIntoView, yrsSession]);
 
   const revealPositionImpl = useCallback(
     (position: number, signal?: AbortSignal): RevealPositionOutcome => {
+      pendingPositionRef.current = null;
       if (!Number.isInteger(position) || position < 0) return 'unsupported';
       if (!displayListQueries) return 'layout-unavailable';
       clearPendingRefine();
@@ -263,6 +259,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {
       pendingPageRef.current = null;
+      pendingPositionRef.current = null;
       clearPendingRefine();
       if (!Number.isInteger(pageNumber) || pageNumber < 1 || !displayListQueries) return;
       if (pageNumber > displayListQueries.pageCount()) {
