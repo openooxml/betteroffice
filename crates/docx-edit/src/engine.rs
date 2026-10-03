@@ -11660,6 +11660,239 @@ mod tests {
         .unwrap()
     }
 
+    fn selective_display_engine() -> (EngineSession, serde_json::Value, String) {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let section = r#"<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="6000" w:h="4000"/><w:pgMar w:top="400" w:right="400" w:bottom="400" w:left="400"/></w:sectPr>"#;
+        let rows: String = (0..24).map(|index| format!(
+            r#"<w:tr><w:trPr>{}</w:trPr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Cell {index}</w:t></w:r></w:p></w:tc></w:tr>"#,
+            if index == 0 { "<w:tblHeader/>" } else { "" }
+        )).collect();
+        let mut body = format!(
+            r#"<w:p><w:r><w:t>Editable paragraph</w:t></w:r><w:r><w:footnoteReference w:id="5"/></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>{rows}</w:tbl>"#
+        );
+        for index in 0..30 {
+            body.push_str(&format!(
+                r#"<w:p><w:pPr>{}</w:pPr><w:r><w:t>Filler paragraph {index}</w:t></w:r></w:p>"#,
+                if index % 10 == 9 { section } else { "" }
+            ));
+        }
+        body.push_str(section);
+        let engine = EngineSession::new(217);
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let fields = [serde_json::json!({
+            "type": "paragraph", "content": [
+                {"type": "simpleField", "fieldType": "PAGE", "instruction": " PAGE ",
+                    "content": [{"type": "run", "content": [{"type": "text", "text": "1"}]}]},
+                {"type": "simpleField", "fieldType": "NUMPAGES", "instruction": " NUMPAGES ",
+                    "content": [{"type": "run", "content": [{"type": "text", "text": "97"}]}]}
+            ]
+        })];
+        crate::seed::seed_blocks(
+            engine.doc(),
+            None,
+            &[
+                ("hf:header".to_owned(), &fields),
+                ("hf:footer".to_owned(), &fields),
+            ],
+        )
+        .unwrap();
+        engine
+            .doc()
+            .create_story("fn:5", "Footnote text", "Normal", "left")
+            .unwrap();
+        let shape = serde_json::json!({
+            "shapeType": "rect", "size": {"width": 190500, "height": 190500},
+            "position": {
+                "horizontal": {"relativeTo": "column", "posOffset": 0},
+                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+            },
+            "wrap": {"type": "inFront"}
+        });
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::new(),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        let deletion = engine
+            .doc()
+            .delete_range(
+                &crate::EditCtx::local("Ann", "2026-09-29T12:00:00Z").suggesting(),
+                crate::StoryRange::new("body", 3, 4),
+            )
+            .unwrap();
+        let sections: Vec<_> = (0..3)
+            .map(|index| {
+                serde_json::json!({
+                    "sectionId": format!("s{index}"),
+                    "pageSize": {"w": 300 + index * 30, "h": 200 + index * 20},
+                    "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20,
+                        "header": 5, "footer": 5},
+                    "headerFooterRefs": {"headerDefault": "header", "footerDefault": "footer"},
+                    "pageNumbering": {"start": 1,
+                        "format": if index == 0 { "lowerRoman" } else { "decimal" }}
+                })
+            })
+            .collect();
+        let request = serde_json::json!({
+            "bodyStory": "body", "regions": {"sections": sections},
+            "notes": {"contents": [{"id": 5, "noteKind": "footnote", "height": 0}]},
+            "measurement": {
+                "fontChains": {"liberation sans|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        (engine, request, deletion.revision_ids[0].clone())
+    }
+
+    #[test]
+    fn selective_display_conversion_matches_legacy_after_preview_edit_and_release() {
+        use docx_layout::display_list::resident_conversion_test_support::with_layout_conversion;
+
+        let mut runs = Vec::new();
+        for force_full in [false, true] {
+            let (engine, mut request, revision_id) = selective_display_engine();
+            let font_chains = request["measurement"]["fontChains"].clone();
+            let extras = |output: &serde_json::Value| {
+                serde_json::json!({
+                    "fontChains": font_chains,
+                    "headersFooters": output["headersFooters"]
+                })
+                .to_string()
+            };
+            let output: serde_json::Value = serde_json::from_str(
+                &engine
+                    .layout_document_with_regions_json(&request.to_string())
+                    .unwrap(),
+            )
+            .unwrap();
+            engine
+                .build_display_list_frame(&extras(&output), 0)
+                .unwrap();
+            engine.set_display_window(Some(0..1));
+            engine.set_windowed_incremental_builds(true);
+            request["renderEnv"]["revisionPreview"] = serde_json::json!({revision_id: "accepted"});
+            let output: serde_json::Value = serde_json::from_str(
+                &engine
+                    .layout_document_with_regions_json(&request.to_string())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(!engine.pagination.borrow().last_incremental);
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let (_, converted) = with_layout_conversion(force_full, || {
+                engine
+                    .build_display_list_frame(&extras(&output), epoch)
+                    .unwrap()
+            });
+            let mut snapshots = Vec::new();
+            let record =
+                || serde_json::to_value(engine.with_display_list(Clone::clone).unwrap()).unwrap();
+            let list = engine.with_display_list(Clone::clone).unwrap();
+            assert!(list.pages.len() >= 4);
+            assert!(!list.pages[0].unbuilt && list.pages[1..].iter().all(|page| page.unbuilt));
+            assert_eq!(converted, if force_full { list.pages.len() } else { 1 });
+            assert!(list.pages[0].header.is_some() && list.pages[0].footer.is_some());
+            assert!(!list.pages[0].note_areas.is_empty());
+            {
+                let pagination = engine.pagination.borrow();
+                let pages = &pagination.layout.as_ref().unwrap().pages;
+                assert!(
+                    pages
+                        .iter()
+                        .filter(|page| page
+                            .fragments
+                            .iter()
+                            .any(|f| matches!(f, Fragment::Table(_))))
+                        .count()
+                        > 1
+                );
+                assert!(pages.iter().any(|page| page.fragments.iter().any(
+                    |f| matches!(f, Fragment::Shape(shape) if shape.is_anchored == Some(true))
+                )));
+                assert!(pages.iter().any(|page| page.size != pages[0].size));
+                assert_eq!(pages[0].page_label.as_deref(), Some("i"));
+                assert!(
+                    pages.iter().any(|page| page.section_index == Some(1)
+                        && page.page_label.as_deref() == Some("1"))
+                );
+            }
+            snapshots.push(record());
+            let complete = || {
+                let rest = engine
+                    .with_display_list(|list| {
+                        list.pages
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, page)| page.unbuilt.then_some(index))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap();
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                with_layout_conversion(force_full, || {
+                    engine.build_display_pages_frame(&rest, epoch).unwrap()
+                });
+                assert_eq!(
+                    record(),
+                    serde_json::to_value(full_display_build(
+                        &engine,
+                        &engine.resident_region_display_extras().unwrap()
+                    ))
+                    .unwrap()
+                );
+            };
+            complete();
+            snapshots.push(record());
+            insert_x(&engine, "body", 5);
+            let before = engine.stats();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let (_, converted) = with_layout_conversion(force_full, || {
+                engine.apply_and_layout("body", epoch).unwrap()
+            });
+            let after = engine.stats();
+            assert_eq!(
+                after.incremental_display_builds,
+                before.incremental_display_builds + 1
+            );
+            if !force_full {
+                assert_eq!(
+                    converted as u64,
+                    after.rebuilt_display_pages - before.rebuilt_display_pages
+                );
+            }
+            snapshots.push(record());
+            complete();
+            snapshots.push(record());
+            let rest = engine
+                .with_display_list(|list| (1..list.pages.len()).collect::<Vec<_>>())
+                .unwrap();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let (_, converted) = with_layout_conversion(force_full, || {
+                engine.release_display_pages_frame(&rest, epoch).unwrap()
+            });
+            assert_eq!(converted, if force_full { rest.len() } else { 0 });
+            snapshots.push(record());
+            complete();
+            snapshots.push(record());
+            runs.push(snapshots);
+            docx_layout::clear_measure_fonts();
+        }
+        assert_eq!(runs[0].len(), runs[1].len());
+        for (step, (selective, legacy)) in runs[0].iter().zip(&runs[1]).enumerate() {
+            assert_eq!(selective, legacy, "step {step}");
+        }
+    }
+
     #[test]
     fn unbuilt_display_pages_build_on_request_and_match_a_full_build() {
         let (engine, extras) = paged_filler_engine(205, 48);
@@ -12146,6 +12379,8 @@ mod tests {
 
     #[test]
     fn an_edit_turns_re_placed_pages_outside_the_window_into_placeholders() {
+        use docx_layout::display_list::resident_conversion_test_support::with_layout_conversion;
+
         let (engine, extras) = paged_filler_engine(207, 40);
         engine.set_display_window(Some(0..1));
         engine.set_windowed_incremental_builds(true);
@@ -12189,16 +12424,23 @@ mod tests {
         let edited = engine.with_display_list(Clone::clone).unwrap();
         let windowed = {
             let pagination = engine.pagination.borrow();
-            docx_layout::build_resident_display_list_partial_observed(
-                pagination.input.as_ref().unwrap(),
-                pagination.layout.as_ref().unwrap(),
-                &extras,
-                &|index| index == 0,
-                &mut || {},
-            )
-            .unwrap()
-            .1
+            with_layout_conversion(true, || {
+                docx_layout::build_resident_display_list_partial_observed(
+                    pagination.input.as_ref().unwrap(),
+                    pagination.layout.as_ref().unwrap(),
+                    &extras,
+                    &|index| index == 0,
+                    &mut || {},
+                )
+                .unwrap()
+                .1
+            })
+            .0
         };
+        assert_eq!(
+            serde_json::to_value(&edited).unwrap(),
+            serde_json::to_value(&windowed).unwrap()
+        );
         assert!(!edited.pages[0].unbuilt);
         assert_eq!(
             edited.pages[0],
@@ -12287,6 +12529,7 @@ mod tests {
 
     #[test]
     fn a_full_windowed_build_keeps_only_the_window_and_the_caret_page() {
+        use docx_layout::display_list::resident_conversion_test_support::with_layout_conversion;
         use yrs::{Assoc, IndexedSequence};
 
         let (engine, extras) = paged_filler_engine(213, 160);
@@ -12337,15 +12580,37 @@ mod tests {
         engine.apply_and_layout("body", epoch).unwrap();
         let before = engine.stats();
         let epoch = engine.display.borrow().binary_frame_epoch;
-        engine
-            .build_display_list_frame(&format!("{extras} "), epoch)
-            .unwrap();
+        let (_, converted) = with_layout_conversion(false, || {
+            engine
+                .build_display_list_frame(&format!("{extras} "), epoch)
+                .unwrap()
+        });
+        assert_eq!(converted, 4);
         assert_eq!(
             engine.stats().incremental_display_builds,
             before.incremental_display_builds
         );
         let full = full_display_build(&engine, &extras);
         let windowed = engine.with_display_list(Clone::clone).unwrap();
+        let legacy = {
+            let pagination = engine.pagination.borrow();
+            with_layout_conversion(true, || {
+                docx_layout::build_resident_display_list_partial_observed(
+                    pagination.input.as_ref().unwrap(),
+                    pagination.layout.as_ref().unwrap(),
+                    &extras,
+                    &|index| index == 0 || (8..11).contains(&index),
+                    &mut || {},
+                )
+                .unwrap()
+                .1
+            })
+            .0
+        };
+        assert_eq!(
+            serde_json::to_value(&windowed).unwrap(),
+            serde_json::to_value(&legacy).unwrap()
+        );
         for (index, (page, full_page)) in windowed.pages.iter().zip(&full.pages).enumerate() {
             if index == 0 || (8..11).contains(&index) {
                 assert_eq!(page, full_page, "page {index} is built");
