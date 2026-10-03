@@ -5,6 +5,7 @@ import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type {
+  DocxContentControlsResult,
   DocxFindTextRequest,
   DocxFindTextResult,
   DocxParagraphIdentitySnapshot,
@@ -25,6 +26,7 @@ import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, t
 import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
+import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
 import { DocxAsyncOnlyError, DocxReplicaNotReadyError, routeViewerRefAccess, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -46,8 +48,12 @@ const PAGE_REFUSAL = {
   failure: { code: 'stale-layout', target: null, message: 'The layout is stale.' },
 } as const;
 const MATCHES = [{ paraId: 'p', match: 'hello', before: '', after: '' }];
+const CONTROLS: DocxContentControlsResult = {
+  ok: true, version: 'worker-v',
+  content: { schemaVersion: 1, anchorScope: 'session', includedStories: ['body'], controls: [], complete: true, diagnostics: [] },
+};
 
-function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList']) {
+function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false) {
   const events: string[] = [];
   const document = {} as Document;
   const state = { viewer, version: 'v' };
@@ -68,6 +74,11 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     applyEdits: mock(() => ({ ok: true, applied: true, changedStories: ['body'] })),
     validateEdits: mock(() => ({ ok: true, version: state.version })),
     findText: mock(() => ({ ok: true, version: state.version, matches: [], truncated: false })),
+    listContentControls: mock(() => CONTROLS),
+    findContentControls: mock(() => CONTROLS),
+    canUndo: () => false,
+    canRedo: () => false,
+    onUpdate: () => () => {},
     exportStructuredWithPagesFor: mock((): Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>> => PAGE_EXPORT),
     layoutFontRequirementsJson: mock(() => '[]'),
   } as unknown as YrsSession;
@@ -94,9 +105,18 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     relayout: mock(() => {}),
   };
   const pagedEditorRef = { current: editor as unknown as PagedEditorRef | null };
+  const bridge = {
+    session: () => session, rootStory: () => 'body', hasPendingInput: () => pendingReplica,
+    subscribe: () => () => {}, toolbarSelection: () => null, hasSelection: () => false,
+    runAfterPendingInput: mock(async () => { throw new Error('unexpected input admission'); }),
+  };
   const subscribers = new Set<(change: DocxDocumentChange) => void>();
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
+    const commands = useDocxCommandBinding({
+      session: bindCommands ? session : null, pagedEditorRef, bridgeRef: { current: bridge },
+      document, readOnly: true, mode: 'viewing', experimentalWorkerOpen: pendingReplica,
+    } as unknown as DocxCommandInputs);
     useDocxEditorRefApi({
       ref, document, documentFromYrs: () => document, historyStateRef: { current: document }, pagedEditorRef,
       experimentalWorkerOpen: pendingReplica, settledDisplayList,
@@ -106,7 +126,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
       comments: [{ id: 1 } as never], setComments: () => {}, setShowCommentsSidebar: sidebar,
       contentChangeSubscribersRef: { current: new Set() }, documentChangeSubscribersRef: { current: subscribers },
       selectionChangeSubscribersRef: { current: new Set() }, getCachedStyleResolver: createStyleResolver,
-      commentIdAllocator: createCommentIdAllocator(), commands: UNAVAILABLE_DOCX_COMMANDS,
+      commentIdAllocator: createCommentIdAllocator(), commands: bindCommands ? commands.controller.store : UNAVAILABLE_DOCX_COMMANDS,
       modeRef, allowHostProposalsRef,
       hostSearch: {
         search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
@@ -116,7 +136,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     });
     return ref;
   });
-  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar };
+  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar, bridge };
 }
 
 const WORKER_IDENTITIES: DocxParagraphIdentitySnapshot = {
@@ -327,6 +347,56 @@ function expectWorkerPageExport(host: ReturnType<typeof apiFor>) {
   expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
   expect(host.session.layoutFontRequirementsJson).not.toHaveBeenCalled();
 }
+
+test('viewer content-control reads answer from the worker without loading the replica', async () => {
+  const host = apiFor(true, true);
+  const worker = workerFor(host);
+  worker.documentRead.mockResolvedValue({ version: 'worker-v', value: CONTROLS });
+  const options = { stories: ['body'], maxControls: 1 } as const;
+  const query = { kind: 'ooxmlId', ooxmlId: '1' } as const;
+  expect(await host.api.listContentControls(options)).toEqual(CONTROLS);
+  expect(await host.api.findContentControls(query, options)).toEqual(CONTROLS);
+  expect(await host.api.listContentControls()).toEqual(CONTROLS);
+  expect(await host.api.findContentControls(query)).toEqual(CONTROLS);
+  expect(worker.documentRead.mock.calls.map(([read]) => read)).toEqual([
+    { kind: 'listContentControls', options },
+    { kind: 'findContentControls', query, options },
+    { kind: 'listContentControls', options: {} },
+    { kind: 'findContentControls', query, options: {} },
+  ]);
+  expect(host.session.listContentControls).not.toHaveBeenCalled();
+  expect(host.session.findContentControls).not.toHaveBeenCalled();
+  expectNoReplica(host);
+});
+
+test('editor content-control reads still flush and read the main session', async () => {
+  const host = apiFor(false, true);
+  const worker = workerFor(host);
+  const options = { stories: ['body'] } as const;
+  const query = { kind: 'tag', tag: 'field' } as const;
+  const listed = host.api.listContentControls(options);
+  host.replica!.start();
+  expect(await listed).toEqual(CONTROLS);
+  expect(await host.api.findContentControls(query, options)).toEqual(CONTROLS);
+  expect(host.session.listContentControls).toHaveBeenCalledWith(options);
+  expect(host.session.findContentControls).toHaveBeenCalledWith(query, options);
+  expect(host.editor.flushPendingInput).toHaveBeenCalledTimes(2);
+  expect(worker.documentRead).not.toHaveBeenCalled();
+});
+
+test('viewer proposal decisions still use the worker after a refused revision command', async () => {
+  const host = apiFor(true, true, undefined, true);
+  const worker = workerFor(host);
+  const refusal = await host.api.commands.execute('reviewAccept', { revisionId: 'revision' });
+  expect(refusal).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(host.bridge.runAfterPendingInput).not.toHaveBeenCalled();
+  expectNoReplica(host);
+  await worker.authority.initialize();
+  const request = { expectVersion: host.session.version(), expectPreviewVersion: 0, changes: [] };
+  expect(await host.api.setProposalStates(request)).toEqual(worker.snapshot.result!);
+  expect(worker.proposal).toHaveBeenLastCalledWith({ kind: 'setStates', request });
+  expectNoReplica(host);
+});
 
 test('viewer paged export reads the worker layout without a replica', async () => {
   const host = apiFor(true, true);

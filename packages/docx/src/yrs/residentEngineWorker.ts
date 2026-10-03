@@ -16,7 +16,8 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
-import { readResidentSearch } from './residentSearch';
+import { findBodyMatches } from './findMatches';
+import { readResidentSearch, residentBodyPositions } from './residentSearch';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
@@ -579,6 +580,12 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       case 'exportStructuredWithPages':
         value = session.exportStructuredWithPagesJson(request.read.options, request.read.currentRequest);
         break;
+      case 'listContentControls':
+        value = session.listContentControls(request.read.options);
+        break;
+      case 'findContentControls':
+        value = session.findContentControls(request.read.query, request.read.options);
+        break;
       case 'paragraphIdentities':
         value = session.paragraphIdentities();
         break;
@@ -592,6 +599,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         break;
       case 'findText':
         value = engine.findText(request.read.request);
+        break;
+      case 'findMatches':
+        value = engine.version() !== request.read.expectVersion ? null : findBodyMatches(
+          session.geometryReader,
+          residentBodyPositions(session.geometryReader),
+          request.read.searchText,
+          request.read.options
+        );
         break;
       case 'navigationTarget':
         value = resolveNavigationTarget(

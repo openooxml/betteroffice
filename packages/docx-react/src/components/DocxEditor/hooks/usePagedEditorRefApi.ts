@@ -99,7 +99,7 @@ interface RefApiInputs {
   displayPositionToYrsLocRef: React.MutableRefObject<PagedEditorRef['displayPositionToYrsLoc']>;
   getPositionAtPointRef: React.MutableRefObject<PagedEditorRef['getPositionAtPoint']>;
   readPositionAtPointRef: React.MutableRefObject<PagedEditorRef['readPositionAtPoint']>;
-  viewerReadsRef: React.RefObject<Pick<UsePagedEditorRefApiOptions, 'readViewerSelectionInfo' | 'navigateViewer'>>;
+  viewerReadsRef: React.RefObject<Pick<UsePagedEditorRefApiOptions, 'readViewerSelectionInfo' | 'readViewerFindMatches' | 'navigateViewer'>>;
   /** The input holds the selection in root display positions, with no document here. */
   viewerSelectionRef: React.MutableRefObject<boolean>;
 }
@@ -250,6 +250,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getPositionAtPoint: (clientX, clientY) => getPositionAtPointRef.current(clientX, clientY),
     readPositionAtPoint: (clientX, clientY) => readPositionAtPointRef.current(clientX, clientY),
     isWorkerViewer: () => viewerSelectionRef.current,
+    readViewerFindMatches: (searchText, options) => viewerReadsRef.current.readViewerFindMatches?.(searchText, options) ?? Promise.resolve(null),
     readViewerSelectionInfo: () => viewerReadsRef.current.readViewerSelectionInfo?.() ?? Promise.resolve(null),
     navigateViewer: (target, options) => {
       const epoch = ++inputs.navigationEpochRef.current;
@@ -410,6 +411,7 @@ export interface UsePagedEditorRefApiOptions {
   readPositionAtPoint?: PagedEditorRef['readPositionAtPoint'];
   viewerSelection?: boolean;
   readViewerSelectionInfo?: PagedEditorRef['readViewerSelectionInfo'];
+  readViewerFindMatches?: PagedEditorRef['readViewerFindMatches'];
   navigateViewer?: (target: Parameters<PagedEditorRef['navigateViewer']>[0], options?: ScrollToParaIdOptions, current?: () => boolean) => Promise<boolean>;
 }
 
@@ -524,8 +526,10 @@ export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {
   ]);
 
   useEffect(() => {
-    if (onReadyRef.current && yrsSession && replicaReady) onReadyRef.current(buildRefApi(inputs));
-  }, [layout, runLayoutPipeline, scrollToParaIdImpl, scrollToPageImpl, yrsSession, replicaReady]);
+    if (onReadyRef.current && yrsSession && (viewerSelectionRef.current ? layout !== null : replicaReady)) {
+      onReadyRef.current(buildRefApi(inputs));
+    }
+  }, [layout, runLayoutPipeline, scrollToParaIdImpl, scrollToPageImpl, yrsSession, replicaReady, viewerSelection]);
 }
 
 export interface UsePagedEditorCommandBridgeOptions {

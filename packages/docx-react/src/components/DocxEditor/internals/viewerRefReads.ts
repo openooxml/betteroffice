@@ -1,5 +1,6 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { DocxDisplayRange, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { DocxDisplayRange, DocxFindDisplayMatch, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { FindOptions } from '@betteroffice/docx/utils/findReplace';
 import type { ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import type { DocxSelectionInfo } from '../../DocxEditor';
 import { isPresented, presentedWorkerVersion } from './layoutProvenance';
@@ -76,4 +77,26 @@ export async function navigateViewer(
     if (attempt === 4 || !await beforeDeadline(access.awaitFrame(queries, deadline - Date.now()), deadline)) return false;
   }
   return false;
+}
+
+export async function readViewerFindMatches(
+  access: ViewerRefReadAccess,
+  searchText: string,
+  options: FindOptions
+): Promise<{ version: string; matches: DocxFindDisplayMatch[] } | null> {
+  const deadline = Date.now() + 10_000;
+  for (let attempt = 0; attempt < 5 && access.current(); attempt += 1) {
+    const queries = access.queries();
+    const expectVersion = frameVersion(access, queries);
+    if (expectVersion === null) return null;
+    const outcome = await beforeDeadline(readAt(access.read, {
+      kind: 'findMatches', searchText, options, expectVersion,
+    }), deadline);
+    if (!access.current() || !outcome) return null;
+    if (outcome.status === 'ok' && outcome.value && frameVersion(access, access.queries()) === expectVersion) {
+      return { version: expectVersion, matches: outcome.value };
+    }
+    if (attempt === 4 || !await beforeDeadline(access.awaitFrame(queries, deadline - Date.now()), deadline)) return null;
+  }
+  return null;
 }

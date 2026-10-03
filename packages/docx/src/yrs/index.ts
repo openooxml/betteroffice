@@ -81,6 +81,7 @@ export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
 export * from './findParagraphs';
+export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';

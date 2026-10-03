@@ -9,12 +9,15 @@ import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
 import { readResidentSearch } from './residentSearch';
+import { findBodyMatches } from './findMatches';
+import { createYrsInputPositionMap } from './inputPositionMap';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
 import type {
   DocxEditRequest,
+  DocxContentControlsResult,
   DocxParagraphAnchor,
   DocxProposalInput,
   YrsResidentCaretRect,
@@ -2695,6 +2698,44 @@ describe('worker proposals during sliced completion', () => {
     import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
   )))));
 
+  test('content-control reads equal a main session opened from the same package', async () => {
+    const bytes = new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '__fixtures__/content-controls/template.docx'
+    )));
+    const engine = await createResidentEngineSession(undefined, 97200);
+    const main = await createYrsSession({ clientId: 97200 });
+    const w = worker();
+    Object.assign(w.harness.session, engine);
+    const normalize = (result: DocxContentControlsResult) => ({ ...result, version: '<version>' });
+    try {
+      expect((await w.send({ type: 'open', bytes: bytes.buffer })).ok).toBe(true);
+      main.openDocx(bytes, true);
+      const listed = main.listContentControls();
+      if (!listed.ok) throw new Error(listed.failure.message);
+      expect(new Set(listed.content.controls.map(({ placement }) => placement))).toEqual(
+        new Set(['inline', 'block'])
+      );
+      const query = { kind: 'ooxmlId', ooxmlId: listed.content.controls[0]!.ooxmlId! } as const;
+      for (const options of [{}, { maxControls: 1 }, { stories: ['body'] as const }]) {
+        for (const read of [
+          { kind: 'listContentControls', options },
+          { kind: 'findContentControls', query, options },
+        ] satisfies ResidentDocumentRead[]) {
+          const reply = await w.send({ type: 'documentRead', read });
+          if (!reply.ok || !reply.read) throw new Error('expected a content-control read');
+          expect(normalize(reply.read.value as DocxContentControlsResult)).toEqual(normalize(
+            read.kind === 'listContentControls'
+              ? main.listContentControls(options)
+              : main.findContentControls(query, options)
+          ));
+        }
+      }
+    } finally {
+      main.destroy();
+      engine.destroy();
+    }
+  });
+
   async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
@@ -3123,6 +3164,34 @@ describe('worker proposals during sliced completion', () => {
       expect(calls.filter((call) => call === 'begin')).toHaveLength(1);
       await expectFullLayout(completed);
     } finally {
+      engine.destroy();
+    }
+  });
+
+  test('find matches read equals the replica and rejects a different version', async () => {
+    const { w, engine } = await proposalWorker();
+    const replica = await createYrsSession();
+    try {
+      replica.loadState(engine.encodeState());
+      const expectVersion = engine.proposalEngine.version();
+      const options = { matchCase: false, matchWholeWord: true };
+      const matches = findBodyMatches(replica, (loc) => yrsLocToProjectedDisplayPosition(
+        replica,
+        (root) => createYrsPositionProjection(replica, root),
+        loc,
+        'body',
+        (story) => createYrsInputPositionMap(story, replica.paragraphSpans(story))
+      ), 'paragraph', options);
+      expect(matches).toHaveLength(40);
+      const read = { kind: 'findMatches', searchText: 'paragraph', options, expectVersion } as const;
+      const reply = await w.send({ type: 'documentRead', read });
+      expect(reply.ok && reply.read).toEqual({ version: expectVersion, value: matches });
+      const stale = await w.send({
+        type: 'documentRead', read: { ...read, expectVersion: `${expectVersion}-stale` },
+      });
+      expect(stale.ok && stale.read).toEqual({ version: expectVersion, value: null });
+    } finally {
+      replica.destroy();
       engine.destroy();
     }
   });
