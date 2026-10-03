@@ -29,6 +29,7 @@ import type {
   DocxParagraphSavePlan,
 } from './paragraphIdentity';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -494,7 +495,10 @@ export interface YrsRevisionReceipt {
   revisionId: string | null;
 }
 
-/** Where the replacement text landed; after the struck-out text when suggesting. */
+/**
+ * Where an edit landed, in whole characters: the inserted text (after the struck-out text when
+ * suggesting), or what a delete left (collapsed when plain, the struck-out text when suggesting).
+ */
 export interface YrsReplaceReceipt extends YrsRevisionReceipt {
   range?: YrsStoryRange;
 }
@@ -1179,12 +1183,12 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
-  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
    */
-  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
   replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
@@ -1215,7 +1219,7 @@ export interface YrsSession extends CollaborationReplica {
     at: YrsLoc,
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
-  ): YrsRevisionReceipt;
+  ): YrsReplaceReceipt;
   /**
    * Sets the value of a content-control embed addressed by stable payload id. A string fills a
    * text control's content as one version-checked step and throws when the fill is refused.
@@ -2116,20 +2120,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
       return cloneSelection(cachedSelection);
     },
-    encodeSelection: () => {
-      const encoded = JSON.parse(session.encoded_selection()) as {
-        story: string;
-        anchor: number[];
-        head: number[];
-      } | null;
-      return encoded
-        ? {
-            story: encoded.story,
-            anchor: Uint8Array.from(encoded.anchor),
-            head: Uint8Array.from(encoded.head),
-          }
-        : null;
-    },
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     resolveSelection: (cursor) => {
       try {
         return JSON.parse(
@@ -2317,7 +2308,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     deleteRange: (range, suggesting) => {
@@ -2334,7 +2325,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     replaceRange: (range, text, suggesting) => {
@@ -2473,7 +2464,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
               suggesting?.name,
               suggesting?.date
             )
-          ) as YrsRevisionReceipt
+          ) as YrsReplaceReceipt
       );
     },
     setContentControlValue: (embedId, value) => {
