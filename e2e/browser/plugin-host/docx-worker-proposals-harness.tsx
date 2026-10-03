@@ -45,6 +45,7 @@ const probe = {
   layoutComplete: null as number | null,
   renderedDomContextCalls: 0,
   contentChanges: [] as { bodyContainsProposedText: boolean }[],
+  documentChanges: [] as string[],
   load: null as { version: string; sessionVersion: string; snapshotVersion: string } | null,
   events: { load: 0, 'proposal-change': 0, 'layout-change': 0 },
   eventSerial: 0,
@@ -60,6 +61,7 @@ const probe = {
       layoutComplete: this.layoutComplete,
       renderedDomContextCalls: this.renderedDomContextCalls,
       contentChanges: [...this.contentChanges],
+      documentChanges: [...this.documentChanges],
       load: this.load,
       events: { ...this.events },
       errors: [...this.errors],
@@ -232,6 +234,7 @@ function Harness() {
             });
           } : undefined
         }
+        onDocumentChange={reportChanges ? ({ version }) => { probe.documentChanges.push(version); } : undefined}
         onError={(error) => probe.errors.push(error.message)}
         onPluginError={(error) => probe.errors.push(String(error.error))}
       />
