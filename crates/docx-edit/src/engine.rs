@@ -12181,7 +12181,8 @@ mod tests {
 
     #[test]
     fn windowed_placeholder_span_frames_match_with_local_lowering_on_and_off() {
-        let mut engines: Vec<_> = [false, true]
+        // Building an engine clears the thread's measurement fonts, so each runs its edits first.
+        let runs: Vec<Vec<_>> = [false, true]
             .into_iter()
             .map(|enabled| {
                 let (engine, extras) = paged_filler_engine(216, 48);
@@ -12194,52 +12195,56 @@ mod tests {
                     crate::frame_delta::apply_placeholder_test_frame(&full, &mut retained);
                 assert!(applied.pages.len() >= 4);
                 assert!(applied.pages[1..].iter().all(|page| page.unbuilt));
-                (engine, retained)
+                ["x", "y", "z"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(edit, text)| {
+                        engine
+                            .doc()
+                            .insert_text(
+                                &crate::EditCtx::local("", ""),
+                                crate::Position::new("body", 3 + edit as u32),
+                                text,
+                                crate::FormatPolicy::Inherit,
+                            )
+                            .unwrap();
+                        let before = engine.with_display_list(Clone::clone).unwrap();
+                        let epoch = engine.display.borrow().binary_frame_epoch;
+                        let bytes = engine.apply_and_layout("body", epoch).unwrap();
+                        let next =
+                            crate::frame_delta::apply_placeholder_test_frame(&bytes, &mut retained);
+                        assert_eq!(next, engine.with_display_list(Clone::clone).unwrap());
+                        let operation_count =
+                            u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
+                        let ranges: Vec<_> = (0..operation_count)
+                            .map(|op| {
+                                crate::frame_delta::FRAME_HEADER_LEN
+                                    + op * crate::frame_delta::PAGE_OP_LEN
+                            })
+                            .filter(|&record| {
+                                bytes[record] == crate::frame_delta::PAGE_OP_SHIFT_RANGE
+                            })
+                            .collect();
+                        assert_eq!(ranges.len(), 1);
+                        let record = ranges[0];
+                        for (index, page) in next.pages.iter().enumerate().skip(1) {
+                            assert!(page.unbuilt);
+                            let [start, end] = before.pages[index].position_span.unwrap();
+                            assert_eq!(page.position_span, Some([start + 1, end + 1]));
+                            let first = u32::from_le_bytes(
+                                bytes[record + 4..record + 8].try_into().unwrap(),
+                            ) as usize;
+                            let count = u32::from_le_bytes(
+                                bytes[record + 24..record + 28].try_into().unwrap(),
+                            ) as usize;
+                            assert!((first..first + count).contains(&index));
+                        }
+                        next
+                    })
+                    .collect()
             })
             .collect();
-        for (edit, text) in ["x", "y", "z"].into_iter().enumerate() {
-            let mut applied = Vec::new();
-            for (engine, retained) in &mut engines {
-                engine
-                    .doc()
-                    .insert_text(
-                        &crate::EditCtx::local("", ""),
-                        crate::Position::new("body", 3 + edit as u32),
-                        text,
-                        crate::FormatPolicy::Inherit,
-                    )
-                    .unwrap();
-                let before = engine.with_display_list(Clone::clone).unwrap();
-                let epoch = engine.display.borrow().binary_frame_epoch;
-                let bytes = engine.apply_and_layout("body", epoch).unwrap();
-                let next = crate::frame_delta::apply_placeholder_test_frame(&bytes, retained);
-                assert_eq!(next, engine.with_display_list(Clone::clone).unwrap());
-                let operation_count =
-                    u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
-                let ranges: Vec<_> = (0..operation_count)
-                    .map(|op| {
-                        crate::frame_delta::FRAME_HEADER_LEN + op * crate::frame_delta::PAGE_OP_LEN
-                    })
-                    .filter(|&record| bytes[record] == crate::frame_delta::PAGE_OP_SHIFT_RANGE)
-                    .collect();
-                assert_eq!(ranges.len(), 1);
-                let record = ranges[0];
-                for (index, page) in next.pages.iter().enumerate().skip(1) {
-                    assert!(page.unbuilt);
-                    let [start, end] = before.pages[index].position_span.unwrap();
-                    assert_eq!(page.position_span, Some([start + 1, end + 1]));
-                    let first =
-                        u32::from_le_bytes(bytes[record + 4..record + 8].try_into().unwrap())
-                            as usize;
-                    let count =
-                        u32::from_le_bytes(bytes[record + 24..record + 28].try_into().unwrap())
-                            as usize;
-                    assert!((first..first + count).contains(&index));
-                }
-                applied.push(next);
-            }
-            assert_eq!(applied[0], applied[1]);
-        }
+        assert_eq!(runs[0], runs[1]);
         docx_layout::clear_measure_fonts();
     }
 
