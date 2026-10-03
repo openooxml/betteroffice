@@ -7,7 +7,6 @@ import type {
   DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
-import type { YrsInputRef } from '../YrsInput';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -326,7 +325,7 @@ function paginatingApi(session?: YrsSession) {
     (props: Props) =>
       usePagedScrollApi({
         pagesContainerRef: { current: host },
-        yrsInputRef: { current: { focus: () => focused.push(1) } as unknown as YrsInputRef },
+        yrsInputRef: { current: { focus: () => focused.push(1) } as never },
         yrsSession: props.session ?? null,
         yrsLocToDisplayPosition: () => 5000,
         getScrollContainer: () => scroller,
