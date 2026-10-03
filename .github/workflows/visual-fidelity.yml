@@ -277,6 +277,54 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  docx-large-synthetic:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/docx-large-synthetic
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: docx-large-synthetic
+          workspaces: . -> target/docx-large-synthetic
+
+      - name: Compile the synthetic DOCX benchmark
+        run: cargo test --locked --release -p betteroffice-docx-edit --test large_document_scaling --no-run --message-format=json > "${RUNNER_TEMP}/docx-large-synthetic-build.jsonl"
+
+      - name: Measure synthetic DOCX pagination and peak process memory
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import resource
+          import subprocess
+          from pathlib import Path
+
+          messages = (Path(os.environ['RUNNER_TEMP']) / 'docx-large-synthetic-build.jsonl').read_text().splitlines()
+          executables = [message['executable'] for line in messages
+                         if (message := json.loads(line)).get('reason') == 'compiler-artifact'
+                         and message['target']['name'] == 'large_document_scaling'
+                         and message.get('executable')]
+          if len(executables) != 1:
+              raise SystemExit('Expected one synthetic DOCX test executable')
+          result = subprocess.run([executables[0], '--ignored', '--nocapture'])
+          peak_rss_kib = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
+          ceiling_kib = 2 * 1024 * 1024
+          print(f'peak_rss_kib={peak_rss_kib} ceiling_kib={ceiling_kib}', flush=True)
+          if result.returncode:
+              raise SystemExit(result.returncode)
+          if peak_rss_kib > ceiling_kib:
+              raise SystemExit('Synthetic DOCX process exceeded the 2 GiB memory ceiling')
+          PY
+
   docx-benchmark:
     needs: [prepare, native-build]
     if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
