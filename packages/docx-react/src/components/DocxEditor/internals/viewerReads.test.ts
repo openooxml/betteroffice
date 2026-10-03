@@ -11,10 +11,10 @@ test('a null value at the requested version is an ok read', async () => {
 
 test('a mismatched version is superseded rather than a null value', async () => {
   const read = (async () => ({ version: 'B', value: null })) as ResidentEngineWorkerClient['documentRead'];
-  expect(await readAt(read, request)).toEqual({ status: 'superseded', version: 'B' });
+  expect(await readAt(read, request)).toEqual({ status: 'superseded' });
 });
 
-test('a rejected read is superseded with no version', async () => {
+test('a rejected read is superseded', async () => {
   const read = (async () => { throw new Error('read failed'); }) as ResidentEngineWorkerClient['documentRead'];
-  expect(await readAt(read, request)).toEqual({ status: 'superseded', version: null });
+  expect(await readAt(read, request)).toEqual({ status: 'superseded' });
 });

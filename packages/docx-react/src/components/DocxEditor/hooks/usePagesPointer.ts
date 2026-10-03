@@ -544,7 +544,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      bumpInputEpoch();
+      // A right-click leaves a viewer selection in place, so its context menu acts on it.
+      if (!(viewerSelection && e.button === 2)) bumpInputEpoch();
       clearPendingGesture();
       pendingPartCaretRef.current = null;
       if (e.button === 2) {
@@ -650,6 +651,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setIsFocused,
       setSelectionRects,
       setTextSelection,
+      viewerSelection,
       yrsRootStory,
       yrsSession,
     ]

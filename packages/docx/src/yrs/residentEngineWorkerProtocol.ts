@@ -66,14 +66,7 @@ export type ResidentDocumentRead =
       expectVersion: string;
     }
   | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
-  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
-  | {
-      kind: 'stickyPosition';
-      story: string;
-      anchor: YrsStickyPosition;
-      head: YrsStickyPosition;
-      expectVersion: string;
-    };
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
@@ -87,7 +80,6 @@ export interface ResidentDocumentReadValues {
   selectionUnit: DocxDisplayRange | null;
   selectionText: DocxDisplaySelectionText | null;
   bookmarkPosition: number | null;
-  stickyPosition: DocxDisplayRange | null;
 }
 
 /** How long a warm waits for the host's compiled module before loading the engine itself. */
@@ -268,6 +260,8 @@ export type ResidentEngineWorkerResponse = (
       /** The document version the frame lays out. */
       documentVersion?: string;
       documentPreview?: boolean;
+      /** The frame lays out the whole document as opened, before any change. */
+      documentAsOpened?: boolean;
       /** Characters an applyDelete removed. */
       deletedUnits?: number;
       /** The worker replica's yrs state vector after this operation, so the

@@ -3,7 +3,7 @@ import type { ResidentDocumentReadValues } from '@betteroffice/docx/yrs/resident
 
 export type ViewerReadOutcome<V> =
   | { status: 'ok'; version: string; value: V }
-  | { status: 'superseded'; version: string | null };
+  | { status: 'superseded' };
 
 type VersionedRead = Extract<ResidentDocumentRead, { expectVersion: string }>;
 
@@ -15,8 +15,8 @@ export async function readAt<K extends VersionedRead['kind']>(
     const reply = await read<K>(request);
     return reply.version === request.expectVersion
       ? { status: 'ok', version: reply.version, value: reply.value }
-      : { status: 'superseded', version: reply.version };
+      : { status: 'superseded' };
   } catch {
-    return { status: 'superseded', version: null };
+    return { status: 'superseded' };
   }
 }

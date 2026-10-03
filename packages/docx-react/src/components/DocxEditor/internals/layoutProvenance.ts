@@ -15,6 +15,7 @@ export function sourceVersionOf(target: object | null | undefined): string | nul
 export interface WorkerFrameProvenance {
   version: string;
   preview: boolean;
+  asOpened: boolean;
 }
 
 const workerFrames = new WeakMap<object, WorkerFrameProvenance>();
@@ -23,9 +24,10 @@ const workerFrames = new WeakMap<object, WorkerFrameProvenance>();
 export function stampWorkerFrameVersion(
   target: object,
   version: string | null | undefined,
-  preview = false
+  preview = false,
+  asOpened = false
 ): void {
-  if (version != null) workerFrames.set(target, { version, preview });
+  if (version != null) workerFrames.set(target, { version, preview, asOpened });
 }
 
 /** The worker document version `target` shows, or null for a frame the worker did not lay out. */

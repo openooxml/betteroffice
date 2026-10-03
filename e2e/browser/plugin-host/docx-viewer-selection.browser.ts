@@ -73,6 +73,19 @@ async function copied(page: Page): Promise<string> {
   return text;
 }
 
+async function copiedNow(page: Page): Promise<string> {
+  await page.evaluate(async (sentinel) => {
+    (window as unknown as ViewerWindow).__viewerSelectionProbe.copies.length = 0;
+    await navigator.clipboard.writeText(sentinel);
+  }, SENTINEL);
+  await page.keyboard.press('ControlOrMeta+C');
+  await page.waitForTimeout(200);
+  return page.evaluate(async () => {
+    const copies = (window as unknown as ViewerWindow).__viewerSelectionProbe.copies;
+    return copies.at(-1) ?? (await navigator.clipboard.readText());
+  });
+}
+
 async function paragraph(page: Page, index: number) {
   return page.evaluate(
     (n) => (window as unknown as ViewerWindow).__viewerSelectionProbe.paragraphText(n),
@@ -186,7 +199,7 @@ test('select-all copies the whole body', async ({ page }) => {
   await expectNoMainThreadDocument(page, instantiations);
 });
 
-test('a selection keeps its text across a proposal, and a triple-click right after it selects', async ({ page }) => {
+test('a proposal clears the selection, and a triple-click right after it selects', async ({ page }) => {
   await open(page);
   const instantiations = await wasmInstantiations(page);
   const { x, y } = await pagePoint(page, 0.35, FIRST_LINE.fy);
@@ -213,7 +226,7 @@ test('a selection keeps its text across a proposal, and a triple-click right aft
     });
     if (!result.ok) throw new Error('the proposal failed');
   });
-  await expect.poll(() => copied(page)).toBe(word);
+  await expect.poll(() => copiedNow(page)).toBe(SENTINEL);
   await page.mouse.click(x, y, { clickCount: 3 });
   await expect.poll(async () => (await copied(page)).startsWith('P1 ')).toBe(true);
   await expectNoMainThreadDocument(page, instantiations);

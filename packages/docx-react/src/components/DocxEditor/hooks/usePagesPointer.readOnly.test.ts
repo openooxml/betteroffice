@@ -117,17 +117,21 @@ const canvasOf = () => host.firstElementChild as HTMLCanvasElement;
 test('P1-6: a pending viewer bookmark cannot override a newer keyboard selection', async () => {
   const linked = fakeQueries();
   linked.isReady = () => true;
-  linked.visualLineAtPosition = (position) => ({ from: 1, to: 80, position }) as unknown as
+  linked.visualLinesOnPage = (pageIndex) => (pageIndex === 0 ? [{ pageIndex: 0, from: 1, to: 80 }] : []) as unknown as
+    ReturnType<DisplayListQueries['visualLinesOnPage']>;
+  linked.visualLineAtPosition = (position) => (position >= 1 && position <= 80
+    ? { pageIndex: 0, from: 1, to: 80 }
+    : null) as
     ReturnType<DisplayListQueries['visualLineAtPosition']>;
   (linked.displayList.pages[0] as { primitives: unknown[] }).primitives = [{
     kind: 'text', text: 'linked text', x: 0, baselineY: 410, width: 800,
     font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 80, href: '#target',
   }];
-  stampWorkerFrameVersion(linked, 'A', false);
+  stampWorkerFrameVersion(linked, 'A', false, false);
   const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
-  const read = ((request: ResidentDocumentRead) => new Promise((resolve) => {
+  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
     pending.push({ request, resolve });
-  })) as ResidentEngineWorkerClient['documentRead'];
+  })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const ref = createRef<YrsInputRef>();
   const input = render(createElement(ViewerInput, {
     ref, read, story: 'body', queries: linked, document: { isDisplayOnly: () => false },
@@ -156,6 +160,56 @@ test('P1-6: a pending viewer bookmark cannot override a newer keyboard selection
   await act(async () => { bookmark!.resolve({ version: 'A', value: 60 }); });
   expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 21 });
   expect(scrolled).toEqual([]);
+});
+
+test('a right-click inside a viewer selection keeps it for the context-menu copy', async () => {
+  const queries = fakeQueries();
+  stampWorkerFrameVersion(queries, 'A', false, false);
+  const pending: Array<{ request: ResidentDocumentRead; resolve(value: { version: string; value: unknown }): void }> = [];
+  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve) => {
+    pending.push({ request, resolve });
+  })) as unknown as ResidentEngineWorkerClient['documentRead'];
+  const ref = createRef<YrsInputRef>();
+  render(createElement(ViewerInput, {
+    ref, read, story: 'body', queries, document: { isDisplayOnly: () => false },
+    onSelectionChange: () => {},
+  }));
+  let gesture = 0;
+  const beginGesture = ref.current!.beginGesture!;
+  ref.current!.beginGesture = () => { gesture = beginGesture(); return gesture; };
+  const { opts } = options({
+    viewerSelection: true,
+    yrsSession: null,
+    yrsInputRef: ref,
+    displayListQueries: queries,
+    getYrsPositionProjection: () => null,
+  });
+  renderHook(() => usePagesPointer(opts));
+  mouse('mousedown', 200, 400, canvasOf());
+  mouse('mousemove', 450, 600, window);
+  await nextFrame();
+  mouse('mouseup', 450, 600, window);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 45 });
+  const selectionGesture = gesture;
+  expect(ref.current!.isGestureCurrent!(selectionGesture)).toBe(true);
+  const pendingCopy = ref.current!.readSelectedText!()!.catch((error: Error) => error);
+  fireEvent.mouseDown(canvasOf(), { button: 2, clientX: 300, clientY: 400 });
+  expect(gesture).toBe(selectionGesture);
+  expect(ref.current!.isGestureCurrent!(selectionGesture)).toBe(true);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 20, head: 45 });
+  const copy = ref.current!.readSelectedText!()!;
+  const caret = pending.shift()!;
+  expect(caret.request).toEqual({
+    kind: 'selectionText', story: 'body', anchor: 20, head: 20, expectVersion: 'A',
+  });
+  await act(async () => { caret.resolve({ version: 'A', value: { text: '', range: null } }); });
+  const range = pending.shift()!;
+  expect(range.request).toEqual({
+    kind: 'selectionText', story: 'body', anchor: 20, head: 45, expectVersion: 'A',
+  });
+  await act(async () => { range.resolve({ version: 'A', value: { text: 'selected text', range: null } }); });
+  expect(await pendingCopy).toBe('selected text');
+  expect(await copy).toBe('selected text');
 });
 
 test('a read-only press places the caret and a drag extends the selection', async () => {

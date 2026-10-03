@@ -7,36 +7,40 @@ const controllers: ViewerSelectionController[] = [];
 afterEach(() => { for (const controller of controllers.splice(0)) controller.reset(); });
 
 function captured(text = 'Alpha'): DocxDisplaySelectionText {
-  return { text, range: null, sticky: {
-    anchor: { story: 'body', encoded: new Uint8Array([1]) },
-    head: { story: 'body', encoded: new Uint8Array([2]) },
-  } };
+  return { text, range: null };
 }
 
 async function drain(): Promise<void> {
   for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 }
 
-function setup(preview = false) {
+function setup(preview = false, lines = [{ pageIndex: 0, from: 1, to: 100 }]) {
   const pending: Array<{
     request: ResidentDocumentRead;
     resolve(reply: { version: string; value: unknown }): void;
     reject(error: Error): void;
   }> = [];
   const issued: ResidentDocumentRead[] = [];
-  const read = ((request: ResidentDocumentRead) => new Promise((resolve, reject) => {
+  const read = ((request: ResidentDocumentRead) => new Promise<{ version: string; value: unknown }>((resolve, reject) => {
     issued.push(request);
     pending.push({ request, resolve, reject });
-  })) as ResidentEngineWorkerClient['documentRead'];
+  })) as unknown as ResidentEngineWorkerClient['documentRead'];
   const queries = {
-    displayList: { pages: [{ primitives: [{ docStart: 1, docEnd: 100 }] }] },
+    displayList: { pages: Array.from(new Set(lines.map((line) => line.pageIndex)), (pageIndex) => ({
+      pageIndex,
+      primitives: lines.filter((line) => line.pageIndex === pageIndex).map((line) => ({
+        docStart: line.from, docEnd: line.to,
+      })),
+    })) },
     isReady: () => true,
     paragraphRects: () => [],
-    visualLineAtPosition: (position: number) => ({ from: 1, to: 100, position }),
+    visualLinesOnPage: (pageIndex: number) => lines.filter((line) => line.pageIndex === pageIndex),
+    visualLineAtPosition: (position: number) => lines.find((line) => position >= line.from && position <= line.to) ?? null,
+    verticalMove: () => null,
   } as unknown as DisplayListQueries;
   const controller = new ViewerSelectionController({ read, story: 'body', queries: () => queries });
   controllers.push(controller);
-  controller.onFrame({ version: 'A', preview });
+  controller.onFrame({ version: 'A', preview, asOpened: false });
   const take = (kind: ResidentDocumentRead['kind'], version: string) => {
     const index = pending.findIndex((entry) => entry.request.kind === kind &&
       'expectVersion' in entry.request && entry.request.expectVersion === version);
@@ -47,7 +51,7 @@ function setup(preview = false) {
     take(kind, version).resolve({ version: replyVersion, value });
     await drain();
   };
-  return { controller, pending, issued, answer, take };
+  return { controller, queries, pending, issued, answer, take };
 }
 
 test('R1: capture and unit channels keep only the newest queued read', async () => {
@@ -70,31 +74,23 @@ test('R1: capture and unit channels keep only the newest queued read', async () 
   expect(controller.settledText()).toBe('Beta');
 });
 
-test('R2/R3: a superseded mapping changes nothing and only onFrame re-issues it', async () => {
+test('a version change clears the selection, rejects its copy and ends its gesture', async () => {
   const { controller, answer, issued } = setup();
   controller.select(1, 6);
-  await answer('selectionText', 'A', captured());
-  controller.onFrame({ version: 'B', preview: false });
+  const gesture = controller.currentGesture();
+  const copy = controller.readSelectedText()!.catch((error: Error) => error);
+  const settled = controller.whenSettled(gesture).catch((error: Error) => error);
+  controller.onFrame({ version: 'B', preview: false, asOpened: false });
   expect(controller.displaySelection()).toBeNull();
-  await answer('stickyPosition', 'B', null, 'C');
-  expect(issued.filter((request) => request.kind === 'stickyPosition')).toHaveLength(1);
-  controller.onFrame({ version: 'C', preview: false });
-  await answer('stickyPosition', 'C', { anchor: 3, head: 8 });
-  expect(controller.displaySelection()).toEqual({ anchor: 3, head: 8 });
-  await answer('selectionText', 'C', captured());
-  expect(controller.settledText()).toBe('Alpha');
-});
-
-test('R1/R3: mapping coalesces intermediate frames to the newest version', async () => {
-  const { controller, answer, issued } = setup();
-  controller.select(1, 6);
+  expect(controller.isCurrent(gesture)).toBe(false);
+  expect((await copy as Error).message).toBe('Selection cleared');
+  expect((await settled as Error).message).toBe('Selection cleared');
+  controller.select(1, 12, gesture);
   await answer('selectionText', 'A', captured());
-  for (const version of ['B', 'C', 'D']) controller.onFrame({ version, preview: false });
-  await answer('stickyPosition', 'B', null, 'D');
-  expect(issued.filter((request) => request.kind === 'stickyPosition').map((request) =>
-    'expectVersion' in request ? request.expectVersion : null)).toEqual(['B', 'D']);
-  await answer('stickyPosition', 'D', { anchor: 5, head: 10 });
-  expect(controller.displaySelection()).toEqual({ anchor: 5, head: 10 });
+  expect(controller.displaySelection()).toBeNull();
+  expect(controller.settledText()).toBeNull();
+  expect(controller.readSelectedText()).toBeNull();
+  expect(issued).toHaveLength(1);
 });
 
 test('R2: superseded and rejected captures preserve the live selection', async () => {
@@ -118,49 +114,49 @@ test('R2: a null capture for an older revision cannot drop a corrected word', as
   expect(controller.settledText()).toBe('Alpha');
 });
 
-test('R3: a frame change waits for an in-flight capture before mapping its sticky ends', async () => {
-  const { controller, answer, pending } = setup();
-  controller.select(1, 6);
+test('the hand-over from a preview to the document as opened keeps the selection and its gesture', async () => {
+  const { controller, answer, issued } = setup(true);
+  controller.expand(5, 'word');
+  const selection = controller.displaySelection();
   const gesture = controller.currentGesture();
-  const copy = controller.whenSettled(gesture);
-  controller.onFrame({ version: 'B', preview: false });
-  expect(pending.some((entry) => entry.request.kind === 'stickyPosition')).toBe(false);
-  await answer('selectionText', 'A', captured());
-  await answer('stickyPosition', 'B', { anchor: 3, head: 8 });
-  await answer('selectionText', 'B', captured());
+  const copy = controller.readSelectedText()!;
+  controller.onFrame({ version: 'F', preview: false, asOpened: true });
+  expect(controller.displaySelection()).toEqual(selection);
+  expect(controller.isCurrent(gesture)).toBe(true);
+  await answer('selectionUnit', 'A', { anchor: 1, head: 6 });
+  await answer('selectionText', 'A', captured('preview'));
+  expect(controller.displaySelection()).toEqual(selection);
+  expect(issued).toContainEqual({
+    kind: 'selectionUnit', story: 'body', position: 5, unit: 'word', expectVersion: 'F',
+  });
+  expect(issued).toContainEqual({
+    kind: 'selectionText', story: 'body', anchor: 5, head: 5, expectVersion: 'F',
+  });
+  await answer('selectionText', 'F', captured(''));
+  expect(controller.settledText()).toBeNull();
+  await answer('selectionUnit', 'F', { anchor: 1, head: 6 });
+  await answer('selectionText', 'F', captured());
   expect(await copy).toBe('Alpha');
   expect(controller.isCurrent(gesture)).toBe(true);
 });
 
-test('R3: a superseded uncaptured selection drops only when a new frame is presented', async () => {
-  const { controller, answer } = setup();
-  controller.select(1, 6);
-  const copy = controller.whenSettled(controller.currentGesture()).catch((error: Error) => error);
-  await answer('selectionText', 'A', null, 'B');
-  expect(controller.displaySelection()).toEqual({ anchor: 1, head: 6 });
-  controller.onFrame({ version: 'B', preview: false });
-  await drain();
+test('a preview hand-over to a changed document clears the selection', async () => {
+  const { controller, answer, issued } = setup(true);
+  controller.expand(5, 'word');
+  const gesture = controller.currentGesture();
+  const copy = controller.readSelectedText()!.catch((error: Error) => error);
+  controller.onFrame({ version: 'F', preview: false, asOpened: false });
   expect(controller.displaySelection()).toBeNull();
-  expect((await copy as Error).message).toBe('Selection dropped');
+  expect(controller.isCurrent(gesture)).toBe(false);
+  expect((await copy as Error).message).toBe('Selection cleared');
+  await answer('selectionUnit', 'A', { anchor: 1, head: 6 });
+  await answer('selectionText', 'A', captured());
+  expect(controller.displaySelection()).toBeNull();
+  expect(controller.settledText()).toBeNull();
+  expect(issued).toHaveLength(2);
 });
 
-test('R3/R9: preview handover re-issues pending unit and capture under the same gesture', async () => {
-  const { controller, answer } = setup(true);
-  controller.expand(4, 'word');
-  const gesture = controller.currentGesture();
-  const copy = controller.whenSettled(gesture);
-  controller.onFrame({ version: 'B', preview: false });
-  expect(controller.displaySelection()).toEqual({ anchor: 4, head: 4 });
-  await answer('selectionUnit', 'A', null, 'B');
-  await answer('selectionText', 'A', null, 'B');
-  await answer('selectionUnit', 'B', { anchor: 1, head: 6 });
-  await answer('selectionText', 'B', captured(''));
-  await answer('selectionText', 'B', captured());
-  expect(await copy).toBe('Alpha');
-  expect(controller.isCurrent(gesture)).toBe(true);
-});
-
-test('R4/R7: a preview story stays pending and every new version re-reads the story', async () => {
+test('select-all on a preview reads the whole story on the document as opened', async () => {
   const { controller, answer, issued } = setup(true);
   controller.selectAll();
   await answer('selectionUnit', 'A', { anchor: 0, head: 10 });
@@ -168,15 +164,67 @@ test('R4/R7: a preview story stays pending and every new version re-reads the st
   await answer('selectionText', 'A', captured('prefix'));
   expect(controller.settledText()).toBeNull();
   const gesture = controller.currentGesture();
-  const copy = controller.whenSettled(gesture);
-  controller.onFrame({ version: 'B', preview: false });
-  await answer('selectionUnit', 'B', { anchor: 0, head: 100 });
-  await answer('selectionText', 'B', captured('whole story'));
+  let finished = false;
+  const copy = controller.readSelectedText()!.then((text) => { finished = true; return text; });
+  await drain();
+  expect(finished).toBe(false);
+  controller.onFrame({ version: 'F', preview: false, asOpened: true });
+  expect(controller.isCurrent(gesture)).toBe(true);
+  expect(issued).toContainEqual({
+    kind: 'selectionUnit', story: 'body', position: 0, unit: 'story', expectVersion: 'F',
+  });
+  await answer('selectionText', 'F', captured('prefix'));
+  expect(finished).toBe(false);
+  await answer('selectionUnit', 'F', { anchor: 0, head: 100 });
+  await answer('selectionText', 'F', captured('whole story'));
   expect(await copy).toBe('whole story');
-  controller.onFrame({ version: 'C', preview: false });
-  await answer('selectionUnit', 'C', { anchor: 0, head: 110 });
-  expect(controller.displaySelection()).toEqual({ anchor: 0, head: 110 });
-  expect(issued.some((request) => request.kind === 'stickyPosition')).toBe(false);
+  expect(controller.displaySelection()).toEqual({ anchor: 0, head: 100 });
+  const count = issued.length;
+  controller.onFrame({ version: 'C', preview: false, asOpened: false });
+  expect(controller.displaySelection()).toBeNull();
+  expect(controller.isCurrent(gesture)).toBe(false);
+  expect(controller.settledText()).toBeNull();
+  expect(issued).toHaveLength(count);
+});
+
+test('keyboard extension stops at the last built page', async () => {
+  const { controller, answer, issued } = setup(false, [
+    { pageIndex: 0, from: 1, to: 40 },
+    { pageIndex: 1, from: 41, to: 80 },
+  ]);
+  controller.selectAll();
+  await answer('selectionUnit', 'A', { anchor: 0, head: 500 });
+  expect(controller.move('ArrowRight', false)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 500, head: 500 });
+  const gesture = controller.currentGesture();
+  const count = issued.length;
+  expect(controller.move('ArrowLeft', true)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 500, head: 500 });
+  expect(controller.isCurrent(gesture)).toBe(true);
+  expect(issued).toHaveLength(count);
+  controller.select(80);
+  const lastPageGesture = controller.currentGesture();
+  expect(controller.move('ArrowRight', true)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 80, head: 80 });
+  expect(controller.isCurrent(lastPageGesture)).toBe(true);
+  controller.select(40);
+  expect(controller.move('ArrowRight', true)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 40, head: 41 });
+});
+
+test('a vertical move does not jump across unbuilt pages', () => {
+  const { controller, queries, issued } = setup(false, [
+    { pageIndex: 0, from: 1, to: 40 },
+    { pageIndex: 5, from: 201, to: 240 },
+  ]);
+  queries.verticalMove = () => ({ position: 210, goalX: 10 });
+  controller.select(20);
+  const gesture = controller.currentGesture();
+  const count = issued.length;
+  expect(controller.move('ArrowDown', true)).toBe(true);
+  expect(controller.displaySelection()).toEqual({ anchor: 20, head: 20 });
+  expect(controller.isCurrent(gesture)).toBe(true);
+  expect(issued).toHaveLength(count);
 });
 
 test('R3: a new frame at the same version only refreshes visibility', async () => {
@@ -186,7 +234,7 @@ test('R3: a new frame at the same version only refreshes visibility', async () =
   const count = issued.length;
   let changes = 0;
   const unsubscribe = controller.subscribe(() => { changes += 1; });
-  controller.onFrame({ version: 'A', preview: false });
+  controller.onFrame({ version: 'A', preview: false, asOpened: false });
   expect(issued).toHaveLength(count);
   expect(controller.displaySelection()).toEqual({ anchor: 1, head: 6 });
   expect(changes).toBe(1);
@@ -201,13 +249,11 @@ test('R6: copy rejects when a new gesture starts', async () => {
   expect((await copy as Error).message).toBe('Selection gesture changed');
 });
 
-test('R6: copy rejects when a valid null answer drops the selection', async () => {
+test('copy rejects when a valid null story answer drops the selection', async () => {
   const { controller, answer } = setup();
-  controller.select(1, 6);
-  await answer('selectionText', 'A', captured());
-  controller.onFrame({ version: 'B', preview: false });
+  controller.selectAll();
   const copy = controller.whenSettled(controller.currentGesture()).catch((error: Error) => error);
-  await answer('stickyPosition', 'B', null);
+  await answer('selectionUnit', 'A', null);
   expect((await copy as Error).message).toBe('Selection dropped');
   expect(controller.displaySelection()).toBeNull();
 });
@@ -244,8 +290,8 @@ test('R8: reset cancels copies and ignores old replies without freeing an occupi
   controller.reset();
   expect(controller.isCurrent(gesture)).toBe(false);
   expect(controller.displaySelection()).toBeNull();
-  expect((await copy as Error).message).toBe('Selection gesture changed');
-  controller.onFrame({ version: 'B', preview: false });
+  expect((await copy as Error).message).toBe('Selection cleared');
+  controller.onFrame({ version: 'B', preview: false, asOpened: false });
   controller.select(8, 12);
   expect(pending).toHaveLength(1);
   await answer('selectionText', 'A', captured('old'));
@@ -274,7 +320,7 @@ test('R3: restoring a temporarily absent frame re-issues reads ignored while it 
   controller.onFrame(null);
   await answer('selectionUnit', 'A', { anchor: 1, head: 6 });
   await answer('selectionText', 'A', captured(''));
-  controller.onFrame({ version: 'A', preview: false });
+  controller.onFrame({ version: 'A', preview: false, asOpened: false });
   await answer('selectionUnit', 'A', { anchor: 1, head: 6 });
   await answer('selectionText', 'A', captured(''));
   await answer('selectionText', 'A', captured());

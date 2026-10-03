@@ -3057,6 +3057,7 @@ describe('resident worker opening', () => {
     const framed = await w.send(bootstrap);
     expect(framed.ok && framed.layoutJson).toBe(provisional);
     expect(framed.ok && framed.documentPreview).toBe(true);
+    expect(framed.ok && framed.documentAsOpened).toBeUndefined();
     // A second preview never replaces the first.
     const again = await w.send({ type: 'open', bytes: new Uint8Array([1, 2]).buffer, previewBlocks: 200 });
     expect(again.ok).toBe(false);
@@ -3067,6 +3068,7 @@ describe('resident worker opening', () => {
     const full = await w.send({ ...bootstrap, expectedFrameEpoch: 1 });
     expect(full.ok && full.layoutJson).toBe(provisional);
     expect(full.ok && full.documentPreview).toBeUndefined();
+    expect(full.ok && full.documentAsOpened).toBe(true);
     expect(calls).toEqual([
       'preview:1,2:200',
       'font',
@@ -3097,6 +3099,33 @@ describe('resident worker opening', () => {
     const fallback = await refusing.w.send({ type: 'open', bytes: new Uint8Array([6]).buffer });
     expect(fallback.ok && fallback.hostJson).toBe('{"host":1}');
     expect(refusing.calls).toEqual(['destroy', 'open:6:undefined:undefined']);
+  });
+
+  test('a frame after the document version changes is no longer as opened', async () => {
+    const { w } = openingWorker();
+    let version = 'opened';
+    w.harness.session.proposalEngine.version = () => version;
+    expect((await w.send({ type: 'open', bytes: new Uint8Array([1]).buffer })).ok).toBe(true);
+    const first = await w.send({
+      type: 'bootstrap',
+      opened: true,
+      snapshot,
+      extras: '',
+      layoutExtras: '{}',
+      expectedFrameEpoch: 0,
+    });
+    expect(first.ok && first.documentVersion).toBe('opened');
+    expect(first.ok && first.documentAsOpened).toBe(true);
+
+    version = 'changed';
+    const changed = await w.send({
+      type: 'buildFrame',
+      extras: '',
+      expectedFrameEpoch: 1,
+      paintCaret: false,
+    });
+    expect(changed.ok && changed.documentVersion).toBe('changed');
+    expect(changed.ok && changed.documentAsOpened).toBeUndefined();
   });
 
   test('proposal requests between open and bootstrap leave the worker registry empty', async () => {
@@ -3160,6 +3189,7 @@ describe('resident worker opening', () => {
     });
     expect(framed.ok && framed.layoutJson).toBe(provisional);
     expect(framed.ok && framed.layoutProvisional).toBe(true);
+    expect(framed.ok && framed.documentAsOpened).toBeUndefined();
     expect(calls).toEqual(['loadState', 'font', 'prefix:{"request":1}:3', 'frame:0']);
   });
 

@@ -1,7 +1,6 @@
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type {
   DocxDisplayRange,
-  DocxDisplaySelectionText,
   DocxSelectionUnit,
   ResidentEngineWorkerClient,
 } from '@betteroffice/docx/yrs';
@@ -15,7 +14,6 @@ interface Selection extends DocxDisplayRange {
   revision: number;
   intent: Intent;
   frame: WorkerFrameProvenance;
-  phase: 'live' | 'mapping';
   unitPending: boolean;
 }
 
@@ -28,14 +26,11 @@ interface Token {
 interface Capture {
   revision: number;
   version: string;
-  sticky: DocxDisplaySelectionText['sticky'];
   text: string;
 }
 
 interface ReadTask<V> {
   token: Token;
-  outcome: Promise<ViewerReadOutcome<V>>;
-  resolve(outcome: ViewerReadOutcome<V>): void;
   read(): Promise<ViewerReadOutcome<V>>;
   apply(outcome: ViewerReadOutcome<V>): void;
 }
@@ -49,11 +44,8 @@ class ReadChannel<V> {
     read: ReadTask<V>['read'],
     apply: ReadTask<V>['apply']
   ): ReadTask<V> {
-    let resolve!: ReadTask<V>['resolve'];
-    const outcome = new Promise<ViewerReadOutcome<V>>((done) => { resolve = done; });
-    const task = { token, outcome, resolve, read, apply };
+    const task = { token, read, apply };
     if (this.active) {
-      this.clearQueued();
       this.queued = task;
     } else {
       this.start(task);
@@ -62,7 +54,6 @@ class ReadChannel<V> {
   }
 
   clearQueued(): void {
-    this.queued?.resolve({ status: 'superseded', version: null });
     this.queued = null;
   }
 
@@ -70,7 +61,6 @@ class ReadChannel<V> {
     this.active = task;
     void task.read().then((outcome) => {
       try {
-        task.resolve(outcome);
         task.apply(outcome);
       } finally {
         this.active = null;
@@ -99,10 +89,9 @@ export class ViewerSelectionController {
   private frame: WorkerFrameProvenance | null = null;
   private selection: Selection | null = null;
   private capture: Capture | null = null;
-  private captureRead: ReadTask<DocxDisplaySelectionText | null> | null = null;
+  private captureRead: ReadTask<{ text: string } | null> | null = null;
   private readonly unit = new ReadChannel<DocxDisplayRange | null>();
-  private readonly captures = new ReadChannel<DocxDisplaySelectionText | null>();
-  private readonly map = new ReadChannel<DocxDisplayRange | null>();
+  private readonly captures = new ReadChannel<{ text: string } | null>();
   private readonly listeners = new Set<() => void>();
   private readonly waiters = new Set<Waiter>();
   private gesture = 0;
@@ -124,7 +113,6 @@ export class ViewerSelectionController {
     this.goalX = undefined;
     this.unit.clearQueued();
     this.captures.clearQueued();
-    this.map.clearQueued();
     this.rejectWaiters('Selection gesture changed');
     return this.gesture;
   }
@@ -167,7 +155,7 @@ export class ViewerSelectionController {
 
   displaySelection(): DocxDisplayRange | null {
     const selection = this.selection;
-    return selection?.phase === 'live' && selection.frame.version === this.frame?.version
+    return selection && selection.frame.version === this.frame?.version
       ? { anchor: selection.anchor, head: selection.head }
       : null;
   }
@@ -177,8 +165,7 @@ export class ViewerSelectionController {
     const capture = this.capture;
     const frame = this.frame;
     return selection && capture && frame && this.isCurrent(gesture) && selection.gesture === gesture &&
-      selection.phase === 'live' && !selection.unitPending &&
-      selection.frame.version === frame.version &&
+      !selection.unitPending && selection.frame.version === frame.version &&
       capture.revision === selection.revision && capture.version === frame.version
       ? capture.text
       : null;
@@ -186,7 +173,7 @@ export class ViewerSelectionController {
 
   readSelectedText(): Promise<string> | null {
     const selection = this.selection;
-    return selection && (selection.anchor !== selection.head || selection.unitPending || selection.phase === 'mapping')
+    return selection && (selection.anchor !== selection.head || selection.unitPending)
       ? this.whenSettled(this.gesture)
       : null;
   }
@@ -209,47 +196,34 @@ export class ViewerSelectionController {
     });
   }
 
+  /**
+   * Follows the presented frame. A selection lives in one document version: a frame at another
+   * version clears it, except the hand-over from a preview to the whole document as opened, whose
+   * display positions are the preview's.
+   */
   onFrame(frame: WorkerFrameProvenance | null): void {
     const previous = this.frame;
     this.frame = frame ? { ...frame } : null;
     const selection = this.selection;
-    if (!selection) return;
-    if (frame?.version === previous?.version) {
+    if (!selection || !frame || frame.version === previous?.version) {
       this.emit();
-      return;
-    }
-    selection.phase = 'mapping';
-    this.emit();
-    if (!frame || !this.isCurrent(selection.gesture)) return;
-    if (selection.frame.version === frame.version) {
-      selection.phase = 'live';
+    } else if (selection.frame.version === frame.version) {
       if (!this.capture) this.captureRead = null;
       this.captureLatest();
-      if (selection.unitPending && (selection.intent === 'word' || selection.intent === 'paragraph' || selection.intent === 'story')) {
-        this.readUnit(this.unit, this.unitPosition, selection.intent);
-      }
+      this.readPendingUnit(selection);
       this.emit();
-    } else if (selection.intent === 'story') {
-      this.readUnit(this.map, 0, 'story');
-    } else if (selection.frame.preview && !frame.preview) {
-      const pending = selection.unitPending;
-      this.setRange(selection, frame, selection.gesture, selection.intent, pending);
-      if (pending && (selection.intent === 'word' || selection.intent === 'paragraph')) {
-        this.readUnit(this.unit, this.unitPosition, selection.intent);
-      }
+    } else if (selection.frame.preview && !frame.preview && frame.asOpened) {
+      this.setRange(selection, frame, selection.gesture, selection.intent,
+        selection.unitPending || selection.intent === 'story');
+      this.readPendingUnit(this.selection!);
     } else {
-      void this.mapCaptured(selection, frame);
+      this.clear();
     }
   }
 
   reset(): void {
-    this.beginGesture();
-    this.reservedGesture = false;
-    this.selection = null;
-    this.capture = null;
-    this.captureRead = null;
     this.frame = null;
-    this.emit();
+    this.clear();
   }
 
   move(key: string, extend: boolean): boolean {
@@ -263,17 +237,12 @@ export class ViewerSelectionController {
     if ((key === 'ArrowLeft' || key === 'ArrowRight') && !extend && from !== to) {
       head = key === 'ArrowLeft' ? from : to;
     } else if (key === 'ArrowLeft' || key === 'ArrowRight') {
-      const step = key === 'ArrowLeft' ? -1 : 1;
-      const limit = this.positionLimit();
-      for (let next = head + step; next >= 0 && next <= limit; next += step) {
-        if (queries.visualLineAtPosition(next)) {
-          head = next;
-          break;
-        }
-      }
+      head = horizontalStep(queries, head, key === 'ArrowLeft' ? -1 : 1) ?? head;
     } else if (key === 'ArrowUp' || key === 'ArrowDown') {
-      const moved = queries.verticalMove(head, key === 'ArrowUp' ? 'up' : 'down', this.goalX);
-      if (moved) {
+      const line = queries.visualLineAtPosition(head);
+      const moved = line && queries.verticalMove(head, key === 'ArrowUp' ? 'up' : 'down', this.goalX);
+      const target = moved && queries.visualLineAtPosition(moved.position);
+      if (line && moved && target && Math.abs(target.pageIndex - line.pageIndex) <= 1) {
         head = moved.position;
         goalX = moved.goalX;
       }
@@ -281,6 +250,7 @@ export class ViewerSelectionController {
       const line = queries.visualLineAtPosition(head);
       if (line) head = key === 'Home' ? line.from : line.to;
     }
+    if (head === selection.head && (extend || from === to)) return true;
     this.beginGesture();
     const gesture = this.takeGesture();
     this.setRange({ anchor: extend ? selection.anchor : head, head }, this.frame, gesture, extend ? 'range' : 'caret', false);
@@ -319,7 +289,7 @@ export class ViewerSelectionController {
 
   private setRange(range: DocxDisplayRange, frame: WorkerFrameProvenance, gesture: number, intent: Intent, unitPending: boolean): void {
     this.selection = { anchor: range.anchor, head: range.head, gesture, revision: ++this.revision,
-      intent, frame: { ...frame }, phase: 'live', unitPending };
+      intent, frame: { ...frame }, unitPending };
     this.capture = null;
     this.captureLatest();
     this.emit();
@@ -333,7 +303,7 @@ export class ViewerSelectionController {
       if (!this.applies(token, outcome)) return;
       const selection = this.selection!;
       if (!outcome.value) {
-        if (unit === 'story' || selection.frame.version !== token.version) {
+        if (unit === 'story') {
           this.drop();
         } else {
           selection.unitPending = false;
@@ -342,8 +312,7 @@ export class ViewerSelectionController {
         return;
       }
       const pending = unit === 'story' && this.frame!.preview;
-      if (selection.frame.version === token.version && selection.phase === 'live' &&
-        selection.anchor === outcome.value.anchor && selection.head === outcome.value.head) {
+      if (selection.anchor === outcome.value.anchor && selection.head === outcome.value.head) {
         selection.unitPending = pending;
         this.emit();
       } else {
@@ -354,47 +323,38 @@ export class ViewerSelectionController {
 
   private captureLatest(): void {
     const selection = this.selection;
-    if (!selection || selection.phase !== 'live' || selection.frame.version !== this.frame?.version) return;
+    if (!selection || selection.frame.version !== this.frame?.version) return;
     if (this.capture?.revision === selection.revision && this.capture.version === this.frame?.version) return;
     const token = this.token();
-    if (this.captureRead?.token.revision === token.revision && this.captureRead.token.version === token.version) return;
+    const pending = this.captureRead?.token;
+    if (pending?.revision === token.revision && pending?.version === token.version) return;
     const { anchor, head } = selection;
     this.captureRead = this.captures.enqueue(token, () => readAt(this.options.read, {
       kind: 'selectionText', story: this.options.story, anchor, head, expectVersion: token.version,
     }), (outcome) => {
       if (!this.applies(token, outcome)) return;
-      this.capture = { revision: token.revision!, version: token.version,
-        sticky: outcome.value?.sticky ?? null, text: outcome.value?.text ?? '' };
+      this.capture = { revision: token.revision!, version: token.version, text: outcome.value?.text ?? '' };
       this.emit();
     });
   }
 
-  private async mapCaptured(selection: Selection, frame: WorkerFrameProvenance): Promise<void> {
-    let capture = this.capture?.revision === selection.revision ? this.capture : null;
-    const pending = this.captureRead;
-    if (!capture && pending?.token.revision === selection.revision) {
-      const outcome = await pending.outcome;
-      if (outcome.status === 'ok' && outcome.value) {
-        capture = { revision: selection.revision, version: outcome.version,
-          sticky: outcome.value.sticky, text: outcome.value.text };
-      }
+  private readPendingUnit(selection: Selection): void {
+    if (selection.unitPending && selection.intent !== 'caret' && selection.intent !== 'range') {
+      this.readUnit(this.unit, this.unitPosition, selection.intent);
     }
-    const token = { gesture: selection.gesture, revision: selection.revision, version: frame.version };
-    if (!this.applies(token, { status: 'ok', version: frame.version, value: null })) return;
-    if (!capture?.sticky) { this.drop(); return; }
-    const sticky = capture.sticky;
-    this.map.enqueue(token, () => readAt(this.options.read, {
-      kind: 'stickyPosition', story: this.options.story, anchor: sticky.anchor,
-      head: sticky.head, expectVersion: token.version,
-    }), (outcome) => {
-      if (!this.applies(token, outcome)) return;
-      if (!outcome.value) { this.drop(); return; }
-      this.setRange(outcome.value, this.frame!, token.gesture, selection.intent, selection.unitPending);
-      if (selection.unitPending && (selection.intent === 'word' || selection.intent === 'paragraph')) {
-        this.unitPosition = outcome.value.anchor;
-        this.readUnit(this.unit, this.unitPosition, selection.intent);
-      }
-    });
+  }
+
+  private clear(): void {
+    this.gesture += 1;
+    this.reservedGesture = false;
+    this.goalX = undefined;
+    this.unit.clearQueued();
+    this.captures.clearQueued();
+    this.selection = null;
+    this.capture = null;
+    this.captureRead = null;
+    this.rejectWaiters('Selection cleared');
+    this.emit();
   }
 
   private drop(): void {
@@ -425,4 +385,20 @@ export class ViewerSelectionController {
     }
     for (const listener of this.listeners) listener();
   }
+}
+
+/** The next caret position from `head`, within its page and the next one; null past the built pages. */
+function horizontalStep(queries: DisplayListQueries, head: number, step: -1 | 1): number | null {
+  const line = queries.visualLineAtPosition(head);
+  if (!line) return null;
+  let bound = step > 0 ? line.to : line.from;
+  for (const pageIndex of [line.pageIndex, line.pageIndex + step]) {
+    for (const candidate of queries.visualLinesOnPage(pageIndex)) {
+      bound = step > 0 ? Math.max(bound, candidate.to) : Math.min(bound, candidate.from);
+    }
+  }
+  for (let next = head + step; step > 0 ? next <= bound : next >= bound; next += step) {
+    if (queries.visualLineAtPosition(next)) return next;
+  }
+  return null;
 }

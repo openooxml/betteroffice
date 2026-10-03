@@ -326,7 +326,13 @@ type DisplayPagesFrame = Pick<ResidentEngineWorkerFrame, 'frame' | 'pageFrames'>
   Partial<
     Pick<
       ResidentEngineWorkerFrame,
-      'caret' | 'selection' | 'caretPainted' | 'layoutRevision' | 'documentVersion' | 'documentPreview'
+      | 'caret'
+      | 'selection'
+      | 'caretPainted'
+      | 'layoutRevision'
+      | 'documentVersion'
+      | 'documentPreview'
+      | 'documentAsOpened'
     >
   >;
 
@@ -386,6 +392,7 @@ interface BuiltDisplay {
   /** The worker document version a worker frame lays out. */
   workerVersion?: string;
   workerPreview?: boolean;
+  workerAsOpened?: boolean;
 }
 
 // A replacement worker's frames follow the frame on screen.
@@ -1264,7 +1271,8 @@ export function useRustDisplayList(
           workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
           line,
           result.documentVersion ?? null,
-          result.documentPreview ?? false
+          result.documentPreview ?? false,
+          result.documentAsOpened ?? false
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -1984,7 +1992,10 @@ export function useRustDisplayList(
                         : null,
                       !!worker && (result.documentVersion === undefined
                         ? (presentedWorkerFrame(previous.queries)?.preview ?? false)
-                        : (result.documentPreview ?? false))
+                        : (result.documentPreview ?? false)),
+                      !!worker && (result.documentVersion === undefined
+                        ? (presentedWorkerFrame(previous.queries)?.asOpened ?? false)
+                        : (result.documentAsOpened ?? false))
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
               if (worker) {
@@ -2876,6 +2887,7 @@ export function useRustDisplayList(
               previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
               ...(result.documentVersion === undefined ? {} : { workerVersion: result.documentVersion }),
               workerPreview: result.documentPreview ?? false,
+              workerAsOpened: result.documentAsOpened ?? false,
             };
           })
           .catch((error) => {
@@ -2928,6 +2940,7 @@ export function useRustDisplayList(
             previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
             ...(result.documentVersion === undefined ? {} : { workerVersion: result.documentVersion }),
             workerPreview: result.documentPreview ?? false,
+            workerAsOpened: result.documentAsOpened ?? false,
           });
         } else {
           pending = handedOverPreviewFrame
@@ -2964,7 +2977,8 @@ export function useRustDisplayList(
           result.previewKey === undefined ? previewKey : result.previewKey,
           line,
           result.workerVersion ?? null,
-          result.workerPreview ?? false
+          result.workerPreview ?? false,
+          result.workerAsOpened ?? false
         );
         snapshotRef.current = nextSnapshot;
         provisionalPageFrameRef.current = result.provisional === true;
@@ -3213,13 +3227,14 @@ function createRustDisplayListSnapshot(
   previewKey: string | null,
   line: object,
   workerVersion: string | null = null,
-  workerPreview = false
+  workerPreview = false,
+  workerAsOpened = false
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
   const queries = createDisplayListQueries(displayList, residentQueries, previous.queries, line);
   stampSourceVersion(queries, sourceVersion);
-  stampWorkerFrameVersion(queries, workerVersion, workerPreview);
-  stampWorkerFrameVersion(displayList, workerVersion, workerPreview);
+  stampWorkerFrameVersion(queries, workerVersion, workerPreview, workerAsOpened);
+  stampWorkerFrameVersion(displayList, workerVersion, workerPreview, workerAsOpened);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };
 }
