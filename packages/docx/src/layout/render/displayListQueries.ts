@@ -50,7 +50,11 @@ import {
   type DisplayListImageRegion,
   type LocatedImagePrimitive,
 } from './displayListImages';
-import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from './rustDisplayList';
+import {
+  loadedRustDisplayListQueryEngine,
+  loadRustDisplayListQueryEngine,
+  type RustDisplayListQueryEngine,
+} from './rustDisplayList';
 
 /**
  * Query surface of an editing engine that already holds the display list.
@@ -824,6 +828,7 @@ export function createDisplayListQueries(
 
   const allPages = (): number[] => list.pages.map((_, index) => index);
 
+  cell.eng ??= resident ? null : loadedRustDisplayListQueryEngine();
   if (resident || cell.eng) {
     resolveReady();
   } else {

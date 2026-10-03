@@ -1548,6 +1548,7 @@ describe('FrameDelta note anchor shifts', () => {
     const freshList = (): DisplayList => {
       const fresh = createEditSession(72);
       fresh.load(session.encode_state());
+      fresh.load_note_separators(session.note_separators_state());
       fresh.register_measure_font(new Uint8Array(readFileSync(FONT)));
       fresh.layout_document_with_regions_json(request);
       return applyFrameDelta(null, decodeFrameDelta(fresh.build_display_list_frame(extras, 0)))

@@ -68,7 +68,7 @@ export interface YrsInputRef {
    */
   runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
   hasPendingInput(): boolean;
-  setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
+  setSelectionFromDisplay(anchor: number, head?: number, story?: string, gesture?: number): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
   displaySelection(): YrsDisplaySelection | null;
@@ -80,6 +80,10 @@ export interface YrsInputRef {
   insertText(text: string): void;
   deleteSelection(): void;
   selectAll(): void;
+  /** The selection's plain text, for an input whose document lives in the worker. */
+  readSelectedText?(): Promise<string> | null;
+  beginGesture?(): number;
+  isGestureCurrent?(gesture: number): boolean;
 }
 
 export type YrsStoredFormattingAction =

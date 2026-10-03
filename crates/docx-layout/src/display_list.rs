@@ -4378,7 +4378,6 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
 }
 
 const NOTE_COLUMN_GAP_PX: f64 = 24.0;
-const NOTE_SEPARATOR_HEIGHT_PX: f64 = 12.0;
 /// note reference-label cap (display numbers / custom marks are tiny)
 pub const MAX_NOTE_LABEL_CHARS: usize = 64;
 
@@ -4588,7 +4587,11 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let column_width =
             ((content_width - (columns - 1) as f64 * NOTE_COLUMN_GAP_PX) / columns as f64).max(1.0);
         let mut separator_primitives = Vec::new();
-        if let Some(separator) = &area.separator {
+        if let Some(separator) = area
+            .separator
+            .as_ref()
+            .filter(|item| !item.blocks.is_empty())
+        {
             emit_note_item(
                 &mut separator_primitives,
                 separator,
@@ -4620,7 +4623,11 @@ fn emit_note_regions(page: &PageIn, ctx: &RenderCtx<'_>) -> Vec<NoteRegion> {
         let partitions = note_partitions(&area.notes, columns);
         for (column, notes) in partitions.into_iter().enumerate() {
             let x = page.margins.left + column as f64 * (column_width + NOTE_COLUMN_GAP_PX);
-            let mut cursor = y + NOTE_SEPARATOR_HEIGHT_PX;
+            let mut cursor = y + area
+                .separator
+                .as_ref()
+                .and_then(|separator| separator.height)
+                .unwrap_or(crate::footnotes::FOOTNOTE_SEPARATOR_HEIGHT);
             for note in notes {
                 cursor += emit_note_item(&mut primitives, note, kind, x, cursor, column_width, ctx);
             }

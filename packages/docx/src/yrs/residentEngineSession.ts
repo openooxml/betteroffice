@@ -8,6 +8,7 @@ import type {
   YrsResidentCaretSnapshot,
   YrsRevisionInfo,
   YrsSelection,
+  YrsSelectionText,
   YrsSession,
   YrsStorySegment,
   YrsTextMatch,
@@ -47,6 +48,7 @@ export type ResidentEngineSession = Pick<
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadMediaSources'
+  | 'loadNoteSeparators'
   | 'loadState'
   | 'setPartialDocument'
   | 'measureParagraphJson'
@@ -58,6 +60,7 @@ export type ResidentEngineSession = Pick<
   | 'residentDeletedUnits'
   | 'resumeRegionLayout'
   | 'selection'
+  | 'selectionText'
   | 'searchText'
   | 'encodeStickyPosition'
   | 'resolveStickyPosition'
@@ -332,6 +335,16 @@ export async function createResidentEngineSession(
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
+    selectionText: (range) =>
+      JSON.parse(
+        session.selection_text_json(
+          range.story,
+          range.start.paraId,
+          range.start.offset,
+          range.end.paraId,
+          range.end.offset
+        )
+      ) as YrsSelectionText,
     encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
@@ -356,6 +369,7 @@ export async function createResidentEngineSession(
     },
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
     loadMediaSources: (json) => session.load_media_sources(json),
+    loadNoteSeparators: (state) => session.load_note_separators(state),
     loadState: (update) => {
       geometryStories.clear();
       session.load(update);

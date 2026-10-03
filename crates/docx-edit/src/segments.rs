@@ -27,18 +27,21 @@ pub(crate) struct ParaEntry {
     pub node_start: u32,
 }
 
+#[derive(Clone)]
 pub(crate) enum SegKind {
     Text(Arc<str>),
     Pilcrow,
     Embed,
 }
 
+#[derive(Clone)]
 pub(crate) struct Seg {
     pub start: u32,
     pub kind: SegKind,
 }
 
-/// Materialized segment geometry for one story at one committed epoch.
+/// Text segments may split anywhere; cold builds follow formatting runs, advanced indexes preserve only per-unit kind and text.
+#[derive(Clone)]
 pub(crate) struct SegmentIndex {
     len: u32,
     segs: Vec<Seg>,
@@ -179,7 +182,96 @@ impl ParagraphIndex {
 }
 
 impl SegmentIndex {
-    /// Whether a nonempty range contains only plain text units.
+    pub(crate) fn shift_for_text_insert(&mut self, index: u32, text: &str) -> bool {
+        let units = text.encode_utf16().count() as u32;
+        if text.is_empty() || index > self.len || self.len.checked_add(units).is_none() {
+            return false;
+        }
+        let slot = self.segs.partition_point(|seg| seg.start < index);
+        let text_slot = slot
+            .checked_sub(1)
+            .filter(|&slot| matches!(self.segs[slot].kind, SegKind::Text(_)))
+            .or_else(|| {
+                self.segs.get(slot).and_then(|seg| {
+                    (seg.start == index && matches!(seg.kind, SegKind::Text(_))).then_some(slot)
+                })
+            });
+        let shifted_from = if let Some(slot) = text_slot {
+            let seg = &mut self.segs[slot];
+            let SegKind::Text(existing) = &seg.kind else {
+                return false;
+            };
+            let Some(offset) = utf16_byte_offset(existing, index - seg.start) else {
+                return false;
+            };
+            let mut replacement = existing.to_string();
+            replacement.insert_str(offset, text);
+            seg.kind = SegKind::Text(replacement.into());
+            slot + 1
+        } else {
+            self.segs.insert(
+                slot,
+                Seg {
+                    start: index,
+                    kind: SegKind::Text(text.into()),
+                },
+            );
+            slot + 1
+        };
+        for seg in &mut self.segs[shifted_from..] {
+            seg.start += units;
+        }
+        self.len += units;
+        true
+    }
+
+    pub(crate) fn shift_for_text_delete(&mut self, start: u32, end: u32) -> bool {
+        if !self.is_text_range(start, end) {
+            return false;
+        }
+        let first = self.segs.partition_point(|seg| seg.start <= start) - 1;
+        let last = self.segs.partition_point(|seg| seg.start < end);
+        let mut cuts = Vec::with_capacity(last - first);
+        for slot in first..last {
+            let seg = &self.segs[slot];
+            let SegKind::Text(text) = &seg.kind else {
+                return false;
+            };
+            let seg_end = self.segs.get(slot + 1).map_or(self.len, |seg| seg.start);
+            let Some(from) = utf16_byte_offset(text, start.max(seg.start) - seg.start) else {
+                return false;
+            };
+            let Some(to) = utf16_byte_offset(text, end.min(seg_end) - seg.start) else {
+                return false;
+            };
+            cuts.push((slot, from, to));
+        }
+        for (slot, from, to) in cuts {
+            let seg = &mut self.segs[slot];
+            if let SegKind::Text(text) = &seg.kind {
+                let mut replacement = text.to_string();
+                replacement.replace_range(from..to, "");
+                seg.kind = SegKind::Text(replacement.into());
+            }
+            seg.start = seg.start.min(start);
+        }
+        let units = end - start;
+        for seg in &mut self.segs[last..] {
+            seg.start -= units;
+        }
+        let mut slot = first;
+        for _ in first..last {
+            if matches!(&self.segs[slot].kind, SegKind::Text(text) if text.is_empty()) {
+                self.segs.remove(slot);
+            } else {
+                slot += 1;
+            }
+        }
+        self.len -= units;
+        true
+    }
+
+    /// Whether a nonempty range contains only plain text units and splits no surrogate pair.
     pub(crate) fn is_text_range(&self, start: u32, end: u32) -> bool {
         if start >= end || end > self.len {
             return false;
@@ -190,6 +282,19 @@ impl SegmentIndex {
                 .iter()
                 .take_while(|seg| seg.start < end)
                 .all(|seg| matches!(seg.kind, SegKind::Text(_)))
+            && self.is_char_boundary(start)
+            && self.is_char_boundary(end)
+    }
+
+    /// Whether `pos` does not fall between the two units of a surrogate pair.
+    pub(crate) fn is_char_boundary(&self, pos: u32) -> bool {
+        match self.segment_at(pos) {
+            Some(Seg {
+                start,
+                kind: SegKind::Text(text),
+            }) => utf16_byte_offset(text, pos - start).is_some(),
+            _ => true,
+        }
     }
 
     /// The segment covering `pos`, if any.
@@ -202,11 +307,86 @@ impl SegmentIndex {
     }
 }
 
+fn utf16_byte_offset(text: &str, offset: u32) -> Option<usize> {
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        if units == offset {
+            return Some(byte);
+        }
+        units += ch.len_utf16() as u32;
+        if units > offset {
+            return None;
+        }
+    }
+    (units == offset).then_some(text.len())
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{EditCtx, EditingDoc, FormatPolicy, Position, RawOp, SegmentContent, StoryRange};
     use yrs::{Map, Transact};
+
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum Unit {
+        Text(u16),
+        Pilcrow,
+        Embed,
+    }
+
+    pub(crate) fn units(index: &SegmentIndex) -> Vec<Unit> {
+        let mut result = Vec::new();
+        for seg in &index.segs {
+            match &seg.kind {
+                SegKind::Text(text) => result.extend(text.encode_utf16().map(Unit::Text)),
+                SegKind::Pilcrow => result.push(Unit::Pilcrow),
+                SegKind::Embed => result.push(Unit::Embed),
+            }
+        }
+        result
+    }
+
+    pub(crate) fn assert_segment_invariants(index: &SegmentIndex) {
+        let mut end = 0;
+        let mut previous = None;
+        for seg in &index.segs {
+            assert_eq!(seg.start, end);
+            assert!(previous.is_none_or(|start| start < seg.start));
+            let len = match &seg.kind {
+                SegKind::Text(text) => text.encode_utf16().count() as u32,
+                _ => 1,
+            };
+            assert!(len > 0);
+            previous = Some(seg.start);
+            end += len;
+        }
+        assert_eq!(end, index.len);
+    }
+
+    fn assert_segment_indexes_unchanged(actual: &SegmentIndex, expected: &SegmentIndex) {
+        assert_eq!(actual.len, expected.len);
+        assert_eq!(actual.segs.len(), expected.segs.len());
+        for (actual, expected) in actual.segs.iter().zip(&expected.segs) {
+            assert_eq!(actual.start, expected.start);
+            match (&actual.kind, &expected.kind) {
+                (SegKind::Text(actual), SegKind::Text(expected)) => assert_eq!(actual, expected),
+                (SegKind::Pilcrow, SegKind::Pilcrow) | (SegKind::Embed, SegKind::Embed) => {}
+                _ => panic!("segment kind changed"),
+            }
+        }
+    }
+
+    pub(crate) fn next_random(state: &mut u64) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state as u32
+    }
+
+    pub(crate) fn random_text(state: &mut u64) -> &'static str {
+        let texts = ["x", "é", "😀", "ab", "xé", "é😀x"];
+        texts[next_random(state) as usize % texts.len()]
+    }
 
     /// The pre-index paragraph walk, kept as the reference oracle.
     fn reference_para_at(doc: &EditingDoc, story: &str, index: u32) -> Option<(String, u32, u32)> {
@@ -317,6 +497,11 @@ mod tests {
     /// `A B [sdt] pilcrow(p1)` | `pilcrow(p2)` (empty paragraph) | `[table] [pageBreak] C pilcrow(p3)`
     fn seeded_doc() -> EditingDoc {
         let doc = EditingDoc::new(7);
+        seed_story(&doc);
+        doc
+    }
+
+    fn seed_story(doc: &EditingDoc) {
         doc.create_story("body", "AB", "Normal", "left").unwrap();
         doc.apply_raw_ops(
             "body",
@@ -360,7 +545,20 @@ mod tests {
             &EditCtx::local(String::new(), String::new()),
         )
         .unwrap();
-        doc
+    }
+
+    pub(crate) fn seed_text_stream(doc: &EditingDoc) {
+        seed_story(doc);
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Insert {
+                index: 1,
+                text: "é😀Bold".into(),
+                attrs: yrs::types::Attrs::from([("bold".into(), Any::Bool(true))]),
+            }],
+            &EditCtx::local("", ""),
+        )
+        .unwrap();
     }
 
     fn plain_doc_with_repeated_ids() -> EditingDoc {
@@ -388,7 +586,7 @@ mod tests {
         build_indexes(&story, &txn).1
     }
 
-    fn assert_paragraph_indexes_eq(actual: &ParagraphIndex, expected: &ParagraphIndex) {
+    pub(crate) fn assert_paragraph_indexes_eq(actual: &ParagraphIndex, expected: &ParagraphIndex) {
         assert_eq!(actual.paras.len(), expected.paras.len());
         for (slot, (actual, expected)) in actual.paras.iter().zip(&expected.paras).enumerate() {
             assert_eq!(
@@ -409,6 +607,222 @@ mod tests {
         }
         assert_eq!(actual.by_para, expected.by_para);
         assert_eq!(actual.repeated, expected.repeated);
+    }
+
+    #[test]
+    fn segment_index_shifts_preserve_units_and_reject_surrogate_cuts() {
+        let original = SegmentIndex {
+            len: 12,
+            segs: vec![
+                Seg {
+                    start: 0,
+                    kind: SegKind::Text("ab".into()),
+                },
+                Seg {
+                    start: 2,
+                    kind: SegKind::Text("é😀z".into()),
+                },
+                Seg {
+                    start: 6,
+                    kind: SegKind::Pilcrow,
+                },
+                Seg {
+                    start: 7,
+                    kind: SegKind::Embed,
+                },
+                Seg {
+                    start: 8,
+                    kind: SegKind::Text("tail".into()),
+                },
+            ],
+        };
+        assert_segment_invariants(&original);
+        for index in 0..=original.len {
+            let mut shifted = original.clone();
+            if index == 4 {
+                assert!(!shifted.shift_for_text_insert(index, "xé😀"));
+                assert_segment_indexes_unchanged(&shifted, &original);
+                continue;
+            }
+            assert!(shifted.shift_for_text_insert(index, "xé😀"));
+            let mut expected = units(&original);
+            expected.splice(
+                index as usize..index as usize,
+                "xé😀".encode_utf16().map(Unit::Text),
+            );
+            assert_eq!(units(&shifted), expected, "insert {index}");
+            assert_segment_invariants(&shifted);
+        }
+        for start in 0..=original.len {
+            for end in start..=original.len + 1 {
+                let mut shifted = original.clone();
+                let eligible = original.is_text_range(start, end);
+                assert!(
+                    !eligible || (start != 4 && end != 4),
+                    "range {start}..{end}"
+                );
+                assert_eq!(
+                    shifted.shift_for_text_delete(start, end),
+                    eligible,
+                    "delete {start}..{end}"
+                );
+                if eligible {
+                    let mut expected = units(&original);
+                    expected.drain(start as usize..end as usize);
+                    assert_eq!(units(&shifted), expected, "delete {start}..{end}");
+                    assert_segment_invariants(&shifted);
+                } else {
+                    assert_segment_indexes_unchanged(&shifted, &original);
+                }
+            }
+        }
+        assert!(!original.is_char_boundary(4));
+        assert!(!original.is_text_range(2, 4) && !original.is_text_range(4, 6));
+        assert!(original.is_text_range(2, 6) && original.is_text_range(3, 5));
+        for (index, text) in [(0, ""), (original.len + 1, "x")] {
+            let mut shifted = original.clone();
+            assert!(!shifted.shift_for_text_insert(index, text));
+            assert_segment_indexes_unchanged(&shifted, &original);
+        }
+        let mut empty = SegmentIndex {
+            len: 0,
+            segs: Vec::new(),
+        };
+        assert!(empty.shift_for_text_insert(0, "é😀"));
+        assert_segment_invariants(&empty);
+        assert!(empty.shift_for_text_delete(0, 3));
+        assert!(empty.segs.is_empty());
+        assert_segment_invariants(&empty);
+    }
+
+    fn run_text_stream(advance_cached: bool) {
+        for seed in [1, 7, 42, 0x1234_5678] {
+            let doc = EditingDoc::new(31);
+            seed_text_stream(&doc);
+            let mut maintained = (*doc.segment_index("body").unwrap()).clone();
+            doc.paragraph_index("body").unwrap();
+            let mut random = seed;
+            let mut steps = 0;
+            let mut shifts = 0;
+            let mut cache_shifts = 0;
+            for step in 0..200 {
+                let before = doc.committed_epoch();
+                let len = doc.story_len("body").unwrap();
+                let insert = next_random(&mut random) % 3 != 0;
+                let start = next_random(&mut random) % (len + u32::from(insert));
+                let start = start - u32::from(!maintained.is_char_boundary(start));
+                let ctx = EditCtx::local("", "");
+                let advanced = if insert {
+                    let text = random_text(&mut random);
+                    if doc
+                        .insert_text(
+                            &ctx,
+                            Position::new("body", start),
+                            text,
+                            FormatPolicy::Inherit,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let exact = doc.story_len("body").unwrap().checked_sub(len)
+                        == Some(text.encode_utf16().count() as u32);
+                    if advance_cached && exact {
+                        doc.advance_indexes_after_text_insert(
+                            "body",
+                            before,
+                            doc.committed_epoch(),
+                            start,
+                            text,
+                        );
+                    }
+                    exact && maintained.shift_for_text_insert(start, text)
+                } else {
+                    let end = (start + 1 + next_random(&mut random) % 3).min(len);
+                    let end = end + u32::from(!maintained.is_char_boundary(end));
+                    let plain = maintained.is_text_range(start, end);
+                    let paragraph_safe = maintained
+                        .segment_at(end)
+                        .is_none_or(|seg| !matches!(seg.kind, SegKind::Embed))
+                        || doc
+                            .paragraph_index("body")
+                            .unwrap()
+                            .para_at(start)
+                            .is_some_and(|para| start > para.node_start);
+                    if doc
+                        .delete_range(&ctx, StoryRange::new("body", start, end))
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let exact =
+                        len.checked_sub(doc.story_len("body").unwrap()) == Some(end - start);
+                    if advance_cached && plain && exact && paragraph_safe {
+                        doc.advance_indexes_after_text_delete(
+                            "body",
+                            before,
+                            doc.committed_epoch(),
+                            start,
+                            end,
+                        );
+                    }
+                    plain && exact && maintained.shift_for_text_delete(start, end)
+                };
+                steps += 1;
+                shifts += usize::from(advanced);
+                let txn = doc.yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                let (cold_segments, cold_paragraphs) = build_indexes(&story, &txn);
+                drop(txn);
+                if !advanced {
+                    maintained = cold_segments.clone();
+                }
+                assert_eq!(
+                    units(&maintained),
+                    units(&cold_segments),
+                    "seed {seed}, step {step}"
+                );
+                assert_segment_invariants(&maintained);
+                assert_segment_invariants(&cold_segments);
+                let after = doc.committed_epoch();
+                let cached_segments = doc.segment_indexes.lock().unwrap().get("body", after);
+                cache_shifts += usize::from(advanced && cached_segments.is_some());
+                if let Some(cached) = cached_segments {
+                    assert_eq!(
+                        units(&cached),
+                        units(&cold_segments),
+                        "seed {seed}, step {step}"
+                    );
+                    assert_segment_invariants(&cached);
+                }
+                if let Some(cached) = doc.paragraph_indexes.lock().unwrap().get("body", after) {
+                    assert_paragraph_indexes_eq(&cached, &cold_paragraphs);
+                }
+                doc.segment_index("body").unwrap();
+                doc.paragraph_index("body").unwrap();
+            }
+            assert!(steps > 150, "seed {seed}: {steps} accepted steps");
+            assert!(
+                shifts * 5 > steps * 2,
+                "seed {seed}: {shifts}/{steps} shifts"
+            );
+            if advance_cached {
+                assert!(
+                    cache_shifts * 5 > steps * 2,
+                    "seed {seed}: {cache_shifts}/{steps} cache shifts"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn segment_index_random_text_stream_matches_cold_builds() {
+        run_text_stream(false);
+    }
+
+    #[test]
+    fn cached_story_indexes_random_text_stream_matches_cold_builds() {
+        run_text_stream(true);
     }
 
     #[test]
@@ -484,9 +898,11 @@ mod tests {
     }
 
     #[test]
-    fn paragraph_index_advances_after_text_insert_and_rebuilds_segments() {
+    fn story_indexes_advance_after_text_insert() {
         let doc = seeded_doc();
         let original = doc.paragraph_index("body").unwrap();
+        let original_segments = doc.segment_index("body").unwrap();
+        let expected_segments = units(&original_segments);
         let expected_original = fresh_paragraph_index(&doc, "body");
         let ctx = EditCtx::local("", "");
         let before = doc.committed_epoch();
@@ -494,7 +910,7 @@ mod tests {
             .unwrap();
         let after = doc.committed_epoch();
         assert_eq!(after, before + 1);
-        doc.advance_paragraph_index_after_text_insert("body", before, after, 1, 2);
+        doc.advance_indexes_after_text_insert("body", before, after, 1, "xy");
         let shifted = doc
             .paragraph_indexes
             .lock()
@@ -505,14 +921,34 @@ mod tests {
         assert!(Arc::ptr_eq(&shifted, &cached));
         assert_paragraph_indexes_eq(&cached, &fresh_paragraph_index(&doc, "body"));
         assert_paragraph_indexes_eq(&original, &expected_original);
+        let shifted_segments = doc
+            .segment_indexes
+            .lock()
+            .unwrap()
+            .get("body", after)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &shifted_segments,
+            &doc.segment_index("body").unwrap()
+        ));
+        assert_eq!(units(&original_segments), expected_segments);
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        assert_eq!(
+            units(&shifted_segments),
+            units(&build_indexes(&story, &txn).0)
+        );
+        assert_segment_invariants(&shifted_segments);
+        drop(txn);
         assert_index_matches_segments(&doc, "body");
     }
 
-    /// A single deletion advances paragraphs while segments rebuild independently.
     #[test]
-    fn paragraph_index_advances_after_text_delete_and_rebuilds_segments() {
+    fn story_indexes_advance_after_text_delete() {
         let doc = seeded_doc();
         let original = doc.paragraph_index("body").unwrap();
+        let original_segments = doc.segment_index("body").unwrap();
+        let expected_segments = units(&original_segments);
         let expected_original = fresh_paragraph_index(&doc, "body");
         let ctx = EditCtx::local("", "");
         let before = doc.committed_epoch();
@@ -520,7 +956,7 @@ mod tests {
             .unwrap();
         let after = doc.committed_epoch();
         assert_eq!(after, before + 1);
-        doc.advance_paragraph_index_after_text_delete("body", before, after, 1, 2);
+        doc.advance_indexes_after_text_delete("body", before, after, 1, 2);
         let shifted = doc
             .paragraph_indexes
             .lock()
@@ -531,11 +967,116 @@ mod tests {
         assert!(Arc::ptr_eq(&shifted, &cached));
         assert_paragraph_indexes_eq(&cached, &fresh_paragraph_index(&doc, "body"));
         assert_paragraph_indexes_eq(&original, &expected_original);
+        let shifted_segments = doc
+            .segment_indexes
+            .lock()
+            .unwrap()
+            .get("body", after)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &shifted_segments,
+            &doc.segment_index("body").unwrap()
+        ));
+        assert_eq!(units(&original_segments), expected_segments);
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        assert_eq!(
+            units(&shifted_segments),
+            units(&build_indexes(&story, &txn).0)
+        );
+        assert_segment_invariants(&shifted_segments);
+        drop(txn);
         assert_index_matches_segments(&doc, "body");
     }
 
     #[test]
-    fn paragraph_index_rebuilds_when_text_insert_spans_two_epochs() {
+    fn story_indexes_advance_independently_when_one_cache_is_missing() {
+        for insert in [false, true] {
+            for missing_segments in [false, true] {
+                let doc = seeded_doc();
+                doc.paragraph_index("body").unwrap();
+                let before = doc.committed_epoch();
+                if missing_segments {
+                    doc.segment_indexes.lock().unwrap().take("body", before);
+                } else {
+                    doc.paragraph_indexes.lock().unwrap().take("body", before);
+                }
+                let ctx = EditCtx::local("", "");
+                if insert {
+                    doc.insert_text(&ctx, Position::new("body", 1), "xy", FormatPolicy::Inherit)
+                        .unwrap();
+                    doc.advance_indexes_after_text_insert(
+                        "body",
+                        before,
+                        doc.committed_epoch(),
+                        1,
+                        "xy",
+                    );
+                } else {
+                    doc.delete_range(&ctx, StoryRange::new("body", 1, 2))
+                        .unwrap();
+                    doc.advance_indexes_after_text_delete(
+                        "body",
+                        before,
+                        doc.committed_epoch(),
+                        1,
+                        2,
+                    );
+                }
+                let after = doc.committed_epoch();
+                let segments = doc.segment_indexes.lock().unwrap().get("body", after);
+                let paragraphs = doc.paragraph_indexes.lock().unwrap().get("body", after);
+                assert_eq!(segments.is_some(), !missing_segments);
+                assert_eq!(paragraphs.is_some(), missing_segments);
+                let txn = doc.yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                let (cold_segments, cold_paragraphs) = build_indexes(&story, &txn);
+                if let Some(segments) = segments {
+                    assert_eq!(units(&segments), units(&cold_segments));
+                    assert_segment_invariants(&segments);
+                }
+                if let Some(paragraphs) = paragraphs {
+                    assert_paragraph_indexes_eq(&paragraphs, &cold_paragraphs);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn segment_index_advances_when_paragraph_shift_is_rejected() {
+        let doc = seeded_doc();
+        doc.paragraph_index("body").unwrap();
+        let before = doc.committed_epoch();
+        doc.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", 5),
+            "xy",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        let after = doc.committed_epoch();
+        doc.advance_indexes_after_text_insert("body", before, after, 5, "xy");
+        assert!(
+            doc.paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_none()
+        );
+        let segments = doc
+            .segment_indexes
+            .lock()
+            .unwrap()
+            .get("body", after)
+            .unwrap();
+        let txn = doc.yrs_doc().transact();
+        let story = crate::story_ref(&txn, "body").unwrap();
+        assert_eq!(units(&segments), units(&build_indexes(&story, &txn).0));
+        assert_segment_invariants(&segments);
+    }
+
+    #[test]
+    fn story_indexes_rebuild_when_text_insert_spans_two_epochs() {
         let doc = seeded_doc();
         doc.paragraph_index("body").unwrap();
         let ctx = EditCtx::local("", "");
@@ -551,9 +1092,16 @@ mod tests {
         }
         let after = doc.committed_epoch();
         assert_eq!(after, before + 2);
-        doc.advance_paragraph_index_after_text_insert("body", before, after, 1, 2);
+        doc.advance_indexes_after_text_insert("body", before, after, 1, "xy");
         assert!(
             doc.paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_none()
+        );
+        assert!(
+            doc.segment_indexes
                 .lock()
                 .unwrap()
                 .get("body", after)
@@ -568,7 +1116,7 @@ mod tests {
 
     /// Two commits cannot advance an index built before either deletion.
     #[test]
-    fn paragraph_index_rebuilds_when_text_delete_spans_two_epochs() {
+    fn story_indexes_rebuild_when_text_delete_spans_two_epochs() {
         let doc = seeded_doc();
         doc.paragraph_index("body").unwrap();
         let ctx = EditCtx::local("", "");
@@ -579,9 +1127,16 @@ mod tests {
         }
         let after = doc.committed_epoch();
         assert_eq!(after, before + 2);
-        doc.advance_paragraph_index_after_text_delete("body", before, after, 0, 1);
+        doc.advance_indexes_after_text_delete("body", before, after, 0, 1);
         assert!(
             doc.paragraph_indexes
+                .lock()
+                .unwrap()
+                .get("body", after)
+                .is_none()
+        );
+        assert!(
+            doc.segment_indexes
                 .lock()
                 .unwrap()
                 .get("body", after)

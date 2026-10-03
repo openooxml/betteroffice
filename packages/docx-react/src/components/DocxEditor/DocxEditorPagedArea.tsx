@@ -9,7 +9,7 @@ import type {
 } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import { type BundledFontProvider } from '@betteroffice/docx/layout';
-import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import { PagedEditor, type PagedEditorProps, type PagedEditorRef } from './PagedEditor';
 import type { PagedEditorCommandBridge } from './hooks/usePagedEditorRefApi';
 import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -81,6 +81,7 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  viewerDocumentRead,
   showHiddenText = false,
   onYrsContentChange,
   onYrsHistoryChange,
@@ -164,6 +165,8 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
+  viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
   showHiddenText?: boolean;
   onYrsContentChange: () => void;
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
@@ -456,6 +459,7 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        viewerDocumentRead={viewerDocumentRead}
         showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}

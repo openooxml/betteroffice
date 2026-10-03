@@ -1,4 +1,6 @@
 import type {
+  TablePayload,
+  TablePayloadRow,
   YrsCellBorders,
   YrsCellLoc,
   YrsContentControlValue,
@@ -10,12 +12,10 @@ import type {
   YrsTableLoc,
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
+import { storyOffsetForLoc, storyPlainText, tableAnchors, tablePlainText } from '@betteroffice/docx/yrs';
 import { computeSplitDialogDefaults, pixelsToEmu } from '@betteroffice/docx/utils';
 import type { ImageLayoutTarget, SetImageWrapTypeOptions } from '@betteroffice/docx/docx';
 import type { TableContextInfo } from './types';
-
-const MAX_TABLE_COLUMNS = 16_384;
-const PLAIN_TEXT_SLOT_LIMIT = 1 << 20;
 
 /** Non-toolbar writes that become yrs-authoritative with `?yrsInput=1`. */
 export type YrsEditorCommand =
@@ -92,8 +92,7 @@ export interface YrsHyperlinkHit {
 }
 
 export function yrsStoryOffsetForLoc(session: YrsSession, loc: YrsLoc): number {
-  const span = session.locateParagraph(loc.story, loc.paraId);
-  return span.start + loc.offset;
+  return storyOffsetForLoc(session, loc);
 }
 
 export function yrsLocForStoryOffset(
@@ -230,106 +229,6 @@ export function yrsSelectedText(session: YrsSession): string {
     .join('');
 }
 
-function embedPlainText(session: YrsSession, kind: string, payload: Record<string, unknown>): string {
-  switch (kind) {
-    case 'tab':
-      return '\t';
-    case 'break':
-      return '\n';
-    case 'field':
-      return typeof payload.displayText === 'string' ? payload.displayText : '';
-    case 'math':
-      return typeof payload.plainText === 'string' ? payload.plainText : '';
-    case 'sdt':
-      return Array.isArray(payload.content)
-        ? payload.content
-            .map((item: { kind?: unknown; text?: unknown; payload?: unknown }) =>
-              item.kind === 'text' && typeof item.text === 'string'
-                ? item.text
-                : embedPlainText(session, String(item.kind), objectValue(item.payload) ?? {})
-            )
-            .join('')
-        : '';
-    case 'blockSdt':
-      return typeof payload.story === 'string'
-        ? `${storyPlainText(session, payload.story).replace(/\n$/, '')}\n`
-        : '';
-    case 'table':
-      return Array.isArray(payload.rows)
-        ? tablePlainText(session, { rows: payload.rows as TablePayloadRow[] })
-            .map((row) => `${row}\n`)
-            .join('')
-        : '';
-    default:
-      return '';
-  }
-}
-
-/** A cell as one tab-separated field, quoted as spreadsheets do when it holds a tab, break or quote. */
-function cellPlainText(session: YrsSession, story: string): string {
-  const text = storyPlainText(session, story).replace(/\n$/, '');
-  return /[\t\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
-}
-
-/** Tab-separated rows, without grid padding for oversized blocks. */
-function tablePlainText(
-  session: YrsSession,
-  payload: TablePayload,
-  range?: { top: number; bottom: number; left: number; right: number }
-): string[] {
-  const { anchors, columns } = tableAnchors(payload);
-  const top = range?.top ?? 0;
-  const bottom = range?.bottom ?? payload.rows.length - 1;
-  const left = range?.left ?? 0;
-  const right = range?.right ?? columns - 1;
-  const lines: string[] = [];
-  if ((bottom - top + 1) * (right - left + 1) > PLAIN_TEXT_SLOT_LIMIT) {
-    let index = 0;
-    for (let row = top; row <= bottom; row += 1) {
-      const texts: string[] = [];
-      while (index < anchors.length && anchors[index].row < row) index += 1;
-      while (index < anchors.length && anchors[index].row === row) {
-        const cell = anchors[index++];
-        if (cell.column >= left && cell.column <= right) {
-          texts.push(cell.story ? cellPlainText(session, cell.story) : '');
-        }
-      }
-      lines.push(texts.join('\t'));
-    }
-    return lines;
-  }
-  const byGrid = new Map(anchors.map((cell) => [`${cell.row}:${cell.column}`, cell.story]));
-  for (let row = top; row <= bottom; row += 1) {
-    const texts: string[] = [];
-    for (let column = left; column <= right; column += 1) {
-      const story = byGrid.get(`${row}:${column}`);
-      texts.push(story ? cellPlainText(session, story) : '');
-    }
-    lines.push(texts.join('\t'));
-  }
-  return lines;
-}
-
-/** Plain text of story units `[from, to)`: paragraphs end in newlines, tables become tab-separated rows. */
-function storyPlainText(session: YrsSession, story: string, from = 0, to = Infinity): string {
-  let text = '';
-  let offset = 0;
-  for (const segment of session.storySegments(story)) {
-    const start = offset;
-    offset += segment.kind === 'text' ? segment.text.length : 1;
-    if (offset <= from) continue;
-    if (start >= to) break;
-    if (segment.kind === 'text') {
-      text += segment.text.slice(Math.max(from, start) - start, Math.min(to, offset) - start);
-    } else if (segment.kind === 'pilcrow') {
-      text += '\n';
-    } else {
-      text += embedPlainText(session, segment.embedKind, segment.payload);
-    }
-  }
-  return text;
-}
-
 /**
  * The current selection as plain text for the clipboard: tabs and line breaks
  * as characters, tables and a multi-cell selection as tab-separated rows.
@@ -355,39 +254,6 @@ export function yrsSelectionPlainText(session: YrsSession): string {
   return start === end ? '' : storyPlainText(session, range.story, start, end);
 }
 
-interface TablePayloadCell {
-  story: string;
-  tcPr?: Record<string, unknown>;
-}
-
-interface TablePayloadRow {
-  cells: TablePayloadCell[];
-}
-
-interface TablePayload {
-  tblPr?: Record<string, unknown>;
-  grid?: unknown[];
-  rows: TablePayloadRow[];
-}
-
-interface TableCellAnchor {
-  row: number;
-  column: number;
-  rowspan: number;
-  colspan: number;
-  story: string;
-}
-
-interface TableVerticalMerge {
-  start: number;
-  end: number;
-  lastRow: number;
-}
-
-function positiveSpan(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 1;
-}
-
 function tablePayload(session: YrsSession, table: YrsTableLoc): TablePayload | null {
   const payload = session.tablePayload(table.story, table.tableIndex);
   if (!payload) return null;
@@ -409,44 +275,6 @@ export function currentYrsTableProperties(
 ): Record<string, unknown> | undefined {
   const resolved = resolveYrsTableTarget(session);
   return resolved ? resolved.payload()?.tblPr : undefined;
-}
-
-function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
-  let activeMerges: TableVerticalMerge[] = [];
-  const anchors: TableCellAnchor[] = [];
-  let columns = Math.min(payload.grid?.length ?? 0, MAX_TABLE_COLUMNS);
-
-  payload.rows.forEach((row, rowIndex) => {
-    activeMerges = activeMerges.filter((merge) => merge.lastRow >= rowIndex);
-    const nextMerges: TableVerticalMerge[] = [];
-    let mergeIndex = 0;
-    let column = 0;
-    for (const cell of row.cells ?? []) {
-      while (mergeIndex < activeMerges.length && activeMerges[mergeIndex].start <= column) {
-        const merge = activeMerges[mergeIndex++];
-        column = Math.max(column, merge.end);
-        nextMerges.push(merge);
-      }
-      const rowspan = Math.max(
-        1,
-        Math.min(positiveSpan(cell.tcPr?.rowspan), payload.rows.length - rowIndex)
-      );
-      const colspan = Math.max(
-        1,
-        Math.min(positiveSpan(cell.tcPr?.colspan), MAX_TABLE_COLUMNS - column)
-      );
-      anchors.push({ row: rowIndex, column, rowspan, colspan, story: cell.story });
-      if (rowspan > 1) {
-        nextMerges.push({ start: column, end: column + colspan, lastRow: rowIndex + rowspan - 1 });
-      }
-      column += colspan;
-      columns = Math.max(columns, column);
-    }
-    while (mergeIndex < activeMerges.length) nextMerges.push(activeMerges[mergeIndex++]);
-    activeMerges = nextMerges;
-  });
-
-  return { anchors, columns };
 }
 
 function sameTable(a: YrsTableLoc, b: YrsTableLoc): boolean {
