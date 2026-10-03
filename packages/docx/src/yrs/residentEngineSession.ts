@@ -129,7 +129,7 @@ export async function createResidentEngineSession(
   let nativeStoryRevision = 0;
   let storyRevision = 0;
 
-  const storiesChangedSince = (since: number) => {
+  const syncStoryRevisions = (): number => {
     const changes = JSON.parse(session.stories_changed_since(nativeStoryRevision)) as {
       revision: number;
       stories: string[];
@@ -139,25 +139,33 @@ export async function createResidentEngineSession(
       storyRevision += 1;
       for (const story of changes.stories) storyRevisions.set(story, storyRevision);
     }
-    if (since >= storyRevision) return { revision: storyRevision, stories: [] };
+    return storyRevision;
+  };
+
+  const storiesChangedSince = (since: number) => {
+    const revision = syncStoryRevisions();
+    if (since >= revision) return { revision, stories: [] };
     return {
-      revision: storyRevision,
-      stories: [...storyRevisions].filter(([, revision]) => revision > since)
+      revision,
+      stories: [...storyRevisions].filter(([, changed]) => changed > since)
         .map(([story]) => story).sort(),
     };
   };
 
+  const storyChangedSince = (story: string, since: number): boolean =>
+    (storyRevisions.get(story) ?? 0) > since;
+
   const geometryStory = (story: string) => {
+    const revision = syncStoryRevisions();
     let cached = geometryStories.get(story);
-    const changes = storiesChangedSince(cached?.revision ?? Number.MAX_SAFE_INTEGER);
-    if (!cached || changes.stories.includes(story)) {
+    if (!cached || storyChangedSince(story, cached.revision)) {
       cached = {
-        revision: changes.revision,
+        revision,
         segments: JSON.parse(session.story_segments(story)) as YrsStorySegment[],
       };
       geometryStories.set(story, cached);
     } else {
-      cached.revision = changes.revision;
+      cached.revision = revision;
     }
     return cached;
   };
@@ -224,14 +232,14 @@ export async function createResidentEngineSession(
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => {
+      const revision = syncStoryRevisions();
       const cached = geometrySpans.get(story);
-      const changes = storiesChangedSince(cached?.revision ?? Number.MAX_SAFE_INTEGER);
-      if (cached && !changes.stories.includes(story)) {
-        cached.revision = changes.revision;
+      if (cached && !storyChangedSince(story, cached.revision)) {
+        cached.revision = revision;
         return cached.spans;
       }
       const spans = JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[];
-      geometrySpans.set(story, { revision: changes.revision, spans });
+      geometrySpans.set(story, { revision, spans });
       return spans;
     },
     storySegments: (story) => geometryStory(story).segments,
@@ -384,7 +392,7 @@ export async function createResidentEngineSession(
         session.apply_raw_ops(story, JSON.stringify(ops));
       } finally {
         if (session.version() !== version) {
-          storiesChangedSince(Number.MAX_SAFE_INTEGER);
+          syncStoryRevisions();
           storyRevision += 1;
           storyRevisions.set(story, storyRevision);
         }
