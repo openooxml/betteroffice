@@ -1,3 +1,4 @@
+import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
   YrsParagraph,
@@ -41,6 +42,7 @@ export type ResidentEngineSession = Pick<
   | 'releaseDisplayPagesFrame'
   | 'clearFonts'
   | 'destroy'
+  | 'encodeSelection'
   | 'encodeStateVector'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
@@ -342,6 +344,7 @@ export async function createResidentEngineSession(
           range.end.offset
         )
       ) as YrsSelectionText,
+    encodeSelection: () => decodeEncodedSelection(session.encoded_selection()),
     applyInput: (text, expectedFrameEpoch) => {
       ensureUndo();
       return session.apply_input(text, expectedFrameEpoch);

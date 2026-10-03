@@ -10,8 +10,8 @@ use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before, snapshot_range,
-    utf16_len,
+    block_embed_at, capture_pilcrow, last_pilcrow, paragraph_content_before, position_chunks,
+    range_chunks, snapshot_range, utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -132,11 +132,6 @@ pub(crate) struct DeleteOutcome {
     /// Units physically removed from the story (all of them in plain mode; only own pending
     /// insertions in suggesting mode).
     pub removed: u32,
-}
-
-/// Chunks covering the insertion/deletion boundary.
-fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec<Chunk> {
-    snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1))
 }
 
 /// Where a suggested replacement of `range` inserts, before its deletion runs:
@@ -326,7 +321,7 @@ impl EditingDoc {
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         text: &str,
         policy: FormatPolicy,
         observe: impl FnOnce(&Attrs),
@@ -342,7 +337,7 @@ impl EditingDoc {
             });
         }
         crate::identity::promote_at(self, txn, &at.story, &story, at.index);
-        let chunks = boundary_chunks(&story, txn, at.index);
+        let chunks = position_chunks(&story, txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {
@@ -380,7 +375,7 @@ impl EditingDoc {
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
     ) -> OpResult<Receipt> {
         let len = crate::format::range_len(&range)?;
         if len == 0 {
@@ -388,12 +383,7 @@ impl EditingDoc {
         }
         let story = story_ref(txn, &range.story)?;
         check_range(&story, txn, range.start, len)?;
-        let chunks = snapshot_range(
-            &story,
-            txn,
-            range.start.saturating_sub(1),
-            range.end.saturating_add(1),
-        );
+        let chunks = range_chunks(&story, txn, &mut range);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, DEL, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
@@ -447,7 +437,7 @@ impl EditingDoc {
         &self,
         txn: &mut TransactionMut<'_>,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         text: &str,
     ) -> OpResult<(Receipt, u32)> {
         validate_text(text)?;
@@ -457,12 +447,8 @@ impl EditingDoc {
         }
         let story = story_ref(txn, &range.story)?;
         check_range(&story, txn, range.start, len)?;
-        let chunks = snapshot_range(
-            &story,
-            txn,
-            range.start.saturating_sub(1),
-            range.end.saturating_add(1),
-        );
+        let chunks = range_chunks(&story, txn, &mut range);
+        let len = range.end - range.start;
         let after = after_struck_text(&story, txn, ctx, &range, len, &chunks);
         let mut at = after.unwrap_or(range.start);
         if !text.is_empty() {
@@ -547,7 +533,7 @@ impl EditingDoc {
     pub(crate) fn replace_range_rich_placed(
         &self,
         ctx: &EditCtx,
-        range: StoryRange,
+        mut range: StoryRange,
         runs: &[RichRun],
     ) -> OpResult<(Receipt, u32)> {
         for run in runs {
@@ -561,12 +547,8 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let chunks = snapshot_range(
-            &story,
-            &txn,
-            range.start.saturating_sub(1),
-            range.end.saturating_add(1),
-        );
+        let chunks = range_chunks(&story, &txn, &mut range);
+        let len = range.end - range.start;
         let after = after_struck_text(&story, &txn, ctx, &range, len, &chunks);
         let mut at = after.unwrap_or(range.start);
         if total > 0 {
@@ -639,12 +621,12 @@ impl EditingDoc {
 
     /// Inserts a one-unit hard-break embed (`_kind: "break"`), inheriting run formatting like
     /// typing.
-    pub fn insert_hard_break(&self, ctx: &EditCtx, at: Position) -> OpResult<Receipt> {
+    pub fn insert_hard_break(&self, ctx: &EditCtx, mut at: Position) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
-        let chunks = boundary_chunks(&story, &txn, at.index);
+        let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id())
@@ -670,12 +652,12 @@ impl EditingDoc {
 
     /// Inserts a one-unit tab. Tabs are the `\t` character in the story vocabulary (the render
     /// bridge splits text runs at `\t`), inheriting run formatting like typing.
-    pub fn insert_tab(&self, ctx: &EditCtx, at: Position) -> OpResult<Receipt> {
+    pub fn insert_tab(&self, ctx: &EditCtx, mut at: Position) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         crate::identity::promote_at(self, &mut txn, &at.story, &story, at.index);
-        let chunks = boundary_chunks(&story, &txn, at.index);
+        let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id())

@@ -273,7 +273,8 @@ export class EditSession {
      * Deletes `[start, end)`. Because a range crossing a paragraph boundary
      * includes the boundary pilcrow, a plain delete also merges those
      * paragraphs. Suggesting mode removes nothing and stamps the content
-     * `del` instead. Receipt: `{"revisionId": string|null}`.
+     * `del` instead. Receipt: `{"revisionId": string|null, "range"}`, the
+     * range being what the delete left.
      */
     delete_range(story: string, start_para: string, start_offset: number, end_para: string, end_offset: number, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -480,8 +481,8 @@ export class EditSession {
      * Inserts one inline image embed at `(story, para_id, offset)`.
      * `payload_json` is the image's authored payload object, stored as given.
      * The embed occupies one story unit. Receipt:
-     * `{"revisionId": string|null}`. Errors when the payload is not an
-     * object.
+     * `{"revisionId": string|null, "range"}`, the range being where the image
+     * landed. Errors when the payload is not an object.
      */
     insert_image(story: string, para_id: string, offset: number, payload_json: string, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -508,10 +509,10 @@ export class EditSession {
     /**
      * Inserts `text` at `(story, para_id, offset)`. It must contain no
      * paragraph or line breaks, and it inherits the formatting at the
-     * insertion point. Receipt: `{"revisionId": string|null}` — non-null in
-     * suggesting mode, where the text is stamped `ins` and coalesces into an
-     * adjacent insertion by the same author rather than opening a second
-     * revision.
+     * insertion point. Receipt: `{"revisionId": string|null, "range"}` —
+     * the id is non-null in suggesting mode, where the text is stamped `ins`
+     * and coalesces into an adjacent insertion by the same author rather than
+     * opening a second revision; the range is where the text landed.
      */
     insert_text(story: string, para_id: string, offset: number, text: string, author_name?: string | null, author_date?: string | null): string;
     /**
@@ -579,10 +580,8 @@ export class EditSession {
      */
     list_revisions(): string;
     /**
-     * Hydrates this replica from an encoded yrs v1 update, typically another
-     * replica's [`EditSession::encode_state`] output. Identical to
-     * [`EditSession::apply_update`]; the separate name marks the initial-load
-     * call site. Errors on a malformed update.
+     * Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
+     * comment writes and marks loaded fields differing from seed placeholders as authored.
      */
     load(update: Uint8Array): void;
     /**

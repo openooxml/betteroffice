@@ -15,7 +15,12 @@ import type { RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { YrsResidentCaretSnapshot } from '@betteroffice/docx/yrs';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import {
   InlineHeaderFooterEditor,
@@ -116,6 +121,7 @@ export function DocxEditorPagedArea({
   applyResidentDelete,
   displayListQueries,
   resolveDisplayListQueries,
+  pageNavigation,
   canvasDisplayList,
   displayListFrameEpoch,
   residentCaret,
@@ -215,6 +221,7 @@ export function DocxEditorPagedArea({
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -484,6 +491,7 @@ export function DocxEditorPagedArea({
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
         resolveDisplayListQueries={resolveDisplayListQueries}
+        pageNavigation={pageNavigation}
         canvasDisplayList={canvasDisplayList}
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}

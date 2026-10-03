@@ -94,7 +94,12 @@ import {
   createRenderedDomContext,
 } from '../../plugin-api/RenderedDomContext';
 import { useLayoutPipeline } from './hooks/useLayoutPipeline';
-import type { FontRequirementsInWorker, LayoutInWorker, ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type {
+  DisplayPageNavigation,
+  FontRequirementsInWorker,
+  LayoutInWorker,
+  ResidentFrameApplyResult,
+} from './hooks/useDisplayList';
 import { workerOpenReplicaPending } from './internals/workerOpenReplica';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
@@ -342,6 +347,7 @@ export interface PagedEditorProps {
    */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  pageNavigation?: DisplayPageNavigation | null;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -562,6 +568,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       rustFontChainsProviderRef,
       displayListQueries = null,
       resolveDisplayListQueries,
+      pageNavigation,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -1185,8 +1192,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           } else if (command.type === 'insertImage') {
             const at = session.selection()?.head;
             if (!at) return false;
-            session.insertImage(at, command.image, structuralAuthor);
-            session.setSelection({ ...at, offset: at.offset + 1 });
+            const landed = session.insertImage(at, command.image, structuralAuthor).range;
+            session.setSelection(
+              landed ? { story: landed.story, ...landed.end } : { ...at, offset: at.offset + 1 }
+            );
           } else if (command.type === 'contentControlValue') {
             const node = positionProjection.nodeAt(command.pmPos);
             const embedId = command.embedId ?? (node ? yrsEmbedIdForProjectedNode(node) : null);
@@ -1241,8 +1250,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
                 const receipt = session.replaceRange(range, command.displayText, structuralAuthor);
                 range = receipt.range ?? insertedRange;
               } else {
-                session.insertText(at, command.displayText, structuralAuthor);
-                range = insertedRange;
+                range =
+                  session.insertText(at, command.displayText, structuralAuthor).range ??
+                  insertedRange;
               }
             }
             if (
@@ -1476,6 +1486,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         yrsLocToDisplayPosition,
         getScrollContainer,
         displayListQueries,
+        pageNavigation,
         layout,
         canvasHostRef,
         onNavigationIntent: cancelPendingScrollRestore,

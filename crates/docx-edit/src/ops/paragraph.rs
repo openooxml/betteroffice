@@ -32,7 +32,8 @@ use crate::identity::{self, IdAllocator, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
     adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, block_embed_at,
-    capture_pilcrow, paragraph_content_before, revision_id_in_range, snapshot_range,
+    capture_pilcrow, paragraph_content_before, position_chunks, revision_id_in_range,
+    snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -368,7 +369,7 @@ impl EditingDoc {
     pub fn split_paragraph(
         &self,
         ctx: &EditCtx,
-        at: Position,
+        mut at: Position,
         next_style: Option<&ResolvedStyleProjection>,
     ) -> OpResult<SplitReceipt> {
         if let Some(projection) = next_style
@@ -382,12 +383,7 @@ impl EditingDoc {
         identity::promote_at(self, &mut txn, &at.story, &story, at.index);
         let mut ids = IdAllocator::new(self, &txn);
         let second_para_id = ids.session_key(self);
-        let chunks = snapshot_range(
-            &story,
-            &txn,
-            at.index.saturating_sub(1),
-            at.index.saturating_add(1),
-        );
+        let chunks = position_chunks(&story, &txn, &mut at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, crate::INS, &ctx.author)
                 .or_else(|| {
