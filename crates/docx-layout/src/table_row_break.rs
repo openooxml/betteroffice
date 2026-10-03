@@ -1,6 +1,6 @@
 //! Whole-line table row-break geometry.
 
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 
 use serde::Serialize;
 
@@ -198,6 +198,7 @@ pub(crate) struct RowBreaks<'a> {
     pub(crate) kept: TableRowBreakInfo,
     lines: OnceCell<TableRowBreakInfo>,
     cells: OnceCell<Vec<Option<Vec<CellBreaks>>>>,
+    every_cell_starts: Cell<bool>,
 }
 
 impl<'a> RowBreaks<'a> {
@@ -208,7 +209,19 @@ impl<'a> RowBreaks<'a> {
             kept: row_break_info(block, measure, block.floating.is_none()),
             lines: OnceCell::new(),
             cells: OnceCell::new(),
+            every_cell_starts: Cell::new(true),
         }
+    }
+
+    /// Whether [`Self::every_cell_start`] may hold a row back for a later
+    /// column; off on pages with float bands and where the next page can be
+    /// shorter than the current column.
+    pub(crate) fn set_every_cell_starts(&self, enabled: bool) {
+        self.every_cell_starts.set(enabled);
+    }
+
+    pub(crate) fn every_cell_starts(&self) -> bool {
+        self.every_cell_starts.get()
     }
 
     pub(crate) fn lines(&self) -> &TableRowBreakInfo {
@@ -304,24 +317,62 @@ impl<'a> RowBreaks<'a> {
             .fold(0.0, f64::max)
     }
 
+    /// The smallest per-cell slice of `row` from `consumed` on that the row loop
+    /// places in a column `capacity` tall: [`Self::every_cell_start`], or where no
+    /// such column starts every cell, the smallest slice any cell progresses in.
     pub(crate) fn first_cell_slice(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
+        self.every_cell_start(row, consumed, capacity).or_else(|| {
+            let minimum = self
+                .cells(row)?
+                .iter()
+                .filter_map(|cell| {
+                    let top = consumed.min(cell.end);
+                    cell.kept
+                        .iter()
+                        .copied()
+                        .find(|offset| *offset > top)
+                        .map(|offset| offset - top)
+                })
+                .min_by(f64::total_cmp)?;
+            let shared = snap_row_break(&self.kept, row, consumed, minimum);
+            (minimum <= capacity
+                && self
+                    .cell_slice(row, consumed, None, minimum, shared, false, capacity)
+                    .is_some())
+            .then_some(minimum)
+        })
+    }
+
+    /// The smallest per-cell slice of `row` from `consumed` on that holds the
+    /// first unbreakable stretch of every cell with content left, when a column
+    /// `capacity` tall holds it.
+    pub(crate) fn every_cell_start(&self, row: usize, consumed: f64, capacity: f64) -> Option<f64> {
+        if !self.every_cell_starts.get() {
+            return None;
+        }
         let minimum = self
             .cells(row)?
             .iter()
             .filter_map(|cell| {
                 let top = consumed.min(cell.end);
-                cell.kept
+                let offsets = if cell.kept_oversized(top, capacity) {
+                    &cell.lines
+                } else {
+                    &cell.kept
+                };
+                offsets
                     .iter()
                     .copied()
                     .find(|offset| *offset > top)
                     .map(|offset| offset - top)
             })
-            .min_by(f64::total_cmp)?;
+            .max_by(f64::total_cmp)?;
         let shared = snap_row_break(&self.kept, row, consumed, minimum);
         (minimum <= capacity
-            && self
-                .cell_slice(row, consumed, None, minimum, shared, false, capacity)
-                .is_some())
+            && (minimum - shared < 1e-6
+                || self
+                    .cell_slice(row, consumed, None, minimum, shared, false, capacity)
+                    .is_some_and(|slice| !slice.starved)))
         .then_some(minimum)
     }
 
@@ -382,6 +433,11 @@ impl<'a> RowBreaks<'a> {
                 clip.bottom = last_fitting(&cell.lines, clip.top);
             }
         }
+        let starved = tops.is_none()
+            && cells
+                .iter()
+                .zip(&clips)
+                .any(|(cell, clip)| clip.bottom == clip.top && cell.end > clip.top);
         let height = height(&clips);
         let complete = cells
             .iter()
@@ -391,6 +447,7 @@ impl<'a> RowBreaks<'a> {
             clips,
             height,
             complete,
+            starved,
         })
     }
 
@@ -433,6 +490,7 @@ impl<'a> RowBreaks<'a> {
             clips,
             height: self.cell_remaining(row, tops),
             complete: true,
+            starved: false,
         }
     }
 
@@ -489,6 +547,8 @@ pub(crate) struct CellRowSlice {
     pub(crate) clips: Vec<CellClip>,
     pub(crate) height: f64,
     pub(crate) complete: bool,
+    /// A first slice that leaves a cell with content left no line on the page.
+    pub(crate) starved: bool,
 }
 
 fn cell_offsets(geometry: &CellRowGeometry, end: f64) -> Vec<f64> {

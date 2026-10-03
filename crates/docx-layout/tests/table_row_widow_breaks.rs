@@ -57,7 +57,11 @@ fn table_fragments(measured: Vec<Value>, columns: Option<Value>) -> Vec<(usize, 
     if let Some(columns) = columns {
         options["columns"] = columns;
     }
-    let input = json!({"measured":measured,"options":options});
+    layout_table_fragments(json!({"measured":measured,"options":options}))
+}
+
+/// Returns each table fragment of the laid-out `input` with its page index.
+fn layout_table_fragments(input: Value) -> Vec<(usize, Value)> {
     let layout: Value =
         serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
             .unwrap();
@@ -752,18 +756,18 @@ fn a_four_line_cell_splits_two_and_two_while_the_other_cell_finishes() {
 }
 
 #[test]
-fn a_three_line_widow_controlled_cell_stays_whole_while_another_splits() {
+fn a_row_moves_whole_when_a_widow_controlled_cell_has_no_line_on_the_page() {
     let measured = after_filler(
-        2,
-        two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+        4,
+        two_cell_table(&[(1, 0.0, json!({})), (2, 0.0, json!({}))]),
     );
     let result = table_fragments(measured.clone(), None);
-    assert_eq!(result[0].0, 0);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 0.0)]);
-    assert_eq!(cell_windows(&result[1].1), [(40.0, 80.0), (0.0, 64.4)]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, 1);
+    assert!(result[0].1["cellClips"].is_null());
     assert_eq!(
         placed_cell_lines(&measured),
-        [vec![(0, 0..2)], vec![(0, 2..4), (1, 0..3)]]
+        [vec![], vec![(0, 0..1), (1, 0..2)]]
     );
 }
 
@@ -1083,16 +1087,17 @@ fn a_fitting_shared_start_keeps_the_legacy_header_decision() {
 }
 
 #[test]
-fn keep_lines_in_one_cell_does_not_block_another_cells_split() {
+fn a_row_moves_whole_when_a_kept_cell_has_no_line_on_the_page() {
     let measured = after_filler(
         2,
         two_cell_table(&[(6, 0.0, json!({})), (4, 4.4, json!({"keepLines": true}))]),
     );
     let result = table_fragments(measured.clone(), None);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    assert_eq!(result[0].0, 1);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 80.0), (0.0, 84.4)]);
     assert_eq!(
         placed_cell_lines(&measured),
-        [vec![(0, 0..3)], vec![(0, 3..6), (1, 0..4)]]
+        [vec![], vec![(0, 0..4), (1, 0..4)], vec![(0, 4..6)]]
     );
 }
 
@@ -1138,14 +1143,19 @@ fn an_unfinished_cell_can_progress_beyond_an_existing_shared_cut() {
 
 #[test]
 fn a_keep_next_heading_stays_with_a_per_cell_leading_slice() {
-    let table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
-    assert_eq!(heading_and_table_pages_after(2, table), (Some(0), Some(0)));
+    let table = two_cell_table(&[(4, 0.0, json!({})), (6, 4.4, json!({}))]);
+    assert_eq!(heading_and_table_pages_after(1, table), (Some(0), Some(0)));
 }
 
 #[test]
-fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
+fn a_keep_next_heading_moves_with_a_row_a_cell_cannot_start_on_the_page() {
+    let table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    assert_eq!(heading_and_table_pages_after(2, table), (Some(1), Some(1)));
+}
+
+fn keep_next_row_fragments(filler_lines: usize, cells: &[(usize, f64, Value)]) -> Vec<Value> {
     let heading = table_rows(&[(1, json!({"keepNext": true}), json!({}))]);
-    let mut table = two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    let mut table = two_cell_table(cells);
     table["block"]["rows"]
         .as_array_mut()
         .unwrap()
@@ -1154,12 +1164,217 @@ fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
         .as_array_mut()
         .unwrap()
         .insert(0, heading["measure"]["rows"][0].clone());
-    table["measure"]["totalHeight"] = json!(100);
-    let result = table_fragments(after_filler(2, table), None);
+    let height = 20.0 + table["measure"]["rows"][1]["height"].as_f64().unwrap();
+    table["measure"]["totalHeight"] = json!(height);
+    table_fragments(after_filler(filler_lines, table), None)
+        .into_iter()
+        .map(|(page, mut fragment)| {
+            fragment["page"] = json!(page);
+            fragment
+        })
+        .collect()
+}
+
+#[test]
+fn a_keep_next_row_stays_with_a_per_cell_leading_slice() {
+    let result = keep_next_row_fragments(1, &[(4, 0.0, json!({})), (6, 4.4, json!({}))]);
     assert_eq!(result.len(), 2);
+    assert_eq!(result[0]["page"], 0);
+    assert_eq!(result[0]["rowStart"], 0);
+    assert_eq!(result[0]["rowEnd"], 2);
+    assert!((result[0]["height"].as_f64().unwrap() - 64.4).abs() < 0.01);
+    assert_eq!(cell_windows(&result[0]), [(0.0, 40.0), (0.0, 44.4)]);
+}
+
+#[test]
+fn a_keep_next_row_moves_with_a_row_a_cell_cannot_start_on_the_page() {
+    let result = keep_next_row_fragments(2, &[(4, 0.0, json!({})), (3, 4.4, json!({}))]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["page"], 1);
+    assert_eq!(result[0]["rowStart"], 0);
+    assert_eq!(result[0]["rowEnd"], 2);
+    assert!(result[0]["cellClips"].is_null());
+}
+
+#[test]
+fn a_row_moves_whole_when_a_staggered_widow_controlled_cell_has_no_line_on_the_page() {
+    let measured = after_filler(
+        2,
+        two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+    );
+    let result = table_fragments(measured.clone(), None);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, 1);
+    assert!(result[0].1["cellClips"].is_null());
+    assert_eq!(
+        placed_cell_lines(&measured),
+        [vec![], vec![(0, 0..4), (1, 0..3)]]
+    );
+}
+
+/// A row of a 20-line cell beside a cell whose one line is taller than a page.
+fn tall_line_table() -> Value {
+    let mut table = two_cell_table(&[(20, 0.0, json!({})), (1, 0.0, json!({}))]);
+    let cell = &mut table["measure"]["rows"][0]["cells"][1];
+    cell["height"] = json!(120);
+    cell["blocks"][0]["totalHeight"] = json!(120);
+    let line = &mut cell["blocks"][0]["lines"][0];
+    line["ascent"] = json!(100);
+    line["descent"] = json!(20);
+    line["lineHeight"] = json!(120);
+    table
+}
+
+#[test]
+fn a_cell_line_taller_than_a_page_keeps_the_other_cells_splitting() {
+    let result = table_fragments(after_filler(2, tall_line_table()), None);
+    assert_eq!(result[0].0, 0);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 60.0), (0.0, 0.0)]);
+    let mut bottom = 0.0;
+    for (_, fragment) in &result {
+        let (top, end) = cell_windows(fragment)[0];
+        assert_eq!(top, bottom);
+        bottom = end;
+    }
+    assert_eq!(bottom, 400.0);
+}
+
+#[test]
+fn pages_with_float_bands_keep_the_per_cell_split() {
+    let input = json!({
+        "measured": after_filler(
+            20,
+            two_cell_table(&[(4, 0.0, json!({})), (3, 4.4, json!({}))]),
+        ),
+        "options": {
+            "pageSize": {"w": 240, "h": 500},
+            "margins": {"top": 20, "right": 10, "bottom": 10, "left": 10},
+            "sectionPageFloatBands": [{"default": [], "first": [{"top": 20, "bottom": 30}]}],
+        },
+    });
+    let tables = layout_table_fragments(input);
+    assert_eq!(tables.len(), 2);
+    assert_eq!(tables[0].0, 0);
+    assert_eq!(cell_windows(&tables[0].1), [(0.0, 40.0), (0.0, 0.0)]);
+    assert_eq!(cell_windows(&tables[1].1), [(40.0, 80.0), (0.0, 64.4)]);
+}
+
+/// The page of the first fragment of a table whose 120px exact-height
+/// keep-next row is followed by a row of `cells`, after `filler` 20px lines on
+/// pages with a 200px body and the given extra layout options; a `section`
+/// option is a section break placed after the filler.
+fn keep_next_exact_row_page(filler: usize, cells: &[(usize, f64, Value)], extra: Value) -> usize {
+    let kept = table_rows(&[(
+        6,
+        json!({"keepNext": true}),
+        json!({"height": 120, "heightRule": "exact"}),
+    )]);
+    let mut table = two_cell_table(cells);
+    for key in ["block", "measure"] {
+        table[key]["rows"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, kept[key]["rows"][0].clone());
+    }
+    table["measure"]["totalHeight"] = json!(240);
+    let mut options = json!({"pageSize": {"w": 240, "h": 220},
+        "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}});
+    options
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let mut measured = after_filler(filler, table);
+    if let Some(section) = options.as_object_mut().unwrap().remove("section") {
+        measured.insert(
+            1,
+            json!({"block": section, "measure": {"kind": "sectionBreak"}}),
+        );
+    }
+    let tables = layout_table_fragments(json!({"measured": measured, "options": options}));
+    assert_eq!(tables[0].1["rowStart"], 0);
+    tables[0].0
+}
+
+#[test]
+fn a_keep_next_row_stays_on_the_page_when_later_pages_have_less_room() {
+    let staggered = [(6, 0.0, json!({})), (3, 4.4, json!({}))];
+    let aligned = [(6, 0.0, json!({})), (3, 0.0, json!({}))];
+    let pages = [
+        keep_next_exact_row_page(
+            2,
+            &staggered,
+            json!({"sectionPageFloatBands":
+                [{"default": [{"top": 10, "bottom": 110}], "first": []}]}),
+        ),
+        keep_next_exact_row_page(
+            2,
+            &aligned,
+            json!({"sectionPageMargins":
+                [{"even": {"top": 110, "right": 10, "bottom": 10, "left": 10}}]}),
+        ),
+        keep_next_exact_row_page(
+            2,
+            &aligned,
+            json!({"section": {"kind": "sectionBreak", "id": 2, "type": "continuous",
+                "margins": {"top": 110, "right": 10, "bottom": 10, "left": 10}}}),
+        ),
+        keep_next_exact_row_page(
+            1,
+            &aligned,
+            json!({"sectionPageFloatBands":
+                [{"default": [], "first": [{"top": 10, "bottom": 30}]}]}),
+        ),
+    ];
+    assert_eq!(pages, [0, 0, 0, 0]);
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_a_header_band_and_a_per_cell_row_chain() {
+    let ends = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({"keepNext": true}), json!({})),
+    ]);
+    let mut table = two_cell_table(&[(6, 0.0, json!({})), (4, 10.0, json!({"keepLines": true}))]);
+    for key in ["block", "measure"] {
+        table[key]["rows"] = json!([
+            ends[key]["rows"][0],
+            ends[key]["rows"][1],
+            table[key]["rows"][0],
+        ]);
+    }
+    table["measure"]["totalHeight"] = json!(160);
+    assert_eq!(heading_and_table_pages_after(1, table), (Some(1), Some(1)));
+}
+
+#[test]
+fn a_keep_next_heading_moves_with_a_row_whose_cell_line_is_taller_than_a_page() {
+    assert_eq!(
+        heading_and_table_pages_after(3, tall_line_table()),
+        (Some(1), Some(1))
+    );
+}
+
+#[test]
+fn repeated_headers_keep_a_keep_next_chain_into_a_per_cell_body_row() {
+    let headers = table_rows(&[
+        (1, json!({}), json!({"isHeader": true})),
+        (1, json!({"keepNext": true}), json!({"isHeader": true})),
+    ]);
+    let mut table = two_cell_table(&[
+        (6, 0.0, json!({"widowControl": false})),
+        (3, 10.0, json!({"keepLines": true})),
+    ]);
+    for key in ["block", "measure"] {
+        table[key]["rows"] = json!([
+            headers[key]["rows"][0],
+            headers[key]["rows"][1],
+            table[key]["rows"][0],
+        ]);
+    }
+    table["measure"]["totalHeight"] = json!(160);
+    let result = table_fragments(after_filler(1, table), None);
     assert_eq!(result[0].0, 0);
     assert_eq!(result[0].1["rowStart"], 0);
-    assert_eq!(result[0].1["rowEnd"], 2);
-    assert_eq!(result[0].1["height"], 60);
-    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 0.0)]);
+    assert_eq!(result[0].1["rowEnd"], 3);
+    assert_eq!(cell_windows(&result[0].1), [(0.0, 40.0), (0.0, 30.0)]);
 }
