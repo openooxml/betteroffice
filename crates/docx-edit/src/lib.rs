@@ -690,8 +690,7 @@ impl EditingDoc {
                 ] {
                     let authored = match comment.get(&txn, key) {
                         Some(Out::Any(value)) => value != placeholder,
-                        Some(_) => true,
-                        None => false,
+                        _ => true,
                     };
                     if authored {
                         written.insert((source_comment.id.clone(), Some(key.to_owned())));
