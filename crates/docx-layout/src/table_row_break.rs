@@ -4,11 +4,13 @@ use std::cell::OnceCell;
 
 use serde::Serialize;
 
-use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
+use crate::cell_layout::{
+    cell_vertical_offset, is_floating_image, layout_cell_content, nested_table_float_offset,
+};
 use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::table_grid::resolve_cell_grid;
 use crate::types::{
-    BlockExtent, CellClip, LayoutBlock, TableBlock, TableCell, TableCellExtent, TableExtent,
+    BlockExtent, CellClip, LayoutBlock, Run, TableBlock, TableCell, TableCellExtent, TableExtent,
 };
 
 /// Per-table break geometry consumed by `snap_row_break`.
@@ -173,6 +175,39 @@ fn minimum_height_governs(
     content > 0.0 && minimum + padding >= content
 }
 
+fn cell_has_anchored_drawing(blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().any(|run| {
+            matches!(run, Run::Image(image) if image.position.is_some()
+                || is_floating_image(image.wrap_type.as_deref(), image.display_mode.as_deref()))
+        }),
+        LayoutBlock::Table(table) => {
+            table.floating.is_some()
+                || table.rows.iter().any(|row| {
+                    row.cells
+                        .iter()
+                        .any(|cell| cell_has_anchored_drawing(&cell.blocks))
+                })
+        }
+        LayoutBlock::Image(image) => image.anchor.as_ref().is_some_and(|anchor| {
+            anchor.is_anchored == Some(true)
+                || anchor.position.is_some()
+                || is_floating_image(anchor.wrap_type.as_deref(), None)
+        }),
+        LayoutBlock::Shape(shape) => shape.position.is_some(),
+        LayoutBlock::TextBox(text_box) => {
+            text_box.position.is_some()
+                || is_floating_image(
+                    text_box.wrap_type.as_deref(),
+                    text_box.display_mode.as_deref(),
+                )
+                || text_box.wrap_type.as_deref() == Some("topAndBottom")
+        }
+        LayoutBlock::Chart(chart) => chart.position.is_some(),
+        _ => false,
+    })
+}
+
 pub(crate) struct RowBreaks<'a> {
     block: &'a TableBlock,
     measure: &'a TableExtent,
@@ -222,6 +257,7 @@ impl<'a> RowBreaks<'a> {
                                         None | Some("lrTb")
                                     )
                                     || !crate::footnotes::collect_note_refs(&cell.blocks).is_empty()
+                                    || cell_has_anchored_drawing(&cell.blocks)
                             })
                         {
                             return None;

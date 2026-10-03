@@ -3404,6 +3404,61 @@ fn per_cell_slices_paint_only_their_lines_and_hit_the_continued_paragraph() {
 }
 
 #[test]
+fn per_cell_window_keeps_and_clips_a_paragraph_border_at_its_bottom() {
+    use serde_json::json;
+    let mut input = per_cell_split_input(2);
+    input["measured"][1]["block"]["rows"][0]["cells"][1]["blocks"][0]["attrs"]["borders"] =
+        json!({"bottom": {"style": "single", "width": 2, "space": 0, "color": "#123456"}});
+    input["layout"] =
+        serde_json::from_str(&docx_layout::layout_to_json(&input.to_string()).unwrap()).unwrap();
+    let fragment = input["layout"]["pages"][0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|fragment| fragment["kind"] == "table")
+        .unwrap();
+    let window = fragment["cellClips"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|clip| clip["cell"] == 1)
+        .unwrap();
+    let top = fragment["y"].as_f64().unwrap();
+    let height = window["bottom"].as_f64().unwrap() - window["top"].as_f64().unwrap();
+    assert!((height - 44.4).abs() < 0.01);
+    let dl = build_dl(&input.to_string());
+    assert_eq!(dl.pages.len(), 2);
+    let borders: Vec<_> = dl.pages[0]
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Line(line)
+                if line.border_owner == Some(docx_layout::display_list::BorderOwner::Paragraph)
+                    && line.color == "#123456" =>
+            {
+                Some(line)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(borders.len(), 1);
+    let border = borders[0];
+    assert_eq!(border.y1, border.y2);
+    assert!((border.y1.as_f64().unwrap() - (top + height)).abs() < 0.01);
+    assert_eq!(border.stroke_width.as_f64(), Some(2.0));
+    let clip = border
+        .attrs
+        .clip_group
+        .as_ref()
+        .unwrap()
+        .clip
+        .as_ref()
+        .unwrap();
+    assert_eq!(clip.y.as_ref().unwrap().as_f64(), Some(top));
+    assert!((clip.h.as_ref().unwrap().as_f64().unwrap() - height).abs() < 0.01);
+}
+
+#[test]
 fn per_cell_windows_survive_the_resident_display_conversion() {
     let input = per_cell_split_input(6);
     let mut pagination: docx_layout::types::Input = serde_json::from_value(input.clone()).unwrap();

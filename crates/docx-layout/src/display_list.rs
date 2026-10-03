@@ -3523,16 +3523,9 @@ fn runs_base_is_rtl(runs: &[RunIn]) -> bool {
     true
 }
 
-fn is_floating_wrap_type(wrap: Option<&str>) -> bool {
-    matches!(
-        wrap,
-        Some("square") | Some("tight") | Some("through") | Some("behind") | Some("inFront")
-    )
-}
-
 /// Returns whether an image is positioned outside inline flow.
 fn is_floating_image_run(run: &ImageRunIn) -> bool {
-    is_floating_wrap_type(run.wrap_type.as_deref()) || run.display_mode.as_deref() == Some("float")
+    crate::cell_layout::is_floating_image(run.wrap_type.as_deref(), run.display_mode.as_deref())
 }
 
 /// parse "rotate(NNdeg)" out of a CSS transform string, normalized to [0, 360)
@@ -4923,7 +4916,7 @@ fn recompose_hf_region(
             }
             (BlockIn::TextBox(block), MeasureIn::TextBox(measure)) => {
                 let flow_y = if block.display_mode.as_deref() != Some("float")
-                    && !is_floating_wrap_type(block.wrap_type.as_deref())
+                    && !crate::cell_layout::is_floating_image(block.wrap_type.as_deref(), None)
                 {
                     hf_flow.place(measure.height, 0.0, 0.0)
                 } else {
@@ -9534,6 +9527,12 @@ pub(crate) fn emit_table_fragment(
             }
         }
 
+        let content_stamp_from = prims.len();
+        let windowed_lines = frag.cell_clips.as_ref().is_some_and(|clips| {
+            clips
+                .iter()
+                .any(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
+        });
         let (content_y, content_clip_top, content_clip_bottom) =
             plan.cell_content_window(frag, g, paint);
         if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
@@ -9548,11 +9547,7 @@ pub(crate) fn emit_table_fragment(
                 is_first_col,
                 content_clip_top,
                 content_clip_bottom,
-                frag.cell_clips.as_ref().is_some_and(|clips| {
-                    clips
-                        .iter()
-                        .any(|clip| clip.row == g.row_index && clip.cell == g.cell_index)
-                }),
+                windowed_lines,
                 ctx,
                 p.selectable,
                 &cell_ref,
@@ -9569,8 +9564,16 @@ pub(crate) fn emit_table_fragment(
             h: Some(px((cell_clip_bottom - cell_clip_top).max(0.0))),
         };
         let clip_id = format!("clip-{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
-        for primitive in &mut prims[cell_stamp_from..] {
-            if let Some(attrs) = doc_attrs_mut(primitive) {
+        for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
+            if windowed_lines
+                && index >= content_stamp_from
+                && let Primitive::Line(line) = primitive
+            {
+                let mut line_clip = cell_clip.clone();
+                line_clip.y = Some(px(content_clip_top));
+                line_clip.h = Some(px((content_clip_bottom - content_clip_top).max(0.0)));
+                apply_clip_group(&mut line.attrs, clip_id.clone(), line_clip);
+            } else if let Some(attrs) = doc_attrs_mut(primitive) {
                 apply_clip_group(attrs, clip_id.clone(), cell_clip.clone());
             }
         }
@@ -10136,7 +10139,12 @@ fn emit_cell_content(
     if windowed_lines {
         let mut index = stamp_from;
         while index < prims.len() {
-            let (top, bottom) = primitive_v_extent(&prims[index]);
+            let (mut top, mut bottom) = primitive_v_extent(&prims[index]);
+            if let Primitive::Line(line) = &prims[index] {
+                let half_stroke = num_f64(&line.stroke_width) / 2.0;
+                top -= half_stroke;
+                bottom += half_stroke;
+            }
             if bottom <= clip_top_y || top >= clip_bottom_y {
                 prims.remove(index);
             } else {

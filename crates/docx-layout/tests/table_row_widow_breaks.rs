@@ -663,6 +663,17 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
         "rotated",
         "footnote",
         "endnote",
+        "floatingImage",
+        "wrappedImage",
+        "behindImage",
+        "floatImage",
+        "anchoredImage",
+        "nestedFloatingImage",
+        "floatingTable",
+        "anchoredShape",
+        "anchoredTextBox",
+        "anchoredChart",
+        "anchoredImageBlock",
     ] {
         let mut table = original.clone();
         match exclusion {
@@ -690,10 +701,99 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
                 };
                 table["block"]["rows"][0]["cells"][0]["blocks"][0]["runs"][0][key] = json!(1);
             }
+            "floatingImage"
+            | "wrappedImage"
+            | "behindImage"
+            | "floatImage"
+            | "anchoredImage"
+            | "nestedFloatingImage"
+            | "floatingTable" => {
+                let mut image = json!({"kind": "image", "src": "synthetic-image",
+                    "width": 20, "height": 20, "wrapType": "inFront",
+                    "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 50}}});
+                match exclusion {
+                    "wrappedImage" | "behindImage" => {
+                        image["wrapType"] = json!(if exclusion == "behindImage" {
+                            "behind"
+                        } else {
+                            "square"
+                        });
+                        image.as_object_mut().unwrap().remove("position");
+                    }
+                    "floatImage" => {
+                        image.as_object_mut().unwrap().remove("wrapType");
+                        image.as_object_mut().unwrap().remove("position");
+                        image["displayMode"] = json!("float");
+                    }
+                    "anchoredImage" => {
+                        image.as_object_mut().unwrap().remove("wrapType");
+                    }
+                    _ => {}
+                }
+                if matches!(exclusion, "nestedFloatingImage" | "floatingTable") {
+                    let mut nested = table_rows(&[(4, json!({}), json!({}))]);
+                    nested["block"]["id"] = json!("nested");
+                    if exclusion == "floatingTable" {
+                        nested["block"]["floating"] = json!({
+                            "vertAnchor": "text", "horzAnchor": "text", "tblpY": 0
+                        });
+                    } else {
+                        nested["block"]["rows"][0]["cells"][0]["blocks"][0]["runs"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(image);
+                    }
+                    table["block"]["rows"][0]["cells"][0]["blocks"] = json!([nested["block"]]);
+                    table["measure"]["rows"][0]["cells"][0]["blocks"] = json!([nested["measure"]]);
+                } else {
+                    table["block"]["rows"][0]["cells"][0]["blocks"][0]["runs"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(image);
+                }
+            }
+            "anchoredShape" | "anchoredTextBox" | "anchoredChart" | "anchoredImageBlock" => {
+                let kind = match exclusion {
+                    "anchoredShape" => "shape",
+                    "anchoredTextBox" => "textBox",
+                    "anchoredChart" => "chart",
+                    _ => "image",
+                };
+                let mut drawing = json!({"kind": kind, "id": 50, "width": 20, "height": 10,
+                    "position": {"vertical": {"relativeTo": "paragraph", "posOffset": 50}}});
+                match exclusion {
+                    "anchoredShape" => {
+                        drawing["shapeType"] = json!("rect");
+                        drawing["geometryPath"] = json!([]);
+                        drawing["children"] = json!([]);
+                        drawing["wrapType"] = json!("behind");
+                    }
+                    "anchoredTextBox" => drawing["content"] = json!([]),
+                    "anchoredChart" => drawing["chart"] = json!({}),
+                    _ => {
+                        drawing["src"] = json!("synthetic-image");
+                        drawing["anchor"] = json!({"isAnchored": true});
+                    }
+                }
+                table["block"]["rows"][0]["cells"][0]["blocks"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(drawing);
+                table["measure"]["rows"][0]["cells"][0]["blocks"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"kind": kind, "width": 20, "height": 10, "innerMeasures": []}));
+                if exclusion != "anchoredShape" {
+                    table["measure"]["rows"][0]["cells"][0]["height"] = json!(90);
+                    table["measure"]["rows"][0]["height"] = json!(90);
+                    table["measure"]["totalHeight"] = json!(90);
+                }
+            }
             _ => unreachable!(),
         }
+        let height = table["measure"]["totalHeight"].clone();
         let result = table_fragments(after_filler(2, table), None);
-        assert!(!result.is_empty(), "{exclusion}");
+        assert_eq!(result.len(), 1, "{exclusion}");
         assert!(
             result
                 .iter()
@@ -701,6 +801,7 @@ fn unsupported_cell_windows_preserve_the_legacy_row_path() {
             "{exclusion}"
         );
         assert_eq!(result[0].0, 1, "{exclusion}");
+        assert_eq!(result[0].1["height"], height, "{exclusion}");
     }
 }
 
