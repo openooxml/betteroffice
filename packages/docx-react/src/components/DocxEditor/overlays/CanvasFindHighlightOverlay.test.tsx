@@ -14,7 +14,7 @@ import {
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, render } = await import('@testing-library/react');
+const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 
 afterEach(cleanup);
 afterAll(async () => {
@@ -118,8 +118,6 @@ function fixture() {
   };
 }
 
-const frame = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 40)));
-
 test('resolves only the matches on the pages in view, and follows scrolling', async () => {
   const { host, target, queries, matches, queried, mountPage, scrollTo } = fixture();
   const view = render(
@@ -143,15 +141,15 @@ test('resolves only the matches on the pages in view, and follows scrolling', as
   act(() => {
     document.dispatchEvent(new Event('scroll'));
   });
-  await frame();
-  expect(queried).toEqual([9, 10, 11]);
+  await waitFor(() => expect(queried).toEqual([9, 10, 11]));
   // those pages are not painted yet
   expect(target.querySelector('[data-testid="canvas-find-highlights"]')).toBeNull();
 
   queried.length = 0;
   act(() => mountPage(10));
-  await frame();
-  expect(queried).toEqual([9, 10, 11]);
-  expect(target.querySelectorAll('.docx-find-highlight')).toHaveLength(1);
+  await waitFor(() => {
+    expect(queried).toEqual([9, 10, 11]);
+    expect(target.querySelectorAll('.docx-find-highlight')).toHaveLength(1);
+  });
   view.unmount();
 });
