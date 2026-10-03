@@ -572,6 +572,41 @@ fn offset_cell_line_grids_split_and_resume_at_independent_boundaries() {
 }
 
 #[test]
+fn offset_cell_line_grids_move_the_whole_row_below_a_float_band_on_the_same_page() {
+    let input = json!({
+        "measured": after_filler(
+            6,
+            two_cell_table(&[(6, 0.0, json!({})), (6, 4.4, json!({}))]),
+        ),
+        "options": {
+            "pageSize": {"w": 240, "h": 500},
+            "margins": {"top": 20, "right": 10, "bottom": 10, "left": 10},
+            "sectionPageFloatBands": [{"default": [], "first": [{"top": 200, "bottom": 250}]}],
+        },
+    });
+    let layout: Value =
+        serde_json::from_str(&docx_layout::layout_to_canonical_json(&input.to_string()).unwrap())
+            .unwrap();
+    let pages = layout["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 1);
+    let fragments: Vec<_> = pages[0]["fragments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fragment| fragment["kind"] == "table")
+        .collect();
+    assert_eq!(fragments.len(), 1);
+    let fragment = fragments[0];
+    assert_eq!(fragment["y"], 250);
+    assert!((fragment["height"].as_f64().unwrap() - 124.4).abs() < 0.01);
+    assert_eq!(fragment["rowStart"], 0);
+    assert_eq!(fragment["rowEnd"], 1);
+    assert!(fragment["clipTop"].is_null());
+    assert!(fragment["clipBottom"].is_null());
+    assert!(fragment["cellClips"].is_null());
+}
+
+#[test]
 fn a_four_line_cell_splits_two_and_two_while_the_other_cell_finishes() {
     let measured = after_filler(
         2,

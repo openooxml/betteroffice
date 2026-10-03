@@ -373,7 +373,10 @@ fn layout_table_with_position(
         } else {
             0.0
         };
-        let available_height = paginator.get_available_height() - pending_spacing - header_overhead;
+        let available_height = paginator.get_available_height();
+        let limited_by_float = available_height
+            < paginator.state(state_idx).content_limit - paginator.state(state_idx).pen_y;
+        let available_height = available_height - pending_spacing - header_overhead;
 
         let start_row = row_index;
         let clip_top = consumed;
@@ -467,8 +470,11 @@ fn layout_table_with_position(
             } else {
                 snap_row_break(row_breaks, cur, start_off, budget)
             };
-            let cell_slice =
-                breaks.cell_slice(cur, start_off, active_tops, budget, placeable, false);
+            let cell_slice = if active_tops.is_none() && limited_by_float {
+                None
+            } else {
+                breaks.cell_slice(cur, start_off, active_tops, budget, placeable, false)
+            };
             if let Some(slice) = cell_slice {
                 used += slice.height;
                 row_end = cur + 1;

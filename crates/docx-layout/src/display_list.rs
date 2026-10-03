@@ -9536,28 +9536,25 @@ pub(crate) fn emit_table_fragment(
         let windowed_lines = cell_window.is_some();
         let (content_y, content_clip_top, content_clip_bottom) =
             plan.cell_content_window(frag, g, paint);
-        let continues_on_next =
-            if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
-                emit_cell_content(
-                    prims,
-                    cell,
-                    measure,
-                    &CellPaintRef::from(p.g),
-                    cx,
-                    content_y,
-                    p.cell_h,
-                    is_first_col,
-                    content_clip_top,
-                    content_clip_bottom,
-                    windowed_lines,
-                    ctx,
-                    p.selectable,
-                    &cell_ref,
-                    &block_ref,
-                )
-            } else {
-                false
-            };
+        let content_frame = if frag.cell_clips.is_none() || content_clip_bottom > content_clip_top {
+            cell_content_frame(
+                cell,
+                measure,
+                &CellPaintRef::from(p.g),
+                cx,
+                content_y,
+                p.cell_h,
+                is_first_col,
+                content_clip_top,
+                content_clip_bottom,
+            )
+        } else {
+            None
+        };
+        let continues_on_next = windowed_lines
+            && content_frame
+                .as_ref()
+                .is_some_and(|(frame, _)| frame.content_end > frame.clip_bottom_y + 1e-6);
 
         let cell_clip_top = cy.max(clip_top_y);
         let cell_clip_bottom = (cy + p.cell_h).min(clip_bottom_y);
@@ -9577,6 +9574,19 @@ pub(crate) fn emit_table_fragment(
         } else {
             cell_clip_bottom
         };
+        if let Some((frame, cell_measure)) = content_frame {
+            emit_cell_content(
+                prims,
+                cell,
+                cell_measure,
+                frame,
+                windowed_lines.then_some((line_clip_top, line_clip_bottom)),
+                ctx,
+                p.selectable,
+                &cell_ref,
+                &block_ref,
+            );
+        }
         let clip_id = format!("clip-{table_id}-r{}-c{}", p.g.row_index, p.g.column_index);
         for (index, primitive) in prims.iter_mut().enumerate().skip(cell_stamp_from) {
             if windowed_lines
@@ -9887,46 +9897,29 @@ fn cell_content_frame<'m>(
 fn emit_cell_content(
     prims: &mut Vec<Primitive>,
     cell: &TableCellIn,
-    measure: &TableExtentIn,
-    p: &CellPaintRef,
-    cx: f64,
-    cy: f64,
-    cell_h: f64,
-    is_first_col: bool,
-    clip_top_y: f64,
-    clip_bottom_y: f64,
-    windowed_lines: bool,
+    cell_measure: &TableCellExtentIn,
+    frame: CellContentFrame,
+    line_clip: Option<(f64, f64)>,
     ctx: &RenderCtx<'_>,
     selectable: bool,
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
-) -> bool {
+) {
     let stamp_from = prims.len();
-    let Some((frame, cell_measure)) = cell_content_frame(
-        cell,
-        measure,
-        p,
-        cx,
-        cy,
-        cell_h,
-        is_first_col,
-        clip_top_y,
-        clip_bottom_y,
-    ) else {
-        return false;
-    };
     let CellContentFrame {
         rotation,
         physical,
         content_x,
         content_top,
         content_width,
-        content_end,
         clip_top_y,
         clip_bottom_y,
         block_tops,
+        ..
     } = frame;
     let rotated = rotation != 0.0;
+    let windowed_lines = line_clip.is_some();
+    let (cull_top_y, cull_bottom_y) = line_clip.unwrap_or((clip_top_y, clip_bottom_y));
 
     // Behind-document floats paint below cell content.
     emit_cell_floating_images(
@@ -9997,8 +9990,8 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
                 windowed_lines,
                 selectable,
                 Some(cell_ref),
@@ -10028,8 +10021,8 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
                 windowed_lines,
                 selectable,
                 None,
@@ -10064,8 +10057,8 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
                 windowed_lines,
                 selectable,
                 Some(cell_ref),
@@ -10090,8 +10083,8 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
                 windowed_lines,
                 selectable,
                 Some(cell_ref),
@@ -10120,8 +10113,8 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
                 windowed_lines,
                 selectable,
                 Some(cell_ref),
@@ -10148,8 +10141,8 @@ fn emit_cell_content(
             postprocess_cell_primitives(
                 prims,
                 before,
-                clip_top_y,
-                clip_bottom_y,
+                cull_top_y,
+                cull_bottom_y,
                 windowed_lines,
                 selectable,
                 Some(cell_ref),
@@ -10176,7 +10169,7 @@ fn emit_cell_content(
         let mut index = stamp_from;
         while index < prims.len() {
             let (top, bottom) = primitive_painted_v_extent(&prims[index]);
-            if bottom <= clip_top_y || top >= clip_bottom_y {
+            if bottom <= cull_top_y || top >= cull_bottom_y {
                 prims.remove(index);
             } else {
                 index += 1;
@@ -10186,7 +10179,6 @@ fn emit_cell_content(
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
     }
-    windowed_lines && content_end > clip_bottom_y + 1e-6
 }
 
 fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64), rotation: f64) {
