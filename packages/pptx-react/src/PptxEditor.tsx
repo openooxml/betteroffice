@@ -241,7 +241,6 @@ interface EditorModel {
   frame: SlideDisplayList | null;
   thumbnails: Map<string, SlideDisplayList>;
   layoutKeys: Record<string, string>;
-  refreshAll: boolean;
 }
 
 interface SlideLayoutCache {
@@ -616,19 +615,6 @@ function PptxEditorContent({
           snapshot.slides.length
         );
         const thumbnails = new Map<string, SlideDisplayList>();
-        for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
-          const slide = snapshot.slides[slideIndex];
-          if (slideIndex === index) continue;
-          const cached = modelRef.current?.thumbnails.get(slide.id);
-          if (!refreshAll) {
-            if (slide.id === editedSlideId) {
-              layoutKeys[slide.id] = cache.key(slideIndex);
-              thumbnails.set(slide.id, handle.layoutSlide(slideIndex));
-            } else if (cached) thumbnails.set(slide.id, cached);
-          } else if (cached && modelRef.current?.layoutKeys[slide.id] === layoutKeys[slide.id]) {
-            thumbnails.set(slide.id, cached);
-          }
-        }
         const slideId = snapshot.slides[index]?.id;
         if (slideId && !refreshAll) layoutKeys[slideId] = cache.key(index);
         const retained = slideId && cache.activate(slideId, layoutKeys[slideId]);
@@ -639,7 +625,17 @@ function PptxEditorContent({
           ? (retained && cachedFrame) || handle.layoutSlide(index)
           : null;
         if (frame && slideId) thumbnails.set(slideId, frame);
-        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails, layoutKeys, refreshAll };
+        for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
+          const slide = snapshot.slides[slideIndex];
+          if (slideIndex === index) continue;
+          const cached = modelRef.current?.thumbnails.get(slide.id);
+          const cachedKey = modelRef.current?.layoutKeys[slide.id];
+          if (!refreshAll && (!cached || cachedKey !== layoutKeys[slide.id] || slide.id === editedSlideId)) {
+            layoutKeys[slide.id] = cache.key(slideIndex);
+          }
+          if (cached && cachedKey === layoutKeys[slide.id]) thumbnails.set(slide.id, cached);
+        }
+        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails, layoutKeys };
         const activeSlide = snapshot.slides[index];
         setSelection((current) =>
           current && activeSlide && findShape(activeSlide.shapes, current.shapeId) ? current : null
@@ -1106,7 +1102,7 @@ function PptxEditorContent({
   useEffect(() => {
     const handle = handleRef.current;
     const pending = model;
-    if (!handle || !pending?.refreshAll) return;
+    if (!handle || !pending || pending.thumbnails.size === pending.snapshot.slides.length) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let index = 0;

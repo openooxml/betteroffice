@@ -40,6 +40,7 @@ pub struct PptxRenderer {
 }
 
 const LAYOUT_CACHE_CAPACITY: usize = 8;
+const LAYOUT_KEY_CACHE_CAPACITY: usize = 256;
 
 struct CachedSlide {
     key: String,
@@ -323,10 +324,10 @@ impl PptxRenderer {
         height: i64,
     ) -> Result<String, JsValue> {
         let (version, resources) = self.resource_key(session)?;
-        if let Some((validated_at, epoch, key)) = self.layout_keys.get(&slide.id)
-            && *validated_at == version
-            && *epoch == self.font_epoch
-        {
+        self.layout_keys.retain(|_, (validated_at, epoch, _)| {
+            *validated_at == version && *epoch == self.font_epoch
+        });
+        if let Some((_, _, key)) = self.layout_keys.get(&slide.id) {
             return Ok(key.clone());
         }
         let parents = self
@@ -346,6 +347,10 @@ impl PptxRenderer {
         #[cfg(test)]
         {
             self.key_count += 1;
+        }
+        if self.layout_keys.len() >= LAYOUT_KEY_CACHE_CAPACITY {
+            let id = self.layout_keys.keys().next().unwrap().clone();
+            self.layout_keys.remove(&id);
         }
         self.layout_keys.insert(
             slide.id.clone(),
@@ -631,6 +636,77 @@ mod tests {
 
     const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn public_layout_prunes_keys_during_slide_churn() {
+        let document = PptxDocument::open_collaborative(DECK, 913.0).unwrap();
+        let mut renderer = PptxRenderer::new();
+        renderer
+            .register_fallback_font("Fallback", false, false, FONT)
+            .unwrap();
+        let live = document.session().slide_ids().unwrap().len();
+        renderer.layout_slide_json(&document, 0).unwrap();
+        for _ in 0..1_000 {
+            let receipt: pptx_edit::SlideReceipt = serde_json::from_str(
+                &document
+                    .insert_slide_json(&serde_json::json!({ "index": live }).to_string())
+                    .unwrap(),
+            )
+            .unwrap();
+            renderer.layout_slide_json(&document, live as u32).unwrap();
+            assert_eq!(renderer.layout_keys.len(), 1);
+            assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
+            document
+                .delete_slide_json(&serde_json::json!({ "slideId": receipt.slide_id }).to_string())
+                .unwrap();
+            assert!(renderer.layout_keys.len() <= live + LAYOUT_KEY_CACHE_CAPACITY);
+            renderer.layout_slide_json(&document, 0).unwrap();
+            assert_eq!(renderer.layout_keys.len(), 1);
+            assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
+            let version = document.session().version().to_string();
+            assert!(
+                renderer
+                    .layout_keys
+                    .values()
+                    .all(|(at, epoch, _)| { *at == version && *epoch == renderer.font_epoch })
+            );
+        }
+        assert_eq!(document.session().slide_ids().unwrap().len(), live);
+    }
+
+    #[test]
+    fn public_key_lookup_caps_entries_and_prunes_old_font_epochs() {
+        let document = PptxDocument::open_collaborative(DECK, 914.0).unwrap();
+        let mut renderer = PptxRenderer::new();
+        let live = document.session().slide_ids().unwrap().len();
+        for index in live..LAYOUT_KEY_CACHE_CAPACITY + 2 {
+            document
+                .insert_slide_json(&serde_json::json!({ "index": index }).to_string())
+                .unwrap();
+        }
+        for index in 0..LAYOUT_KEY_CACHE_CAPACITY + 2 {
+            renderer.slide_layout_key(&document, index as u32).unwrap();
+            assert!(renderer.layout_keys.len() <= LAYOUT_KEY_CACHE_CAPACITY);
+        }
+        assert_eq!(renderer.layout_keys.len(), LAYOUT_KEY_CACHE_CAPACITY);
+        let index = (LAYOUT_KEY_CACHE_CAPACITY + 1) as u32;
+        let previous = renderer.slide_layout_key(&document, index).unwrap();
+        let computed = renderer.key_count;
+        assert_eq!(
+            renderer.slide_layout_key(&document, index).unwrap(),
+            previous
+        );
+        assert_eq!(renderer.key_count, computed);
+        renderer
+            .register_fallback_font("Fallback", false, false, FONT)
+            .unwrap();
+        assert_ne!(
+            renderer.slide_layout_key(&document, index).unwrap(),
+            previous
+        );
+        assert_eq!(renderer.layout_keys.len(), 1);
+        assert_eq!(renderer.key_count, computed + 1);
+    }
 
     fn key(package: &pptx_parse::PptxPackage, scope: &SlideScope, epoch: u64) -> String {
         let parents = pptx_edit::paragraph::SlideParents::resolve(
