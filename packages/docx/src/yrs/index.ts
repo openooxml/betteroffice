@@ -100,6 +100,7 @@ export type {
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
   preloadResidentEngineWorker,
@@ -150,9 +151,14 @@ export {
 } from './saveYrsDocx';
 export { sessionSourcePackage } from './sessionInternals';
 export {
+  DirtyProjectionStories,
   dirtyProjectionStory,
+  EditorDirtyStories,
+  hostSaveMetadata,
   mergeDocxHostMetadata,
+  proposalProjectionStories,
   saveEditorDocument,
+  serialWorkerSaves,
   type EditorSaveRecord,
 } from './editorSave';
 export { editorSaveKeys } from './editorSaveKeys';

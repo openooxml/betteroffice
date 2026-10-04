@@ -15,7 +15,9 @@ mod write;
 mod xml;
 
 pub use axis::SheetAxes;
-pub use chart::{chart_space, preserved_chart_space};
+pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_space};
+#[cfg(feature = "test-counters")]
+pub use chart::{chart_counters, reset_chart_counters};
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };

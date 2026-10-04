@@ -40,6 +40,10 @@ export class XlsxDocument {
      */
     clearUpdateObservation(): void;
     /**
+     * @experimental
+     */
+    displayListForJson(sheet: number, viewport_json: string): string;
+    /**
      * serialized `DisplayList` for a serialized `Viewport`.
      */
     displayListJson(viewport_json: string): string;
@@ -184,6 +188,7 @@ export interface InitOutput {
     readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
+    readonly xlsxdocument_displayListForJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_displayListProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_documentVersion: (a: number) => [number, number];

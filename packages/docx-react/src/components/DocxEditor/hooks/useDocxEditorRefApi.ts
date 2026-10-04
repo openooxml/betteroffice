@@ -73,7 +73,7 @@ export const DOCX_REF_REPLICA_ACCESS = {
   getDocument: 'sync',
   getEditorRef: 'sync',
   flushPendingInput: 'await',
-  save: 'await',
+  save: 'independent',
   setZoom: 'independent',
   getZoom: 'independent',
   focus: 'sync',
@@ -711,7 +711,7 @@ export function useDocxEditorRefApi({
       flushPendingInput: async () => {
         await flushedSession(pagedEditorRef, experimentalWorkerOpen);
       },
-      save: async () => (opening() ? null : handleSave()),
+      save: async () => (experimentalWorkerOpen || !opening() ? handleSave() : null),
       setZoom,
       getZoom: () => zoom,
       focus: () => pagedEditorRef.current?.focus(),
