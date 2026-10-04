@@ -1,5 +1,6 @@
 import { expect, test, type Page } from 'playwright/test';
-import type { DocxExportInline, DocxLayoutMap, DocxPagedStructuredContent } from '@betteroffice/docx/yrs';
+import type { DocxLayoutMap, DocxPagedStructuredContent } from '../../../packages/docx/src/yrs/pagedExport';
+import type { DocxExportInline } from '../../../packages/docx/src/yrs/structuredExport';
 
 interface PersistedParagraph {
   kind: 'persisted';

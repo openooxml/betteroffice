@@ -575,7 +575,7 @@ for (const entry of ['prop', 'loadDocument'] as const) {
       act(() => rerender({ document: entry === 'prop' ? parsed : null }));
       const opens = posted.filter((request) => request.type === 'open');
       expect(opens).toHaveLength(1);
-      expect(new Uint8Array(opens[0].bytes)).toEqual(serialized);
+      expect(new Uint8Array(opens[0].bytes)).toEqual(new Uint8Array(serialized));
       const writer = originalBuffer ? repack : create;
       expect(writer.mock.calls).toEqual([[parsed]]);
       expect(originalBuffer ? create : repack).not.toHaveBeenCalled();
