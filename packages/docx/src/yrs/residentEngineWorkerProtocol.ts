@@ -49,6 +49,7 @@ export type ResidentProposalOperation =
   | { kind: 'propose'; request: DocxProposalRequest }
   | { kind: 'setStates'; request: DocxProposalStateRequest }
   | { kind: 'withdraw'; request: DocxProposalWithdrawRequest }
+  | { kind: 'removeComment'; id: string }
   | { kind: 'snapshot' };
 
 /** @internal */

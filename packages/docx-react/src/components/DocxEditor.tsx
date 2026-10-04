@@ -83,6 +83,7 @@ import {
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { requestWorkerOpenReplica, workerOpenReplicaPending } from './DocxEditor/internals/workerOpenReplica';
+import { registeredWorkerProposalAuthority } from './DocxEditor/internals/workerProposalAuthority';
 import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
 import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
 import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
@@ -2099,14 +2100,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       const target = comments.find((c) => c.id === id);
       setComments((prev) => prev.filter((c) => c.id !== id && c.parentId !== id));
       const editor = pagedEditorRef.current;
-      const session = viewerReads ? null : editor?.getYrsSession();
+      const session = editor?.getYrsSession();
       if (session) {
-        try {
-          session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
-          editor?.syncYrsInputState(true);
-        } catch {
-          // The anchor may already have disappeared with its content.
-        }
+        const main = () => {
+          try {
+            session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+            editor?.syncYrsInputState(true);
+          } catch {}
+        };
+        const authority = viewerReads ? registeredWorkerProposalAuthority(session) : null;
+        if (authority) void authority.removeComment(String(id), main).catch(() => {});
+        else main();
       }
       if (target) onCommentDelete?.(target);
     },

@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { useEffect, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import {
   workerOpenReplicaPending,
@@ -53,6 +53,12 @@ const methods = [
   'storySegments', 'locateParagraph', 'listComments', 'selection',
 ] as const;
 const counts = Object.fromEntries(methods.map((method) => [method, 0])) as Record<typeof methods[number], number>;
+let documentWorker: ResidentEngineWorkerClient | null = null;
+const documentRead = ResidentEngineWorkerClient.prototype.documentRead;
+ResidentEngineWorkerClient.prototype.documentRead = function (this: ResidentEngineWorkerClient, ...args) {
+  documentWorker = this;
+  return documentRead.apply(this, args);
+} as typeof documentRead;
 const probe = {
   editor: null as DocxEditorRef | null,
   sessions: [] as YrsSession[],
@@ -65,6 +71,14 @@ const probe = {
     };
   },
   sessionReads() { return { ...counts }; },
+  async commentAnchors(id: string) {
+    if (!this.editor || !documentWorker) throw new Error('Viewer is not ready');
+    const { version } = await this.editor.getProposals();
+    const { value } = await documentWorker.documentRead({
+      kind: 'sidebar', commentIds: [id], expectVersion: version,
+    });
+    return value?.comments.find((comment) => comment.id === id)?.anchors ?? null;
+  },
 };
 
 export type ViewerSidebarsProbe = typeof probe;
