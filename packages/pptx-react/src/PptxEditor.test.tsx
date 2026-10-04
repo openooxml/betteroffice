@@ -196,6 +196,70 @@ describe('PptxEditor slide layout cache', () => {
     }, 60_000);
   }
 
+  it('refreshes an edited slide thumbnail after undo and redo from another slide', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
+    const restorers: Array<() => void> = [];
+    let api: PptxEditorApi | undefined;
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame) => {
+        paintedFrames.set(ctx.canvas, frame);
+        return Promise.resolve();
+      });
+      restorers.push(() => paint.mockRestore());
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
+      restorers.push(() => context.mockRestore());
+      view = render(<PptxEditor file={fixture} fonts={fonts}
+        collaboration={{ clientId: 9450 }}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const thumbnail = () => view!.container.querySelector<HTMLCanvasElement>('aside button:first-child canvas');
+      await waitFor(() => expect(paintedFrames.get(thumbnail()!)).toBeDefined());
+      const original = paintedFrames.get(thumbnail()!)!;
+      const slide = api!.handle.snapshot().slides[0];
+      const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+      const story = shape.textStories[0];
+      const originalStory = api!.handle.story(story.id);
+      await act(async () => {
+        expect(api!.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 })).toBe(true);
+        fireEvent.keyDown(view!.getByRole('application'), { key: 'X' });
+        await api!.flushPendingInput();
+      });
+      await waitFor(() => {
+        expect(paintedFrames.get(thumbnail()!)).toBeDefined();
+        expect(paintedFrames.get(thumbnail()!)).not.toEqual(original);
+      });
+      const editedStory = api!.handle.story(story.id);
+      expect(editedStory).not.toEqual(originalStory);
+      await act(async () => { expect(api!.goToSlide(2)).toBe(true); });
+      for (const direction of ['undo', 'redo'] as const) {
+        await act(async () => {
+          expect(await api!.commands.execute(direction, null)).toEqual({ ok: true, status: 'executed' });
+        });
+        expect(view!.container.querySelectorAll('aside button')[1].getAttribute('aria-current')).toBe('page');
+        expect(api!.handle.story(story.id)).toEqual(direction === 'undo' ? originalStory : editedStory);
+        const fresh = pptx.openPresentation(fixture, {
+          clientId: 9451, fonts, initialUpdate: api!.handle.encodeStateAsUpdate(),
+        });
+        try {
+          const expected = fresh.layoutSlide(0);
+          await waitFor(() => expect(paintedFrames.get(thumbnail()!)).toEqual(expected));
+        } finally {
+          fresh.dispose();
+        }
+      }
+    } finally {
+      try {
+        view?.unmount();
+      } finally {
+        for (const restore of restorers.reverse()) restore();
+      }
+    }
+  }, 30_000);
+
   for (const scenario of ['ready navigation', 'undo restoration'] as const) {
     it(`completes uncached thumbnails after ${scenario}`, async () => {
       const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];

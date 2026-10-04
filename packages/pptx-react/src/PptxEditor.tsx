@@ -2249,7 +2249,7 @@ function PptxEditorContent({
     recentClickRef.current = null;
     resizeRef.current = null;
     setResizeDelta(null);
-    refreshAt(undefined, true);
+    refreshAt(undefined, true, true);
     return true;
   };
 

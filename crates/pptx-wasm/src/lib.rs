@@ -1,6 +1,7 @@
 //! PPTX display-list wasm boundary.
 
-use std::collections::{BTreeMap, HashMap};
+use serde::{Serialize, ser};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 
@@ -32,6 +33,7 @@ pub struct PptxRenderer {
     package_identity: Option<(yrs::Doc, usize)>,
     generation: u64,
     next_token: u64,
+    prune_at: usize,
     layout_keys: HashMap<String, LayoutKeyRecord>,
     #[cfg(test)]
     layout_count: usize,
@@ -40,7 +42,6 @@ pub struct PptxRenderer {
 }
 
 const LAYOUT_CACHE_CAPACITY: usize = 8;
-const LAYOUT_KEY_CACHE_CAPACITY: usize = 256;
 
 struct CachedSlide {
     key: String,
@@ -71,6 +72,7 @@ impl PptxRenderer {
             package_identity: None,
             generation: 0,
             next_token: 0,
+            prune_at: 256,
             layout_keys: HashMap::new(),
             #[cfg(test)]
             layout_count: 0,
@@ -93,6 +95,8 @@ impl PptxRenderer {
             .map_err(js_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
+        self.rendered.clear();
+        self.last_slide = None;
         Ok(id)
     }
 
@@ -110,6 +114,8 @@ impl PptxRenderer {
             .map_err(js_error)?;
         self.font_epoch += 1;
         self.layout_keys.clear();
+        self.rendered.clear();
+        self.last_slide = None;
         Ok(id)
     }
 
@@ -155,10 +161,11 @@ impl PptxRenderer {
     #[wasm_bindgen(js_name = setActiveSlide)]
     pub fn set_active_slide(&mut self, id: &str, key: &str) -> bool {
         self.active_slide = Some(id.to_owned());
-        let current = self
-            .rendered
-            .get(id)
-            .is_some_and(|cached| cached.key == key);
+        let current = self.layout_keys.get(id).is_some_and(|record| {
+            record.generation == self.generation
+                && record.font_epoch == self.font_epoch
+                && record.token.to_string() == key
+        }) && self.rendered.get(id).is_some_and(|cached| cached.key == key);
         if current {
             self.last_slide = Some(id.to_owned());
         }
@@ -187,6 +194,7 @@ impl PptxRenderer {
         }
         self.rendered.retain(|id, _| keys.contains_key(id));
         self.layout_keys.retain(|id, _| keys.contains_key(id));
+        self.prune_at = 256.max(keys.len().saturating_mul(2));
         #[derive(serde::Serialize)]
         struct LayoutSnapshot<'a> {
             snapshot: &'a pptx_edit::DeckSnapshot,
@@ -209,13 +217,15 @@ impl PptxRenderer {
         let scope = slide_scope(session, slide_index)?;
         let version = Rc::new(session.version());
         self.sync_package(session);
-        Ok(self.slide_key(
+        let key = self.slide_key(
             &version,
             &scope.slide,
             scope.index,
             scope.width_emu,
             scope.height_emu,
-        ))
+        );
+        self.prune_layout_keys(session)?;
+        Ok(key)
     }
 
     #[wasm_bindgen(js_name = hitTestSlideJson)]
@@ -303,6 +313,18 @@ impl PptxRenderer {
 }
 
 impl PptxRenderer {
+    fn prune_layout_keys(&mut self, session: &pptx_edit::DeckSession) -> Result<(), JsValue> {
+        if self.layout_keys.len() > self.prune_at {
+            let ids = session.slide_ids().map_err(js_error)?;
+            self.prune_at = 256.max(ids.len().saturating_mul(2));
+            if self.layout_keys.len() > self.prune_at {
+                let live: HashSet<_> = ids.into_iter().collect();
+                self.layout_keys.retain(|id, _| live.contains(id));
+            }
+        }
+        Ok(())
+    }
+
     fn sync_package(&mut self, session: &pptx_edit::DeckSession) {
         let package = session.package() as *const pptx_parse::PptxPackage as usize;
         if self.package_identity.as_ref().is_none_or(|(doc, address)| {
@@ -334,7 +356,9 @@ impl PptxRenderer {
                 || (record.scope.slide == *slide
                     && record.scope.index == index
                     && record.scope.width_emu == width
-                    && record.scope.height_emu == height))
+                    && record.scope.height_emu == height
+                    && float_bits(&record.scope.slide)
+                        .is_some_and(|bits| Some(bits) == float_bits(slide))))
         {
             if record.validated_version != *version {
                 record.validated_version = Rc::clone(version);
@@ -354,12 +378,6 @@ impl PptxRenderer {
         #[cfg(test)]
         {
             self.key_count += 1;
-        }
-        if !self.layout_keys.contains_key(&slide.id)
-            && self.layout_keys.len() >= LAYOUT_KEY_CACHE_CAPACITY
-        {
-            let id = self.layout_keys.keys().next().unwrap().clone();
-            self.layout_keys.remove(&id);
         }
         self.layout_keys.insert(
             slide.id.clone(),
@@ -392,6 +410,7 @@ impl PptxRenderer {
             scope.width_emu,
             scope.height_emu,
         );
+        self.prune_layout_keys(session)?;
         let id = &scope.slide.id;
         self.clock += 1;
         if self.rendered.get(id).is_none_or(|cached| cached.key != key) {
@@ -459,6 +478,202 @@ impl PptxRenderer {
         ))
     }
 }
+
+#[derive(Default)]
+struct FloatBits(Vec<u64>);
+
+fn float_bits(value: &impl Serialize) -> Option<Vec<u64>> {
+    let mut bits = FloatBits::default();
+    value.serialize(&mut bits).ok()?;
+    Some(bits.0)
+}
+
+macro_rules! ignore_primitives {
+    ($($method:ident($ty:ty)),* $(,)?) => {
+        $(fn $method(self, _: $ty) -> Result<(), Self::Error> { Ok(()) })*
+    };
+}
+
+impl<'a> ser::Serializer for &'a mut FloatBits {
+    type Ok = ();
+    type Error = serde::de::value::Error;
+    type SerializeSeq = Self;
+    type SerializeTuple = Self;
+    type SerializeTupleStruct = Self;
+    type SerializeTupleVariant = Self;
+    type SerializeMap = Self;
+    type SerializeStruct = Self;
+    type SerializeStructVariant = Self;
+
+    ignore_primitives! {
+        serialize_bool(bool),
+        serialize_i8(i8), serialize_i16(i16), serialize_i32(i32),
+        serialize_i64(i64), serialize_i128(i128),
+        serialize_u8(u8), serialize_u16(u16), serialize_u32(u32),
+        serialize_u64(u64), serialize_u128(u128),
+        serialize_char(char), serialize_str(&str), serialize_bytes(&[u8]),
+    }
+
+    fn serialize_f32(self, value: f32) -> Result<(), Self::Error> {
+        self.0.push(u64::from(value.to_bits()));
+        Ok(())
+    }
+
+    fn serialize_f64(self, value: f64) -> Result<(), Self::Error> {
+        self.0.push(value.to_bits());
+        Ok(())
+    }
+
+    fn serialize_none(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn serialize_some<T: ?Sized + Serialize>(self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn serialize_unit_struct(self, _: &'static str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn serialize_unit_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn serialize_newtype_struct<T: ?Sized + Serialize>(
+        self,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        value.serialize(self)
+    }
+
+    fn serialize_newtype_variant<T: ?Sized + Serialize>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        value: &T,
+    ) -> Result<(), Self::Error> {
+        value.serialize(self)
+    }
+
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn serialize_tuple(self, _: usize) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn serialize_map(self, _: Option<usize>) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self, Self::Error> {
+        Ok(self)
+    }
+
+    fn collect_str<T: ?Sized + std::fmt::Display>(self, _: &T) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+macro_rules! float_sequence {
+    ($trait:ident, $method:ident) => {
+        impl ser::$trait for &mut FloatBits {
+            type Ok = ();
+            type Error = serde::de::value::Error;
+
+            fn $method<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+                value.serialize(&mut **self)
+            }
+
+            fn end(self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+    };
+}
+
+float_sequence!(SerializeSeq, serialize_element);
+float_sequence!(SerializeTuple, serialize_element);
+float_sequence!(SerializeTupleStruct, serialize_field);
+float_sequence!(SerializeTupleVariant, serialize_field);
+
+impl ser::SerializeMap for &mut FloatBits {
+    type Ok = ();
+    type Error = serde::de::value::Error;
+
+    fn serialize_key<T: ?Sized + Serialize>(&mut self, key: &T) -> Result<(), Self::Error> {
+        key.serialize(&mut **self)
+    }
+
+    fn serialize_value<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Self::Error> {
+        value.serialize(&mut **self)
+    }
+
+    fn end(self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+macro_rules! float_struct {
+    ($trait:ident) => {
+        impl ser::$trait for &mut FloatBits {
+            type Ok = ();
+            type Error = serde::de::value::Error;
+
+            fn serialize_field<T: ?Sized + Serialize>(
+                &mut self,
+                _: &'static str,
+                value: &T,
+            ) -> Result<(), Self::Error> {
+                value.serialize(&mut **self)
+            }
+
+            fn end(self) -> Result<(), Self::Error> {
+                Ok(())
+            }
+        }
+    };
+}
+
+float_struct!(SerializeStruct);
+float_struct!(SerializeStructVariant);
 
 impl Default for PptxRenderer {
     fn default() -> Self {
@@ -572,11 +787,13 @@ mod tests {
             .unwrap();
         renderer.register_font("Test", false, false, FONT).unwrap();
         let live = session.slide_ids().unwrap().len();
+        let bound = 256.max(2 * (live + 1));
         renderer.layout_slide_json(&document, 0).unwrap();
+        let original = renderer.slide_layout_key(&document, 0).unwrap();
         for n in 0..1_000 {
             let receipt = session.insert_slide(&context, live as u32, None).unwrap();
             renderer.layout_slide_json(&document, live as u32).unwrap();
-            assert!(renderer.layout_keys.len() <= LAYOUT_KEY_CACHE_CAPACITY);
+            assert!(renderer.layout_keys.len() <= bound);
             assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
             let record = &renderer.layout_keys[&receipt.slide_id];
             assert_eq!(record.validated_version.as_ref(), &session.version());
@@ -584,9 +801,10 @@ mod tests {
             assert_eq!(record.generation, renderer.generation);
             session.delete_slide(&context, &receipt.slide_id).unwrap();
             renderer.layout_slide_json(&document, 0).unwrap();
-            assert!(renderer.layout_keys.len() <= LAYOUT_KEY_CACHE_CAPACITY);
+            assert!(renderer.layout_keys.len() <= bound);
             assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
-            if n % 100 == 0 {
+            assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), original);
+            if n % 300 == 0 {
                 let json = renderer.snapshot_with_layout_keys_json(&document).unwrap();
                 let snapshot: serde_json::Value = serde_json::from_str(&json).unwrap();
                 assert_eq!(
@@ -619,15 +837,31 @@ mod tests {
         let context = EditCtx::local("test");
         let mut renderer = PptxRenderer::new();
         let live = session.slide_ids().unwrap().len();
-        for index in live..LAYOUT_KEY_CACHE_CAPACITY + 2 {
+        let count = 258;
+        for index in live..count {
             session.insert_slide(&context, index as u32, None).unwrap();
         }
-        for index in 0..LAYOUT_KEY_CACHE_CAPACITY + 2 {
-            renderer.slide_layout_key(&document, index as u32).unwrap();
-            assert!(renderer.layout_keys.len() <= LAYOUT_KEY_CACHE_CAPACITY);
+        let mut keys = Vec::new();
+        for index in 0..count {
+            keys.push(renderer.slide_layout_key(&document, index as u32).unwrap());
+            assert!(renderer.layout_keys.len() <= 2 * count);
         }
-        assert_eq!(renderer.layout_keys.len(), LAYOUT_KEY_CACHE_CAPACITY);
-        let index = (LAYOUT_KEY_CACHE_CAPACITY + 1) as u32;
+        assert_eq!(renderer.layout_keys.len(), count);
+        for _ in 0..600 {
+            let receipt = session.insert_slide(&context, count as u32, None).unwrap();
+            renderer.slide_layout_key(&document, count as u32).unwrap();
+            assert!(renderer.layout_keys.len() <= 2 * (count + 1));
+            session.delete_slide(&context, &receipt.slide_id).unwrap();
+            assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), keys[0]);
+            assert!(renderer.layout_keys.len() <= 2 * count);
+        }
+        for (index, expected) in keys.iter().enumerate() {
+            assert_eq!(
+                &renderer.slide_layout_key(&document, index as u32).unwrap(),
+                expected
+            );
+        }
+        let index = (count - 1) as u32;
         let previous = renderer.slide_layout_key(&document, index).unwrap();
         let computed = renderer.key_count;
         assert_eq!(
@@ -649,6 +883,155 @@ mod tests {
                 && record.font_epoch == renderer.font_epoch
                 && record.generation == renderer.generation
         }));
+    }
+
+    #[test]
+    fn large_deck_snapshot_keys_survive_every_layout() {
+        let document = PptxDocument::open_collaborative(DECK, 919.0).unwrap();
+        let session = document.session();
+        let context = EditCtx::local("test");
+        for index in session.slide_ids().unwrap().len()..260 {
+            session.insert_slide(&context, index as u32, None).unwrap();
+        }
+        let mut renderer = PptxRenderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &renderer.snapshot_with_layout_keys_json(&document).unwrap(),
+        )
+        .unwrap();
+        let second: serde_json::Value = serde_json::from_str(
+            &renderer.snapshot_with_layout_keys_json(&document).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(first["keys"], second["keys"]);
+        assert_eq!(renderer.layout_keys.len(), 260);
+        let computed = renderer.key_count;
+        for (index, id) in session.slide_ids().unwrap().iter().enumerate() {
+            renderer.layout_slide_json(&document, index as u32).unwrap();
+            let expected = first["keys"][id].as_str().unwrap();
+            assert_eq!(renderer.rendered[id].key, expected);
+            assert_eq!(
+                renderer.slide_layout_key(&document, index as u32).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(renderer.key_count, computed);
+        assert_eq!(renderer.layout_keys.len(), 260);
+    }
+
+    #[test]
+    fn signed_zero_changes_tokens_and_cached_layouts() {
+        let document = PptxDocument::open_collaborative(DECK, 920.0).unwrap();
+        let session = document.session();
+        let context = EditCtx::local("test");
+        let slide_id = session.slide_ids().unwrap()[0].clone();
+        let shape = session
+            .add_shape(
+                &context,
+                &slide_id,
+                &pptx_edit::PresetShapeDraft {
+                    name: "Callout".to_owned(),
+                    geometry: "wedgeEllipseCallout".to_owned(),
+                    rect: pptx_edit::ShapeRect {
+                        x: 0,
+                        y: 0,
+                        width: 1_000_000,
+                        height: 1_000_000,
+                    },
+                    fill: Some("#123456".to_owned()),
+                },
+            )
+            .unwrap();
+        let mut adjustments = BTreeMap::from([("adj1".to_owned(), 0.0), ("adj2".to_owned(), 0.0)]);
+        session
+            .set_shape_adjust(&context, &slide_id, &shape.shape_id, &adjustments)
+            .unwrap();
+        let positive = session.slide_scope(0).unwrap();
+        let mut renderer = PptxRenderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        let original_frame = renderer.layout_slide_json(&document, 0).unwrap();
+        let original = renderer.slide_layout_key(&document, 0).unwrap();
+        adjustments.insert("adj1".to_owned(), -0.0);
+        session
+            .set_shape_adjust(&context, &slide_id, &shape.shape_id, &adjustments)
+            .unwrap();
+        let negative = session.slide_scope(0).unwrap();
+        assert_eq!(positive, negative);
+        let adjustment = negative.slide.shapes.last().unwrap().adjust_values["adj1"];
+        assert_eq!(adjustment.to_bits(), (-0.0_f64).to_bits());
+        assert_ne!(renderer.slide_layout_key(&document, 0).unwrap(), original);
+        let frame = renderer.layout_slide_json(&document, 0).unwrap();
+        assert_ne!(frame, original_frame);
+        assert_eq!(renderer.layout_count, 2);
+        let fresh = renderer
+            .renderer
+            .layout_scoped_slide(session.package(), &negative)
+            .unwrap();
+        assert_eq!(frame, serde_json::to_string(&fresh.display_list).unwrap());
+    }
+
+    #[test]
+    fn invalidated_frames_cannot_be_activated() {
+        let document = PptxDocument::open_collaborative(DECK, 921.0).unwrap();
+        let session = document.session();
+        let scope = session.slide_scope(0).unwrap();
+        let mut renderer = PptxRenderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        for fallback in [false, true] {
+            renderer.layout_slide_json(&document, 0).unwrap();
+            let old = renderer.slide_layout_key(&document, 0).unwrap();
+            assert!(renderer.set_active_slide(&scope.slide.id, &old));
+            let frame = &renderer.rendered[&scope.slide.id].rendered;
+            let point = (0..frame.display_list.height as usize)
+                .step_by(32)
+                .flat_map(|y| {
+                    (0..frame.display_list.width as usize)
+                        .step_by(32)
+                        .map(move |x| (x as f32, y as f32))
+                })
+                .find(|(x, y)| frame.hit_test(*x, *y).is_some())
+                .unwrap();
+            assert_ne!(renderer.hit_test_json(point.0, point.1).unwrap(), "null");
+            if fallback {
+                renderer
+                    .register_fallback_font("Fallback", false, false, FONT)
+                    .unwrap();
+            } else {
+                renderer.register_font("Test", false, false, FONT).unwrap();
+            }
+            assert!(renderer.rendered.is_empty());
+            assert!(renderer.last_slide.is_none());
+            assert!(!renderer.set_active_slide(&scope.slide.id, &old));
+            assert_eq!(renderer.hit_test_json(point.0, point.1).unwrap(), "null");
+            let layouts = renderer.layout_count;
+            renderer
+                .hit_test_slide_json(&document, &scope.slide.id, point.0, point.1)
+                .unwrap();
+            assert_eq!(renderer.layout_count, layouts + 1);
+        }
+        let old = renderer.slide_layout_key(&document, 0).unwrap();
+        let story = scope
+            .slide
+            .shapes
+            .iter()
+            .flat_map(|shape| &shape.text_stories)
+            .next()
+            .unwrap();
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story.id,
+                0,
+                "X",
+                &TextStyle::default(),
+            )
+            .unwrap();
+        let current = renderer.slide_layout_key(&document, 0).unwrap();
+        assert_ne!(old, current);
+        assert!(!renderer.set_active_slide(&scope.slide.id, &old));
+        assert!(!renderer.set_active_slide(&scope.slide.id, &current));
+        renderer.layout_slide_json(&document, 0).unwrap();
+        assert!(renderer.set_active_slide(&scope.slide.id, &current));
     }
 
     #[test]
