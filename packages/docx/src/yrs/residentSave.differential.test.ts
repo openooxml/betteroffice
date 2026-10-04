@@ -803,22 +803,68 @@ function liveCommentIds(parts: Record<string, Uint8Array>): ReadonlySet<string> 
   );
 }
 
-function danglingRangeMarkers(parts: Record<string, Uint8Array>, part: string): string[] {
-  const xml = parts[part] ? new TextDecoder().decode(parts[part]) : '';
-  const ids = liveCommentIds(parts);
+function danglingRangeMarkers(xml: string, liveIds: ReadonlySet<string>): string[] {
   return [...xml.matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
     .map((match) => match[1]!)
-    .filter((id) => !ids.has(id));
+    .filter((id) => !liveIds.has(id));
 }
 
 const COMMENT_RANGE_MARKER = /<w:commentRange(?:Start|End)\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>/g;
 const COMMENT_REFERENCE_RUN =
   /<w:r\b[^<>]*>\s*(?:<w:rPr\b[^<>]*>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>\s*)?<w:commentReference\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>\s*<\/w:r>/g;
 
-function withoutStaleCommentMarkers(xml: string, liveIds: ReadonlySet<string>): string {
+function withoutStaleCommentMarkers(xml: string, ids: ReadonlySet<string>): string {
   return [COMMENT_REFERENCE_RUN, COMMENT_RANGE_MARKER].reduce((text, pattern) =>
-    text.replace(pattern, (marker, id: string) => liveIds.has(id) ? marker : ''), xml
+    text.replace(pattern, (marker, id: string) => ids.has(id) ? '' : marker), xml
   );
+}
+
+function mergedTextRuns(xml: string): string {
+  const pattern = /^<w:r>(<w:rPr>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:t(?: xml:space="preserve")?>([^<]*)<\/w:t><\/w:r>$/;
+  let result = '';
+  let offset = 0;
+  let runStart = 0;
+  let runDepth = 0;
+  let previous: { start: number; end: number; properties: string; text: string; count: number } | undefined;
+  const flush = () => {
+    if (!previous) return;
+    result += xml.slice(offset, previous.start);
+    const space = /^\s|\s$/.test(previous.text) ? ' xml:space="preserve"' : '';
+    result += previous.count === 1 ? xml.slice(previous.start, previous.end)
+      : `<w:r>${previous.properties}<w:t${space}>${previous.text}</w:t></w:r>`;
+    offset = previous.end;
+  };
+  for (const tag of xml.matchAll(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/?w:r\b[^<>]*>/g)) {
+    if (/^<w:r\b/.test(tag[0])) {
+      if (runDepth === 0) runStart = tag.index!;
+      if (!tag[0].endsWith('/>')) runDepth += 1;
+      continue;
+    }
+    if (tag[0] !== '</w:r>' || runDepth === 0) continue;
+    runDepth -= 1;
+    if (runDepth !== 0) continue;
+    const start = runStart;
+    const end = tag.index! + tag[0].length;
+    const match = xml.slice(start, end).match(pattern);
+    if (!match) continue;
+    const properties = match[1] ?? '';
+    if (previous && previous.end === start && previous.properties === properties) {
+      previous.end = end;
+      previous.text += match[2]!;
+      previous.count += 1;
+    } else {
+      flush();
+      previous = { start, end, properties, text: match[2]!, count: 1 };
+    }
+  }
+  flush();
+  return result + xml.slice(offset);
+}
+
+function staleMainPartExempt(workerXml: string, mainXml: string, liveIds: ReadonlySet<string>): boolean {
+  const ids = new Set(danglingRangeMarkers(mainXml, liveIds));
+  return ids.size > 0 && danglingRangeMarkers(workerXml, liveIds).length === 0 &&
+    mergedTextRuns(withoutStaleCommentMarkers(mainXml, ids)) === mergedTextRuns(workerXml);
 }
 
 // Deferred: after a host projection, the main-thread save keeps the range markers of a comment
@@ -829,21 +875,23 @@ function staleMainCommentMarkers(
   const actual = unzipContainer(worker);
   const expected = unzipContainer(main);
   const liveIds = liveCommentIds(expected);
-  const matches = parts.length > 0 && parts.every((part) =>
-    /^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) &&
-    danglingRangeMarkers(actual, part).length === 0 &&
-    danglingRangeMarkers(expected, part).length > 0 &&
-    actual[part] !== undefined && expected[part] !== undefined &&
-    withoutStaleCommentMarkers(new TextDecoder().decode(expected[part]), liveIds) ===
-      new TextDecoder().decode(actual[part])
-  );
+  const workerLiveIds = liveCommentIds(actual);
+  const matches = parts.length > 0 && parts.every((part) => {
+    if (!/^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) ||
+      actual[part] === undefined || expected[part] === undefined) return false;
+    const workerXml = new TextDecoder().decode(actual[part]);
+    const mainXml = new TextDecoder().decode(expected[part]);
+    return danglingRangeMarkers(workerXml, workerLiveIds).length === 0 &&
+      staleMainPartExempt(workerXml, mainXml, liveIds);
+  });
   if (matches) {
     for (const part of parts) {
       const xml = new TextDecoder().decode(expected[part]);
-      const ids = [COMMENT_RANGE_MARKER, COMMENT_REFERENCE_RUN].flatMap((pattern) =>
-        [...xml.matchAll(pattern)].map((match) => match[1]!).filter((id) => !liveIds.has(id))
-      );
-      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...new Set(ids)])}`);
+      const workerXml = new TextDecoder().decode(actual[part]);
+      const ids = new Set(danglingRangeMarkers(xml, liveIds));
+      const strippedMain = withoutStaleCommentMarkers(xml, ids);
+      const merged = mergedTextRuns(strippedMain) !== strippedMain || mergedTextRuns(workerXml) !== workerXml;
+      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...ids])} merged runs=${merged}`);
     }
   }
   return matches;
@@ -857,19 +905,92 @@ test('the stale comment marker exemption removes only dangling markers', () => {
     '<w:commentReference w:id="7"/></w:r>';
   const main = worker.replace('</w:p>', `${range}${reference}${formattedReference}</w:p>`);
   const liveIds = new Set<string>();
-  expect(withoutStaleCommentMarkers(main, liveIds)).toBe(worker);
-  expect(withoutStaleCommentMarkers(main.replace('text', 'text!'), liveIds)).not.toBe(worker);
-  expect(withoutStaleCommentMarkers(main.replace('</w:p>', '<x:foreign/></w:p>'), liveIds))
-    .not.toBe(worker);
-  expect(withoutStaleCommentMarkers(main, new Set(['7']))).toBe(main);
+  const ids = new Set(['7']);
+  expect(staleMainPartExempt(worker, main, liveIds)).toBe(true);
+  expect(staleMainPartExempt(worker, main.replace('text', 'text!'), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main.replace('</w:p>', '<x:foreign/></w:p>'), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main, new Set(['7']))).toBe(false);
+  expect(staleMainPartExempt(worker, worker, liveIds)).toBe(false);
+  expect(staleMainPartExempt(main, main, liveIds)).toBe(false);
+  expect(withoutStaleCommentMarkers(main, ids)).toBe(worker);
+  expect(withoutStaleCommentMarkers(main, new Set<string>())).toBe(main);
   const mixed = '<w:r><w:commentReference w:id="7"/><w:t>keep</w:t></w:r>';
-  expect(withoutStaleCommentMarkers(mixed, liveIds)).toBe(mixed);
+  expect(withoutStaleCommentMarkers(mixed, ids)).toBe(mixed);
+  expect(staleMainPartExempt(worker, main.replace(reference, mixed), liveIds)).toBe(false);
   const foreign = reference.replace('</w:r>', '<x:foreign/></w:r>');
-  expect(withoutStaleCommentMarkers(foreign, liveIds)).toBe(foreign);
+  expect(withoutStaleCommentMarkers(foreign, ids)).toBe(foreign);
+  expect(staleMainPartExempt(worker, main.replace(reference, foreign), liveIds)).toBe(false);
   const mixedMarkers = `<w:r>${range}<w:commentReference w:id="7"/></w:r>`;
-  expect(withoutStaleCommentMarkers(mixedMarkers, liveIds)).toBe(reference);
+  expect(withoutStaleCommentMarkers(mixedMarkers, ids)).toBe(reference);
   const bare = '<w:commentReference w:id="7"/>';
-  expect(withoutStaleCommentMarkers(bare, liveIds)).toBe(bare);
+  expect(withoutStaleCommentMarkers(bare, ids)).toBe(bare);
+  expect(staleMainPartExempt(worker, main.replace(reference, bare), liveIds)).toBe(false);
+  const liveRange = range.replaceAll('"7"', '"8"');
+  expect(withoutStaleCommentMarkers(`${main}${liveRange}`, ids)).toBe(`${worker}${liveRange}`);
+  expect(staleMainPartExempt(worker, `${main}${liveRange}`, new Set(['8']))).toBe(false);
+  expect(staleMainPartExempt(`${worker}${liveRange}`, `${main}${liveRange}`, new Set(['8']))).toBe(true);
+});
+
+test('the stale comment marker exemption merges cached text runs without hiding differences', () => {
+  const reference = '<w:r><w:commentReference w:id="1"/></w:r>';
+  const worker = `<w:p><w:r><w:t>Alpa betaY gamma.</w:t></w:r>${reference}</w:p>`;
+  const main = '<w:p><w:r><w:t>Alpa beta</w:t></w:r><w:commentRangeStart w:id="5"/>' +
+    '<w:r><w:t>Y</w:t></w:r><w:commentRangeEnd w:id="5"/>' +
+    '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="5"/></w:r>' +
+    `<w:r><w:t xml:space="preserve"> gamma.</w:t></w:r>${reference}</w:p>`;
+  const liveIds = new Set<string>();
+  expect(staleMainPartExempt(worker, main, liveIds)).toBe(true);
+  const splitWorker = worker.replace('<w:r><w:t>Alpa betaY gamma.</w:t></w:r>',
+    '<w:r><w:t xml:space="preserve">Alpa </w:t></w:r><w:r><w:t>betaY gamma.</w:t></w:r>');
+  expect(staleMainPartExempt(splitWorker, main, liveIds)).toBe(true);
+  expect(staleMainPartExempt(worker, main.replace('gamma', 'gamma!'), liveIds)).toBe(false);
+  const formatted = main.replace('<w:r><w:t>Y</w:t></w:r>',
+    '<w:r><w:rPr><w:b/></w:rPr><w:t>Y</w:t></w:r>');
+  expect(staleMainPartExempt(worker, formatted, liveIds)).toBe(false);
+  const extraReference = reference.replace('"1"', '"2"');
+  expect(staleMainPartExempt(worker, main.replace('</w:p>', `${extraReference}</w:p>`), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main.replace('</w:p>', '<w:r><w:tab/></w:r></w:p>'), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker.replace(reference, ''), main, liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main, new Set(['5']))).toBe(false);
+});
+
+test('text run merging preserves formatting, whitespace and other children', () => {
+  const first = '<w:r><w:t>one</w:t></w:r>';
+  const second = '<w:r><w:t>two</w:t></w:r>';
+  expect(mergedTextRuns(`${first}${second}${first}`)).toBe('<w:r><w:t>onetwoone</w:t></w:r>');
+  const spaced = '<w:r><w:t xml:space="preserve"> two </w:t></w:r>';
+  expect(mergedTextRuns(`${spaced}${first}`)).toBe('<w:r><w:t xml:space="preserve"> two one</w:t></w:r>');
+  expect(mergedTextRuns(`${first}${spaced}`)).toBe('<w:r><w:t xml:space="preserve">one two </w:t></w:r>');
+  expect(mergedTextRuns(`${first}${spaced}${second}`)).toBe('<w:r><w:t>one two two</w:t></w:r>');
+  expect(mergedTextRuns(spaced)).toBe(spaced);
+  const properties = '<w:rPr><w:b/></w:rPr>';
+  const boldFirst = first.replace('<w:r>', `<w:r>${properties}`);
+  const boldSecond = second.replace('<w:r>', `<w:r>${properties}`);
+  expect(mergedTextRuns(`${boldFirst}${boldSecond}`)).toBe(`<w:r>${properties}<w:t>onetwo</w:t></w:r>`);
+  expect(mergedTextRuns(`${boldFirst}${second}`)).toBe(`${boldFirst}${second}`);
+  const otherProperties = boldSecond.replace('<w:b/>', '<w:b />');
+  expect(mergedTextRuns(`${boldFirst}${otherProperties}`)).toBe(`${boldFirst}${otherProperties}`);
+  for (const separator of [' ', '\n', '<w:bookmarkStart w:id="1"/>', '<!--keep-->', '</w:p><w:p>']) {
+    const xml = `<w:p>${first}${separator}${second}</w:p>`;
+    expect(mergedTextRuns(xml)).toBe(xml);
+  }
+  for (const run of [
+    '<w:r><w:tab/></w:r>',
+    '<w:r><w:t>keep</w:t><w:tab/></w:r>',
+    '<w:r><w:t>keep</w:t><w:br/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="begin"/><w:t>keep</w:t></w:r>',
+    '<w:r><w:instrText>keep</w:instrText></w:r>',
+    '<w:r><x:foreign/><w:t>keep</w:t></w:r>',
+    '<w:r w:rsidR="1"><w:t>keep</w:t></w:r>',
+    '<w:r><w:t xml:lang="en">keep</w:t></w:r>',
+    '<w:r><w:t>keep</w:t><w:t>more</w:t></w:r>',
+    `<w:r><x:foreign>${first}${second}${first}</x:foreign></w:r>`,
+    `<!--${first}${second}-->`,
+    `<![CDATA[${first}${second}]]>`,
+  ]) {
+    const xml = `${first}${run}${second}`;
+    expect(mergedTextRuns(xml)).toBe(xml);
+  }
 });
 
 test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => {
