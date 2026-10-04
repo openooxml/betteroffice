@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { YrsDocxHost, YrsSession } from '@betteroffice/docx/yrs';
+import { createDocx, repackDocx } from '@betteroffice/docx/docx';
 import {
   extractEmbeddedFontFaces,
   extractFontsFromDocument,
@@ -19,6 +20,7 @@ import type { UseHistoryReturn } from '../../../hooks/useHistory';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { DocumentLoadGeneration } from './documentLoadGeneration';
+import { DocxWorkerError } from '../internals/docxWorkerError';
 
 /**
  * Document lifecycle: load buffer / pre-parsed doc, react to
@@ -32,6 +34,7 @@ import { DocumentLoadGeneration } from './documentLoadGeneration';
 export function useDocumentLoader({
   documentBuffer,
   initialDocument,
+  workerViewer = false,
   externalContent,
   history,
   pagedEditorRef,
@@ -47,6 +50,7 @@ export function useDocumentLoader({
 }: {
   documentBuffer: DocxInput | null | undefined;
   initialDocument: Document | null | undefined;
+  workerViewer?: boolean;
   externalContent: boolean | undefined;
   history: UseHistoryReturn<Document | null>;
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
@@ -74,7 +78,7 @@ export function useDocumentLoader({
   // separate so PagedEditor can replace its session without treating normal
   // edits as fresh documents.
   const [yrsSeedDocument, setYrsSeedDocument] = useState<Document | null>(
-    initialDocument ?? null
+    workerViewer ? null : initialDocument ?? null
   );
   const [yrsSeedBytes, setYrsSeedBytes] = useState<Uint8Array | null>(null);
   const [yrsSeedGeneration, setYrsSeedGeneration] = useState(0);
@@ -88,10 +92,53 @@ export function useDocumentLoader({
   const [fontAliases, setFontAliases] = useState<ReadonlyMap<string, string>>(NO_FONT_ALIASES);
   const skippedFontsRef = useRef<SkippedFonts | null>(null);
 
+  const failHostDocument = useCallback(
+    (error: Error, generation: number, options?: { opened: boolean }) => {
+      // A load that fails after its document was accepted has completed.
+      if (
+        options?.opened
+          ? !loadGeneration.isCurrent(generation)
+          : !loadGeneration.complete(generation)
+      ) {
+        return;
+      }
+      loadGeneration.fail(generation);
+      // A preview's first pages, or a document that failed to show, are not
+      // the document the load opened.
+      if (options?.opened || previewDocumentRef.current) {
+        previewDocumentRef.current = null;
+        history.reset(null);
+      }
+      setYrsSeedDocument(null);
+      setYrsSeedBytes(null);
+      setLoadingState({ isLoading: false, parseError: error.message });
+      onError?.(error);
+    },
+    [loadGeneration, history, onError, setLoadingState]
+  );
+
   const loadParsedDocument = useCallback(
     (doc: Document, seedBytes?: Uint8Array) => {
       const generation = loadGeneration.begin();
       resetForNewDocument();
+      if (workerViewer) {
+        setYrsSeedDocument(null);
+        setYrsSeedBytes(null);
+        setYrsSeedGeneration(generation);
+        history.reset(null);
+        setLoadingState({ isLoading: true, parseError: null });
+        setFontAliases(NO_FONT_ALIASES);
+        void (async () => {
+          try {
+            const buffer = await (doc.originalBuffer ? repackDocx(doc) : createDocx(doc));
+            if (!loadGeneration.isCurrent(generation)) return;
+            setYrsSeedBytes(new Uint8Array(buffer));
+          } catch (cause) {
+            failHostDocument(new DocxWorkerError('open', cause), generation);
+          }
+        })();
+        return;
+      }
       setYrsSeedDocument(doc);
       setYrsSeedBytes(seedBytes?.slice() ?? null);
       setYrsSeedGeneration(generation);
@@ -114,7 +161,16 @@ export function useDocumentLoader({
         })
       );
     },
-    [loadGeneration, resetForNewDocument, history, setLoadingState, setDocumentFonts, fontScope]
+    [
+      workerViewer,
+      loadGeneration,
+      resetForNewDocument,
+      history,
+      setLoadingState,
+      setDocumentFonts,
+      fontScope,
+      failHostDocument,
+    ]
   );
 
   const loadBuffer = useCallback(
@@ -213,31 +269,6 @@ export function useDocumentLoader({
       );
     },
     [loadGeneration, history, setDocumentFonts, setLoadingState, fontScope]
-  );
-
-  const failHostDocument = useCallback(
-    (error: Error, generation: number, options?: { opened: boolean }) => {
-      // A load that fails after its document was accepted has completed.
-      if (
-        options?.opened
-          ? !loadGeneration.isCurrent(generation)
-          : !loadGeneration.complete(generation)
-      ) {
-        return;
-      }
-      loadGeneration.fail(generation);
-      // A preview's first pages, or a document that failed to show, are not
-      // the document the load opened.
-      if (options?.opened || previewDocumentRef.current) {
-        previewDocumentRef.current = null;
-        history.reset(null);
-      }
-      setYrsSeedDocument(null);
-      setYrsSeedBytes(null);
-      setLoadingState({ isLoading: false, parseError: error.message });
-      onError?.(error);
-    },
-    [loadGeneration, history, onError, setLoadingState]
   );
 
   const isCurrentLoad = useCallback(

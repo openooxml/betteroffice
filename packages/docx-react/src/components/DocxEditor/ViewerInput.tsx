@@ -172,9 +172,14 @@ const ViewerInputComponent = forwardRef<YrsInputRef, ViewerInputProps>(function 
     focus: () => textareaRef.current?.focus({ preventScroll: true }),
     blur: () => textareaRef.current?.blur(),
     isFocused: () => typeof document !== 'undefined' && document.activeElement === textareaRef.current,
-    flushPendingInput: async () => {},
-    runAfterPendingInput: async (operation) => operation(),
-    hasPendingInput: () => false,
+    flushPendingInput: () => controller.flushPendingInput(),
+    runAfterPendingInput: async (operation) => {
+      const gesture = controller.currentGesture();
+      await controller.flushPendingInput();
+      if (!controller.isCurrent(gesture)) throw new Error('Selection gesture changed');
+      return operation();
+    },
+    hasPendingInput: () => controller.hasPendingInput(),
     beginGesture: () => controller.beginGesture(),
     currentGesture: () => controller.currentGesture(),
     isGestureCurrent: (gesture) => controller.isCurrent(gesture),

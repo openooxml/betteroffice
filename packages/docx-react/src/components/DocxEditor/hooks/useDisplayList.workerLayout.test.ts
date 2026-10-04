@@ -31,7 +31,10 @@ import { documentPageCount } from './documentPageCount';
 import { viewportMinHeightPx } from '../internals/scrollUtils';
 import { markSupersededLayout } from '../internals/layoutProvenance';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
-import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
+import { deferWorkerOpenReplica, holdWorkerOpenDocument } from '../internals/workerOpenReplica';
+import { DocxWorkerError } from '../internals/docxWorkerError';
+import { SupersededPreviewError } from '../internals/supersededPreview';
+import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -541,6 +544,104 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     unmount();
   } finally {
     native.free();
+  }
+});
+
+test.each([true, false])('viewer layout recovery (%s) keeps main construction empty and shares terminal error identity', async (recover) => {
+  const source = setupLayoutPipeline();
+  const initialWorkers = FakeWorker.instances.length;
+  const viewer = { current: true };
+  const mainPreflight = spyOn(source.engine, 'layoutFontRequirementsJson');
+  const mainConstruction = mock(() => { throw new Error('unexpected main document construction'); });
+  Object.assign(source.engine, {
+    openDocx: mainConstruction,
+    openDocxPreview: mainConstruction,
+    loadState: mainConstruction,
+    applyUpdate: mainConstruction,
+    layoutDocumentWithRegionsRetainedJson: mainConstruction,
+    buildDisplayListFrame: mainConstruction,
+    buildDisplayListJson: mainConstruction,
+    resetFrameBase: mainConstruction,
+    setDisplayWindow: mainConstruction,
+  });
+  const release = mock(() => deferWorkerOpenReplica(
+    source.engine, () => new Promise(() => {}), mainConstruction, () => {}
+  ));
+  const onError = mock((_error: Error) => {});
+  const syncCoordinator = new LayoutSelectionGate();
+  const hook = renderHook(() => {
+    const renderer = useCanvasRenderer(undefined, undefined, undefined, undefined, undefined, true, viewer);
+    const pipeline = useLayoutPipeline({
+      document: null,
+      session: source.engine,
+      renderEnv: {} as YrsRenderEnv,
+      pageGap: 24,
+      zoom: 1,
+      experimentalWorkerOpen: true,
+      residentMeasurementConfig: () => ({} as ResidentMeasurementConfig),
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null },
+      viewportLayoutRef: { current: null },
+      syncCoordinator,
+      getScrollContainer: () => null,
+      onError,
+      onLayoutComputed: (layout) => renderer.onLayoutComputed(layout, source.engine),
+      layoutInWorker: renderer.layoutInWorker,
+      fontRequirementsInWorker: renderer.fontRequirementsInWorker,
+    });
+    return { renderer, pipeline };
+  });
+  try {
+    const opening = hook.result.current.renderer.openInWorker(source.engine, Uint8Array.of(1));
+    const first = FakeWorker.last!;
+    await act(async () => {
+      first.reply({ id: first.requestAt(0).id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer });
+      await opening;
+    });
+    holdWorkerOpenDocument(source.engine, release);
+    act(() => hook.result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(first.posted.at(-1)?.type).toBe('fontRequirements'));
+    await act(async () => {
+      first.reply({ id: first.requestAt(-1).id, ok: true, requirementsJson: '[]' });
+    });
+    await waitFor(() => expect(first.posted.at(-1)?.type).toBe('bootstrap'));
+    await act(async () => { first.onerror?.({ message: 'layout crashed' } as ErrorEvent); });
+    await waitFor(() => expect(FakeWorker.instances.length - initialWorkers).toBe(2));
+    const second = FakeWorker.last!;
+    expect(second.posted.at(-1)?.type).toBe('open');
+    await act(async () => {
+      second.reply({ id: second.requestAt(-1).id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(8).buffer });
+    });
+    await waitFor(() => expect(second.posted.at(-1)?.type).toBe('bootstrap'));
+    await act(async () => {
+      if (recover) second.reply({
+        id: second.requestAt(-1).id, ok: true, frame: source.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null,
+        layoutRevision: source.adopted.length, layoutJson: source.layoutJson,
+      });
+      else second.reply({ id: second.requestAt(-1).id, ok: false, error: 'layout failed again', terminal: true });
+    });
+    if (recover) {
+      await waitFor(() => expect(hook.result.current.renderer.status).toBe('ready'));
+      expect(onError).not.toHaveBeenCalled();
+      expect(hook.result.current.renderer.frame).not.toBeNull();
+    } else {
+      await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+      const failure = onError.mock.calls[0]![0];
+      expect(failure).toBeInstanceOf(DocxWorkerError);
+      expect((failure as DocxWorkerError).stage).toBe('layout');
+      expect(hook.result.current.renderer.error).toBe(failure);
+      expect(hook.result.current.renderer.status).toBe('error');
+      await expect(hook.result.current.renderer.settledDisplayList(null, null)).rejects.toBe(failure);
+    }
+    expect(mainPreflight).not.toHaveBeenCalled();
+    expect(mainConstruction).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    expect(FakeWorker.instances.length - initialWorkers).toBe(2);
+  } finally {
+    hook.unmount();
+    mainPreflight.mockRestore();
+    source.native.free();
   }
 });
 
@@ -2400,9 +2501,11 @@ test.each([true, false])('viewer=%s selects the reply mode across decisions and 
   }
 });
 
-test.each(['ok', 'stale'] as const)('an unknown meta version requests JSON and handles %s', async (status) => {
+test.each([
+  ['ok', 'an editor'], ['stale', 'an editor'], ['ok', 'a viewer'], ['stale', 'a viewer'],
+] as const)('an unknown meta version requests JSON and handles %s for %s', async (status, session) => {
   const { native, engine, layoutJson, frame } = setup(9402);
-  const viewerRef = { current: true };
+  const viewerRef = { current: session === 'a viewer' };
   const hook = renderHook(
     ({ layout, source }) => useRustDisplayList(
       layout, undefined, undefined, undefined, source,
@@ -2430,10 +2533,14 @@ test.each(['ok', 'stale'] as const)('an unknown meta version requests JSON and h
       id: worker.requestAt(2).id, ok: true, layoutJsonStatus: status,
       ...(status === 'ok' ? { layoutJson } : {}),
     });
-    const adopted = await act(() => pass);
-    if (status === 'stale') {
-      expect(adopted).toBeNull();
+    if (status === 'stale' && session === 'a viewer') {
+      await act(async () => {
+        await expect(pass).rejects.toBeInstanceOf(SupersededPreviewError);
+      });
+    } else if (status === 'stale') {
+      expect(await act(() => pass)).toBeNull();
     } else {
+      const adopted = await act(() => pass);
       expect(adopted!.layout.summaryOnly).toBeUndefined();
       expect(adopted!.layout).toEqual(JSON.parse(layoutJson).layout);
       expect(adopted!.layout.pages[0]!.fragments.length).toBeGreaterThan(0);

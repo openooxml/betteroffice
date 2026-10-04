@@ -8,6 +8,7 @@ import {
   DocxAsyncOnlyError,
   DocxReplicaNotReadyError,
 } from './components/DocxEditor/hooks/useDocxEditorRefApi';
+import { DocxWorkerError } from './components/DocxEditor/internals/docxWorkerError';
 import type {
   DocxCommentInsertion,
   DocxDocumentChange,
@@ -78,7 +79,18 @@ test('errors and new public types are exported from the root', () => {
   expect(asyncOnly).toBeInstanceOf(Error);
   expect(asyncOnly).not.toBeInstanceOf(NotReady);
   expect(new NotReady('getDocument')).not.toBeInstanceOf(AsyncOnly);
-  const names = ['DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange'];
+  const WorkerError: typeof import('./index').DocxWorkerError = DocxWorkerError;
+  const cause = new Error('Worker stopped');
+  for (const stage of ['open', 'layout', 'render'] as const) {
+    const workerError = new WorkerError(stage, cause);
+    expect(workerError).toBeInstanceOf(Error);
+    expect(workerError.name).toBe('DocxWorkerError');
+    expect(workerError.stage).toBe(stage);
+    expect(workerError.cause).toBe(cause);
+  }
+  expect(new WorkerError('open').cause).toBeUndefined();
+  expect(index).toMatch(/export\s*\{[^}]*\bDocxWorkerError\b[^}]*\}\s*from\s*['"]\.\/components\/DocxEditor\/internals\/docxWorkerError['"]/);
+  const names = ['DocxWorkerError', 'DocxAsyncOnlyError', 'DocxReplicaNotReadyError', 'DocxParagraphMatch', 'DocxSelectionInfo', 'DocxCommentInsertion', 'DocxDocumentChange'];
   for (const name of names) expect(index).toMatch(new RegExp(`\\b${name}\\b`));
   const match: DocxParagraphMatch = { paraId: 'p', match: 'text', before: '', after: '' };
   const selection: DocxSelectionInfo = { paraId: null, selectedText: '', paragraphText: '', before: '', after: '' };

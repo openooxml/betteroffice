@@ -14,7 +14,7 @@ import { layoutIdOf } from '../../plugins/geometry';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, renderHook } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalClipboardItem = globalThis.ClipboardItem;
 
@@ -215,9 +215,13 @@ test('a version change clears a viewer selection and rejects its pending copy', 
   const { ref, show, answer, has } = mount(frame('A'));
   act(() => ref.current!.setSelectionFromDisplay(1, 6));
   const copy = ref.current!.readSelectedText!()!.catch((error: Error) => error);
+  const operation = mock(() => ref.current!.readSelectedText!());
+  const command = ref.current!.runAfterPendingInput(operation).catch((error: Error) => error);
   show(frame('B'));
   expect(ref.current!.displaySelection()).toBeNull();
   expect((await copy as Error).message).toBe('Selection cleared');
+  expect((await command as Error).message).toBe('Selection cleared');
+  expect(operation).not.toHaveBeenCalled();
   show(frame('C'));
   await answer('selectionText', 'A', 'A', text('Alpha'));
   expect(ref.current!.displaySelection()).toBeNull();
@@ -239,6 +243,43 @@ test('navigation leaves a viewer selection and its copy in place', async () => {
   });
   expect(ref.current!.displaySelection()).toEqual({ anchor: 1, head: 6 });
   expect(await ref.current!.readSelectedText!()).toBe('Alpha');
+});
+
+test.each(['ctrlKey', 'metaKey'] as const)('a viewer command waits for select-all and its capture with %s', async (modifier) => {
+  const { ref, show, answer, textarea } = mount(frame('A'));
+  fireEvent.keyDown(textarea, { key: 'a', [modifier]: true });
+  const gesture = ref.current!.currentGesture!();
+  expect(ref.current!.hasPendingInput()).toBe(true);
+  const operation = mock(() => ref.current!.readSelectedText!());
+  const command = ref.current!.runAfterPendingInput(operation);
+  await answer('selectionText', 'A', 'A', null);
+  show(frame('A'));
+  expect(operation).not.toHaveBeenCalled();
+  expect(ref.current!.currentGesture!()).toBe(gesture);
+  await answer('selectionUnit', 'A', 'A', { anchor: 0, head: 30 });
+  expect(operation).not.toHaveBeenCalled();
+  expect(ref.current!.hasPendingInput()).toBe(true);
+  await answer('selectionText', 'A', 'A', text('Alpha\nBeta\nGamma'));
+  expect(await command).toBe('Alpha\nBeta\nGamma');
+  expect(operation).toHaveBeenCalledTimes(1);
+  expect(ref.current!.displaySelection()).toEqual({ anchor: 0, head: 30 });
+  expect(ref.current!.hasPendingInput()).toBe(false);
+});
+
+test('an immediate viewer copy waits for the select-all capture', async () => {
+  const written = mock(async (_value: string) => {});
+  globalThis.ClipboardItem = undefined as unknown as typeof ClipboardItem;
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: written } });
+  const { answer, textarea } = mount(frame('A'));
+  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+  fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true });
+  await answer('selectionText', 'A', 'A', null);
+  expect(written).not.toHaveBeenCalled();
+  await answer('selectionUnit', 'A', 'A', { anchor: 0, head: 30 });
+  expect(written).not.toHaveBeenCalled();
+  await answer('selectionText', 'A', 'A', text('Alpha\nBeta\nGamma'));
+  await waitFor(() => expect(written).toHaveBeenCalledTimes(1));
+  expect(written).toHaveBeenCalledWith('Alpha\nBeta\nGamma');
 });
 
 test('P1-2: a selection on presented preview pages waits for the full frame after the session handover', async () => {

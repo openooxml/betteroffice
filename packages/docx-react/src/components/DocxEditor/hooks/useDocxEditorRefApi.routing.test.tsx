@@ -20,12 +20,14 @@ import type {
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxDocumentChange, DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
+import type { YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import type { EditorMode } from '../internals/editing-modes';
 import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedViewerMembers';
 import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
-import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
+import * as workerOpenReplica from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, holdWorkerOpenDocument, releaseWorkerOpenDocument, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { exportWorkerOpenPages, registerWorkerOpenExport, VIEWER_LAYOUT_WAIT_MS } from '../internals/workerOpenExport';
 import { workerExportVersions } from '../internals/workerExportVersions';
@@ -57,7 +59,7 @@ const CONTROLS: DocxContentControlsResult = {
   content: { schemaVersion: 1, anchorScope: 'session', includedStories: ['body'], controls: [], complete: true, diagnostics: [] },
 };
 
-function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false, viewerSession = false) {
+function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false, viewerSession = false, readWorkerDocument?: ResidentEngineWorkerClient['documentRead']) {
   const events: string[] = [];
   const document = { package: {} } as Document;
   const state = { viewer, version: 'v' };
@@ -92,8 +94,13 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
   } as unknown as YrsSession;
   const hydrate = mock(async () => () => {});
   const fallback = mock(() => {});
-  const request = mock(() => {});
-  const replica = pendingReplica ? deferWorkerOpenReplica(session, hydrate, fallback, () => {}, { active: () => true, request }) : null;
+  const request = mock(() => deferWorkerOpenReplica(session, hydrate, fallback, () => {}));
+  if (pendingReplica && (viewer || viewerSession)) holdWorkerOpenDocument(session, request);
+  const replica = pendingReplica
+    ? viewer || viewerSession
+      ? { start: () => {}, get started() { return workerOpenReplicaStarted(session); } }
+      : deferWorkerOpenReplica(session, hydrate, fallback, () => {})
+    : null;
   const editor = {
     isWorkerViewer: () => state.viewer,
     getYrsSession: () => session,
@@ -127,7 +134,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     } as unknown as DocxCommandInputs);
     useDocxEditorRefApi({
       ref, document, documentFromYrs: () => document, historyStateRef: { current: document }, pagedEditorRef,
-      experimentalWorkerOpen: pendingReplica, settledDisplayList, viewerSession,
+      experimentalWorkerOpen: pendingReplica, settledDisplayList, viewerSession, readWorkerDocument,
       handleSave: async () => null, zoom: 1, setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {}, loadBuffer: async () => {},
@@ -334,12 +341,12 @@ for (const failure of ['missing paragraph', 'refused proposal', 'rejected propos
   });
 }
 
-test('viewer proposeChange without host admission retains the replica gate', () => {
+test('viewer proposeChange without host admission refuses before the replica gate', () => {
   spyOn(console, 'warn').mockImplementation(() => {});
   const host = apiFor(true, true);
   host.allowHostProposalsRef.current = false;
   expect(host.api.proposeChange({ paraId: 'p', search: 'hello', replaceWith: 'world', author: 'Host' })).toBe(false);
-  expect(host.fallback).toHaveBeenCalledTimes(1);
+  expectNoReplica(host);
 });
 
 test('editor proposeChange preserves synchronous edits, refresh and sidebar behavior', () => {
@@ -581,29 +588,6 @@ test('viewer paged export rejects a session replacement while waiting for layout
   expectWorkerPageExport(host);
 });
 
-test('viewer paged export returns the main result after hand-over without more worker attempts', async () => {
-  const settled = mock(async () => ({} as DisplayList));
-  const host = apiFor(true, true, settled);
-  const worker = workerFor(host);
-  await worker.authority.initialize();
-  host.hydrate.mockImplementation(async () => {
-    const handover = await beginWorkerProposalHandover(host.session)!;
-    return () => { host.state.version = 'main-v'; handover.complete(); };
-  });
-  const ready = requestWorkerOpenReplica(host.session)!;
-  spyOn(host.session, 'exportStructuredWithPagesFor').mockReturnValue({
-    ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' },
-  });
-  const result = host.api.exportStructuredWithPages(PAGE_OPTIONS);
-  await ready;
-  expect(await result).toEqual({ ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' } });
-  expect(worker.documentRead).not.toHaveBeenCalled();
-  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
-  expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledTimes(2);
-  expect(host.editor.flushPendingInput).toHaveBeenCalledTimes(1);
-  expect(settled).not.toHaveBeenCalled();
-});
-
 test('viewer paged export uses a main-thread copy that is already loaded', async () => {
   const host = apiFor(true);
   const worker = workerFor(host);
@@ -611,6 +595,26 @@ test('viewer paged export uses a main-thread copy that is already loaded', async
   expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledWith(PAGE_OPTIONS, PAGE_REQUEST);
   expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
   expect(worker.documentRead).not.toHaveBeenCalled();
+});
+
+test('a saved viewer exports the worker layout after proposal hand-over', async () => {
+  const read = mock(async (_request: ResidentDocumentRead) => ({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) }));
+  const host = apiFor(true, false, undefined, false, true, read as ResidentEngineWorkerClient['documentRead']);
+  const worker = workerFor(host);
+  await worker.authority.initialize();
+  const handover = await beginWorkerProposalHandover(host.session);
+  handover!.complete();
+  host.editor.getLayoutRequest.mockReturnValue(null);
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(read).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST });
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
+  expect(host.editor.getLayoutRequest).not.toHaveBeenCalled();
+  expect(host.editor.relayout).not.toHaveBeenCalled();
+  expect(await host.api.listContentControls()).toEqual(CONTROLS);
+  expect(host.session.listContentControls).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(host.events).toEqual(['flush', 'flush']);
 });
 
 test('editor paged export flushes and reads the resident worker after hand-over', async () => {
@@ -861,6 +865,7 @@ for (const [member, args, use] of [
     expect(host.fallback).not.toHaveBeenCalled();
     expect(host.request).not.toHaveBeenCalled();
     host.state.viewer = false;
+    releaseWorkerOpenDocument(host.session);
     Reflect.apply(host.api[member], host.api, args);
     expect(host.fallback).toHaveBeenCalledTimes(1);
     expect(warning).toHaveBeenCalledTimes(1);
@@ -909,7 +914,7 @@ for (const [member, twin, args] of NAVIGATION) {
 }
 
 const PASS_THROUGH = [
-  'getPositionAtPoint', 'getSelectionInfo', 'proposeChange', 'highlightRange',
+  'getPositionAtPoint', 'proposeChange', 'highlightRange',
   'getComments', 'readParagraphs', 'onDocumentChange',
 ] as const;
 for (const member of PASS_THROUGH) {
@@ -932,6 +937,7 @@ for (const member of PASS_THROUGH) {
 
 const REFUSALS = [
   ['getEditorRef', [], null, true],
+  ['getSelectionInfo', [], null, true],
   ['setParagraphStyle', [{ paraId: 'p', styleId: 'Normal' }], false, true],
   ['applyFormatting', [{ paraId: 'p', search: 'hello', marks: { bold: true } }], false, true],
   ['insertBreak', [{ paraId: 'p', type: 'page' }], false, true],
@@ -1244,4 +1250,43 @@ test('a newer paged navigation invalidates a pending worker navigation across re
   const second = hook.result.current.current!.navigateViewer(TARGETS[1]!);
   expect(await second).toBe(true);
   expect(bump).not.toHaveBeenCalled();
+});
+
+test('held paged viewer flush and highlight use viewer input without a replica or projection', async () => {
+  const session = { version: () => 'v' } as YrsSession;
+  const release = mock(() => { throw new Error('unexpected viewer release'); });
+  holdWorkerOpenDocument(session, release);
+  const helpers = [
+    spyOn(workerOpenReplica, 'requestWorkerOpenReplica'),
+    spyOn(workerOpenReplica, 'awaitWorkerOpenReplica'),
+    spyOn(workerOpenReplica, 'ensureWorkerOpenReplica'),
+  ];
+  const input = { flushPendingInput: mock(async () => {}), setSelectionFromDisplay: mock(() => {}) };
+  const projection = mock(() => null);
+  const scroll = mock(() => {});
+  const hook = renderHook(() => {
+    const ref = useRef<PagedEditorRef>(null);
+    usePagedEditorRefApi({
+      ref, viewerSelection: true, experimentalWorkerOpen: true, replicaReady: false,
+      yrsInputRef: { current: input as unknown as YrsInputRef },
+      layout: null, yrsSession: session, documentFromYrs: () => null,
+      runLayoutPipeline: () => {}, getLayoutRequest: () => null, readLayoutRequest: async () => null,
+      scrollToPositionImpl: scroll, revealPositionImpl: () => 'scrolled',
+      scrollToParaIdImpl: () => false, scrollToPageImpl: () => {},
+      setIsFocused: () => {}, onReadyRef: { current: undefined },
+      yrsLocToDisplayPosition: () => null, syncYrsInputState: () => true,
+      applyYrsFormatting: () => false, applyYrsCommand: () => false,
+      getYrsPositionProjection: projection, displayPositionToYrsLoc: () => null,
+      getPositionAtPoint: () => null,
+    });
+    return ref;
+  });
+  await hook.result.current.current!.flushPendingInput();
+  hook.result.current.current!.highlightRange(2, 5);
+  expect(input.flushPendingInput).toHaveBeenCalledTimes(1);
+  expect(input.setSelectionFromDisplay).toHaveBeenCalledWith(2, 5);
+  expect(scroll).toHaveBeenCalledWith(2, true);
+  expect(projection).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  for (const helper of helpers) expect(helper).not.toHaveBeenCalled();
 });

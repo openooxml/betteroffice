@@ -235,7 +235,7 @@ function texts(session: YrsSession): string[] {
 function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
   const authority: Pick<
     workerProposals.WorkerProposalAuthority,
-    'initialized' | 'navigationTarget' | 'readParagraphs'
+    'initialized' | 'navigationTarget' | 'readParagraphs' | 'findText'
   > = {
     initialized: true,
     async navigationTarget(story: string, paraId: string) {
@@ -243,6 +243,9 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
         version: env.session.version(),
         target: { loc: { story, paraId, offset: 0 }, position: 42 },
       };
+    },
+    async findText() {
+      return { ok: true as const, version: env.session.version(), matches: [], truncated: false };
     },
     async readParagraphs(request) {
       return {
@@ -261,16 +264,18 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
   );
   const navigation = spyOn(authority, 'navigationTarget');
   const read = spyOn(authority, 'readParagraphs');
+  const findText = spyOn(authority, 'findText');
   const flush = spyOn(editorBatches, 'flushEditorInput');
   const replica = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
   restoreWorkers.push(() => {
     replica.mockRestore();
     flush.mockRestore();
     read.mockRestore();
+    findText.mockRestore();
     navigation.mockRestore();
     routing.mockRestore();
   });
-  return { authority, navigation, read, flush, replica };
+  return { authority, navigation, read, findText, flush, replica, routing };
 }
 
 describe('plugin edit client', () => {
@@ -736,7 +741,7 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('worker reads and versions skip flushing, while text searches request the replica', async () => {
+  test('editor worker reads skip flushing while text searches retain replica admission', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     expect(await env.clients.read.version()).toEqual({ ok: true, version: env.session.version() });
@@ -795,6 +800,68 @@ describe('plugin read and navigation clients', () => {
       failure: { code: 'document-replaced' },
     });
     expect(worker.read).toHaveBeenCalledTimes(1);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+  });
+
+  for (const held of [true, false]) {
+    test(`viewer text search reads ${held ? 'the worker with a held document' : 'the main copy already present'}`, async () => {
+      const env = await setup();
+      const worker = routeWorker(env);
+      if (!held) worker.routing.mockReturnValue(null);
+      env.state.viewer = !held;
+      const release = mock(() => { throw new Error('unexpected viewer release'); });
+      if (held) workerOpenReplica.holdWorkerOpenDocument(env.session, release);
+      const awaitReplica = spyOn(workerOpenReplica, 'awaitWorkerOpenReplica');
+      const ensureReplica = spyOn(workerOpenReplica, 'ensureWorkerOpenReplica');
+      const mainFind = spyOn(env.session, 'findText');
+      restoreWorkers.push(() => { awaitReplica.mockRestore(); ensureReplica.mockRestore(); mainFind.mockRestore(); });
+      const request = { text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
+      expect(await env.clients.read.findText(request)).toEqual({
+        ok: true, version: env.session.version(), matches: held ? [] : expect.any(Array), truncated: false,
+      });
+      if (held) {
+        expect(worker.findText).toHaveBeenCalledWith(request, expect.any(Function));
+        expect(mainFind).not.toHaveBeenCalled();
+        expect(worker.flush).not.toHaveBeenCalled();
+        expect(worker.replica).not.toHaveBeenCalled();
+      } else {
+        expect(worker.findText).not.toHaveBeenCalled();
+        expect(mainFind).toHaveBeenCalledWith(request);
+        expect(worker.flush).toHaveBeenCalledTimes(1);
+        expect(worker.replica).not.toHaveBeenCalled();
+      }
+      expect(awaitReplica).not.toHaveBeenCalled();
+      expect(ensureReplica).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+    });
+  }
+
+  test('viewer text search preserves document replacement refusals during the worker read', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    env.state.viewer = true;
+    workerOpenReplica.holdWorkerOpenDocument(env.session, () => { throw new Error('unexpected viewer release'); });
+    worker.findText.mockImplementationOnce(async () => {
+      env.pagedEditorRef.current = null;
+      return { ok: true as const, version: env.session.version(), matches: [], truncated: false };
+    });
+    expect(await env.clients.read.findText({
+      text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    })).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+  });
+
+  test('viewer text search refuses an authority main fallback without flushing or replica admission', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    env.state.viewer = true;
+    workerOpenReplica.holdWorkerOpenDocument(env.session, () => { throw new Error('unexpected viewer release'); });
+    worker.findText.mockImplementation((_request, main) => main());
+    expect(await env.clients.read.findText({
+      text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    })).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
     expect(worker.flush).not.toHaveBeenCalled();
     expect(worker.replica).not.toHaveBeenCalled();
   });

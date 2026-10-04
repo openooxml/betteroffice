@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import { DocxWorkerError } from './internals/docxWorkerError';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -307,6 +308,51 @@ test('an untaken worker session whose render and open fail reports the error onc
     release();
   }
 }, 30_000);
+
+test.each([false, true])('a terminal worker open reports one typed error and an alert with viewer=%s', async (viewer) => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const failure = new DocxWorkerError('open', new Error('worker open failed'));
+  let release = () => {};
+  const opening = new Promise<void>((done) => { release = done; });
+  const openInWorker = mock(async (_session: YrsSession) => {
+    await opening;
+    throw failure;
+  });
+  workerOpen = openInWorker;
+  const errors: Error[] = [];
+  const buffer = documentBuffer();
+  const element = () => (
+    <DocxEditor
+      experimentalWorkerOpen
+      previewFirstPage={false}
+      readOnly={viewer}
+      documentBuffer={buffer}
+      onError={(error) => errors.push(error)}
+    />
+  );
+  const view = render(element());
+  try {
+    await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1));
+    const pending = openInWorker.mock.calls[0][0];
+    workerFailure = { error: failure, errorEngine: pending };
+    await act(async () => view.rerender(element()));
+    expect(errors).toEqual([]);
+    await act(async () => release());
+    await waitFor(() => expect(errors).toEqual([failure]));
+    expect(errors[0]).toBe(failure);
+    expect(view.getByRole('alert').textContent).toContain(failure.message);
+    expect(view.container.querySelector('.canvas-pages')).toBeNull();
+    await act(async () => view.rerender(element()));
+    expect(errors).toEqual([failure]);
+    expect(openInWorker).toHaveBeenCalledTimes(1);
+  } finally {
+    release();
+  }
+});
 
 test('a stale worker open failure keeps the replacement preview read-only', async () => {
   created = 0;
