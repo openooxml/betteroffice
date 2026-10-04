@@ -128,22 +128,27 @@ export class YrsStorySegmentCache {
       }
     }
     for (const story of this.undigested) {
-      let cached = this.stories.get(story);
-      if (!this.warming.has(story)) {
-        this.warming.set(story, cached && !changedSince.has(story) ? cached : null);
-      }
-      const warming = this.warming.get(story);
-      if (warming && !cached?.digests && (cached !== warming || changedSince.has(story))) {
-        this.refresh();
-        this.store(story, null, [this.session.storySegments(story)]);
-        cached = this.stories.get(story);
-      }
-      if (warming && cached && !cached.digests) {
-        const digests = this.session.storySegmentUnitDigests(story);
-        const units = splitUnits(cached.segments);
-        if (digests.length === units.length) {
-          this.stories.delete(story);
-          this.store(story, digests, units);
+      if (!this.session.hasStory(story)) {
+        this.release(this.stories.get(story)?.digests ?? []);
+        this.stories.delete(story);
+      } else {
+        let cached = this.stories.get(story);
+        if (!this.warming.has(story)) {
+          this.warming.set(story, cached && !changedSince.has(story) ? cached : null);
+        }
+        const warming = this.warming.get(story);
+        if (warming && !cached?.digests && (cached !== warming || changedSince.has(story))) {
+          this.refresh();
+          this.store(story, null, [this.session.storySegments(story)]);
+          cached = this.stories.get(story);
+        }
+        if (warming && cached && !cached.digests) {
+          const digests = this.session.storySegmentUnitDigests(story);
+          const units = splitUnits(cached.segments);
+          if (digests.length === units.length) {
+            this.stories.delete(story);
+            this.store(story, digests, units);
+          }
         }
       }
       this.undigested.delete(story);

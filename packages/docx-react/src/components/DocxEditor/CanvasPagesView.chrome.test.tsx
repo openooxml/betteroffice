@@ -19,21 +19,14 @@ import {
 import { CanvasInteractiveOverlay } from './CanvasInteractiveOverlay';
 import { CanvasPageMirror } from './CanvasPageMirror';
 import { CanvasPagesView } from './CanvasPagesView';
+import { checkIdleContinuation, fakeIdleScheduler } from './__fixtures__/fakeIdleScheduler';
 import type { PageChromeHandle } from './usePageChrome';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
-const originalIdle = globalThis.requestIdleCallback;
-const originalCancelIdle = globalThis.cancelIdleCallback;
-const idleWork = new Map<number, { callback: IdleRequestCallback; timeout?: number }>();
-let nextIdle = 1;
-
-const flushIdle = (deadline: IdleDeadline): void => {
-  for (const [id, { callback }] of Array.from(idleWork)) {
-    if (!idleWork.delete(id)) continue;
-    callback(deadline);
-  }
-};
+let scheduler: ReturnType<typeof fakeIdleScheduler>;
+let idleWork: typeof scheduler.idleWork;
+let flushIdle: typeof scheduler.flushIdle;
 
 /** Lets chrome and queued fallbacks finish their idle work. */
 const idle = () =>
@@ -56,6 +49,12 @@ const blankPages = (
     primitives: primitives(pageIndex),
   }));
 
+const renderInactiveMirrors = (pages: DisplayPage[]) => render(
+  <>{pages.map((page) => (
+    <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
+  ))}</>
+);
+
 const hasFullMirror = (page: Element): boolean => {
   const mirror = page.querySelector<HTMLElement>('.canvas-page-mirror > .layout-page-mirror');
   return Boolean(mirror && mirror.style.contentVisibility !== 'auto');
@@ -68,20 +67,12 @@ const mirroredPages = (host: HTMLElement) =>
     .map((page) => Number(page.dataset.pageIndex));
 
 beforeEach(() => {
-  globalThis.requestIdleCallback = (callback, options) => {
-    const id = nextIdle++;
-    idleWork.set(id, { callback, timeout: options?.timeout });
-    return id;
-  };
-  globalThis.cancelIdleCallback = (id) => {
-    idleWork.delete(id);
-  };
+  scheduler = fakeIdleScheduler();
+  ({ idleWork, flushIdle } = scheduler);
 });
 afterEach(() => {
   cleanup();
-  idleWork.clear();
-  globalThis.requestIdleCallback = originalIdle;
-  globalThis.cancelIdleCallback = originalCancelIdle;
+  scheduler.restore();
 });
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -689,11 +680,7 @@ test('first fallbacks share a FIFO and honor idle deadlines and timeouts', async
     color: '#000',
     text: `Page ${index}`,
   }]);
-  const { container } = render(
-    <>{pages.map((page) => (
-      <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
-    ))}</>
-  );
+  const { container } = renderInactiveMirrors(pages);
   expect(idleWork.size).toBe(1);
   const timeout = Array.from(idleWork.values())[0]!.timeout!;
   expect(timeout).toBeGreaterThan(0);
@@ -713,11 +700,7 @@ test('first fallbacks share a FIFO and honor idle deadlines and timeouts', async
 
 test('first fallbacks cap each idle slice at eight milliseconds and keep FIFO order', () => {
   const pages = blankPages(8);
-  const { container } = render(
-    <>{pages.map((page) => (
-      <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
-    ))}</>
-  );
+  const { container } = renderInactiveMirrors(pages);
   const hosts = Array.from(container.querySelectorAll('.canvas-page-mirror'));
   const clock = spyOn(performance, 'now').mockImplementation(
     () => hosts.filter((host) => host.firstChild !== null).length * 3
@@ -746,83 +729,31 @@ test('first fallbacks cap each idle slice at eight milliseconds and keep FIFO or
 for (const scenario of ['busy', 'no idle', 'dispose', 'dispose no idle', 'expiry during page']) {
   test(`fallback continuation: ${scenario}`, () => {
     const noIdle = scenario.includes('no idle');
-    if (noIdle) globalThis.requestIdleCallback = undefined as unknown as typeof requestIdleCallback;
-    const timers = new Map<number, { at: number; run: () => void }>();
-    let next = 0;
     let now = 0;
     let hosts: Element[] = [];
-    const clock = spyOn(performance, 'now').mockImplementation(
-      () => now + (hosts[0]?.firstChild ? 8 : 0)
-    );
-    const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
-      ((run: () => void, delay = 0) => {
-        const id = ++next;
-        timers.set(id, { at: performance.now() + delay, run });
-        return id;
-      }) as unknown as typeof setTimeout
-    );
-    const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
-      timers.delete(id as unknown as number);
+    scheduler.restore();
+    scheduler = fakeIdleScheduler({
+      timers: true, noIdle, now: () => now + (hosts[0]?.firstChild ? 8 : 0),
     });
-    const flushTimer = () => {
-      expect(timers.size).toBe(1);
-      const [id, timer] = timers.entries().next().value!;
-      expect(timer.at).toBeLessThanOrEqual(performance.now());
-      timers.delete(id);
-      act(() => timer.run());
-    };
     const built = () => hosts.map((host) => host.textContent);
-    let unmount: (() => void) | undefined;
-    try {
-      const pages = blankPages(3, (index) => [{
-        kind: 'text', x: 10, y: 10, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
-      }]);
-      const rendered = render(
-        <>{pages.map((page) => (
-          <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
-        ))}</>
-      );
-      unmount = rendered.unmount;
-      hosts = Array.from(rendered.container.querySelectorAll('.canvas-page-mirror'));
-      if (noIdle) {
-        now = 50;
-        flushTimer();
-      } else {
-        now = scenario === 'expiry during page' ? 4999 : 4990;
-        act(() => flushIdle({ didTimeout: false, timeRemaining: () => 40 }));
-      }
-      expect(built()).toEqual(['Page 0', '', '']);
-      const expiresAt = noIdle ? 50 : 5000;
-      expect([...timers.values()].map(({ at }) => at)).toEqual([
-        Math.max(expiresAt, performance.now()),
-      ]);
-      if (scenario.startsWith('dispose')) {
-        unmount();
-        unmount = undefined;
-        expect(timers.size).toBe(0);
-        expect(idleWork.size).toBe(0);
-      } else {
-        if (!noIdle && scenario !== 'expiry during page') {
-          now = 4991;
-          expect([...timers.values()].every(({ at }) => at > performance.now())).toBe(true);
-          now = 4992;
+    const pages = blankPages(3, (index) => [{
+      kind: 'text', x: 10, y: 10, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
+    }]);
+    const rendered = renderInactiveMirrors(pages);
+    const { unmount } = rendered;
+    hosts = Array.from(rendered.container.querySelectorAll('.canvas-page-mirror'));
+    checkIdleContinuation(scheduler, scenario, {
+      setNow: (value) => { now = value; }, dispose: unmount,
+      run: act, noIdleStart: 50, offset: () => hosts[0]?.firstChild ? 8 : 0,
+      checkFirst: () => expect(built()).toEqual(['Page 0', '', '']),
+      timerSlices: 2, replayIdle: true,
+      checkTimer: (index) => {
+        expect(built()).toEqual(index === 0 ? ['Page 0', 'Page 1', ''] : ['Page 0', 'Page 1', 'Page 2']);
+        if (index === 1) {
+          expect(performance.now()).toBe(noIdle ? 58 : scenario === 'expiry during page' ? 5007 : 5000);
         }
-        const held = Array.from(idleWork.values(), ({ callback }) => callback);
-        flushTimer();
-        expect(built()).toEqual(['Page 0', 'Page 1', '']);
-        flushTimer();
-        act(() => held.forEach((run) => run({ didTimeout: true, timeRemaining: () => 0 })));
-        expect(built()).toEqual(['Page 0', 'Page 1', 'Page 2']);
-        expect(performance.now()).toBe(noIdle ? 58 : scenario === 'expiry during page' ? 5007 : 5000);
-        expect(timers.size).toBe(0);
-        expect(idleWork.size).toBe(0);
-      }
-    } finally {
-      unmount?.();
-      timeout.mockRestore();
-      clear.mockRestore();
-      clock.mockRestore();
-    }
+      },
+    });
   });
 }
 
@@ -865,52 +796,26 @@ test('deferred full chrome keeps its own idle schedule alongside queued fallback
 });
 
 test('deferred chrome keeps independent 150 ms timers without requestIdleCallback', () => {
-  globalThis.requestIdleCallback = undefined as unknown as typeof requestIdleCallback;
-  const timers = new Map<number, { at: number; run: () => void }>();
-  let next = 0;
-  let now = 0;
-  const clock = spyOn(performance, 'now').mockImplementation(() => now);
-  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
-    ((run: () => void, delay = 0) => {
-      const id = ++next;
-      timers.set(id, { at: now + delay, run });
-      return id;
-    }) as unknown as typeof setTimeout
+  scheduler.restore();
+  scheduler = fakeIdleScheduler({ timers: true, noIdle: true });
+  const { timers } = scheduler;
+  const pages = blankPages(3);
+  const rendered = render(
+    <>
+      <CanvasPageMirror page={pages[0]!} active={false} />
+      <CanvasPageMirror page={pages[1]!} defer />
+      <CanvasPageMirror page={pages[2]!} defer />
+    </>
   );
-  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
-    timers.delete(id as unknown as number);
-  });
-  let unmount: (() => void) | undefined;
-  try {
-    const pages = blankPages(3);
-    const rendered = render(
-      <>
-        <CanvasPageMirror page={pages[0]!} active={false} />
-        <CanvasPageMirror page={pages[1]!} defer />
-        <CanvasPageMirror page={pages[2]!} defer />
-      </>
-    );
-    unmount = rendered.unmount;
-    const mirrors = () => rendered.container.querySelectorAll<HTMLElement>('.layout-page-mirror');
-    expect([...timers.values()].map(({ at }) => at)).toEqual([50, 150, 150]);
-    for (const at of [50, 150]) {
-      now = at;
-      act(() => {
-        for (const [id, timer] of [...timers]) {
-          if (timer.at > now || !timers.delete(id)) continue;
-          timer.run();
-        }
-      });
-      expect(mirrors()).toHaveLength(at === 50 ? 1 : 3);
-    }
-    expect(mirrors()[0]!.style.contentVisibility).toBe('auto');
-    expect(mirrors()[1]!.style.contentVisibility).not.toBe('auto');
-    expect(mirrors()[2]!.style.contentVisibility).not.toBe('auto');
-    expect(timers.size).toBe(0);
-  } finally {
-    unmount?.();
-    timeout.mockRestore();
-    clear.mockRestore();
-    clock.mockRestore();
+  const mirrors = () => rendered.container.querySelectorAll<HTMLElement>('.layout-page-mirror');
+  expect([...timers.values()].map(({ at }) => at)).toEqual([50, 150, 150]);
+  for (const at of [50, 150]) {
+    scheduler.now = at;
+    act(() => scheduler.flushDueTimers());
+    expect(mirrors()).toHaveLength(at === 50 ? 1 : 3);
   }
+  expect(mirrors()[0]!.style.contentVisibility).toBe('auto');
+  expect(mirrors()[1]!.style.contentVisibility).not.toBe('auto');
+  expect(mirrors()[2]!.style.contentVisibility).not.toBe('auto');
+  expect(timers.size).toBe(0);
 });

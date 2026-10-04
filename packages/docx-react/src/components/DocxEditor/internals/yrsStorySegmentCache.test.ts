@@ -1,10 +1,11 @@
-import { beforeAll, expect, spyOn, test } from 'bun:test';
+import { beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { createYrsSidebarProjection } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type YrsSession, type YrsStorySegment } from '@betteroffice/docx/yrs';
+import { checkIdleContinuation, fakeIdleScheduler } from '../__fixtures__/fakeIdleScheduler';
 import { createYrsPositionProjection } from './yrsPositionProjection';
 import { storySegmentSource, YrsStorySegmentCache } from './yrsStorySegmentCache';
 
@@ -188,18 +189,7 @@ for (const editBetweenSlices of ['none', 'reread', 'without rereading'] as const
     : `idle digest slices preserve warming after an edit ${editBetweenSlices}`;
   test(name, async () => {
     const session = await createYrsSession({ clientId: 77005 });
-    const originalIdle = globalThis.requestIdleCallback;
-    const originalCancelIdle = globalThis.cancelIdleCallback;
-    const callbacks = new Map<number, IdleRequestCallback>();
-    let nextIdle = 1;
-    globalThis.requestIdleCallback = (run) => {
-      const id = nextIdle++;
-      callbacks.set(id, run);
-      return id;
-    };
-    globalThis.cancelIdleCallback = (id) => { callbacks.delete(id); };
-    let now = 0;
-    const clock = spyOn(performance, 'now').mockImplementation(() => now);
+    const scheduler = fakeIdleScheduler({ timers: true });
     const cache = new YrsStorySegmentCache(session);
     const synchronous = new YrsStorySegmentCache(session);
     try {
@@ -207,7 +197,7 @@ for (const editBetweenSlices of ['none', 'reread', 'without rereading'] as const
       const { reads, clear, storySegments } = counted(session);
       const digests = session.storySegmentUnitDigests.bind(session);
       session.storySegmentUnitDigests = (story) => {
-        now += 4;
+        scheduler.now += 4;
         return digests(story);
       };
       expectSameProjection(session, cache, storySegments);
@@ -216,27 +206,19 @@ for (const editBetweenSlices of ['none', 'reread', 'without rereading'] as const
         const [paragraph] = session.paragraphs(story);
         session.splitParagraph({ story, paraId: paragraph!.paraId, offset: 0 });
       }
-      cache.refresh();
-      synchronous.refresh();
-      for (const story of stories) {
-        cache.segments(story);
-        synchronous.segments(story);
+      for (const warmed of [cache, synchronous]) {
+        warmed.refresh();
+        for (const story of stories) warmed.segments(story);
       }
       clear();
-      const flush = () => {
-        expect(callbacks.size).toBe(1);
-        const [id, run] = callbacks.entries().next().value!;
-        callbacks.delete(id);
-        run({ didTimeout: false, timeRemaining: () => 40 });
-      };
       cache.scheduleDigests();
-      const firstCallbackTime = now;
+      const firstCallbackTime = scheduler.now;
       synchronous.completeDigests();
       const expected = [...reads.digests];
       expect(expected).toEqual(stories);
-      now = firstCallbackTime;
+      scheduler.now = firstCallbackTime;
       clear();
-      flush();
+      scheduler.flushOneIdle();
       expect(reads.digests).toEqual(stories.slice(0, 2));
       const completed = [...reads.digests];
       if (editBetweenSlices !== 'none') {
@@ -251,18 +233,17 @@ for (const editBetweenSlices of ['none', 'reread', 'without rereading'] as const
         }
       }
       clear();
-      flush();
-      flush();
+      scheduler.flushOneIdle();
+      scheduler.flushOneIdle();
       expect([...completed, ...reads.digests]).toEqual(expected);
-      expect(callbacks.size).toBe(0);
+      expect(scheduler.idleWork.size).toBe(0);
       if (editBetweenSlices === 'without rereading') {
         const story = stories[2]!;
         expect(reads.whole).toEqual([story]);
         clear();
         const resumed = cache.segments(story);
         expect(resumed).toEqual(storySegments(story));
-        expect(reads.whole).toEqual([]);
-        expect(reads.digests).toEqual([]);
+        expect({ whole: reads.whole, digests: reads.digests }).toEqual({ whole: [], digests: [] });
         synchronous.refresh();
         expect(synchronous.segments(story)).toEqual(resumed);
       }
@@ -270,109 +251,73 @@ for (const editBetweenSlices of ['none', 'reread', 'without rereading'] as const
     } finally {
       cache.dispose();
       synchronous.dispose();
-      clock.mockRestore();
-      globalThis.requestIdleCallback = originalIdle;
-      globalThis.cancelIdleCallback = originalCancelIdle;
+      scheduler.restore();
       session.destroy();
     }
   });
 }
 
 for (const scenario of [
-  'busy', 'no idle', 'dispose', 'dispose no idle', 'expiry during story', 'idle deadline',
+  'busy', 'no idle', 'dispose', 'dispose no idle', 'expiry during story', 'idle deadline', 'deleted story',
 ]) {
-  test(`digest continuation: ${scenario}`, () => {
-    const originalIdle = globalThis.requestIdleCallback;
-    const originalCancelIdle = globalThis.cancelIdleCallback;
+  const name = scenario === 'deleted story'
+    ? 'idle digest slices skip a deleted story and warm its surviving neighbour'
+    : `digest continuation: ${scenario}`;
+  test(name, () => {
     const noIdle = scenario.includes('no idle');
-    const callbacks = new Map<number, IdleRequestCallback>();
-    const timers = new Map<number, { at: number; run: () => void }>();
-    let next = 0;
-    let now = 0;
-    const clock = spyOn(performance, 'now').mockImplementation(() => now);
-    const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
-      ((run: () => void, delay = 0) => {
-        const id = ++next;
-        timers.set(id, { at: now + delay, run });
-        return id;
-      }) as unknown as typeof setTimeout
-    );
-    const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
-      timers.delete(id as unknown as number);
-    });
-    globalThis.requestIdleCallback = noIdle
-      ? undefined as unknown as typeof requestIdleCallback
-      : (run) => {
-        const id = ++next;
-        callbacks.set(id, run);
-        return id;
-      };
-    globalThis.cancelIdleCallback = (id) => { callbacks.delete(id); };
+    const scheduler = fakeIdleScheduler({ timers: true, noIdle });
     const completed: string[] = [];
+    const live = new Set(['A', 'B', 'C']);
     const session = {
-      storiesChangedSince: () => ({ revision: 0, stories: [] }),
-      storySegments: (story: string) => [0, 1].map((index) => ({
-        kind: 'pilcrow', paraId: `${story}:${index}`, properties: {}, attributes: {},
-      })),
+      hasStory: (story: string) => live.has(story),
+      storiesChangedSince: () => ({ revision: 0, stories: live.has('B') ? [] : ['B'] }),
+      storySegments: (story: string) => {
+        if (!live.has(story)) throw new Error(`Missing story: ${story}`);
+        return [0, 1].map((index) => ({
+          kind: 'pilcrow', paraId: `${story}:${index}`, properties: {}, attributes: {},
+        }));
+      },
       storySegmentUnitDigests: (story: string) => {
         completed.push(story);
         if (scenario === 'expiry during story' || story === 'A') {
-          now += scenario === 'idle deadline' ? 2 : 8;
+          scheduler.now += scenario === 'idle deadline' ? 2 : 8;
         }
         return [`${story}:0`, `${story}:1`];
       },
     } as unknown as YrsSession;
     const cache = new YrsStorySegmentCache(session);
-    const flushTimer = () => {
-      expect(timers.size).toBe(1);
-      const [id, timer] = timers.entries().next().value!;
-      expect(timer.at).toBeLessThanOrEqual(now);
-      timers.delete(id);
-      timer.run();
-    };
     try {
       for (const story of ['A', 'B', 'C']) cache.segments(story);
       cache.scheduleDigests();
-      if (noIdle) flushTimer();
-      else {
-        now = scenario === 'expiry during story' ? 4999 : 4990;
-        const [id, run] = callbacks.entries().next().value!;
-        callbacks.delete(id);
-        run({
+      expect(() => checkIdleContinuation(scheduler, scenario, {
+        setNow: scheduler.setNow, dispose: () => cache.dispose(),
+        checkFirst: () => {
+          expect(completed).toEqual(['A']);
+          if (scenario === 'deleted story') live.delete('B');
+        },
+        timerSlices: scenario === 'expiry during story' ? 2 : 1, resumeIdle: scenario === 'deleted story',
+        deadline: {
           didTimeout: false,
           timeRemaining: () => scenario === 'idle deadline' && completed.length > 0 ? 0 : 40,
-        });
-      }
-      expect(completed).toEqual(['A']);
-      expect([...timers.values()].map(({ at }) => at)).toEqual([noIdle ? 8 : Math.max(5000, now)]);
-      if (scenario.startsWith('dispose')) {
-        cache.dispose();
-        expect(timers.size).toBe(0);
-        expect(callbacks.size).toBe(0);
-      } else {
-        if (!noIdle && scenario !== 'expiry during story') {
-          now = 4999;
-          expect([...timers.values()].every(({ at }) => at > now)).toBe(true);
-          now = 5000;
-        }
-        flushTimer();
-        if (scenario === 'expiry during story') {
-          expect(completed).toEqual(['A', 'B']);
-          flushTimer();
-        } else {
-          expect(now).toBe(noIdle ? 8 : 5000);
-        }
-        expect(completed).toEqual(['A', 'B', 'C']);
-        expect(timers.size).toBe(0);
-        expect(callbacks.size).toBe(0);
-      }
+        },
+        checkTimer: (index) => {
+          const expected = scenario === 'deleted story' ? ['A', 'C']
+            : scenario === 'expiry during story' && index === 0 ? ['A', 'B'] : ['A', 'B', 'C'];
+          expect(completed).toEqual(expected);
+          if (scenario === 'deleted story') {
+            const fresh = new YrsStorySegmentCache(session);
+            for (const story of ['A', 'C']) fresh.segments(story);
+            fresh.completeDigests();
+            expect(cache).toEqual(fresh);
+            fresh.dispose();
+          } else if (scenario !== 'expiry during story') {
+            expect(scheduler.now).toBe(noIdle ? 8 : 5000);
+          }
+        },
+      })).not.toThrow();
     } finally {
       cache.dispose();
-      timeout.mockRestore();
-      clear.mockRestore();
-      clock.mockRestore();
-      globalThis.requestIdleCallback = originalIdle;
-      globalThis.cancelIdleCallback = originalCancelIdle;
+      scheduler.restore();
     }
   });
 }
