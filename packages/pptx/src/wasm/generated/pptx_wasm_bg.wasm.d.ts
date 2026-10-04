@@ -98,7 +98,7 @@ export const pptxrenderer_layoutSlideProfiledJson: (a: number, b: number, c: num
 export const pptxrenderer_new: () => number;
 export const pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
-export const pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number) => number;
+export const pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
 export const pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
 export const renderPptxMarkdownJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

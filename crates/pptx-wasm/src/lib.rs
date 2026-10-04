@@ -33,7 +33,6 @@ pub struct PptxRenderer {
     package_identity: Option<(yrs::Doc, usize)>,
     generation: u64,
     next_token: u64,
-    prune_at: usize,
     layout_keys: HashMap<String, LayoutKeyRecord>,
     #[cfg(test)]
     layout_count: usize,
@@ -72,7 +71,6 @@ impl PptxRenderer {
             package_identity: None,
             generation: 0,
             next_token: 0,
-            prune_at: 256,
             layout_keys: HashMap::new(),
             #[cfg(test)]
             layout_count: 0,
@@ -159,16 +157,21 @@ impl PptxRenderer {
     }
 
     #[wasm_bindgen(js_name = setActiveSlide)]
-    pub fn set_active_slide(&mut self, id: &str, key: &str) -> bool {
+    pub fn set_active_slide(&mut self, document: &PptxDocument, id: &str, key: &str) -> bool {
+        let session = document.session();
+        self.sync_package(session);
+        let version = session.version();
         self.active_slide = Some(id.to_owned());
         let current = self.layout_keys.get(id).is_some_and(|record| {
             record.generation == self.generation
                 && record.font_epoch == self.font_epoch
+                && record.validated_version.as_ref() == &version
                 && record.token.to_string() == key
-        }) && self.rendered.get(id).is_some_and(|cached| cached.key == key);
-        if current {
-            self.last_slide = Some(id.to_owned());
-        }
+        }) && self
+            .rendered
+            .get(id)
+            .is_some_and(|cached| cached.key == key);
+        self.last_slide = current.then(|| id.to_owned());
         current
     }
 
@@ -194,7 +197,6 @@ impl PptxRenderer {
         }
         self.rendered.retain(|id, _| keys.contains_key(id));
         self.layout_keys.retain(|id, _| keys.contains_key(id));
-        self.prune_at = 256.max(keys.len().saturating_mul(2));
         #[derive(serde::Serialize)]
         struct LayoutSnapshot<'a> {
             snapshot: &'a pptx_edit::DeckSnapshot,
@@ -314,10 +316,9 @@ impl PptxRenderer {
 
 impl PptxRenderer {
     fn prune_layout_keys(&mut self, session: &pptx_edit::DeckSession) -> Result<(), JsValue> {
-        if self.layout_keys.len() > self.prune_at {
+        if self.layout_keys.len() > 256 {
             let ids = session.slide_ids().map_err(js_error)?;
-            self.prune_at = 256.max(ids.len().saturating_mul(2));
-            if self.layout_keys.len() > self.prune_at {
+            if self.layout_keys.len() > 256.max(ids.len().saturating_mul(2)) {
                 let live: HashSet<_> = ids.into_iter().collect();
                 self.layout_keys.retain(|id, _| live.contains(id));
             }
@@ -494,7 +495,7 @@ macro_rules! ignore_primitives {
     };
 }
 
-impl<'a> ser::Serializer for &'a mut FloatBits {
+impl ser::Serializer for &mut FloatBits {
     type Ok = ();
     type Error = serde::de::value::Error;
     type SerializeSeq = Self;
@@ -776,6 +777,37 @@ mod tests {
         )
     }
 
+    fn layout_input_oracle(scope: &SlideScope, generation: u64, font_epoch: u64) -> String {
+        serde_json::to_string(&(scope, generation, font_epoch)).unwrap()
+    }
+
+    fn assert_key_oracles(
+        renderer: &mut PptxRenderer,
+        document: &PptxDocument,
+        seen: &mut HashMap<(u64, String), String>,
+        previous: &mut HashMap<String, (String, String)>,
+    ) {
+        let session = document.session();
+        for index in 0..session.slide_ids().unwrap().len() {
+            let scope = session.slide_scope(index).unwrap();
+            let token = renderer.slide_layout_key(document, index as u32).unwrap();
+            let oracle = layout_input_oracle(&scope, renderer.generation, renderer.font_epoch);
+            if let Some(known) = seen.insert((renderer.generation, token.clone()), oracle.clone()) {
+                assert_eq!(known, oracle, "{}", scope.slide.id);
+            }
+            if let Some((previous_token, previous_oracle)) =
+                previous.insert(scope.slide.id.clone(), (token.clone(), oracle.clone()))
+            {
+                assert_eq!(
+                    previous_token == token,
+                    previous_oracle == oracle,
+                    "{}",
+                    scope.slide.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn public_layout_prunes_keys_during_slide_churn() {
         let document = PptxDocument::open_collaborative(DECK, 913.0).unwrap();
@@ -895,14 +927,12 @@ mod tests {
         }
         let mut renderer = PptxRenderer::new();
         renderer.register_font("Test", false, false, FONT).unwrap();
-        let first: serde_json::Value = serde_json::from_str(
-            &renderer.snapshot_with_layout_keys_json(&document).unwrap(),
-        )
-        .unwrap();
-        let second: serde_json::Value = serde_json::from_str(
-            &renderer.snapshot_with_layout_keys_json(&document).unwrap(),
-        )
-        .unwrap();
+        let first: serde_json::Value =
+            serde_json::from_str(&renderer.snapshot_with_layout_keys_json(&document).unwrap())
+                .unwrap();
+        let second: serde_json::Value =
+            serde_json::from_str(&renderer.snapshot_with_layout_keys_json(&document).unwrap())
+                .unwrap();
         assert_eq!(first["keys"], second["keys"]);
         assert_eq!(renderer.layout_keys.len(), 260);
         let computed = renderer.key_count;
@@ -917,6 +947,35 @@ mod tests {
         }
         assert_eq!(renderer.key_count, computed);
         assert_eq!(renderer.layout_keys.len(), 260);
+    }
+
+    #[test]
+    fn new_document_resets_pruning_after_large_deck_snapshot() {
+        let large = PptxDocument::open_collaborative(DECK, 922.0).unwrap();
+        let context = EditCtx::local("test");
+        for index in large.session().slide_ids().unwrap().len()..260 {
+            large
+                .session()
+                .insert_slide(&context, index as u32, None)
+                .unwrap();
+        }
+        let mut renderer = PptxRenderer::new();
+        renderer.snapshot_with_layout_keys_json(&large).unwrap();
+        assert_eq!(renderer.layout_keys.len(), 260);
+
+        let document = PptxDocument::open_collaborative(DECK, 923.0).unwrap();
+        let session = document.session();
+        let live = session.slide_ids().unwrap().len();
+        let original = renderer.slide_layout_key(&document, 0).unwrap();
+        assert_eq!(renderer.layout_keys.len(), 1);
+        for _ in 0..520 {
+            let receipt = session.insert_slide(&context, live as u32, None).unwrap();
+            renderer.slide_layout_key(&document, live as u32).unwrap();
+            assert!(renderer.layout_keys.len() <= 256.max(2 * (live + 1)));
+            session.delete_slide(&context, &receipt.slide_id).unwrap();
+            assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), original);
+            assert!(renderer.layout_keys.len() <= 256.max(2 * live));
+        }
     }
 
     #[test]
@@ -957,6 +1016,10 @@ mod tests {
             .unwrap();
         let negative = session.slide_scope(0).unwrap();
         assert_eq!(positive, negative);
+        assert_ne!(
+            layout_input_oracle(&positive, renderer.generation, renderer.font_epoch),
+            layout_input_oracle(&negative, renderer.generation, renderer.font_epoch)
+        );
         let adjustment = negative.slide.shapes.last().unwrap().adjust_values["adj1"];
         assert_eq!(adjustment.to_bits(), (-0.0_f64).to_bits());
         assert_ne!(renderer.slide_layout_key(&document, 0).unwrap(), original);
@@ -980,7 +1043,7 @@ mod tests {
         for fallback in [false, true] {
             renderer.layout_slide_json(&document, 0).unwrap();
             let old = renderer.slide_layout_key(&document, 0).unwrap();
-            assert!(renderer.set_active_slide(&scope.slide.id, &old));
+            assert!(renderer.set_active_slide(&document, &scope.slide.id, &old));
             let frame = &renderer.rendered[&scope.slide.id].rendered;
             let point = (0..frame.display_list.height as usize)
                 .step_by(32)
@@ -1001,7 +1064,7 @@ mod tests {
             }
             assert!(renderer.rendered.is_empty());
             assert!(renderer.last_slide.is_none());
-            assert!(!renderer.set_active_slide(&scope.slide.id, &old));
+            assert!(!renderer.set_active_slide(&document, &scope.slide.id, &old));
             assert_eq!(renderer.hit_test_json(point.0, point.1).unwrap(), "null");
             let layouts = renderer.layout_count;
             renderer
@@ -1010,6 +1073,18 @@ mod tests {
             assert_eq!(renderer.layout_count, layouts + 1);
         }
         let old = renderer.slide_layout_key(&document, 0).unwrap();
+        assert!(renderer.set_active_slide(&document, &scope.slide.id, &old));
+        let frame = &renderer.rendered[&scope.slide.id].rendered;
+        let point = (0..frame.display_list.height as usize)
+            .step_by(32)
+            .flat_map(|y| {
+                (0..frame.display_list.width as usize)
+                    .step_by(32)
+                    .map(move |x| (x as f32, y as f32))
+            })
+            .find(|(x, y)| frame.hit_test(*x, *y).is_some())
+            .unwrap();
+        assert_ne!(renderer.hit_test_json(point.0, point.1).unwrap(), "null");
         let story = scope
             .slide
             .shapes
@@ -1026,12 +1101,75 @@ mod tests {
                 &TextStyle::default(),
             )
             .unwrap();
+        assert!(!renderer.set_active_slide(&document, &scope.slide.id, &old));
+        assert_eq!(renderer.hit_test_json(point.0, point.1).unwrap(), "null");
         let current = renderer.slide_layout_key(&document, 0).unwrap();
         assert_ne!(old, current);
-        assert!(!renderer.set_active_slide(&scope.slide.id, &old));
-        assert!(!renderer.set_active_slide(&scope.slide.id, &current));
+        assert!(!renderer.set_active_slide(&document, &scope.slide.id, &old));
+        assert!(!renderer.set_active_slide(&document, &scope.slide.id, &current));
         renderer.layout_slide_json(&document, 0).unwrap();
-        assert!(renderer.set_active_slide(&scope.slide.id, &current));
+        assert!(renderer.set_active_slide(&document, &scope.slide.id, &current));
+        let layouts = renderer.layout_count;
+        let index = session.slide_ids().unwrap().len() as u32;
+        session
+            .insert_slide(&EditCtx::local("test"), index, None)
+            .unwrap();
+        assert_eq!(renderer.slide_layout_key(&document, 0).unwrap(), current);
+        assert!(renderer.set_active_slide(&document, &scope.slide.id, &current));
+        assert_eq!(renderer.layout_count, layouts);
+    }
+
+    #[test]
+    fn tokens_match_serialized_inputs_across_edit_history() {
+        let document = PptxDocument::open_collaborative(DECK, 924.0).unwrap();
+        let session = document.session();
+        let context = EditCtx::local("test");
+        let mut renderer = PptxRenderer::new();
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        let mut seen = HashMap::new();
+        let mut previous = HashMap::new();
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+        let stories: Vec<_> = (0..2)
+            .map(|index| {
+                session
+                    .slide_scope(index)
+                    .unwrap()
+                    .slide
+                    .shapes
+                    .iter()
+                    .flat_map(|shape| &shape.text_stories)
+                    .next()
+                    .unwrap()
+                    .id
+                    .clone()
+            })
+            .collect();
+        session
+            .insert_text(&context, &stories[0], 0, "Edited ", &TextStyle::default())
+            .unwrap();
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+
+        for index in [1, 0] {
+            let scope = session.slide_scope(index).unwrap();
+            renderer.layout_slide_json(&document, index as u32).unwrap();
+            let token = renderer.slide_layout_key(&document, index as u32).unwrap();
+            assert!(renderer.set_active_slide(&document, &scope.slide.id, &token));
+            assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+        }
+        assert!(session.undo());
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+        assert!(session.redo());
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+        session
+            .insert_text(&context, &stories[1], 0, "Other ", &TextStyle::default())
+            .unwrap();
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+        renderer.register_font("Test", false, false, FONT).unwrap();
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
+        renderer
+            .register_fallback_font("Fallback", false, false, FONT)
+            .unwrap();
+        assert_key_oracles(&mut renderer, &document, &mut seen, &mut previous);
     }
 
     #[test]
@@ -1058,7 +1196,7 @@ mod tests {
             before.push((memoized, uncached));
         }
         let scope = session.slide_scope(0).unwrap();
-        renderer.set_active_slide(&scope.slide.id, &before[0].0);
+        renderer.set_active_slide(&document, &scope.slide.id, &before[0].0);
         let story = scope
             .slide
             .shapes
@@ -1284,7 +1422,7 @@ mod tests {
         let scope = session.slide_scope(0).unwrap();
         let original = renderer.slide_layout_key(&document, 0).unwrap();
         let original_frame = renderer.layout_slide_json(&document, 0).unwrap();
-        assert!(renderer.set_active_slide(&scope.slide.id, &original));
+        assert!(renderer.set_active_slide(&document, &scope.slide.id, &original));
         let story = scope
             .slide
             .shapes
@@ -1305,13 +1443,13 @@ mod tests {
         assert_ne!(original, edited);
         let edited_frame = renderer.layout_slide_json(&document, 0).unwrap();
         assert_ne!(original_frame, edited_frame);
-        assert!(!renderer.set_active_slide(&scope.slide.id, &original));
+        assert!(!renderer.set_active_slide(&document, &scope.slide.id, &original));
         assert!(session.undo());
         assert_eq!(session.slide_scope(0).unwrap(), scope);
         let restored = renderer.slide_layout_key(&document, 0).unwrap();
         assert_ne!(restored, edited);
         assert!(restored.parse::<u64>().unwrap() > edited.parse::<u64>().unwrap());
-        assert!(!renderer.set_active_slide(&scope.slide.id, &edited));
+        assert!(!renderer.set_active_slide(&document, &scope.slide.id, &edited));
         let expected = renderer
             .renderer
             .layout_scoped_slide(session.package(), &scope)
@@ -1322,7 +1460,7 @@ mod tests {
             restored_frame,
             serde_json::to_string(&expected.display_list).unwrap()
         );
-        assert!(renderer.set_active_slide(&scope.slide.id, &restored));
+        assert!(renderer.set_active_slide(&document, &scope.slide.id, &restored));
         assert_eq!(renderer.key_count, 3);
         assert_eq!(renderer.layout_count, 3);
         assert!(session.redo());
@@ -1350,7 +1488,7 @@ mod tests {
             .register_font("Liberation Sans", false, false, FONT)
             .unwrap();
         let scope = session.slide_scope(0).unwrap();
-        renderer.set_active_slide(&scope.slide.id, "");
+        renderer.set_active_slide(&document, &scope.slide.id, "");
         let json = renderer.layout_slide_json(&document, 0).unwrap();
         let fresh = renderer
             .renderer

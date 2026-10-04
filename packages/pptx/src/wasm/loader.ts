@@ -859,7 +859,7 @@ export function openPresentation(
       key: (index: number): string =>
         wasmCall(() => renderer.slideLayoutKey(doc, index)),
       activate: (slideId: string, key: string): boolean =>
-        wasmCall(() => renderer.setActiveSlide(slideId, key)),
+        wasmCall(() => renderer.setActiveSlide(doc, slideId, key)),
       hitTest: (slideId: string, x: number, y: number): HitTestResult | null =>
         jsonWasmCall(() => renderer.hitTestSlideJson(doc, slideId, x, y)),
     },
