@@ -467,7 +467,8 @@ describe('worker save', () => {
     ));
     const source = await repackDocx(await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false }));
     const opened = await open(new Uint8Array(source));
-    expect(opened.host.package.footnotes?.find((note) => note.id === 1)?.verbatimXml).toContain('<w:customXml');
+    expect(opened.replica.session.materializeDocx()?.package.footnotes
+      ?.find((note) => note.id === 1)?.verbatimXml).toContain('<w:customXml');
     expect(opened.replica.session.storyIds()).toContain('fn:1');
     for (const engine of [opened.resident.proposalEngine, opened.replica.session]) {
       expect(engine.applyEdits({
