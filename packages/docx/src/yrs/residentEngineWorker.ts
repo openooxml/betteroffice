@@ -378,7 +378,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;
-    if (!previewing) openedSource = { bytes: request.bytes, hostJson };
+    if (!previewing) {
+      openedSource = { bytes: request.bytes, hostJson };
+      editorSaves.revision = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    }
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
     return;

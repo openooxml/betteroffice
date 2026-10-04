@@ -33,7 +33,8 @@ import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, markPresented, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { workerOpenSave } from '../internals/workerOpenSave';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -563,6 +564,60 @@ test('eager worker open preserves input and command order after first paint unti
   load.mockRestore();
   insert.mockRestore();
 });
+
+test('saved paragraph ID claims refresh editor point geometry without another edit', async () => {
+  installWorker();
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, 'body');
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const point = () => {
+    const queries = harness.renderer.queries!;
+    const size = queries.pageSize(0)!;
+    canvasHost.current!.firstElementChild!.getBoundingClientRect = () => ({
+      left: 0, top: 0, right: size.width, bottom: size.height, ...size,
+    }) as DOMRect;
+    markPresented(canvasHost.current!, queries.displayList);
+    const caret = queries.caretRect(1)!;
+    return editor.current!.getPositionAtPoint(caret.x, caret.y + caret.height / 2);
+  };
+  expect(point()).not.toBeNull();
+  const beforeSave = session.encodeStateVector();
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(session.encodeStateVector()).not.toEqual(beforeSave);
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  expect(point()).not.toBeNull();
+  expect(harness.errors).toEqual([]);
+}, 20_000);
 
 test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
   const { workers, posted } = installWorker({ holdState: true });

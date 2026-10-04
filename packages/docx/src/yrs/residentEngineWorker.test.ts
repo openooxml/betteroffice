@@ -3542,6 +3542,7 @@ describe('resident worker opening', () => {
         calls.push(`open:${bytes.join(',')}:${digest}:${generation}`);
         return '{"host":1}';
       },
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
       layoutFontRequirementsJson: (input: string) => {
         calls.push(`requirements:${input}`);
         return '[{"key":"a"}]';
@@ -3604,7 +3605,7 @@ describe('resident worker opening', () => {
       expect(metadata).toBe(host);
       expect(comments).toEqual([]);
       if (records.at(-1) !== record) {
-        expect(record).toEqual({ full: false });
+        expect(record).toEqual({ full: false, revision: 0 });
         records.push(record);
       } else {
         expect(record.full).toBe(true);

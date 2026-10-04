@@ -320,15 +320,27 @@ test('an editor integrates saved paragraph ID claims before later worker proposa
   await layOut(opened);
   let paraId!: string;
   let beforeSave!: Uint8Array;
+  const origins: string[] = [];
+  let unsubscribe = () => {};
   opened.flush.mockImplementation(async () => {
     const first = opened.session.paragraphs('body')[0]!;
     paraId = opened.session.splitParagraph({ story: 'body', paraId: first.paraId, offset: 0 }).secondParaId;
     opened.session.insertText({ story: 'body', paraId, offset: 0 }, 'Peer claim ');
     beforeSave = opened.session.encodeStateVector();
+    unsubscribe = opened.session.onUpdate((_update, origin) => origins.push(origin));
   });
-  await act(async () => {
-    expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
-  });
+  try {
+    await act(async () => {
+      expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
+    });
+  } finally {
+    unsubscribe();
+  }
+  expect(origins.length).toBeGreaterThan(0);
+  expect(new Set(origins)).toEqual(new Set(['remote']));
+  const saveIndex = opened.worker.requests.lastIndexOf('save');
+  expect(saveIndex).toBeGreaterThanOrEqual(0);
+  expect(opened.worker.requests.slice(saveIndex + 1)).not.toContain('applyUpdate');
   expect(opened.session.encodeStateVector()).not.toEqual(beforeSave);
   expect(opened.session.encodeStateVector()).toEqual(opened.worker.sessions[0]!.encodeStateVector());
   const paragraph = opened.session.paragraphIdentities().paragraphs
@@ -348,7 +360,7 @@ test('an editor integrates saved paragraph ID claims before later worker proposa
   expect(proposed.result?.ok).toBe(true);
   expect(proposed.updates.length).toBeGreaterThan(0);
   await act(async () => {
-    for (const update of proposed.updates) opened.session.applyLocalUpdate(update);
+    for (const update of proposed.updates) opened.session.applyUpdate(update);
   });
   expect(opened.session.encodeStateVector()).toEqual(opened.worker.sessions[0]!.encodeStateVector());
   expect(opened.session.readParagraphs({ story: 'body', paraIds: [paraId], view: 'accepted' }))

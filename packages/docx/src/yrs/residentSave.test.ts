@@ -1,6 +1,8 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, it, setSystemTime, spyOn } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import { parseDocx } from '../docx';
+import { repackDocx } from '../docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import type { Comment } from '../types/content';
 import type { Document } from '../types/document';
@@ -8,6 +10,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
+  dirtyProjectionStory,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
@@ -200,19 +203,28 @@ async function bootstrap(opened: Opened): Promise<void> {
 }
 
 class Replica {
+  private revision: number;
+
   constructor(
     readonly session: YrsSession,
     private readonly host: Document,
     private base: Document | null = null
-  ) {}
+  ) {
+    this.revision = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+  }
 
   async save(comments: Comment[]): Promise<Uint8Array<ArrayBuffer>> {
     const base = this.base ?? this.session.materializeDocx();
     if (!base) throw new Error('the replica has no package');
-    const projected = yrsToDocument(this.session, mergeDocxHostMetadata(base, this.host));
+    const storyIds = new Set(this.session.storiesChangedSince(this.revision).stories.map(dirtyProjectionStory));
+    const projected = yrsToDocument(
+      this.session, mergeDocxHostMetadata(base, this.host),
+      storyIds.size > 0 ? { storyIds } : undefined
+    );
     this.base = projected;
     const buffer = await saveEditorDocument(this.session, projected, comments);
     projected.originalBuffer = buffer;
+    this.revision = this.session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
     return new Uint8Array(buffer);
   }
 }
@@ -285,7 +297,7 @@ describe('worker save', () => {
       comments: [], host: hostSaveMetadata(opened.host), stateVector: peer.encodeStateVector(),
     });
     expect(saved.updates.length).toBeGreaterThan(0);
-    for (const update of saved.updates) peer.applyLocalUpdate(update);
+    for (const update of saved.updates) peer.applyUpdate(update);
     const initial = await opened.client.proposal({ kind: 'snapshot' });
     const proposed = await opened.client.proposal({
       kind: 'propose',
@@ -308,8 +320,8 @@ describe('worker save', () => {
     expect(proposed.result?.ok).toBe(true);
     expect(proposed.updates.length).toBeGreaterThan(0);
     for (const update of proposed.updates) {
-      peer.applyLocalUpdate(update);
-      unsynced.applyLocalUpdate(update);
+      peer.applyUpdate(update);
+      unsynced.applyUpdate(update);
     }
     expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
     expect(peer.readParagraphs({ story: 'body', paraIds: ['0000B002'], view: 'accepted' }))
@@ -347,7 +359,7 @@ describe('worker save', () => {
     }
     const saved = await opened.client.save({ comments: [], stateVector: peer.encodeStateVector() });
     expect(saved.updates.length).toBeGreaterThan(0);
-    for (const update of saved.updates) peer.applyLocalUpdate(update);
+    for (const update of saved.updates) peer.applyUpdate(update);
     expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
     const initial = await opened.client.proposal({ kind: 'snapshot' });
     const proposed = await opened.client.proposal({
@@ -365,7 +377,7 @@ describe('worker save', () => {
     });
     expect(proposed.result?.ok).toBe(true);
     expect(proposed.updates.length).toBeGreaterThan(0);
-    for (const update of proposed.updates) peer.applyLocalUpdate(update);
+    for (const update of proposed.updates) peer.applyUpdate(update);
     expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
     expect(peer.readParagraphs({ story: 'body', paraIds: ['0000B003'], view: 'accepted' }))
       .toMatchObject({ ok: true, paragraphs: [{ text: 'Eta THETA iota.' }] });
@@ -382,7 +394,7 @@ describe('worker save', () => {
     const beforeSave = peer.encodeStateVector();
     const saved = await opened.client.save({ comments: [], stateVector: beforeSave });
     expect(saved.updates.length).toBeGreaterThan(0);
-    for (const update of saved.updates) peer.applyLocalUpdate(update);
+    for (const update of saved.updates) peer.applyUpdate(update);
     expect(peer.encodeStateVector()).not.toEqual(beforeSave);
     expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
     await bootstrap(opened);
@@ -401,7 +413,7 @@ describe('worker save', () => {
     });
     expect(proposed.result?.ok).toBe(true);
     expect(proposed.updates.length).toBeGreaterThan(0);
-    for (const update of proposed.updates) peer.applyLocalUpdate(update);
+    for (const update of proposed.updates) peer.applyUpdate(update);
     expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
     expect(peer.readParagraphs({ story: 'body', paraIds: [secondParaId], view: 'accepted' }))
       .toMatchObject({ ok: true, paragraphs: [{ text: ' BETA gamma.' }] });
@@ -433,6 +445,51 @@ describe('worker save', () => {
     await compareSave(opened);
     body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2400 };
     await compareSave(opened);
+  }, TIMEOUT);
+
+  it('keeps untouched note XML across a full save after a body edit', async () => {
+    const parts: PartsMap = new Map(Object.entries(unzipContainer(synthetic(
+      '<w:p w14:paraId="0000B001"><w:r><w:t>Body text</w:t></w:r>' +
+      '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+    ))));
+    const text = (name: string) => new TextDecoder().decode(parts.get(name)!);
+    parts.set('[Content_Types].xml', toBytes(text('[Content_Types].xml').replace(
+      '</Types>', `<Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.wordprocessingml.footnotes+xml"/></Types>`
+    )));
+    parts.set('word/_rels/document.xml.rels', toBytes(text('word/_rels/document.xml.rels').replace(
+      '</Relationships>', `<Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`
+    )));
+    parts.set('word/footnotes.xml', toBytes(
+      `<w:footnotes ${NS}><w:footnote w:id="1">` +
+      '<w:bookmarkStart w:id="7" w:name="note"/><w:customXml w:element="note" w:uri="urn:example">' +
+      paragraph('0000F001', 'Untouched note text') +
+      '</w:customXml><w:bookmarkEnd w:id="7"/></w:footnote></w:footnotes>'
+    ));
+    const source = await repackDocx(await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false }));
+    const opened = await open(new Uint8Array(source));
+    expect(opened.host.package.footnotes?.find((note) => note.id === 1)?.verbatimXml).toContain('<w:customXml');
+    expect(opened.replica.session.storyIds()).toContain('fn:1');
+    for (const engine of [opened.resident.proposalEngine, opened.replica.session]) {
+      expect(engine.applyEdits({
+        expectVersion: engine.version(),
+        steps: [{
+          op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: '0000B001' },
+          at: 'end', text: ' edited',
+        }],
+      }).ok).toBe(true);
+    }
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const save = spyOn(opened.resident, 'save');
+    try {
+      const saved = await compareSave(opened);
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save.mock.calls[0]![4].full).toBe(true);
+      expect(unzipContainer(saved)['word/footnotes.xml'])
+        .toEqual(unzipContainer(opened.bytes)['word/footnotes.xml']);
+    } finally {
+      save.mockRestore();
+    }
   }, TIMEOUT);
 
   it('writes a host comment reply range once across two saves', async () => {

@@ -1657,7 +1657,7 @@ export function useRustDisplayList(
               if (peer) {
                 suppressWorkerInvalidationRef.current += 1;
                 try {
-                  for (const update of saved.updates) peer.applyLocalUpdate(update);
+                  for (const update of saved.updates) peer.applyUpdate(update);
                 } finally {
                   suppressWorkerInvalidationRef.current -= 1;
                 }
