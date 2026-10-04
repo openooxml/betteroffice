@@ -3196,6 +3196,39 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
+  test('comment deletion removes only its worker anchor and missing ids are harmless', async () => {
+    const extraBody = [1, 2].map((id) =>
+      `<w:p w14:paraId="0000010${id}"><w:commentRangeStart w:id="${id}"/><w:r><w:t>Marked ${id}</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p>`
+    ).join('');
+    const comments = [1, 2].map((id) =>
+      `<w:comment w:id="${id}" w:author="Reviewer"><w:p><w:r><w:t>Comment ${id}</w:t></w:r></w:p></w:comment>`
+    ).join('');
+    const { w, engine } = await proposalWorker(extraBody, comments);
+    try {
+      expect(engine.resolveComment('1')).not.toHaveLength(0);
+      const untouched = engine.resolveComment('2');
+      const reply = await w.send({ type: 'proposal', operation: { kind: 'removeComment', id: '1' } });
+      if (!reply.ok || !reply.proposal) throw new Error('expected comment deletion reply');
+      expect(reply.proposal.result).toBeUndefined();
+      expect(reply.proposal.changedStories.length).toBeGreaterThan(0);
+      expect(reply.proposal.updates.length).toBeGreaterThan(0);
+      let anchors: ReturnType<typeof engine.resolveComment> = [];
+      try { anchors = engine.resolveComment('1'); } catch {}
+      expect(anchors).toEqual([]);
+      expect(engine.resolveComment('2')).toEqual(untouched);
+      expect(readSidebar(engine.geometryReader, ['1'], engine.proposalEngine.version())!.comments)
+        .toEqual([{ id: '1', anchors: [] }]);
+
+      const version = engine.proposalEngine.version();
+      const missing = await w.send({ type: 'proposal', operation: { kind: 'removeComment', id: 'missing' } });
+      expect(missing).toMatchObject({ ok: true, proposal: { changedStories: [], updates: [] } });
+      expect(engine.proposalEngine.version()).toBe(version);
+      expect(engine.resolveComment('2')).toEqual(untouched);
+    } finally {
+      engine.destroy();
+    }
+  });
+
   test('viewer document reads reply with the current version and value', async () => {
     const extraBody = '<w:p w14:paraId="00000100"><w:r><w:t xml:space="preserve">Before </w:t></w:r>' +
       '<w:commentRangeStart w:id="1"/><w:r><w:t>the phrase</w:t></w:r><w:commentRangeEnd w:id="1"/>' +

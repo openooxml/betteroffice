@@ -400,6 +400,77 @@ test('a completed hand-over releases exclusive worker state and keeps routing re
   expect(h.worker.handOver).toHaveBeenCalledTimes(1);
 });
 
+test('comment deletion queues with proposals and reads and stores changed worker state', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const pending = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementationOnce(async (op) => {
+    h.events.push(op.kind);
+    posted.resolve();
+    return pending.promise;
+  });
+  const main = mock(() => {});
+  const deletion = h.authority.removeComment('7', main);
+  await posted.promise;
+  expect(h.worker.proposal.mock.calls.at(-1)![0]).toEqual({ kind: 'removeComment', id: '7' });
+  expect(h.session.version()).toBe('worker-1~');
+  expect(h.authority.holdsWorkerState()).toBe(true);
+  expect(h.authority.holdsCommittedWorkerState()).toBe(false);
+  const propose = h.authority.propose(request, unusedMain);
+  const read = h.authority.readParagraphs({ view: 'accepted' }, unusedMain);
+  expect(h.events).toEqual(['snapshot', 'removeComment']);
+
+  const changed = reply('worker-2', ['body']);
+  delete changed.result;
+  pending.resolve(changed);
+  expect(await deletion).toBeUndefined();
+  expect(h.session.version()).toBe('worker-2');
+  expect(h.authority.geometry()).toBe(changed.geometry);
+  expect(h.authority.holdsCommittedWorkerState()).toBe(true);
+  expect(h.relayout).toHaveBeenCalledTimes(1);
+  expect(h.contentChanged).toHaveBeenCalledTimes(1);
+  expect(main).not.toHaveBeenCalled();
+  await propose;
+  await read;
+  expect(h.events).toEqual(['snapshot', 'removeComment', 'propose', 'readParagraphs']);
+});
+
+test('unchanged comment deletion does not hold worker state or relayout', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const unchanged = reply();
+  delete unchanged.result;
+  h.worker.proposal.mockResolvedValueOnce(unchanged);
+  await h.authority.removeComment('missing', unusedMain);
+  expect(h.authority.holdsWorkerState()).toBe(false);
+  expect(h.authority.geometry()).toBe(unchanged.geometry);
+  expect(h.relayout).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
+});
+
+test('comment deletion queued after hand-over waits for and runs the main continuation', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handover = await beginWorkerProposalHandover(h.session)!;
+  const replica = deferred<() => void>();
+  deferWorkerOpenReplica(h.session, () => replica.promise, () => {
+    throw new Error('unexpected fallback');
+  }, () => {});
+  const ready = requestWorkerOpenReplica(h.session)!;
+  const main = mock(async () => {});
+  const deletion = h.authority.removeComment('7', main);
+  expect(main).not.toHaveBeenCalled();
+  replica.resolve(() => { h.mainVersion('main-2'); handover.complete(); });
+  await ready;
+  expect(await deletion).toBeUndefined();
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.events).toEqual(['snapshot', 'handOver']);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+  expect(h.relayout).not.toHaveBeenCalled();
+  expect(h.contentChanged).not.toHaveBeenCalled();
+});
+
 test('propose and withdraw relayout only when stories change', async () => {
   const h = harness();
   await h.authority.propose(request, unusedMain);
