@@ -106,16 +106,16 @@ enum WorkbookMode {
 /// sheet it came from and the shared-string entry each of its cells was
 /// authored against.
 #[derive(Clone, Default)]
-struct PreservedSheetState {
-    origins: Vec<Option<usize>>,
-    shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+pub(crate) struct PreservedSheetState {
+    pub(crate) origins: Vec<Option<usize>>,
+    pub(crate) shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
     /// Where each sheet's source rows and columns sit after the row and column
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
-    axes: Vec<Option<xlsx_parse::SheetAxes>>,
+    pub(crate) axes: Vec<Option<xlsx_parse::SheetAxes>>,
     /// Whether each sheet was added in this session, so its properties are the
     /// defaults of a new sheet rather than unknown ones.
-    created: Vec<bool>,
+    pub(crate) created: Vec<bool>,
 }
 
 impl PreservedSheetState {

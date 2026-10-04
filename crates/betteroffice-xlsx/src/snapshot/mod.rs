@@ -1,3 +1,8 @@
+pub(crate) mod cells;
+pub(crate) mod header;
+pub(crate) mod model;
+pub(crate) mod package;
+pub(crate) mod preserved;
 pub(crate) mod wire;
 pub(crate) mod yrs_split;
 
