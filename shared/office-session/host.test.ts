@@ -348,6 +348,145 @@ describe('session host and cloned transport', () => {
     expect(disposals).toBe(1);
   });
 
+  it('makes pure compute and install traps terminal without cancel hooks', async () => {
+    for (const phase of ['compute', 'install'] as const) {
+      const s = session();
+      const failed = deferred<SessionFailure>();
+      s.client.onFailure((error) => { failed.resolve(error); });
+      s.host.scheduler.dispatch({
+        kind: 'pure', version: 0, generation: 0, input: 1,
+        compute(input) {
+          if (phase === 'compute') throw new WebAssembly.RuntimeError('boom');
+          return input;
+        },
+        install() {
+          if (phase === 'install') throw new WebAssembly.RuntimeError('boom');
+        },
+      });
+      expect((await failed.promise).code).toBe('trap');
+      expect(s.client.failure?.message).toBe('boom');
+      expect(s.disposeCount).toBe(1);
+      expect(await s.client.call.add(1, 2).catch((error) => error)).toBe(s.client.failure);
+      await s.client.dispose();
+      expect(s.disposeCount).toBe(1);
+    }
+  });
+
+  it('makes background session failures terminal before task fail hooks', async () => {
+    const s = session();
+    const failed = deferred<SessionFailure>();
+    let taskFailures = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.schedule({
+      kind: 'slice', version: 0, generation: 0,
+      run() { throw new SessionFailure('out-of-memory', 'oom', 'diag'); },
+      fail() { taskFailures += 1; },
+    });
+    const error = await failed.promise;
+    expect(error.code).toBe('out-of-memory');
+    expect(error.message).toBe('oom');
+    expect(error.diagnostics).toBe('diag');
+    expect(taskFailures).toBe(0);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
+  });
+
+  it('classifies unhandled background errors as traps or crashes', async () => {
+    for (const [error, code] of [
+      [new WebAssembly.RuntimeError('boom'), 'trap'],
+      [new Error('boom'), 'crash'],
+    ] as const) {
+      const s = session();
+      const failed = deferred<SessionFailure>();
+      s.client.onFailure((error) => { failed.resolve(error); });
+      s.host.scheduler.schedule({
+        kind: 'slice', version: 0, generation: 0,
+        run() { throw error; },
+      });
+      expect((await failed.promise).code).toBe(code);
+      expect(s.disposeCount).toBe(1);
+      await s.client.dispose();
+    }
+  });
+
+  it('keeps ordinary background errors routed to task fail hooks', async () => {
+    const s = session();
+    const failed = deferred<unknown>();
+    const error = new Error('refused');
+    let cancels = 0;
+    s.host.scheduler.schedule({
+      kind: 'slice', version: 0, generation: 0,
+      run() { throw error; },
+      fail(error) { failed.resolve(error); },
+      cancel() { cancels += 1; },
+    });
+    expect(await failed.promise).toBe(error);
+    expect(await s.client.call.add(1, 2)).toBe(3);
+    expect(s.client.failure).toBeUndefined();
+    await s.client.dispose();
+    await s.disposed.promise;
+    expect(cancels).toBe(0);
+  });
+
+  it('cancels queued background tasks once during an idle hold', async () => {
+    const pair = createInProcessPair();
+    const disposed = deferred<void>();
+    let runs = 0;
+    let cancels = 0;
+    const host = createSessionHost<{ input(): void }, {}, null>(pair.host, {
+      context: null, policies: { input: { lane: 'input', holdsIdleTasks: true } },
+      handlers: { input() {} },
+      onDispose() { disposed.resolve(); },
+    });
+    const client = createSessionClient<{ input(): void }, {}>(pair.client, {
+      methods: { input: true },
+    });
+    await client.call.input();
+    host.scheduler.schedule({
+      kind: 'idle', version: 0, generation: 0, idleAfterInputMs: 10_000,
+      run() { runs += 1; return 'done'; },
+      cancel() { cancels += 1; },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(host.scheduler.pending().background).toBe(1);
+    await client.dispose();
+    await disposed.promise;
+    expect(cancels).toBe(1);
+    expect(runs).toBe(0);
+    await client.dispose();
+    expect(cancels).toBe(1);
+  });
+
+  it('cancels a running background slice once and suppresses its yield after disposal', async () => {
+    const s = session();
+    const started = deferred<void>();
+    const held = deferred<'yield'>();
+    const finished = deferred<void>();
+    let runs = 0;
+    let cancels = 0;
+    s.host.scheduler.schedule({
+      kind: 'slice', version: 0, generation: 0,
+      async run() {
+        runs += 1;
+        started.resolve();
+        const step = await held.promise;
+        finished.resolve();
+        return step;
+      },
+      cancel() { cancels += 1; },
+    });
+    await started.promise;
+    await s.client.dispose();
+    await s.disposed.promise;
+    expect(cancels).toBe(1);
+    held.resolve('yield');
+    await finished.promise;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(runs).toBe(1);
+    expect(cancels).toBe(1);
+    expect(s.host.scheduler.pending().background).toBe(0);
+  });
+
   it('transfers deferred results and keeps ordinary deferred errors non-terminal', async () => {
     type Methods = { transfer(): ArrayBuffer; refuse(): string; echo(): string };
     const pair = createInProcessPair();
