@@ -68,7 +68,7 @@ export async function exportWorkerOpenPages(
     ok: false, version, failure: { code, target: null, message },
   });
   assertCurrent();
-  const ready = awaitWorkerOpenReplica(peer, { passive: true });
+  const ready = awaitWorkerOpenReplica(peer);
   if (ready) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let hydrated: boolean;

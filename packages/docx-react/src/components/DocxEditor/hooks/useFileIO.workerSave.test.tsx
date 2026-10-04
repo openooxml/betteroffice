@@ -20,13 +20,14 @@ import {
 import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { isMacPlatform } from '../../../commands/descriptors';
-import type { DocxEditorRef } from '../../DocxEditor';
+import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplica, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import { registerWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
 import { registeredWorkerProposalAuthority, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { useViewerSession } from '../internals/viewerSession';
 import { useCanvasRenderer, type OpenInWorker, type WorkerOpenedDocument } from './useDisplayList';
 import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -98,7 +99,12 @@ function zeroLengthBodyComment(): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function workerOpened(viewer = true, workerProposals = false, source: Uint8Array = bytes) {
+async function workerOpened(
+  initialViewer = true,
+  workerProposals = false,
+  source: Uint8Array = bytes,
+  onSaveRequest?: DocxEditorProps['onSaveRequest']
+) {
   let client!: ResidentEngineWorkerClient;
   const open = ResidentEngineWorkerClient.prototype.open;
   const capture = spyOn(ResidentEngineWorkerClient.prototype, 'open').mockImplementation(function (
@@ -113,7 +119,13 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
   const flush = mock(async () => {});
   const project = mock(() => {});
   const hook = renderHook((generation: number) => {
-    const renderer = useCanvasRenderer(undefined, undefined, undefined, undefined, undefined, true);
+    const [viewing, setViewing] = useState(initialViewer);
+    const viewer = useViewerSession(true, viewing, generation);
+    const modeRef = useRef<'viewing' | 'editing'>(viewing ? 'viewing' : 'editing');
+    modeRef.current = viewing ? 'viewing' : 'editing';
+    const viewerSessionRef = useRef(viewer);
+    viewerSessionRef.current = viewer;
+    const renderer = useCanvasRenderer(undefined, undefined, undefined, undefined, undefined, true, viewerSessionRef);
     const workerDocument = useRef<WorkerOpenedDocument | null>(null);
     const openInWorker = useCallback<OpenInWorker>(async (...args) => {
       workerDocument.current = await renderer.openInWorker(...args);
@@ -138,7 +150,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
         renderedFrame,
         pendingCompletion: renderer.pendingCompletion,
         workerProposals,
-        hydrateOnDemand: viewer || workerProposals,
+        viewer,
         onWorkerRevisions: () => {},
       },
     });
@@ -148,7 +160,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
       isWorkerViewer: () => viewer,
       isFocused: () => true,
       flushPendingInput: async () => {
-        await awaitWorkerOpenReplica(core.session!);
+        if (!viewer) await awaitWorkerOpenReplica(core.session!);
         await flush();
       },
       syncYrsInputState: (_sync: boolean, stories: string[]) => core.publishDirectInput(stories),
@@ -164,6 +176,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
       comments: host?.document.package.document.comments ?? [],
       documentName: undefined,
       onSave: (buffer) => saved.push(buffer),
+      onSaveRequest,
       downloadOnSave: false,
       onOpen: undefined,
       onError: (error) => errors.push(error),
@@ -177,8 +190,8 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
       session: core.session,
       document: host?.document ?? null,
       viewerSession: viewer,
-      readOnly: viewer,
-      mode: viewer ? 'viewing' : 'editing',
+      readOnly: viewing,
+      mode: viewing ? 'viewing' : 'editing',
       experimentalWorkerOpen: true,
       bridgeRef: { current: {
         session: () => core.session,
@@ -203,6 +216,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
     useDocxEditorRefApi({
       ref,
       experimentalWorkerOpen: true,
+      viewerSession: viewer,
       document: host?.document ?? null,
       documentFromYrs: core.documentFromYrs,
       historyStateRef: { current: host?.document ?? null },
@@ -221,7 +235,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
       getCachedStyleResolver: createStyleResolver,
       commentIdAllocator: createCommentIdAllocator(),
       commands: controller.store,
-      modeRef: { current: viewer ? 'viewing' : 'editing' },
+      modeRef,
       allowHostProposalsRef,
       hostSearch: {
         search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
@@ -233,7 +247,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
         onSearchChange: () => () => {},
       },
     });
-    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, renderer, setRenderedFrame, allowHostProposalsRef };
+    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, renderer, setRenderedFrame, allowHostProposalsRef, setViewing };
   }, { initialProps: 1 });
   try {
     await waitFor(() => expect(hook.result.current.core.session).not.toBeNull());
@@ -281,7 +295,7 @@ test.each(['save', 'download', 'ref'] as const)('viewer %s saves in the worker w
   save.mockRestore();
 });
 
-test.each(['worker', 'loaded copy'] as const)('a viewer with a loaded copy preserves body comment markers after a %s header proposal and margin change', async (owner) => {
+test.each(['worker', 'loaded copy'] as const)('an editor switched to viewing preserves body comment markers after a %s header proposal and margin change', async (owner) => {
   const opened = await workerOpened(true, true, zeroLengthBodyComment());
   await layOut(opened);
   act(() => opened.hook.result.current.setRenderedFrame({}));
@@ -306,9 +320,11 @@ test.each(['worker', 'loaded copy'] as const)('a viewer with a loaded copy prese
     });
   };
   if (owner === 'worker') await propose();
-  await act(async () => { await opened.hook.result.current.ref.current!.flushPendingInput(); });
+  act(() => opened.hook.result.current.setViewing(false));
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  act(() => opened.hook.result.current.setViewing(true));
   expect(opened.hook.result.current.core.replicaReady).toBe(true);
-  expect(opened.hook.result.current.pagedEditorRef.current!.isWorkerViewer()).toBe(true);
+  expect(opened.hook.result.current.pagedEditorRef.current!.isWorkerViewer()).toBe(false);
   expect(opened.session.listComments()).toEqual([]);
   if (owner === 'loaded copy') await propose();
   const body = opened.hook.result.current.host!.document.package.document;
@@ -400,7 +416,7 @@ test('an editor with an unloaded peer saves without hydrating', async () => {
 });
 
 test('a save without the editing copy clears the editor\'s save marks for the next editor save', async () => {
-  const opened = await workerOpened(false, true);
+  const opened = await workerOpened(true, true);
   await layOut(opened);
   act(() => opened.hook.result.current.setRenderedFrame({}));
   await waitFor(() => expect(opened.hook.result.current.core.workerProposalsReady).toBe(true));
@@ -441,6 +457,7 @@ test('a save without the editing copy clears the editor\'s save marks for the ne
     expect(workerOpenReplicaStarted(opened.session)).toBe(false);
     expect(opened.worker.requests).not.toContain('encodeState');
     expect(opened.flush).not.toHaveBeenCalled();
+    act(() => opened.hook.result.current.setViewing(false));
     await act(async () => { await requestWorkerOpenReplica(opened.session); });
     expect(opened.hook.result.current.core.replicaReady).toBe(true);
     expect(opened.opens).toEqual([false]);
@@ -727,8 +744,8 @@ test('a loaded peer with an empty diff posts only save', async () => {
   expect(opened.worker.requests.slice(posted)).toEqual(['save']);
 });
 
-test('a viewer saves without a peer while its requested copy is still loading', async () => {
-  const opened = await workerOpened();
+test('an editor switched to viewing waits for its in-flight editing copy before saving', async () => {
+  const opened = await workerOpened(false);
   const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
   opened.worker.hold();
   try {
@@ -736,19 +753,50 @@ test('a viewer saves without a peer while its requested copy is still loading', 
     await waitFor(() => expect(opened.worker.requests).toContain('encodeState'));
     expect(workerOpenReplicaStarted(opened.session)).toBe(true);
     expect(opened.hook.result.current.core.replicaReady).toBe(false);
+    act(() => opened.hook.result.current.setViewing(true));
     const saving = opened.hook.result.current.io.handleSave();
-    await waitFor(() => expect(opened.worker.requests).toContain('save'));
-    expect(save.mock.calls[0]![0]).not.toHaveProperty('stories');
-    expect(save.mock.calls[0]![1]).toBeUndefined();
+    expect(opened.worker.requests).not.toContain('save');
     expect(opened.flush).not.toHaveBeenCalled();
     await act(async () => {
       opened.worker.release();
       await ready;
       expect(await saving).toBeInstanceOf(ArrayBuffer);
     });
+    expect(save.mock.calls[0]![0].stories).toEqual([]);
+    expect(save.mock.calls[0]![1]).toBe(opened.session);
+    expect(opened.flush).toHaveBeenCalledTimes(1);
     expect(opened.errors).toEqual([]);
   } finally {
     opened.worker.release();
+    save.mockRestore();
+  }
+});
+
+test('a viewer switched to editing during a save request flushes its loaded peer before saving', async () => {
+  let resolveRequest!: (proceed: boolean) => void;
+  const request = new Promise<boolean>((resolve) => { resolveRequest = resolve; });
+  const onSaveRequest = mock(() => request);
+  const opened = await workerOpened(true, false, bytes, onSaveRequest);
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  try {
+    const saving = opened.hook.result.current.io.handleDownloadDocument();
+    await waitFor(() => expect(onSaveRequest).toHaveBeenCalledTimes(1));
+    act(() => opened.hook.result.current.setViewing(false));
+    await act(async () => { await requestWorkerOpenReplica(opened.session); });
+    await waitFor(() => expect(opened.hook.result.current.core.replicaReady).toBe(true));
+    expect(opened.hook.result.current.core.session).toBe(opened.session);
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveRequest(true);
+      expect(await saving).toBe('saved');
+    });
+    expect(save.mock.calls).toHaveLength(1);
+    expect(save.mock.calls[0]![1]).toBe(opened.session);
+    expect(opened.flush).toHaveBeenCalledTimes(1);
+    expect(opened.saved).toHaveLength(1);
+    expect(opened.errors).toEqual([]);
+  } finally {
+    resolveRequest(false);
     save.mockRestore();
   }
 });

@@ -1,16 +1,31 @@
 import { createRoot } from 'react-dom/client';
 import { useEffect, useRef, useState } from 'react';
 import JSZip from 'jszip';
-import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
+import { DocxEditor, defineDocxPlugin, type DocxEditorRef } from '@betteroffice/docx-react';
+import { parseDocx, repackDocx } from '@betteroffice/docx/docx';
+import type { Document } from '@betteroffice/docx/types/document';
 import { ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
-import {
-  workerOpenReplicaPending,
-  workerOpenReplicaStarted,
-} from '../../../packages/docx-react/src/components/DocxEditor/internals/workerOpenReplica';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
+import fixtureUrl from '../../../apps/demo/public/betteroffice-demo.docx?url';
 import '../../../packages/docx-react/src/styles/editor.css';
 
+const options = new URLSearchParams(window.location.search);
+const noCopy = options.get('noCopy') === '1';
+const viewing = options.get('kind') === 'viewing';
+const publicFixture = options.get('fixture') === 'public';
+const sourceKind = options.get('source');
+const residentWorkers = new Set<Worker>();
+const killedWorkers = new WeakSet<Worker>();
+if (noCopy) {
+  const postMessage = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (message: unknown, ...args: unknown[]) {
+    if (message && typeof message === 'object' && 'type' in message && message.type === 'open') {
+      residentWorkers.add(this);
+    }
+    return Reflect.apply(postMessage, this, [message, ...args]);
+  };
+}
 setGoogleFontsEnabled(false);
 
 async function viewerDocx(): Promise<ArrayBuffer> {
@@ -53,6 +68,10 @@ const methods = [
   'storySegments', 'locateParagraph', 'listComments', 'selection',
 ] as const;
 const counts = Object.fromEntries(methods.map((method) => [method, 0])) as Record<typeof methods[number], number>;
+const loadMethods = ['openDocx', 'openDocxPreview', 'loadState', 'applyUpdate'] as const;
+type DocumentLoads = Record<typeof loadMethods[number], number>;
+const documentLoads: DocumentLoads[] = [];
+const loadEvents: { session: number; method: typeof loadMethods[number]; at: number }[] = [];
 let documentWorker: ResidentEngineWorkerClient | null = null;
 const documentRead = ResidentEngineWorkerClient.prototype.documentRead;
 ResidentEngineWorkerClient.prototype.documentRead = function (this: ResidentEngineWorkerClient, ...args) {
@@ -63,12 +82,46 @@ const probe = {
   editor: null as DocxEditorRef | null,
   sessions: [] as YrsSession[],
   errors: [] as string[],
-  sidebarOpen: false,
-  replica() {
+  reportedErrors: [] as Error[],
+  copies: [] as string[],
+  saveStarted: null as number | null,
+  workersOpened() { return residentWorkers.size; },
+  crashResidentWorker() {
+    const worker = [...residentWorkers].reverse().find((entry) => !killedWorkers.has(entry));
+    if (!worker) throw new Error('No resident worker is available to fail');
+    killedWorkers.add(worker);
+    worker.terminate();
+    worker.dispatchEvent(new ErrorEvent('error', { message: 'Synthetic resident worker failure' }));
+  },
+  async saveForTest() {
+    const before = this.mainDocumentLoads();
+    this.saveStarted = performance.now();
+    const bytes = await this.editor!.save();
+    if (!bytes) throw new Error('Save returned no bytes');
+    const zip = await JSZip.loadAsync(bytes);
+    const xml = await zip.file('word/document.xml')?.async('string');
     return {
-      started: this.sessions.some((session) => workerOpenReplicaStarted(session)),
-      loaded: this.sessions.some((session) => !workerOpenReplicaPending(session)),
+      before,
+      saveStarted: this.saveStarted,
+      byteLength: bytes.byteLength,
+      signature: Array.from(new Uint8Array(bytes).slice(0, 4)),
+      validDocument: !!xml?.includes('First heading'),
+      after: this.mainDocumentLoads(),
     };
+  },
+  sidebarOpen: false,
+  mainDocumentLoads() {
+    return {
+      sessionsCaptured: this.sessions.length,
+      total: documentLoads.reduce((total, counts) =>
+        total + loadMethods.reduce((sum, method) => sum + counts[method], 0), 0),
+      sessions: documentLoads.map((counts) => ({ ...counts })),
+      events: loadEvents.map((event) => ({ ...event })),
+    };
+  },
+  replica() {
+    const loaded = this.mainDocumentLoads().total > 0;
+    return { started: loaded, loaded };
   },
   sessionReads() { return { ...counts }; },
   async commentAnchors(id: string) {
@@ -88,7 +141,19 @@ export type ViewerSidebarsProbe = typeof probe;
 }).__workerProposalTest = {
   captureSession(session) {
     if (probe.sessions.includes(session)) return;
+    const index = probe.sessions.length;
     probe.sessions.push(session);
+    const loads: DocumentLoads = { openDocx: 0, openDocxPreview: 0, loadState: 0, applyUpdate: 0 };
+    documentLoads.push(loads);
+    const loadTarget = session as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const method of loadMethods) {
+      const original = loadTarget[method]!;
+      loadTarget[method] = (...args) => {
+        loads[method] += 1;
+        loadEvents.push({ session: index, method, at: performance.now() });
+        return original.apply(session, args);
+      };
+    }
     const target = session as unknown as Record<string, (...args: unknown[]) => unknown>;
     for (const method of methods) {
       const original = target[method]!;
@@ -100,27 +165,90 @@ export type ViewerSidebarsProbe = typeof probe;
   },
 };
 
+window.addEventListener('copy', (event) => {
+  probe.copies.push(event.clipboardData?.getData('text/plain') ?? '');
+});
+
+const viewerCard = defineDocxPlugin<{ anchor: { version: string; story: string; paraId: string } | null }>({
+  id: 'probe.viewer-no-copy',
+  createState: () => ({ anchor: null }),
+  async onEvent(context, event) {
+    if (event.type !== 'load' && event.type !== 'layout-change') return;
+    const result = await context.read.findText({
+      text: 'Commented text', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    });
+    if (!result.ok) throw new Error(result.failure.message);
+    const match = result.matches[0];
+    if (match) context.setState({
+      anchor: { version: result.version, story: match.range.story, paraId: match.range.start.paraId },
+    }, result.version);
+  },
+  getSidebarItems: (context) => context.state.anchor ? [{
+    id: 'viewer-card',
+    anchor: context.state.anchor,
+    render: ({ measureRef }) => <div ref={measureRef} data-testid="viewer-plugin-card">Viewer plugin card</div>,
+  }] : [],
+});
+const viewerPlugins = [viewerCard];
+
 const fonts = { resolve: () => async () => (await fetch(fontUrl)).arrayBuffer() };
 const faces = [{ family: 'Liberation Sans', src: fontUrl }];
 
 function Harness() {
-  const [buffer, setBuffer] = useState<ArrayBuffer | null>(null);
+  const [source, setSource] = useState<{ buffer?: ArrayBuffer; document?: Document } | null>(null);
+  const pendingDocument = useRef<Document | null>(null);
   const editor = useRef<DocxEditorRef>(null);
-  useEffect(() => { void viewerDocx().then(setBuffer); }, []);
-  useEffect(() => { probe.editor = editor.current; });
-  if (!buffer) return null;
+  useEffect(() => {
+    void (async () => {
+      if (!publicFixture) {
+        setSource({ buffer: await viewerDocx() });
+        return;
+      }
+      const document = await parseDocx(await (await fetch(fixtureUrl)).arrayBuffer(), { preloadFonts: false });
+      const paragraph = document.package.document.content.find((block) => block.type === 'paragraph');
+      if (!paragraph) throw new Error('The public fixture has no body paragraph');
+      paragraph.content.push({ type: 'run', content: [{ type: 'text', text: ' Parsed document host edit.' }] });
+      if (sourceKind === 'prop') setSource({ document });
+      else if (sourceKind === 'loadDocument') {
+        pendingDocument.current = document;
+        setSource({});
+      } else setSource({ buffer: await repackDocx(document) });
+    })().catch((error: Error) => {
+      probe.errors.push(error.message);
+      probe.reportedErrors.push(error);
+    });
+  }, []);
+  useEffect(() => {
+    probe.editor = editor.current;
+    if (editor.current && pendingDocument.current) {
+      const document = pendingDocument.current;
+      pendingDocument.current = null;
+      editor.current.loadDocument(document);
+    }
+  });
+  if (!source) return null;
   return (
     <div style={{ height: '100%' }}>
       <DocxEditor
         ref={editor}
-        documentBuffer={buffer}
+        documentBuffer={source.buffer}
+        document={source.document}
         experimentalWorkerOpen
-        readOnly
+        readOnly={!viewing}
+        mode={viewing ? 'viewing' : undefined}
+        plugins={noCopy && !publicFixture ? viewerPlugins : undefined}
         allowHostProposals
+        onFirstPagePainted={() => {
+          if (source.document) setSource({});
+        }}
         onCommentsSidebarOpenChange={(open) => { probe.sidebarOpen = open; }}
         fonts={faces}
         measurementFontProvider={fonts}
-        onError={(error) => probe.errors.push(error.message)}
+        onError={(error) => {
+          probe.errors.push(error.message);
+          probe.reportedErrors.push(error);
+        }}
+        onPluginError={noCopy ? (error) => probe.errors.push(String(error.error)) : undefined}
       />
     </div>
   );

@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useRef, type ReactNode } from 'react';
@@ -21,10 +21,11 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
-import { deferWorkerOpenReplica, workerOpenReplicaOnDemand, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
+import * as workerOpenReplica from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, holdWorkerOpenDocument, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
-import { DOCX_REF_REPLICA_ACCESS, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DOCX_REF_REPLICA_ACCESS, DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -38,6 +39,7 @@ beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
 )))));
 afterEach(() => {
   cleanup();
+  mock.restore();
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
@@ -48,7 +50,8 @@ function apiFor(
   session: YrsSession,
   document: Document,
   mode: EditorMode = 'viewing',
-  replicaReadyRef?: { current: boolean }
+  replicaReadyRef?: { current: boolean },
+  viewerSession = false
 ) {
   const events: string[] = [];
   const inputRef = { current: null as YrsInputRef | null };
@@ -57,6 +60,7 @@ function apiFor(
     return base ? yrsToDocument(session, base) : null;
   };
   const editor = {
+    isWorkerViewer: () => viewerSession,
     getYrsSession: () => session,
     getDocument: project,
     flushPendingInput: async () => {
@@ -81,6 +85,7 @@ function apiFor(
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
       experimentalWorkerOpen: true,
+      viewerSession,
       ref,
       document,
       documentFromYrs: project,
@@ -144,7 +149,7 @@ function apiFor(
   return { api, events, pagedEditorRef };
 }
 
-async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, hydrateOnDemand = false) {
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -172,15 +177,14 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
       opens.push(true);
       session.openDocx(bytes, true);
     },
-    () => { readiness.current = true; },
-    { active: () => hydrateOnDemand, request: () => replica.start() }
+    () => { readiness.current = true; }
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
   return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
 }
 
 async function pendingWorkerProposalReplica() {
-  const pending = await pendingReplica('viewing', false, true);
+  const pending = await pendingReplica('viewing', false);
   const { session, worker } = pending;
   let previewVersion = 0;
   const reply = (): ResidentProposalReply => {
@@ -293,11 +297,25 @@ test('async reads, exports and write refusals wait for the main replica while sa
   expect(values[13]).toBe(0);
 });
 
-test.each(['viewing', 'editing'] as const)('ref save in %s mode leaves an on-demand replica pending', async (mode) => {
-  const { api, events, replica, opens } = await pendingReplica(mode, false, true);
+test.each(['viewing', 'editing'] as const)('ref save in %s mode leaves the held viewer document or deferred editor replica unloaded', async (mode) => {
+  if (mode === 'viewing') {
+    const host = await heldViewer();
+    expect(await host.api.save()).toBeInstanceOf(ArrayBuffer);
+    expect(host.events).toEqual(['save']);
+    expect(workerOpenReplica.workerOpenDocumentHeld(host.session)).toBe(true);
+    expect(workerOpenReplica.workerOpenReplicaPending(host.session)).toBe(true);
+    expect(workerOpenReplica.workerOpenReplicaStarted(host.session)).toBe(false);
+    expect(host.session.storyIds()).toEqual([]);
+    expect(host.release).not.toHaveBeenCalled();
+    for (const helper of host.helpers) expect(helper).not.toHaveBeenCalled();
+    return;
+  }
+  const { api, events, session, replica, opens } = await pendingReplica(mode);
   expect(await api.save()).toBeInstanceOf(ArrayBuffer);
   expect(events).toEqual(['save']);
   expect(replica.started).toBe(false);
+  expect(replica.pending).toBe(true);
+  expect(session.storyIds()).toEqual([]);
   expect(opens).toEqual([]);
 });
 
@@ -370,58 +388,6 @@ test('a layout deadline covers the wait for the main replica', async () => {
   expect(opens).toEqual([]);
 });
 
-test('layout completion leaves an on-demand replica pending while async reads start it', async () => {
-  const { api, opens, replica, session, release } = await pendingReplica('viewing', false, true);
-  expect(await api.whenLayoutComplete({ timeoutMs: 20 })).toBe(0);
-  expect(workerOpenReplicaOnDemand(session)).toBe(true);
-  expect(opens).toEqual([]);
-  const read = api.readParagraphs({ view: 'accepted' });
-  await act(async () => {
-    release();
-    expect(await read).toMatchObject({ ok: true });
-  });
-  expect(opens).toEqual([false]);
-  expect(replica.pending).toBe(false);
-});
-
-test.each(['focus', 'scrollToPosition', 'print', 'openPrintPreview', 'highlightRange'] as const)(
-  '%s leaves an on-demand replica pending', async (method) => {
-    const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
-    act(() => {
-      if (method === 'scrollToPosition') api.scrollToPosition(0);
-      else if (method === 'highlightRange') api.highlightRange(0, 1);
-      else api[method]();
-    });
-    expect(opens).toEqual([]);
-    expect(replica.pending).toBe(true);
-    await act(async () => { release(); });
-    expect(opens).toEqual([]);
-    expect(replica.pending).toBe(true);
-  }
-);
-
-test('getSelectionInfo returns null without starting an on-demand replica', async () => {
-  const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
-  expect(api.getSelectionInfo()).toBeNull();
-  expect(opens).toEqual([]);
-  expect(replica.pending).toBe(true);
-  await act(async () => { release(); });
-  expect(opens).toEqual([]);
-  expect(replica.pending).toBe(true);
-});
-
-test('getPositionAtPoint answers without starting an on-demand replica', async () => {
-  const { api, opens, replica, release } = await pendingReplica('viewing', false, true);
-  let requests = 0;
-  replica.onDemand!.request = () => { requests += 1; replica.start(); };
-  expect(api.getPositionAtPoint(0, 0)).toBeNull();
-  expect(requests).toBe(0);
-  expect(replica.started).toBe(false);
-  await act(async () => { release(); });
-  expect(opens).toEqual([]);
-  expect(replica.pending).toBe(true);
-});
-
 test.each([
   ['getDocument', (api: DocxEditorRef) => expect(api.getDocument()).not.toBeNull()],
   ['getEditorRef', (api: DocxEditorRef) => expect(api.getEditorRef()).not.toBeNull()],
@@ -451,10 +417,10 @@ test.each([
   ['insertBreak', (api: DocxEditorRef) => expect(api.insertBreak({
     paraId: '00000001', type: 'page',
   })).toBe(true)],
-] as const)('%s synchronously opens an on-demand replica and returns its result', async (method, check) => {
+] as const)('%s synchronously opens an editor replica and returns its result', async (method, check) => {
   const mode = ['addComment', 'proposeChange', 'applyFormatting', 'setParagraphStyle', 'insertBreak']
     .includes(method) ? 'editing' : 'viewing';
-  const { api, opens, replica, pagedEditorRef } = await pendingReplica(mode, false, true);
+  const { api, opens, replica, pagedEditorRef } = await pendingReplica(mode, false);
   if (method === 'getPageContent') {
     pagedEditorRef.current!.getLayout = () => ({
       pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
@@ -531,35 +497,6 @@ test.each([
   expect(opens).toEqual([false]);
 });
 
-test('selection and point reads return null while proposals are held in the worker', async () => {
-  const { api, opens, replica, release, transport } = await pendingWorkerProposalReplica();
-  let requests = 0;
-  replica.onDemand!.request = () => { requests += 1; replica.start(); };
-  expect(api.getSelectionInfo()).toBeNull();
-  expect(requests).toBe(0);
-  expect(replica.started).toBe(false);
-  expect(api.getPositionAtPoint(0, 0)).toBeNull();
-  expect(requests).toBe(0);
-  expect(replica.started).toBe(false);
-  await act(async () => { release(); });
-  expect(transport.handOver).not.toHaveBeenCalled();
-  expect(opens).toEqual([]);
-});
-
-test('focus stays direct while proposals are held in the worker', async () => {
-  const { api, opens, replica, release, pagedEditorRef, transport } = await pendingWorkerProposalReplica();
-  const focus = mock(() => {});
-  pagedEditorRef.current!.focus = focus;
-  act(() => { expect(() => api.focus()).not.toThrow(); });
-  expect(focus).toHaveBeenCalledTimes(1);
-  expect(opens).toEqual([]);
-  expect(replica.started).toBe(false);
-  await act(async () => { release(); });
-  expect(transport.handOver).not.toHaveBeenCalled();
-  expect(opens).toEqual([]);
-  expect(replica.pending).toBe(true);
-});
-
 test('getProposals stays worker-served while proposals are held in the worker', async () => {
   const { api, events, worker, opens, replica, release, transport } = await pendingWorkerProposalReplica();
   let read!: ReturnType<DocxEditorRef['getProposals']>;
@@ -600,4 +537,56 @@ test('getEditorRef immediately inserts text after synchronously finishing the re
   expect(opens).toEqual([true]);
   expect(fallbackReasons).toEqual([{ syncAccess: 'getEditorRef' }]);
   expect(session.paragraphs('body')[0]!.text).toStartWith('Immediate ');
+});
+
+async function heldViewer() {
+  const worker = await createYrsSession();
+  const session = await createYrsSession();
+  sessions.push(worker, session);
+  const { document } = worker.openDocx(bytes, true);
+  const release = mock(() => { throw new Error('unexpected viewer release'); });
+  holdWorkerOpenDocument(session, release);
+  const mounted = apiFor(session, document, 'viewing', undefined, true);
+  const helpers = [
+    spyOn(workerOpenReplica, 'requestWorkerOpenReplica'),
+    spyOn(workerOpenReplica, 'awaitWorkerOpenReplica'),
+    spyOn(workerOpenReplica, 'ensureWorkerOpenReplica'),
+  ];
+  return { ...mounted, session, release, helpers };
+}
+
+test('held viewer save delegates without generic replica admission', async () => {
+  const host = await heldViewer();
+  expect(await host.api.save()).toBeInstanceOf(ArrayBuffer);
+  expect(host.events).toEqual(['save']);
+  expect(workerOpenReplica.workerOpenDocumentHeld(host.session)).toBe(true);
+  expect(host.release).not.toHaveBeenCalled();
+  for (const helper of host.helpers) expect(helper).not.toHaveBeenCalled();
+});
+
+test('held viewer layout completion and input flush resolve without a replica', async () => {
+  const host = await heldViewer();
+  expect(await host.api.whenLayoutComplete({ timeoutMs: 20 })).toBe(0);
+  await host.api.flushPendingInput();
+  expect(host.events).toEqual(['flush']);
+  expect(host.release).not.toHaveBeenCalled();
+  for (const helper of host.helpers) expect(helper).not.toHaveBeenCalled();
+});
+
+test('held viewer synchronous reads and edit refusals never reach replica helpers', async () => {
+  const host = await heldViewer();
+  spyOn(console, 'warn').mockImplementation(() => {});
+  expect(() => host.api.getDocument()).toThrow(DocxAsyncOnlyError);
+  expect(() => host.api.getPageContent(1)).toThrow(DocxAsyncOnlyError);
+  expect(() => host.api.findInDocument('text')).toThrow(DocxAsyncOnlyError);
+  expect(host.api.getEditorRef()).toBeNull();
+  expect(host.api.getSelectionInfo()).toBeNull();
+  expect(host.api.applyFormatting({ paraId: 'p', search: 'text', marks: { bold: true } })).toBe(false);
+  expect(host.api.proposeChange({ paraId: 'p', search: 'text', replaceWith: 'next', author: 'Host' })).toBe(false);
+  host.api.focus();
+  host.api.scrollToPosition(0);
+  host.api.highlightRange(0, 1);
+  expect(host.api.getPositionAtPoint(0, 0)).toBeNull();
+  expect(host.release).not.toHaveBeenCalled();
+  for (const helper of host.helpers) expect(helper).not.toHaveBeenCalled();
 });

@@ -99,6 +99,7 @@ interface WorkerProposalProbe {
   status(): {
     pending: boolean | null;
     captures: number;
+    mainDocumentLoads: { sessionsCaptured: number; total: number; sessions: Record<string, number>[] };
     hydratedBeforeSidebar: boolean;
     sidebarOpen: boolean;
     sidebarOpenChanges: boolean[];
@@ -187,12 +188,14 @@ async function status(page: Page) {
 async function assertReplica(page: Page, readOnly: boolean, sidebarOpen = false) {
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
-  expect(current.captures).toBe(1);
+  expect(current.captures).toBeGreaterThan(0);
   expect(current.errors).toEqual([]);
   expect(current.pending).toBe(readOnly);
   expect(current.encodeState).toBe(readOnly ? 0 : 1);
   expect(current.sidebarOpen).toBe(sidebarOpen);
   if (readOnly) {
+    expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+    expect(current.mainDocumentLoads.total).toBe(0);
     expect(current.hydratedBeforeSidebar).toBe(false);
     expect(current.layoutComplete).not.toBeNull();
   }
@@ -520,6 +523,8 @@ test('opening the built-in sidebar reads worker cards and preserves host proposa
   await expect.poll(async () => (await status(page)).sidebarOpen).toBe(true);
   expect(await getProposals(page)).toEqual(after);
   const current = await status(page);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.pending).toBe(true);
   expect(current.hydratedBeforeSidebar).toBe(false);
@@ -536,6 +541,8 @@ test('existing revisions keep the controlled sidebar and host replica closed', a
   expect(current.revisionCount).toBe(1);
   expect(current.sidebarOpen).toBe(false);
   expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.layoutComplete).not.toBeNull();
   expect(current.hydratedBeforeSidebar).toBe(false);
@@ -563,9 +570,11 @@ test('existing revisions open worker sidebar cards without a replica', async ({ 
   expect((await getProposals(page)).proposals).toEqual([]);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
-  expect(current.captures).toBe(1);
+  expect(current.captures).toBeGreaterThan(0);
   expect(current.sidebarOpenChanges).toEqual([true]);
   expect(current.revisionCount).toBe(1);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.pending).toBe(true);
   expect(current.hydratedBeforeSidebar).toBe(false);
@@ -594,8 +603,10 @@ test('a worker viewer reports a proposal through onDocumentChange without openin
   expect(await getProposals(page)).toEqual(after);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
-  expect(current.captures).toBe(1);
+  expect(current.captures).toBeGreaterThan(0);
   expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.contentChanges).toEqual([]);
   expect(current.sidebarOpen).toBe(false);
@@ -643,6 +654,8 @@ test('a worker viewer exports its retained page layout without opening the main-
   }).toBe(true);
   const current = await status(page);
   expect(current.openedInWorker).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.errors).toEqual([]);
 });
@@ -680,6 +693,8 @@ test('a worker viewer reads content controls and refuses revision commands witho
   expect(accepted.previewVersion).toBe(proposed.previewVersion + 1);
   const current = await status(page);
   expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.errors).toEqual([]);
 });
@@ -718,6 +733,8 @@ test('Find in a worker viewer steps through worker matches without the main-thre
   });
   const current = await status(page);
   expect(current.pending).toBe(true);
+  expect(current.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(current.mainDocumentLoads.total).toBe(0);
   expect(current.encodeState).toBe(0);
   expect(current.errors).toEqual([]);
 });

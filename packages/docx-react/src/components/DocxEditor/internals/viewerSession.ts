@@ -1,7 +1,4 @@
 import { useState } from 'react';
-import type { YrsSession } from '@betteroffice/docx/yrs';
-import { presentedWorkerVersion } from './layoutProvenance';
-import { workerOpenReplicaPending } from './workerOpenReplica';
 
 /**
  * Whether the loaded document is a viewer session: opened read-only in the worker, so it has no
@@ -20,12 +17,4 @@ export function useViewerSession(workerOpen: boolean, workerProposals: boolean, 
     return false;
   }
   return opened.viewer;
-}
-
-/** Whether a viewer session still reads from the worker: false once its document fell back here. */
-export function viewerReadsWorker(
-  queries: { readonly displayList: object } | null | undefined,
-  session: YrsSession | null | undefined
-): boolean {
-  return !(queries && presentedWorkerVersion(queries) === null && session && !workerOpenReplicaPending(session));
 }

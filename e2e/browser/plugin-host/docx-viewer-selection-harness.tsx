@@ -4,10 +4,6 @@ import JSZip from 'jszip';
 import { DocxEditor, type DocxEditorRef } from '@betteroffice/docx-react';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
-import {
-  workerOpenReplicaPending,
-  workerOpenReplicaStarted,
-} from '../../../packages/docx-react/src/components/DocxEditor/internals/workerOpenReplica';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
 
@@ -51,6 +47,10 @@ async function viewerDocx(): Promise<ArrayBuffer> {
   return zip.generateAsync({ type: 'arraybuffer' });
 }
 
+const loadMethods = ['openDocx', 'openDocxPreview', 'loadState', 'applyUpdate'] as const;
+type DocumentLoads = Record<typeof loadMethods[number], number>;
+const documentLoads: DocumentLoads[] = [];
+const loadEvents: { session: number; method: typeof loadMethods[number]; at: number }[] = [];
 const probe = {
   editor: null as DocxEditorRef | null,
   sessions: [] as YrsSession[],
@@ -58,12 +58,18 @@ const probe = {
   errors: [] as string[],
   paragraphText,
   paragraphs: PARAGRAPHS,
-  /** Whether any session asked for, or loaded, a document copy on the main thread. */
-  replica() {
+  mainDocumentLoads() {
     return {
-      started: this.sessions.some((session) => workerOpenReplicaStarted(session)),
-      loaded: this.sessions.some((session) => !workerOpenReplicaPending(session)),
+      sessionsCaptured: this.sessions.length,
+      total: documentLoads.reduce((total, counts) =>
+        total + loadMethods.reduce((sum, method) => sum + counts[method], 0), 0),
+      sessions: documentLoads.map((counts) => ({ ...counts })),
+      events: loadEvents.map((event) => ({ ...event })),
     };
+  },
+  replica() {
+    const loaded = this.mainDocumentLoads().total > 0;
+    return { started: loaded, loaded };
   },
 };
 
@@ -73,7 +79,20 @@ export type ViewerSelectionProbe = typeof probe;
   __workerProposalTest: { captureSession(session: YrsSession): void };
 }).__workerProposalTest = {
   captureSession(session) {
+    if (probe.sessions.includes(session)) return;
+    const index = probe.sessions.length;
     probe.sessions.push(session);
+    const loads: DocumentLoads = { openDocx: 0, openDocxPreview: 0, loadState: 0, applyUpdate: 0 };
+    documentLoads.push(loads);
+    const loadTarget = session as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const method of loadMethods) {
+      const original = loadTarget[method]!;
+      loadTarget[method] = (...args) => {
+        loads[method] += 1;
+        loadEvents.push({ session: index, method, at: performance.now() });
+        return original.apply(session, args);
+      };
+    }
   },
 };
 window.addEventListener('copy', (event) => {
