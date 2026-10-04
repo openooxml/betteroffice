@@ -349,13 +349,13 @@ function hydrateArms(arms: Arms): Promise<void> {
   if (!replica || arms.peer) throw new Error('Hydration requires an unloaded editing copy');
   arms.log.push('start editing copy hydration');
   const state = arms.mirror
-    ? arms.client.handOver()
-    : arms.client.encodeState().then((state) => ({ state }));
+    ? arms.client.handOver().then((handover) => ({ state: handover.state, mirror: handover }))
+    : arms.client.encodeState().then((state) => ({ state, mirror: null }));
   arms.hydration = state.then((handover) => {
     replica.openDocx(source.slice(), false);
     replica.loadState(handover.state);
-    if ('proposals' in handover) {
-      replica.mirrorWorkerDocument({ version: handover.version, proposals: handover.proposals });
+    if (handover.mirror) {
+      replica.mirrorWorkerDocument({ version: handover.mirror.version, proposals: handover.mirror.proposals });
       replica.mirrorWorkerDocument(null);
     }
     for (const story of STORIES) {

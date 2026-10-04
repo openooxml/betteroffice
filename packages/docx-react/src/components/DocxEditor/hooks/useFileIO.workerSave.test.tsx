@@ -106,8 +106,10 @@ async function workerOpened(viewer = true, workerProposals = false) {
       workerOpen: {
         openInWorker,
         renderedFrame,
+        pendingCompletion: renderer.pendingCompletion,
         workerProposals,
         hydrateOnDemand: viewer || workerProposals,
+        onWorkerRevisions: () => {},
       },
     });
     const pagedEditorRef = useRef<PagedEditorRef | null>(null);
@@ -304,6 +306,10 @@ test('a save without the editing copy clears the editor\'s save marks for the ne
   await layOut(opened);
   act(() => opened.hook.result.current.setRenderedFrame({}));
   await waitFor(() => expect(opened.hook.result.current.core.workerProposalsReady).toBe(true));
+  expect(workerOpenReplicaStarted(opened.session)).toBe(false);
+  expect(opened.hook.result.current.core.replicaReady).toBe(false);
+  expect(opened.session.storyIds()).toEqual([]);
+  expect(opened.opens).toEqual([]);
   const authority = registeredWorkerProposalAuthority(opened.session)!;
   const identities = await authority.paragraphIdentities(async () => {
     throw new Error('Unexpected main paragraph identities');
@@ -326,6 +332,7 @@ test('a save without the editing copy clears the editor\'s save marks for the ne
       snapshot: { proposals: [{ changed: true, paragraph: { story } }] },
     });
   });
+  expect(authority.holdsCommittedWorkerState()).toBe(true);
   const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
   try {
     expect(workerOpenReplicaStarted(opened.session)).toBe(false);
@@ -334,8 +341,11 @@ test('a save without the editing copy clears the editor\'s save marks for the ne
     expect(save.mock.calls[0]![0]).not.toHaveProperty('stories');
     expect(save.mock.calls[0]![1]).toBeUndefined();
     expect(workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(opened.worker.requests).not.toContain('encodeState');
     expect(opened.flush).not.toHaveBeenCalled();
     await act(async () => { await requestWorkerOpenReplica(opened.session); });
+    expect(opened.hook.result.current.core.replicaReady).toBe(true);
+    expect(opened.opens).toEqual([false]);
     expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
     expect(save.mock.calls).toHaveLength(2);
     expect(save.mock.calls[1]![0].stories).toEqual([]);
