@@ -31,6 +31,7 @@ export class XlsxDocument {
      */
     cellJson(args: string): string;
     cellPositionJson(args: string): string;
+    cellRectJson(args: string): string;
     /**
      * the chart under a viewport-local point, or `null`.
      */
@@ -130,6 +131,8 @@ export class XlsxDocument {
      */
     setActiveSheet(index: number): void;
     setRangeNumberFormatJson(args: string): string;
+    sheetCount(): number;
+    sheetInfoForJson(sheet: number): string;
     /**
      * serialized `SheetInfo`: stable IDs, names, active index, content extent.
      */
@@ -147,6 +150,7 @@ export class XlsxDocument {
      * crate version string.
      */
     static version(): string;
+    visibleMergedRangesJson(sheet: number, viewport_json: string): string;
     readonly clientId: number;
 }
 
@@ -185,6 +189,7 @@ export interface InitOutput {
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_cellRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
@@ -222,11 +227,14 @@ export interface InitOutput {
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
     readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_sheetCount: (a: number) => number;
+    readonly xlsxdocument_sheetInfoForJson: (a: number, b: number) => [number, number, number, number];
     readonly xlsxdocument_sheetInfoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
+    readonly xlsxdocument_visibleMergedRangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

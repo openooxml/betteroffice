@@ -728,17 +728,13 @@ export function openWorkbook(
       return parseJson(() => doc.sheetInfoJson());
     },
     sheetCount(): number {
-      return wasmCall(() =>
-        (doc as XlsxDocument & { sheetCount(): number }).sheetCount()
-      );
+      return wasmCall(() => doc.sheetCount());
     },
     sheetInfoFor(sheet: number): SheetInfo {
       if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
         throw new RangeError('Sheet index is out of range');
       }
-      return parseJson(() =>
-        (doc as XlsxDocument & { sheetInfoForJson(sheet: number): string }).sheetInfoForJson(sheet)
-      );
+      return parseJson(() => doc.sheetInfoForJson(sheet));
     },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
@@ -817,10 +813,7 @@ export function openWorkbook(
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
     cellRect(sheet: number, row: number, col: number): Rect {
-      return parseJson(() =>
-        (doc as XlsxDocument & { cellRectJson(args: string): string })
-          .cellRectJson(JSON.stringify({ sheet, row, col }))
-      );
+      return parseJson(() => doc.cellRectJson(JSON.stringify({ sheet, row, col })));
     },
     rangeCells(sheet: number, range: string): CellEdit[][] {
       const parsed = parseJson<{ cells: CellEdit[][] }>(() =>
@@ -868,8 +861,7 @@ export function openWorkbook(
         throw new RangeError('Sheet index is out of range');
       }
       const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
-        (doc as XlsxDocument & { visibleMergedRangesJson(sheet: number, viewport: string): string })
-          .visibleMergedRangesJson(sheet, JSON.stringify(viewport))
+        doc.visibleMergedRangesJson(sheet, JSON.stringify(viewport))
       );
       return parsed.ranges;
     },
