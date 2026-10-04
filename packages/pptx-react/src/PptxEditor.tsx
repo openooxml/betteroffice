@@ -1141,7 +1141,8 @@ function PptxEditorContent({
         reportError(failure.value);
         return;
       }
-      if (thumbnails.size < current.snapshot.slides.length) timer = setTimeout(step, 0);
+      if (index < current.snapshot.slides.length && thumbnails.size < current.snapshot.slides.length)
+        timer = setTimeout(step, 0);
     };
     void activePaintRef.current.then(() => {
       if (!cancelled) timer = setTimeout(step, 0);

@@ -388,7 +388,7 @@ describe('PptxEditor slide layout cache', () => {
           expect(key.mock.calls.map((call) => call[0])).toEqual([0]);
           expect(snapshot).not.toHaveBeenCalled();
           expect(layout.mock.calls.length).toBeLessThanOrEqual(1);
-          expect(layout.mock.calls.every(([index]) => index === 0)).toBe(true);
+          expect(layout.mock.calls.map((call) => call[0])).toEqual([0]);
           expect(view.container.querySelectorAll('aside canvas')).toHaveLength(50);
         }
         const text = api!.handle.story(story.id).paragraphs.flatMap((paragraph) =>
