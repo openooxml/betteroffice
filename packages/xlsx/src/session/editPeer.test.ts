@@ -376,7 +376,7 @@ describe('workbook edit peers', () => {
           if (envelope.op.method === 'applyEdits') {
             const input = envelope.op.args[0];
             envelope.op.args = [{ ...input, steps: [{
-              op: 'setCellInputs', target: { ...target('B1'), sheetId: 'missing-sheet' }, inputs: [['2']],
+              op: 'setCellInputs', target: { ...target('B3'), sheetId: 'missing-sheet' }, inputs: [['2']],
             }] }];
           }
         }
@@ -391,7 +391,7 @@ describe('workbook edit peers', () => {
     const offUpdate = peer.onUpdate(() => {
       if (nested) return;
       nested = true;
-      nestedResult = edits.applyEdits(request(peer, 'B1', '2'));
+      nestedResult = edits.applyEdits(request(peer, 'B3', '2'));
       pendingFlush = edits.flush();
     });
     try {
