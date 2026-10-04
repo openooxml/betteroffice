@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
@@ -66,6 +67,36 @@ const MAX_UPDATE_DELETE_RANGES: usize = 1_000_000;
 const MAX_CELL_FORMAT_BYTES: usize = 64 * 1024;
 const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_FULL_MATERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAST_SET_CELL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_full_materialization() -> bool {
+    FORCE_FULL_MATERIALIZATION.get()
+}
+
+#[cfg(test)]
+pub(crate) fn with_full_materialization<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORCE_FULL_MATERIALIZATION.set(self.0);
+        }
+    }
+
+    let _reset = Reset(FORCE_FULL_MATERIALIZATION.replace(true));
+    f()
+}
+
+#[cfg(test)]
+pub(crate) fn fast_set_cell_count() -> usize {
+    FAST_SET_CELL_COUNT.get()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncOrigin {
@@ -420,6 +451,7 @@ enum HistoryAction {
 
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
+    projection_valid: Arc<AtomicBool>,
     base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
@@ -427,7 +459,30 @@ pub(crate) struct WorkbookAuthority {
     redo_stack: Vec<StackItem<()>>,
 }
 
+struct SetCellSync {
+    keys: Vec<String>,
+    sheet_map: MapRef,
+    cell_formats: MapRef,
+    styles: Stylesheet,
+    sheet: Sheet,
+    at: CellRef,
+    formatted: bool,
+}
+
 impl WorkbookAuthority {
+    fn hydrated(doc: Doc, base: Arc<WorkbookBase>, next_sheet_id: u64) -> Self {
+        let projection_valid = observe_projection(&doc);
+        Self {
+            doc,
+            projection_valid,
+            base,
+            history: SheetOrderHistory::default(),
+            next_sheet_id,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+
     #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
         Self::from_model_internal(model, None, &[], None)
@@ -485,14 +540,7 @@ impl WorkbookAuthority {
             },
         };
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
-        let authority = Self {
-            doc,
-            base: Arc::new(base),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        };
+        let authority = Self::hydrated(doc, Arc::new(base), 0);
         authority
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
@@ -527,6 +575,35 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector = self.doc.transact().state_vector();
+        if let Some(prepared) = self.prepare_set_cell_sync(ops, styles)
+            && let Ok((keys, history)) =
+                self.plan_sheet_keys(&prepared.keys, ops, prepared.keys.len(), origin)
+            && keys == prepared.keys
+            && self.validate_sync_state(&prepared.keys, &keys).is_ok()
+        {
+            let mut txn = self.doc.transact_mut_with(origin.as_str());
+            sync_cell_formats(&prepared.cell_formats, &mut txn, &prepared.styles)
+                .map_err(AuthorityError::InvalidState)?;
+            sync_authored_cell(&prepared.sheet_map, &mut txn, &prepared.sheet, prepared.at)
+                .map_err(AuthorityError::InvalidState)?;
+            if prepared.formatted {
+                sync_cell_format(
+                    &prepared.sheet_map,
+                    &mut txn,
+                    &prepared.sheet,
+                    &prepared.styles,
+                    prepared.at,
+                )
+                .map_err(AuthorityError::InvalidState)?;
+            }
+            drop(txn);
+            self.apply_history(history);
+            self.projection_valid.store(true, Ordering::Relaxed);
+            #[cfg(test)]
+            FAST_SET_CELL_COUNT.set(FAST_SET_CELL_COUNT.get() + 1);
+            let update = self.doc.transact().encode_diff_v1(&state_vector);
+            return Ok((update.as_slice() != Update::EMPTY_V1).then_some(update));
+        }
         let mut model = self.materialize()?;
         let ops =
             remap_styles(ops, styles, &mut model.styles).map_err(AuthorityError::InvalidState)?;
@@ -556,8 +633,80 @@ impl WorkbookAuthority {
         }
         self.sync_model(&model, ops, origin, &authored_styles)
             .map_err(AuthorityError::InvalidState)?;
+        if let [Op::SetCell { at, cell, .. }] = ops
+            && at.row < MAX_ROWS
+            && at.col < MAX_COLS
+            && !matches!(cell.value, CellValue::Number { value } if !value.is_finite())
+        {
+            self.projection_valid.store(true, Ordering::Relaxed);
+        }
         let update = self.doc.transact().encode_diff_v1(&state_vector);
         Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
+    }
+
+    fn prepare_set_cell_sync(&self, ops: &[Op], source: &Stylesheet) -> Option<SetCellSync> {
+        #[cfg(test)]
+        if force_full_materialization() {
+            return None;
+        }
+        let [Op::SetCell { sheet, at, cell }] = ops else {
+            return None;
+        };
+        if !self.projection_valid.load(Ordering::Relaxed)
+            || at.row >= MAX_ROWS
+            || at.col >= MAX_COLS
+            || matches!(cell.value, CellValue::Number { value } if !value.is_finite())
+            || self.schema_version().ok()? != SCHEMA_VERSION
+            || !self.has_current_base_fingerprint()
+        {
+            return None;
+        }
+        let txn = self.doc.transact();
+        let cell_formats = txn.get_map(CELL_FORMATS)?;
+        let (mut styles, indices) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles).ok()?;
+        let order = txn.get_array(SHEET_ORDER)?;
+        let keys = sheet_keys(&order, &txn).ok()?;
+        let key = keys.get(sheet.0 as usize)?;
+        let sheets = txn.get_map(SHEETS)?;
+        let sheet_map = sheets.get(&txn, key)?.cast::<MapRef>().ok()?;
+        let contents = nested_map(&sheet_map, &txn, CONTENTS).ok()?;
+        let key = cell_key(*at);
+        match contents.get(&txn, &key) {
+            Some(Out::Any(value)) => {
+                content_from_any(&value).ok()?;
+            }
+            Some(_) => return None,
+            None => {}
+        }
+        let authored_styles = nested_map(&sheet_map, &txn, STYLES).ok()?;
+        let prior_style = match authored_styles.get(&txn, &key) {
+            Some(value) => *indices.get(&value.cast::<String>().ok()?)?,
+            None => None,
+        };
+        let remapped = remap_styles(ops, source, &mut styles).ok()?;
+        let Op::SetCell { cell, .. } = &remapped[0] else {
+            return None;
+        };
+        cell_format_entry(&CellFormat::default()).ok()?;
+        for index in 0..styles.cell_xfs.len() {
+            cell_format_entry(&styles.cell_format(Some(u32::try_from(index).ok()?))).ok()?;
+        }
+        if let Some(style) = cell.style {
+            style_key(&styles, style).ok()?;
+        }
+        let formatted = cell.style != prior_style;
+        let mut target = Sheet::default();
+        target.set_cell(*at, cell.clone().into());
+        Some(SetCellSync {
+            keys,
+            sheet_map,
+            cell_formats,
+            styles,
+            sheet: target,
+            at: *at,
+            formatted,
+        })
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -610,14 +759,7 @@ impl WorkbookAuthority {
         if hydrate_doc(&doc, update).is_err() {
             return SnapshotAdoption::NotApplicable;
         }
-        let candidate = Self {
-            doc,
-            base: self.base.clone(),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: self.next_sheet_id,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        };
+        let candidate = Self::hydrated(doc, self.base.clone(), self.next_sheet_id);
         if !candidate.is_whole_document() {
             return SnapshotAdoption::NotApplicable;
         }
@@ -696,14 +838,7 @@ impl WorkbookAuthority {
             .apply_update(incoming)
             .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
 
-        let staged = Self {
-            doc: staged_doc,
-            base: self.base.clone(),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: self.next_sheet_id,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        };
+        let staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
         let pending = {
             let txn = staged.doc.transact();
             txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
@@ -791,7 +926,13 @@ impl WorkbookAuthority {
         origin: SyncOrigin,
         styles: &Stylesheet,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        self.stage_local_ops_from_v1(ops, origin, styles, &self.encode_state_as_update_v1())
+        self.stage_local_ops_from_validated_v1(
+            ops,
+            origin,
+            styles,
+            &self.encode_state_as_update_v1(),
+            self.projection_valid.load(Ordering::Relaxed),
+        )
     }
 
     /// [`Self::stage_local_ops_v1`] from this replica's already-encoded state.
@@ -802,16 +943,23 @@ impl WorkbookAuthority {
         styles: &Stylesheet,
         baseline: &[u8],
     ) -> Result<StagedLocalUpdate, AuthorityError> {
+        self.stage_local_ops_from_validated_v1(ops, origin, styles, baseline, false)
+    }
+
+    fn stage_local_ops_from_validated_v1(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+        styles: &Stylesheet,
+        baseline: &[u8],
+        projection_valid: bool,
+    ) -> Result<StagedLocalUpdate, AuthorityError> {
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
-        let mut staged = Self {
-            doc: staged_doc,
-            base: self.base.clone(),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: self.next_sheet_id,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        };
+        let mut staged = Self::hydrated(staged_doc, self.base.clone(), self.next_sheet_id);
+        staged
+            .projection_valid
+            .store(projection_valid, Ordering::Relaxed);
         // `apply_ops` already encoded the same diff: the staged doc is the
         // hydrated baseline, so its pre-op state vector is this replica's own.
         let update = staged
@@ -1038,6 +1186,7 @@ impl WorkbookAuthority {
         ));
         hydrate_local_doc(&doc, restore).map_err(AuthorityError::InvalidState)?;
         self.doc = doc;
+        self.projection_valid = observe_projection(&self.doc);
         self.undo_stack = undo_stack;
         self.redo_stack = redo_stack;
         Ok(())
@@ -1316,6 +1465,7 @@ impl WorkbookAuthority {
                 .collect(),
             shared_types,
         };
+        self.projection_valid.store(true, Ordering::Relaxed);
         Ok((model, structure))
     }
 
@@ -1614,6 +1764,16 @@ impl WorkbookAuthority {
         self.next_sheet_id += 1;
         key
     }
+}
+
+fn observe_projection(doc: &Doc) -> Arc<AtomicBool> {
+    let valid = Arc::new(AtomicBool::new(false));
+    let observed = valid.clone();
+    doc.observe_after_transaction_with("projection", move |_| {
+        observed.store(false, Ordering::Relaxed)
+    })
+    .expect("authority document has no active transaction");
+    valid
 }
 
 /// The base-model sheet a stable key names. Bootstrap mints `sheet:N` from the
@@ -3810,6 +3970,210 @@ mod tests {
         model
     }
 
+    fn assert_singleton_lockstep(
+        fast: &mut WorkbookAuthority,
+        oracle: &mut WorkbookAuthority,
+        ops: &[Op],
+        origin: SyncOrigin,
+        styles: &Stylesheet,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let result = fast
+            .apply_ops(ops, origin, styles)
+            .map_err(|error| format!("{error:?}"));
+        let expected = with_full_materialization(|| oracle.apply_ops(ops, origin, styles))
+            .map_err(|error| format!("{error:?}"));
+        assert_eq!(result, expected);
+        assert_eq!(
+            fast.encode_state_vector_v1(),
+            oracle.encode_state_vector_v1()
+        );
+        assert_eq!(
+            fast.encode_state_as_update_v1(),
+            oracle.encode_state_as_update_v1()
+        );
+        assert_eq!(fast.history.undo, oracle.history.undo);
+        assert_eq!(fast.history.redo, oracle.history.redo);
+        let model = fast.materialize().map_err(|error| format!("{error:?}"));
+        let expected_model = oracle.materialize().map_err(|error| format!("{error:?}"));
+        assert_eq!(model, expected_model);
+        result
+    }
+
+    #[test]
+    fn singleton_set_cell_sync_matches_authored_state_and_catalog() {
+        let model = rich_model();
+        let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut styles = model.styles.clone();
+        let mut format = CellFormat::default();
+        format.font.bold = true;
+        let bold = styles.intern_cell_format(&format).unwrap();
+        let count = fast_set_cell_count();
+        let cached = Op::SetCell {
+            sheet: SheetId(0),
+            at: CellRef::new(0, 0),
+            cell: CellState {
+                value: CellValue::Number { value: 999.0 },
+                formula: Some("40+2".into()),
+                style: Some(0),
+            },
+        };
+        assert_eq!(
+            assert_singleton_lockstep(&mut fast, &mut oracle, &[cached], SyncOrigin::User, &styles)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            fast.materialize().unwrap().sheets[0]
+                .cell(CellRef::new(0, 0))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 42.0 }
+        );
+        for (origin, cell) in [
+            (
+                SyncOrigin::User,
+                CellState {
+                    value: CellValue::Number { value: 123.0 },
+                    style: bold,
+                    ..Default::default()
+                },
+            ),
+            (
+                SyncOrigin::Agent,
+                CellState {
+                    formula: Some("Data!A1+1".into()),
+                    style: bold,
+                    ..Default::default()
+                },
+            ),
+            (
+                SyncOrigin::User,
+                CellState {
+                    style: bold,
+                    ..Default::default()
+                },
+            ),
+            (SyncOrigin::Undo, CellState::default()),
+            (
+                SyncOrigin::Redo,
+                CellState {
+                    value: CellValue::Bool { value: true },
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let op = Op::SetCell {
+                sheet: SheetId(1),
+                at: CellRef::new(2, 3),
+                cell,
+            };
+            assert_singleton_lockstep(&mut fast, &mut oracle, &[op], origin, &styles).unwrap();
+        }
+        assert_eq!(fast_set_cell_count(), count + 6);
+    }
+
+    #[test]
+    fn singleton_set_cell_falls_back_before_writes() {
+        let model = rich_model();
+        for op in [
+            Op::SetCell {
+                sheet: SheetId(99),
+                at: CellRef::new(0, 0),
+                cell: CellState::default(),
+            },
+            Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(0, 0),
+                cell: CellState {
+                    style: Some(u32::MAX),
+                    ..Default::default()
+                },
+            },
+        ] {
+            let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+            let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+            let before = fast.encode_state_as_update_v1();
+            let count = fast_set_cell_count();
+            assert!(
+                assert_singleton_lockstep(
+                    &mut fast,
+                    &mut oracle,
+                    &[op],
+                    SyncOrigin::User,
+                    &model.styles
+                )
+                .is_err()
+            );
+            assert_eq!(fast.encode_state_as_update_v1(), before);
+            assert_eq!(fast_set_cell_count(), count);
+        }
+        let mut fast = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        let mut oracle = WorkbookAuthority::from_model_with_client_id(&model, 73).unwrap();
+        for authority in [&fast, &oracle] {
+            let mut txn = authority.doc.transact_mut();
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            let contents = nested_map(&sheet, &txn, CONTENTS).unwrap();
+            contents.insert(&mut txn, "1:0", Any::BigInt(42));
+        }
+        let before = fast.encode_state_as_update_v1();
+        let count = fast_set_cell_count();
+        let op = Op::SetCell {
+            sheet: SheetId(1),
+            at: CellRef::new(0, 0),
+            cell: CellState::default(),
+        };
+        assert!(
+            assert_singleton_lockstep(
+                &mut fast,
+                &mut oracle,
+                &[op],
+                SyncOrigin::User,
+                &model.styles
+            )
+            .is_err()
+        );
+        assert_eq!(fast.encode_state_as_update_v1(), before);
+        assert_eq!(fast_set_cell_count(), count);
+    }
+
+    #[test]
+    fn singleton_set_cell_legacy_schema_matches_full_materialization() {
+        let model = rich_model();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+            let bytes = legacy_update(&model, version, true);
+            let mut fast = authority_from_update(&model, &bytes, 73);
+            let mut oracle = authority_from_update(&model, &bytes, 73);
+            fast.materialize().unwrap();
+            oracle.materialize().unwrap();
+            let count = fast_set_cell_count();
+            let op = Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(1, 0),
+                cell: CellState {
+                    value: CellValue::Text {
+                        value: "new".into(),
+                    },
+                    ..Default::default()
+                },
+            };
+            assert_singleton_lockstep(
+                &mut fast,
+                &mut oracle,
+                &[op],
+                SyncOrigin::User,
+                &model.styles,
+            )
+            .unwrap();
+            assert_eq!(fast_set_cell_count(), count);
+        }
+    }
+
     fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
         let base = WorkbookBase::from_model(model).unwrap();
         let (_, client_id) =
@@ -3854,14 +4218,7 @@ mod tests {
     ) -> WorkbookAuthority {
         let doc = Doc::with_client_id(client_id);
         hydrate_doc(&doc, update).unwrap();
-        WorkbookAuthority {
-            doc,
-            base: Arc::new(WorkbookBase::from_model(model).unwrap()),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        }
+        WorkbookAuthority::hydrated(doc, Arc::new(WorkbookBase::from_model(model).unwrap()), 0)
     }
 
     #[test]
