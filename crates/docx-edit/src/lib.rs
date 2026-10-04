@@ -603,15 +603,16 @@ impl EditingDoc {
             .get_or_insert_map(STORIES)
             .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
         let stamped = Arc::clone(&story_revisions);
-        let comment_revision_sub = doc.get_or_insert_map(COMMENTS).observe(move |txn, event| {
-            if event.keys(txn).values().any(|change| {
-                matches!(change, EntryChange::Inserted(_) | EntryChange::Removed(_))
-            }) {
-                let mut revisions = stamped.lock().unwrap();
-                revisions.current += 1;
-                revisions.comment_ids = revisions.current;
-            }
-        });
+        let comment_revision_sub =
+            doc.get_or_insert_map(COMMENTS).observe(move |txn, event| {
+                if event.keys(txn).values().any(|change| {
+                    matches!(change, EntryChange::Inserted(_) | EntryChange::Removed(_))
+                }) {
+                    let mut revisions = stamped.lock().unwrap();
+                    revisions.current += 1;
+                    revisions.comment_ids = revisions.current;
+                }
+            });
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -1837,7 +1838,10 @@ mod tests {
         assert!(since > 0);
         assert!(stories.is_empty());
         assert!(comments);
-        assert_eq!(a.stories_changed_since(since), (since, Vec::<String>::new(), false));
+        assert_eq!(
+            a.stories_changed_since(since),
+            (since, Vec::<String>::new(), false)
+        );
 
         b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
         let (remote_since, stories, comments) = b.stories_changed_since(0);
@@ -1851,14 +1855,20 @@ mod tests {
             let comment = comments.get(&txn, "1").unwrap().cast::<MapRef>().unwrap();
             comment.insert(&mut txn, "body", "edited");
         }
-        assert_eq!(a.stories_changed_since(since), (since, Vec::<String>::new(), false));
+        assert_eq!(
+            a.stories_changed_since(since),
+            (since, Vec::<String>::new(), false)
+        );
         {
             let mut txn = a.doc.transact_mut();
             txn.get_map(COMMENTS)
                 .unwrap()
                 .insert(&mut txn, "1", MapPrelim::default());
         }
-        assert_eq!(a.stories_changed_since(since), (since, Vec::<String>::new(), false));
+        assert_eq!(
+            a.stories_changed_since(since),
+            (since, Vec::<String>::new(), false)
+        );
         b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
         assert_eq!(
             b.stories_changed_since(remote_since),
@@ -1873,7 +1883,10 @@ mod tests {
         assert!(revision > since);
         assert!(stories.is_empty());
         assert!(comments);
-        assert_eq!(a.stories_changed_since(revision), (revision, Vec::<String>::new(), false));
+        assert_eq!(
+            a.stories_changed_since(revision),
+            (revision, Vec::<String>::new(), false)
+        );
         b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
         let (revision, stories, comments) = b.stories_changed_since(remote_since);
         assert!(revision > remote_since);
