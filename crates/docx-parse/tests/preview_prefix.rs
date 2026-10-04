@@ -1,9 +1,11 @@
 use docx_parse::ParseLimits;
 use docx_parse::block::PREVIEW_MIN_BLOCKS;
 use docx_parse::s9::{
-    S9ParseOptions, parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_full_dom,
+    S9ParseOptions, media_table_parts, parse_docx_s9_preview_from_parts,
+    parse_docx_s9_preview_from_parts_full_dom,
     parse_docx_s9_preview_from_parts_full_dom_with_budget,
-    parse_docx_s9_preview_from_parts_with_budget, parse_docx_s9_wire_with_limits,
+    parse_docx_s9_preview_from_parts_with_budget,
+    parse_docx_s9_preview_with_media_table_with_budget, parse_docx_s9_wire_with_limits,
 };
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
@@ -105,7 +107,10 @@ fn compare(body: &str, refused: bool) {
                 )
                 .unwrap();
                 assert_eq!(actual.is_none(), refused);
-                assert_eq!(actual, expected, "blocks={blocks}, budget={paragraph_budget:?}");
+                assert_eq!(
+                    actual, expected,
+                    "blocks={blocks}, budget={paragraph_budget:?}"
+                );
                 if paragraph_budget.is_none() {
                     let envelope = actual.as_ref().map(|(envelope, budget_stopped)| {
                         assert!(!*budget_stopped);
@@ -293,33 +298,167 @@ fn table(rows: usize, cells: usize, cell_paragraphs: usize) -> String {
     )
 }
 
-fn weighted_preview(body: &str, blocks: usize, budget: usize) -> (docx_parse::S9WireEnvelope, bool) {
-    let parts = package(body);
+fn weighted_preview(
+    body: &str,
+    blocks: usize,
+    budget: usize,
+) -> (docx_parse::S9WireEnvelope, bool) {
+    preview_with_budget(&package(body), blocks, Some(budget))
+}
+
+fn preview_with_budget(
+    parts: &[(String, Vec<u8>)],
+    blocks: usize,
+    budget: Option<usize>,
+) -> (docx_parse::S9WireEnvelope, bool) {
     let options = S9ParseOptions {
         determinism_seed: Some("7".repeat(64)),
         ..S9ParseOptions::default()
     };
     let limits = ParseLimits::default();
     let streaming = parse_docx_s9_preview_from_parts_with_budget(
-        &parts,
+        parts,
         blocks,
         options.clone(),
         &limits,
-        Some(budget),
+        budget,
     )
     .unwrap()
     .unwrap();
     let dom = parse_docx_s9_preview_from_parts_full_dom_with_budget(
-        &parts,
+        parts,
         blocks,
-        options,
+        options.clone(),
         &limits,
-        Some(budget),
+        budget,
     )
     .unwrap()
     .unwrap();
     assert_eq!(streaming, dom);
+    let (parts, media) = media_table_parts(&ooxml_opc::rezip_parts(parts).unwrap().into()).unwrap();
+    let media_preview = parse_docx_s9_preview_with_media_table_with_budget(
+        &parts, &media, blocks, options, &limits, budget,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(streaming, media_preview);
     streaming
+}
+
+fn dense_tables_with_page_count(trailing_paragraphs: usize) -> Vec<(String, Vec<u8>)> {
+    let body = format!(
+        r#"{}{}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/></w:sectPr>"#,
+        table(1, 1, 10).repeat(40),
+        paragraph(40, "", "").repeat(trailing_paragraphs),
+    );
+    let mut parts = package(&body);
+    let header = parts
+        .iter_mut()
+        .find(|(path, _)| path == "word/header1.xml")
+        .unwrap();
+    header.1 = format!(
+        r#"<w:hdr {NS}><w:p><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>99</w:t></w:r></w:fldSimple></w:p></w:hdr>"#,
+    ).into_bytes();
+    parts
+}
+
+fn paragraph_count(content: &[docx_parse::BlockContent]) -> usize {
+    content
+        .iter()
+        .map(|block| match block {
+            docx_parse::BlockContent::Paragraph(_) => 1,
+            docx_parse::BlockContent::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .map(|cell| paragraph_count(&cell.content))
+                .sum(),
+            docx_parse::BlockContent::BlockSdt(sdt) => paragraph_count(&sdt.content),
+            docx_parse::BlockContent::RawXml(_) => 0,
+        })
+        .sum()
+}
+
+#[test]
+fn a_short_dense_body_with_numpages_ignores_the_budget() {
+    let parts = dense_tables_with_page_count(0);
+    let (preview, stopped) = preview_with_budget(&parts, 200, Some(256));
+    let (legacy, _) = preview_with_budget(&parts, 200, None);
+    assert!(!stopped);
+    let content = &preview.document.package.document.content;
+    assert_eq!(content.len(), 40);
+    assert!(
+        content
+            .iter()
+            .all(|block| matches!(block, docx_parse::BlockContent::Table(_)))
+    );
+    assert_eq!(paragraph_count(content), 400);
+    assert_eq!(
+        serde_json::to_vec(&preview).unwrap(),
+        serde_json::to_vec(&legacy).unwrap()
+    );
+}
+
+#[test]
+fn a_dense_body_with_more_than_the_block_limit_uses_the_budget() {
+    let parts = dense_tables_with_page_count(170);
+    let (preview, stopped) = preview_with_budget(&parts, 200, Some(256));
+    let (legacy, _) = preview_with_budget(&parts, 200, None);
+    assert!(stopped);
+    let content = &preview.document.package.document.content;
+    let legacy_content = &legacy.document.package.document.content;
+    assert_eq!(content.len(), PREVIEW_MIN_BLOCKS);
+    assert_eq!(legacy_content.len(), 200);
+    assert_eq!(paragraph_count(content), 320);
+    assert_eq!(paragraph_count(legacy_content), 560);
+    assert!(paragraph_count(content) < paragraph_count(legacy_content));
+}
+
+#[test]
+fn the_budget_requires_strictly_more_than_the_block_limit() {
+    for blocks in [199, 200, 201] {
+        let body = format!("{}<w:sectPr/>", table(1, 1, 10).repeat(blocks));
+        let parts = package(&body);
+        let (preview, stopped) = preview_with_budget(&parts, 200, Some(256));
+        assert_eq!(stopped, blocks > 200);
+        if blocks <= 200 {
+            let (legacy, _) = preview_with_budget(&parts, 200, None);
+            assert_eq!(preview, legacy);
+        } else {
+            assert_eq!(
+                preview.document.package.document.content.len(),
+                PREVIEW_MIN_BLOCKS
+            );
+        }
+    }
+}
+
+#[test]
+fn fields_that_hold_the_legacy_cut_to_the_body_end_disable_the_budget() {
+    for blocks in [210, 450] {
+        for close in [false, true] {
+            let body = (0..blocks)
+                .map(|index| {
+                    if index < 40 {
+                        return table(1, 1, 10);
+                    }
+                    let runs = match index {
+                        190 => r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r>"#,
+                        191 => r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                        index if close && index == blocks - 1 => r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                        _ => "",
+                    };
+                    paragraph(index, "", runs)
+                })
+                .collect::<String>();
+            let parts = package(&body);
+            let (preview, stopped) = preview_with_budget(&parts, 200, Some(256));
+            let (legacy, _) = preview_with_budget(&parts, 200, None);
+            assert!(!stopped);
+            assert_eq!(preview.document.package.document.content.len(), blocks);
+            assert_eq!(preview, legacy);
+        }
+    }
 }
 
 #[test]
@@ -342,10 +481,11 @@ fn dense_tables_stop_at_the_first_complete_block_after_the_minimum() {
                 assert_eq!(row.cells.len(), 3);
                 for cell in &row.cells {
                     assert_eq!(cell.content.len(), 2);
-                    assert!(cell.content.iter().all(|block| matches!(
-                        block,
-                        docx_parse::BlockContent::Paragraph(_)
-                    )));
+                    assert!(
+                        cell.content
+                            .iter()
+                            .all(|block| matches!(block, docx_parse::BlockContent::Paragraph(_)))
+                    );
                 }
             }
         }
@@ -366,10 +506,11 @@ fn an_exhausted_budget_keeps_trailing_non_block_children() {
         assert!(!stopped);
         let content = &preview.document.package.document.content;
         assert_eq!(content.len(), 32);
-        assert!(content.iter().all(|block| matches!(
-            block,
-            docx_parse::BlockContent::Table(_)
-        )));
+        assert!(
+            content
+                .iter()
+                .all(|block| matches!(block, docx_parse::BlockContent::Table(_)))
+        );
         let whole_body = !stopped && content.len() < 200;
         assert!(whole_body);
         let full = parse_docx_s9_wire_with_limits(
@@ -395,8 +536,9 @@ fn an_exhausted_budget_stops_before_another_block() {
         r#"<ext:block xmlns:ext="urn:preview-test"/>"#.to_owned(),
     ] {
         let body = format!(
-            r#"{}{trailing_block}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:pgSz w:w="18000" w:h="24000"/></w:sectPr>"#,
+            r#"{}{trailing_block}{}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:pgSz w:w="18000" w:h="24000"/></w:sectPr>"#,
             table(1, 1, 10).repeat(32),
+            paragraph(33, "", "").repeat(170),
         );
         let (preview, stopped) = weighted_preview(&body, 200, 256);
         assert!(stopped);
@@ -498,7 +640,9 @@ fn a_field_spanning_the_budget_closes_before_the_cut() {
 #[test]
 fn a_giant_first_table_is_kept_whole() {
     let body = format!("{}{}", table(100, 3, 2), paragraph(0, "", "").repeat(620));
-    for (blocks, expected_blocks, budget_stopped) in [(1, 1, false), (200, PREVIEW_MIN_BLOCKS, true)] {
+    for (blocks, expected_blocks, budget_stopped) in
+        [(1, 1, false), (200, PREVIEW_MIN_BLOCKS, true)]
+    {
         let (preview, stopped) = weighted_preview(&body, blocks, 256);
         assert_eq!(stopped, budget_stopped);
         let content = &preview.document.package.document.content;
@@ -571,6 +715,9 @@ fn empty_blocks_still_have_weight_and_zero_budget_obeys_the_minimum() {
     for (budget, expected_blocks) in [(0, PREVIEW_MIN_BLOCKS), (40, 40)] {
         let (preview, stopped) = weighted_preview(&body, 200, budget);
         assert!(stopped);
-        assert_eq!(preview.document.package.document.content.len(), expected_blocks);
+        assert_eq!(
+            preview.document.package.document.content.len(),
+            expected_blocks
+        );
     }
 }

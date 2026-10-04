@@ -86,7 +86,12 @@ export function syntheticDocx(
   flavour: Flavour,
   size: number,
   seed: number,
-  options: { pageNumberRestarts?: [number, number]; tableDense?: boolean } = {}
+  options: {
+    pageNumberRestarts?: [number, number];
+    tableDense?: boolean;
+    blocks?: number;
+    trailingShortParagraphs?: number;
+  } = {}
 ): Uint8Array {
   let state = seed;
   const random = (limit: number) => {
@@ -118,7 +123,7 @@ export function syntheticDocx(
   const footnotes: number[] = [];
   const endnotes: number[] = [];
   const body: string[] = [];
-  const blocks = flavour === 'whole' ? WHOLE_BLOCKS : BLOCKS;
+  const blocks = options.blocks ?? (flavour === 'whole' ? WHOLE_BLOCKS : BLOCKS);
   for (let i = 1; i <= blocks; i += 1) {
     let properties = '';
     let runs = run(text(3, 9));
@@ -167,6 +172,9 @@ export function syntheticDocx(
           `${rows}</w:tbl>`
       );
     }
+  }
+  for (let i = 0; i < (options.trailingShortParagraphs ?? 0); i += 1) {
+    body.push(`<w:p>${run('Tail')}</w:p>`);
   }
   set(
     'word/styles.xml',

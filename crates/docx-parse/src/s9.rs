@@ -401,7 +401,14 @@ fn parse_s9_package(
     media_table: Option<&MediaTable>,
 ) -> Result<Option<S9WireEnvelope>, ParseError> {
     parse_s9_package_impl(
-        parts, data, options, limits, body_blocks, media_table, true, None,
+        parts,
+        data,
+        options,
+        limits,
+        body_blocks,
+        media_table,
+        true,
+        None,
     )
     .map(|preview| preview.map(|(envelope, _)| envelope))
 }
@@ -501,12 +508,18 @@ fn parse_s9_package_impl(
             let mut scanned_budget = body_blocks
                 .filter(|_| prefix_preview)
                 .map(|_| budget.clone());
+            let mut legacy_partial = None;
             let prefix = if let Some(blocks) = body_blocks.filter(|_| prefix_preview) {
-                match crate::document::streaming_body_cut(xml, scanned_budget.as_mut().unwrap()) {
-                    Ok(refused) => {
+                match crate::document::streaming_body_cut_with_limit(
+                    xml,
+                    scanned_budget.as_mut().unwrap(),
+                    body_blocks.filter(|_| paragraph_budget.is_some()),
+                ) {
+                    Ok((refused, partial)) => {
                         if refused {
                             return Ok(None);
                         }
+                        legacy_partial = paragraph_budget.map(|_| partial);
                         let keep = blocks.saturating_mul(2).max(blocks.saturating_add(64));
                         crate::document::body_prefix(xml, keep).map(|xml| (xml, keep))
                     }
@@ -561,6 +574,7 @@ fn parse_s9_package_impl(
                                 body_blocks,
                                 kept_children,
                                 paragraph_budget,
+                                legacy_partial,
                             )?;
                         if read >= kept_children {
                             return parse_s9_package_impl(
@@ -581,6 +595,7 @@ fn parse_s9_package_impl(
                             &mut parser,
                             body_blocks,
                             paragraph_budget,
+                            legacy_partial,
                         )?
                     }
                 }

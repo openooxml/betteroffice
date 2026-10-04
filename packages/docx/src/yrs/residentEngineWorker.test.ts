@@ -3522,7 +3522,11 @@ describe('resident worker opening', () => {
     await preloadEditWasm(new Uint8Array(readFileSync(resolve(
       import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
     ))));
-    const bytes = syntheticDocx('plain', 44, 17, { tableDense: true });
+    const bytes = syntheticDocx('plain', 44, 17, {
+      tableDense: true,
+      blocks: 40,
+      trailingShortParagraphs: 170,
+    });
     const engine = await createResidentEngineSession();
     const w = worker();
     const forwarded: Array<number | undefined> = [];

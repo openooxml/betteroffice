@@ -168,7 +168,11 @@ async function build(bytes: Uint8Array, preview: boolean, paragraphBudget?: numb
 }
 
 test('weighted table preview builds exactly the first two full-layout pages with fewer paragraphs', async () => {
-  const bytes = syntheticDocx('plain', 44, 17, { tableDense: true });
+  const bytes = syntheticDocx('plain', 44, 17, {
+    tableDense: true,
+    blocks: 40,
+    trailingShortParagraphs: 170,
+  });
   const weighted = await build(bytes, true, 256);
   const blockCount = await build(bytes, true);
   const full = await build(bytes, false);
@@ -183,6 +187,15 @@ test('weighted table preview builds exactly the first two full-layout pages with
     expect(full.pages[page.pageIndex]?.unbuilt).not.toBe(true);
     expect(page).toEqual(full.pages[page.pageIndex]);
   }
+});
+
+test('a short dense whole-body preview is identical with and without the paragraph budget', async () => {
+  const bytes = syntheticDocx('whole', 10, 17, { tableDense: true, blocks: 40 });
+  const weighted = await build(bytes, true, 256);
+  const blockCount = await build(bytes, true);
+  expect(weighted.refused).toBe(false);
+  expect(weighted.wholeBody).toBe(true);
+  expect(weighted).toEqual(blockCount);
 });
 
 async function comparePreview(
