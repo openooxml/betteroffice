@@ -115,7 +115,15 @@ fn edit_and_compare(
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let engine = EngineSession::new(75401);
-    seed_from_docx(engine.doc(), bytes).unwrap();
+    let seed = docx_edit::EditingDoc::new(75400);
+    seed_from_docx(&seed, bytes).unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&seed.encode_state_as_update_v1())
+        .unwrap();
+    engine
+        .doc()
+        .set_note_separator_state(seed.note_separator_state().unwrap());
     let mut request = fixture::region_request(&engine, bytes, font);
     request["regions"]["sections"] = sections;
     request["notes"]["contents"] = json!([
@@ -363,7 +371,15 @@ fn assert_moving_footnote_tail_reuse(class: EditClass) {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let engine = EngineSession::new(75403);
-    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let seed = docx_edit::EditingDoc::new(75405);
+    seed_from_docx(&seed, &bytes).unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&seed.encode_state_as_update_v1())
+        .unwrap();
+    engine
+        .doc()
+        .set_note_separator_state(seed.note_separator_state().unwrap());
     let mut request = fixture::region_request(&engine, &bytes, font);
     request["regions"]["sections"] = small_sections();
     request["notes"]["contents"] = json!([

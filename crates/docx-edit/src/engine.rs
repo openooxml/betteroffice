@@ -3777,9 +3777,7 @@ impl EngineSession {
         {
             let mut pagination = self.pagination.borrow_mut();
             pagination.input_lowering = None;
-            if self.relayout_trigger.get().uses_region_path() {
-                pagination.lowered_from = None;
-            }
+            pagination.lowered_from = None;
         }
         let blocks = Rc::get_mut(&mut lowered.blocks)?;
         let map = Rc::get_mut(&mut lowered.map)?;
@@ -5310,7 +5308,7 @@ impl EngineSession {
                 notes: Rc::new(notes.contents),
             }));
         }
-        self.set_relayout_trigger(RelayoutTrigger::Interactive);
+        self.region_retention_valid.set(false);
         Ok(RegionPass {
             notes_converged,
             provisional,
@@ -10615,13 +10613,26 @@ mod tests {
                 .unwrap(),
             RelayoutTrigger::Preview
         );
+        let has_note_contents = request["notes"]["contents"]
+            .as_array()
+            .is_some_and(|contents| !contents.is_empty());
+        let rebuild_locality = !engine.region_retention_valid.get()
+            || engine
+                .preview_locality
+                .borrow()
+                .as_ref()
+                .is_none_or(|locality| locality.doc_epoch != epoch);
+        let pagination_calls = engine.stats().pagination_calls;
         REGION_WORK_COUNTS.with(|counts| counts.set(RegionWorkCounts::default()));
         engine
             .layout_document_with_regions_retained(&request.to_string())
             .unwrap();
         let counts = REGION_WORK_COUNTS.with(Cell::get);
-        assert!(counts.certification > 0 && counts.placement > 0 && counts.compaction > 0);
-        assert!(counts.fingerprint > 0 && counts.locality > 0);
+        assert!(counts.certification > 0 && counts.compaction > 0);
+        assert_eq!(counts.placement > 0, has_note_contents);
+        assert_eq!(counts.fingerprint, 1);
+        assert_eq!(counts.locality, u64::from(rebuild_locality));
+        assert_eq!(engine.stats().pagination_calls, pagination_calls + 1);
         assert_eq!(engine.doc_epoch(), epoch);
         assert_eq!(engine.doc().version(), version);
         assert_region_state_matches_cold(engine, &request.to_string(), decision);
@@ -11948,6 +11959,23 @@ mod tests {
         assert!(engine.pagination.borrow().retain_matches.is_empty());
         assert_region_state_matches_cold(&engine, &request, "local prefix identity");
         engine.set_relayout_trigger(RelayoutTrigger::Preview);
+        let before = engine.stats();
+        let matches = engine.pagination.borrow().retain_match_calls;
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        assert_eq!(engine.pagination.borrow().retain_match_calls, matches);
+        assert_eq!(
+            engine.stats().resident_reused_blocks,
+            before.resident_reused_blocks
+        );
+        assert_region_state_matches_cold(
+            &engine,
+            &request,
+            "first preview after local prefix patch",
+        );
+        let prefix = Rc::clone(&engine.render.borrow().stories["body"].blocks.shared()[0]);
+        engine.set_relayout_trigger(RelayoutTrigger::Preview);
         let before = engine.pagination.borrow().retain_match_calls;
         engine
             .layout_document_with_regions_retained_json(&request)
@@ -11958,6 +11986,98 @@ mod tests {
             &engine.render.borrow().stories["body"].blocks.shared()[0]
         ));
         assert_region_state_matches_cold(&engine, &request, "preview after local prefix patch");
+    }
+
+    #[test]
+    fn explicit_preview_after_interactive_relayout_starts_cold_then_reuses_retention() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for resident in [false, true] {
+            let engine = paragraphs_engine(9669, 3);
+            engine.set_local_lowering(true);
+            let request = small_page_request(font);
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            if resident {
+                engine.build_display_list_frame("{}", 0).unwrap();
+            }
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
+                .unwrap();
+            assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Interactive);
+            if resident {
+                let epoch = engine.display.borrow().binary_frame_epoch;
+                engine.apply_and_layout("body", epoch).unwrap();
+            } else {
+                engine
+                    .layout_document_with_regions_retained_json(&request)
+                    .unwrap();
+            }
+            assert!(!engine.interactive_pending.get());
+            assert!(!engine.region_retention_valid.get());
+            engine.set_relayout_trigger(RelayoutTrigger::Preview);
+            assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Preview);
+            let before = engine.stats();
+            let matches = engine.pagination.borrow().retain_match_calls;
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            let after = engine.stats();
+            assert_eq!(after.pagination_calls, before.pagination_calls + 1);
+            assert_eq!(after.resident_reused_blocks, before.resident_reused_blocks);
+            assert_eq!(engine.pagination.borrow().retain_match_calls, matches);
+            assert!(engine.region_retention_valid.get());
+            assert_region_state_matches_cold(&engine, &request, "explicit first preview");
+            engine.set_relayout_trigger(RelayoutTrigger::Preview);
+            assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Preview);
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            assert_eq!(engine.stats().pagination_calls, after.pagination_calls + 1);
+            assert!(engine.pagination.borrow().retain_match_calls > matches);
+            assert_region_state_matches_cold(&engine, &request, "explicit second preview");
+        }
+    }
+
+    #[test]
+    fn first_interactive_edit_after_preview_uses_local_lowering() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let engine = paragraphs_engine(9670, 3);
+        engine.set_local_lowering(true);
+        let request = small_page_request(font);
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        engine.set_relayout_trigger(RelayoutTrigger::Preview);
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        assert!(engine.region_retention_valid.get());
+        assert!(Rc::ptr_eq(
+            engine.pagination.borrow().lowered_from.as_ref().unwrap(),
+            &engine.render.borrow().stories["body"].blocks
+        ));
+        let blocks = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
+        let before = engine.stats();
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
+            .unwrap();
+        assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Interactive);
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        assert_eq!(
+            Rc::as_ptr(&engine.render.borrow().stories["body"].blocks),
+            blocks
+        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+        assert_eq!(engine.stats().pagination_calls, before.pagination_calls + 1);
+        assert!(!engine.region_retention_valid.get());
+        assert_region_state_matches_cold(&engine, &request, "local edit after preview");
     }
 
     #[test]
