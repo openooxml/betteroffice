@@ -636,7 +636,10 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
         if segments.is_empty() && !checkpoints.is_empty() {
             let reservations = paginator.snapshot_geometry().footnote_reserved_heights;
             for checkpoint in &mut checkpoints {
-                checkpoint.flow.footnote_reserved_heights.clone_from(&reservations);
+                checkpoint
+                    .flow
+                    .footnote_reserved_heights
+                    .clone_from(&reservations);
             }
         }
         let convergence = ConvergenceInput {
