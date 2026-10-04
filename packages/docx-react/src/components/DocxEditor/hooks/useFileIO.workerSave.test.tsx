@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useCallback, useRef, useState } from 'react';
 import JSZip from 'jszip';
+import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '@betteroffice/docx/docx/rezip/parts';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import * as yrs from '@betteroffice/docx/yrs';
@@ -68,7 +69,33 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function workerOpened(viewer = true, workerProposals = false) {
+function zeroLengthBodyComment(): Uint8Array {
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const office = 'application/vnd.openxmlformats-officedocument';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const paragraph = (id: string, text: string) =>
+    `<w:p w14:paraId="${id}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const parts: PartsMap = new Map();
+  const set = (name: string, content: string) => parts.set(name, toBytes(content));
+  set('[Content_Types].xml',
+    `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${office}.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${office}.wordprocessingml.header+xml"/><Override PartName="/word/comments.xml" ContentType="${office}.wordprocessingml.comments+xml"/></Types>`);
+  set('_rels/.rels',
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`);
+  set('word/_rels/document.xml.rels',
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${rel}/header" Target="header1.xml"/><Relationship Id="rIdC" Type="${rel}/comments" Target="comments.xml"/></Relationships>`);
+  set('word/comments.xml', `<w:comments ${ns}><w:comment w:id="1" w:author="Host" w:date="2026-09-29T12:00:00Z">` +
+    paragraph('0000C001', 'Zero-length comment') + '</w:comment></w:comments>');
+  set('word/header1.xml', `<w:hdr ${ns}>${paragraph('0000A001', 'Header text')}</w:hdr>`);
+  set('word/document.xml', `<w:document ${ns} xmlns:r="${rel}"><w:body>` +
+    '<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/>' +
+    '<w:r><w:commentReference w:id="1"/><w:t>Alpha beta gamma.</w:t></w:r></w:p>' +
+    paragraph('0000B002', 'Delta epsilon zeta.') + paragraph('0000B003', 'Eta theta iota.') +
+    '<w:sectPr><w:headerReference w:type="default" r:id="rIdH1"/></w:sectPr></w:body></w:document>');
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+async function workerOpened(viewer = true, workerProposals = false, source: Uint8Array = bytes) {
   let client!: ResidentEngineWorkerClient;
   const open = ResidentEngineWorkerClient.prototype.open;
   const capture = spyOn(ResidentEngineWorkerClient.prototype, 'open').mockImplementation(function (
@@ -91,7 +118,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
     }, [renderer.openInWorker]);
     const [host, setHost] = useState<YrsDocxHost | null>(null);
     const [renderedFrame, setRenderedFrame] = useState<object | null>(null);
-    const core = useYrsCoreSession(true, host?.document ?? null, null, bytes, generation, undefined, {
+    const core = useYrsCoreSession(true, host?.document ?? null, null, source, generation, undefined, {
       onSession: (session) => {
         renderer.recordSession(session);
         const open = session.openDocx.bind(session);
@@ -121,6 +148,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
         await awaitWorkerOpenReplica(core.session!);
         await flush();
       },
+      syncYrsInputState: (_sync: boolean, stories: string[]) => core.publishDirectInput(stories),
       getDocument: () => {
         project();
         return core.documentFromYrs();
@@ -130,7 +158,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
       pagedEditorRef,
       viewerSession: viewer,
       resolveImage: () => null,
-      comments: [],
+      comments: host?.document.package.document.comments ?? [],
       documentName: undefined,
       onSave: (buffer) => saved.push(buffer),
       downloadOnSave: false,
@@ -168,6 +196,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
       tableSelection: { state: { tableIndex: null } } as never,
     });
     const ref = useRef<DocxEditorRef>(null);
+    const allowHostProposalsRef = useRef(false);
     useDocxEditorRefApi({
       ref,
       experimentalWorkerOpen: true,
@@ -181,7 +210,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {},
       loadBuffer: async () => {},
-      comments: [],
+      comments: host?.document.package.document.comments ?? [],
       setComments: () => {},
       setShowCommentsSidebar: () => {},
       contentChangeSubscribersRef: { current: new Set() },
@@ -190,7 +219,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
       commentIdAllocator: createCommentIdAllocator(),
       commands: controller.store,
       modeRef: { current: viewer ? 'viewing' : 'editing' },
-      allowHostProposalsRef: { current: false },
+      allowHostProposalsRef,
       hostSearch: {
         search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
         searchNext: () => null,
@@ -201,7 +230,7 @@ async function workerOpened(viewer = true, workerProposals = false) {
         onSearchChange: () => () => {},
       },
     });
-    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, setRenderedFrame };
+    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, setRenderedFrame, allowHostProposalsRef };
   }, { initialProps: 1 });
   try {
     await waitFor(() => expect(hook.result.current.core.session).not.toBeNull());
@@ -232,6 +261,7 @@ async function layOut(opened: Awaited<ReturnType<typeof workerOpened>>) {
 test.each(['save', 'download', 'ref'] as const)('viewer %s saves in the worker without starting its replica', async (kind) => {
   const opened = await workerOpened();
   const { io, ref } = opened.hook.result.current;
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
   const buffer = kind === 'ref' ? await ref.current!.save()
     : kind === 'download' ? await io.handleDownloadDocument() : await io.handleSave();
   expect(kind === 'download' ? buffer : buffer instanceof ArrayBuffer).toBe(kind === 'download' ? 'saved' : true);
@@ -243,6 +273,71 @@ test.each(['save', 'download', 'ref'] as const)('viewer %s saves in the worker w
   expect(opened.opens).toEqual([]);
   expect(opened.saved).toHaveLength(1);
   expect(opened.errors).toEqual([]);
+  expect(save.mock.calls[0]![0]).not.toHaveProperty('stories');
+  expect(save.mock.calls[0]![1]).toBeUndefined();
+  save.mockRestore();
+});
+
+test.each(['worker', 'loaded copy'] as const)('a viewer with a loaded copy preserves body comment markers after a %s header proposal and margin change', async (owner) => {
+  const opened = await workerOpened(true, true, zeroLengthBodyComment());
+  await layOut(opened);
+  act(() => opened.hook.result.current.setRenderedFrame({}));
+  await waitFor(() => expect(opened.hook.result.current.core.workerProposalsReady).toBe(true));
+  opened.hook.result.current.allowHostProposalsRef.current = true;
+  const propose = async () => {
+    await act(async () => {
+      expect(await opened.hook.result.current.ref.current!.proposeChanges({
+        expectVersion: opened.session.version(),
+        proposals: [{
+          id: 'header-proposal',
+          paragraph: {
+            kind: 'persisted', story: { kind: 'header', partUri: '/word/header1.xml' }, paraId: '0000A001',
+          },
+          suggest: { author: 'Host', date: '2026-09-29T12:00:00Z' },
+          op: 'replaceText', search: 'Header', replaceWith: 'Changed header',
+        }],
+      })).toMatchObject({
+        ok: true,
+        snapshot: { proposals: [{ changed: true, paragraph: { story: 'hf:rIdH1' } }] },
+      });
+    });
+  };
+  if (owner === 'worker') await propose();
+  await act(async () => { await opened.hook.result.current.ref.current!.flushPendingInput(); });
+  expect(opened.hook.result.current.core.replicaReady).toBe(true);
+  expect(opened.hook.result.current.pagedEditorRef.current!.isWorkerViewer()).toBe(true);
+  expect(opened.session.listComments()).toEqual([]);
+  if (owner === 'loaded copy') await propose();
+  const body = opened.hook.result.current.host!.document.package.document;
+  body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+  const posted = opened.worker.requests.length;
+  const flushed = opened.flush.mock.calls.length;
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  const clientSave = spyOn(opened.client, 'save');
+  try {
+    const buffer = await opened.hook.result.current.io.handleSave();
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    expect(save.mock.calls).toHaveLength(1);
+    expect(save.mock.calls[0]![0].stories).toEqual(['hf:rIdH1']);
+    expect(save.mock.calls[0]![1]).toBe(opened.session);
+    expect(clientSave.mock.calls[0]![0].stateVector).toBeInstanceOf(Uint8Array);
+    const zip = await JSZip.loadAsync(buffer!);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:commentRangeStart\b[^>]*\bw:id="1"/);
+    expect(xml).toMatch(/<w:commentRangeEnd\b[^>]*\bw:id="1"/);
+    expect(xml).toContain('w:top="2000"');
+    expect(await zip.file('word/header1.xml')!.async('string')).toContain('Changed header');
+    expect(await zip.file('word/comments.xml')!.async('string')).toMatch(/<w:comment\b[^>]*\bw:id="1"/);
+    expect(opened.flush.mock.calls).toHaveLength(flushed + 1);
+    expect(opened.worker.requests.slice(posted)).not.toContain('encodeState');
+    expect(opened.session.encodeStateVector()).toEqual(opened.worker.sessions[0]!.encodeStateVector());
+    expect(opened.opens).toEqual([false]);
+    expect(opened.project).not.toHaveBeenCalled();
+    expect(opened.errors).toEqual([]);
+  } finally {
+    clientSave.mockRestore();
+    save.mockRestore();
+  }
 });
 
 test.each(['command', 'shortcut'] as const)('viewer %s saves through the worker without starting the replica', async (kind) => {
@@ -571,6 +666,32 @@ test('a loaded peer with an empty diff posts only save', async () => {
   const posted = opened.worker.requests.length;
   expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
   expect(opened.worker.requests.slice(posted)).toEqual(['save']);
+});
+
+test('a viewer saves without a peer while its requested copy is still loading', async () => {
+  const opened = await workerOpened();
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  opened.worker.hold();
+  try {
+    const ready = requestWorkerOpenReplica(opened.session);
+    await waitFor(() => expect(opened.worker.requests).toContain('encodeState'));
+    expect(workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.hook.result.current.core.replicaReady).toBe(false);
+    const saving = opened.hook.result.current.io.handleSave();
+    await waitFor(() => expect(opened.worker.requests).toContain('save'));
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('stories');
+    expect(save.mock.calls[0]![1]).toBeUndefined();
+    expect(opened.flush).not.toHaveBeenCalled();
+    await act(async () => {
+      opened.worker.release();
+      await ready;
+      expect(await saving).toBeInstanceOf(ArrayBuffer);
+    });
+    expect(opened.errors).toEqual([]);
+  } finally {
+    opened.worker.release();
+    save.mockRestore();
+  }
 });
 
 test('an editor waits for an in-flight peer load before flushing and saving', async () => {

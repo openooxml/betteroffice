@@ -17,6 +17,7 @@ import { flushedSession } from '../editorBatches';
 import {
   awaitWorkerOpenReplica,
   requestWorkerOpenReplica,
+  workerOpenReplicaLoadedVersion,
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
@@ -58,7 +59,7 @@ async function saveWithWorker(
   assertCurrent: () => void
 ): Promise<ArrayBuffer | null> {
   let peer: YrsSession | undefined;
-  if (!viewer && workerOpenReplicaStarted(session)) {
+  if (viewer ? workerOpenReplicaLoadedVersion(session) !== undefined : workerOpenReplicaStarted(session)) {
     await awaitWorkerOpenReplica(session);
     peer = (await flushedSession(pagedEditorRef)).session;
     assertCurrent();
