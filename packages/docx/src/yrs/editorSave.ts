@@ -11,7 +11,12 @@ import { captureSessionSave, writeSessionSave, type DocxSessionSave } from './sa
 import { sessionSourcePackage } from './sessionInternals';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 
-export { DirtyProjectionStories, dirtyProjectionStory, proposalProjectionStories } from './dirtyProjectionStories';
+export {
+  DirtyProjectionStories,
+  dirtyProjectionStory,
+  EditorDirtyStories,
+  proposalProjectionStories,
+} from './dirtyProjectionStories';
 
 /** What the editor's earlier saves of a session leave for its next save. @internal */
 export interface EditorSaveRecord {

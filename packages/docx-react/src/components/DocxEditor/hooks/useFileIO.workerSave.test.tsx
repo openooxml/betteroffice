@@ -385,6 +385,26 @@ test.each(['getDocument', 'fallback'] as const)('%s keeps body edits after a wor
   expect(opened.errors).toEqual([]);
 });
 
+test('a worker save after getDocument with no later edit projects every story', async () => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  const { core, pagedEditorRef, io, workerDocument } = opened.hook.result.current;
+  const body = opened.session.paragraphs('body')[0]!;
+  opened.session.insertText({ story: 'body', paraId: body.paraId, offset: 0 }, 'Body edit ');
+  core.publishDirectInput('body');
+  expect(pagedEditorRef.current!.getDocument()).not.toBeNull();
+  const save = spyOn(workerDocument.current!, 'save');
+  try {
+    const buffer = await io.handleSave();
+    expect(save.mock.calls[0]![0].stories).toEqual([]);
+    const zip = await JSZip.loadAsync(buffer!);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('Body edit ');
+    expect(opened.errors).toEqual([]);
+  } finally {
+    save.mockRestore();
+  }
+});
+
 test('an unavailable worker save preserves peer stories for the main-thread fallback', async () => {
   const opened = await workerOpened(false);
   await act(async () => { await requestWorkerOpenReplica(opened.session); });

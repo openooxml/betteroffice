@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { DirtyProjectionStories } from './dirtyProjectionStories';
+import { DirtyProjectionStories, EditorDirtyStories } from './dirtyProjectionStories';
 
 test('dirty projection stories select every story when empty and normalize nested edits', () => {
   const dirty = new DirtyProjectionStories();
@@ -25,4 +25,26 @@ test('a save snapshot keeps pending marks and preserves later edits to the same 
   expect(dirty.projectionOptions()?.storyIds).toEqual(new Set(['body', 'fn:1']));
   dirty.capture().clear();
   expect(dirty.projectionOptions()).toBeUndefined();
+});
+
+test('editor worker saves project every story after a main-thread projection with no later edit', () => {
+  const dirty = new EditorDirtyStories();
+  dirty.add('body');
+  const first = dirty.captureWorkerSave();
+  expect(first.stories).toEqual(['body']);
+  dirty.add('hf:rId7');
+  dirty.projected();
+  first.clear();
+  expect(dirty.projection.projectionOptions()).toBeUndefined();
+  expect(dirty.captureWorkerSave().stories).toEqual([]);
+  dirty.add('fn:1');
+  expect(dirty.projection.projectionOptions()?.storyIds).toEqual(new Set(['fn:1']));
+  const second = dirty.captureWorkerSave();
+  expect(second.stories).toEqual(['hf:rId7', 'fn:1']);
+  second.clear();
+  dirty.add('body');
+  expect(dirty.captureWorkerSave().stories).toEqual(['body']);
+  dirty.clear();
+  expect(dirty.captureWorkerSave().stories).toEqual([]);
+  expect(dirty.projection.projectionOptions()).toBeUndefined();
 });

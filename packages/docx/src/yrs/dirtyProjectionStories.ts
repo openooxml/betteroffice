@@ -38,6 +38,49 @@ export class DirtyProjectionStories {
   }
 }
 
+/**
+ * @internal
+ * Dirty stories of an editor that keeps a main-thread projection cache and saves in the worker.
+ * A worker save projects the stories the main-thread save would project at the same point.
+ */
+export class EditorDirtyStories {
+  /** Stories changed since the main-thread projection cache last advanced. */
+  readonly projection = new DirtyProjectionStories();
+  private readonly workerSave = new DirtyProjectionStories();
+  private projections = 0;
+  private savedAtProjection = 0;
+
+  add(story: string): void {
+    this.projection.add(story);
+    this.workerSave.add(story);
+  }
+
+  /** The main-thread projection cache advanced over `projection`'s stories. */
+  projected(): void {
+    this.projection.clear();
+    this.projections++;
+  }
+
+  captureWorkerSave(): { stories: string[]; clear(): void } {
+    const captured = this.workerSave.capture();
+    const projections = this.projections;
+    const every = projections !== this.savedAtProjection && this.projection.projectionOptions() === undefined;
+    return {
+      stories: every ? [] : captured.stories,
+      clear: () => {
+        captured.clear();
+        this.savedAtProjection = projections;
+      },
+    };
+  }
+
+  clear(): void {
+    this.projection.clear();
+    this.workerSave.clear();
+    this.savedAtProjection = this.projections;
+  }
+}
+
 /** @internal */
 export function proposalProjectionStories(
   known: ReadonlySet<string>,

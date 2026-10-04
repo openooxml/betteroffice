@@ -8,7 +8,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { DirtyProjectionStories, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import { EditorDirtyStories, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -319,13 +319,9 @@ export function useYrsCoreSession(
   const mediaTokensRef = useRef(options?.mediaTokens);
   mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
-  const projectionStoriesRef = useRef(new DirtyProjectionStories());
-  const workerSaveStoriesRef = useRef(new DirtyProjectionStories());
+  const dirtyStoriesRef = useRef(new EditorDirtyStories());
   const markProjectionStories = useCallback((stories: readonly string[]): void => {
-    for (const story of stories) {
-      projectionStoriesRef.current.add(story);
-      workerSaveStoriesRef.current.add(story);
-    }
+    for (const story of stories) dirtyStoriesRef.current.add(story);
   }, []);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
@@ -418,8 +414,7 @@ export function useYrsCoreSession(
     let openedWorker: WorkerOpenedDocument | null = null;
     let unregisterSave: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
-    projectionStoriesRef.current.clear();
-    workerSaveStoriesRef.current.clear();
+    dirtyStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
     let abandoned = false;
@@ -653,7 +648,7 @@ export function useYrsCoreSession(
               save: async (comments, peer) => {
                 if (stale()) throw new Error('The document changed while saving');
                 const currentHost = documentRef.current ?? host?.document;
-                const dirty = peer ? workerSaveStoriesRef.current.capture() : undefined;
+                const dirty = peer ? dirtyStoriesRef.current.captureWorkerSave() : undefined;
                 const saved = await worker.save({
                   comments,
                   ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
@@ -810,8 +805,7 @@ export function useYrsCoreSession(
         if (opened) {
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
-          projectionStoriesRef.current.clear();
-          workerSaveStoriesRef.current.clear();
+          dirtyStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
           previewingRef.current = false;
           retiringRef.current = opened.session;
@@ -856,8 +850,7 @@ export function useYrsCoreSession(
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
-      projectionStoriesRef.current.clear();
-      workerSaveStoriesRef.current.clear();
+      dirtyStoriesRef.current.clear();
     };
   }, [
     enabled,
@@ -1089,13 +1082,13 @@ export function useYrsCoreSession(
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
-      const dirtyStories = projectionStoriesRef.current;
+      const dirtyStories = dirtyStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.projectionOptions()
+        dirtyStories.projection.projectionOptions()
       );
-      dirtyStories.clear();
+      dirtyStories.projected();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {

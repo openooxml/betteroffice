@@ -151,6 +151,7 @@ export { sessionSourcePackage } from './sessionInternals';
 export {
   DirtyProjectionStories,
   dirtyProjectionStory,
+  EditorDirtyStories,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   proposalProjectionStories,
