@@ -131,7 +131,7 @@ describe('presentation sessions', () => {
       expect(foundVersion).not.toBe(mainFoundVersion);
       expect(matches).toEqual(mainMatches);
       expect(await worker.save()).toEqual(main.save());
-      expect(new Uint8Array(await worker.call.save())).toEqual(main.save());
+      expect<Uint8Array>(new Uint8Array(await worker.call.save())).toEqual(main.save());
       expect(worker.state).toMatchObject({ version: 1, dirty: true });
     } finally {
       main.dispose();
@@ -298,8 +298,8 @@ describe('presentation sessions', () => {
         expect(transferred).toHaveLength(2);
         expect(transferred.every((buffer) => buffer.byteLength === 0)).toBe(true);
         expect(source.byteLength).toBe(fixture.byteLength + (asView ? 16 : 0));
-        expect(new Uint8Array(document)).toEqual(fixture);
-        expect(face).toEqual(fontBytes);
+        expect<Uint8Array>(new Uint8Array(document)).toEqual(fixture);
+        expect<Uint8Array>(face).toEqual(fontBytes);
         expect(await worker.save()).toEqual(saved);
       } finally { await worker.dispose(); }
     }
