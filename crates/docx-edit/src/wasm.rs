@@ -48,6 +48,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use js_sys::{Function, Uint8Array};
+use ooxml_opc::PackageBytes;
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
@@ -1210,7 +1211,7 @@ pub struct EditSession {
     engine: EngineSession,
     /// This session's measurement fonts; see the module docs.
     fonts: docx_layout::MeasureFonts,
-    docx_source: RefCell<Option<Arc<[u8]>>>,
+    docx_source: RefCell<Option<PackageBytes>>,
     /// The [`crate::seed::package_digest`] of `docx_source`, when known.
     docx_digest: RefCell<Option<String>>,
     awaiting_comment_baseline: Cell<bool>,
@@ -1334,18 +1335,46 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
 }
 
 impl EditSession {
-    fn open_docx_inner(
+    pub fn seed_from_docx(
         &self,
         bytes: &[u8],
+        generation: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.open_docx_inner(bytes.into(), true, generation.as_deref(), None)
+    }
+
+    pub fn open_docx(
+        &self,
+        bytes: &[u8],
+        seed_stories: bool,
+        generation: Option<String>,
+        digest: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.open_docx_inner(
+            bytes.into(),
+            seed_stories,
+            generation.as_deref(),
+            digest.as_deref(),
+        )
+    }
+
+    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
+        self.open_preview_source(bytes, blocks as usize)
+            .map_err(|error| js_err(&error))
+    }
+
+    fn open_docx_inner(
+        &self,
+        bytes: PackageBytes,
         seed_stories: bool,
         generation: Option<&str>,
         digest: Option<&str>,
     ) -> Result<String, JsValue> {
-        self.open_docx_retaining(bytes, seed_stories, generation, digest)
+        self.open_docx_retaining_source(bytes, seed_stories, generation, digest)
             .map_err(|error| js_err(&error))
     }
 
-    /// Opens `bytes`, retaining them and their digest only once opening succeeds.
+    #[cfg(test)]
     fn open_docx_retaining(
         &self,
         bytes: &[u8],
@@ -1353,13 +1382,23 @@ impl EditSession {
         generation: Option<&str>,
         digest: Option<&str>,
     ) -> Result<String, String> {
-        let source: Arc<[u8]> = Arc::from(bytes);
+        self.open_docx_retaining_source(bytes.into(), seed_stories, generation, digest)
+    }
+
+    /// Opens `source`, retaining it and its digest only once opening succeeds.
+    fn open_docx_retaining_source(
+        &self,
+        source: PackageBytes,
+        seed_stories: bool,
+        generation: Option<&str>,
+        digest: Option<&str>,
+    ) -> Result<String, String> {
         let digest = match digest {
             Some(digest) => crate::seed::checked_package_digest(digest)?,
-            None => crate::seed::package_digest(bytes),
+            None => crate::seed::package_digest(&source),
         };
         let (envelope, parts, media) =
-            crate::seed::parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
+            crate::seed::parse_docx_package_with_media(source.clone(), digest.clone())?;
         let host_envelope = thin_docx_envelope(&envelope);
         let fonts = if seed_stories {
             let seed_media = if self.media_tokens.get() {
@@ -1374,7 +1413,7 @@ impl EditSession {
                 self.engine.doc(),
                 envelope,
                 parts,
-                Arc::clone(&source),
+                source.clone(),
                 digest.clone(),
                 seed_media,
             )
@@ -1385,7 +1424,7 @@ impl EditSession {
             fonts
         } else {
             let (mut metadata, index, fonts) =
-                crate::seed::replica_source(envelope, parts, Arc::clone(&source), digest.clone())?;
+                crate::seed::replica_source(envelope, parts, source.clone(), digest.clone())?;
             metadata.watch_comments(self.engine.doc());
             self.engine.doc().install_source(metadata, js_entropy());
             self.awaiting_comment_baseline.set(true);
@@ -1415,14 +1454,22 @@ impl EditSession {
         Ok(json)
     }
 
+    #[cfg(test)]
     fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<Option<String>, String> {
+        self.open_preview_source(bytes, blocks)
+    }
+
+    fn open_preview_source(
+        &self,
+        bytes: impl Into<PackageBytes>,
+        blocks: usize,
+    ) -> Result<Option<String>, String> {
         // A preview holds a cut of the document and must never be saved, so
         // it only opens into a session with nothing to save.
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let Some((envelope, media)) = crate::seed::parse_docx_preview(Arc::from(bytes), blocks)?
-        else {
+        let Some((envelope, media)) = crate::seed::parse_docx_preview(bytes.into(), blocks)? else {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
@@ -2286,12 +2333,13 @@ impl EditSession {
     }
 
     /// [`EditSession::open_docx`] with seeding always on.
-    pub fn seed_from_docx(
+    #[wasm_bindgen(js_name = seed_from_docx)]
+    pub fn seed_from_docx_owned(
         &self,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         generation: Option<String>,
     ) -> Result<String, JsValue> {
-        self.open_docx_inner(bytes, true, generation.as_deref(), None)
+        self.open_docx_inner(bytes.into(), true, generation.as_deref(), None)
     }
 
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
@@ -2323,15 +2371,16 @@ impl EditSession {
     /// readable DOCX.
     /// `digest`, when given, must be the SHA-256 of `bytes` in lowercase hex,
     /// as a host that hashed them off this thread already knows it.
-    pub fn open_docx(
+    #[wasm_bindgen(js_name = open_docx)]
+    pub fn open_docx_owned(
         &self,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         seed_stories: bool,
         generation: Option<String>,
         digest: Option<String>,
     ) -> Result<String, JsValue> {
         self.open_docx_inner(
-            bytes,
+            bytes.into(),
             seed_stories,
             generation.as_deref(),
             digest.as_deref(),
@@ -2345,8 +2394,13 @@ impl EditSession {
     /// it cannot save.
     /// Opens nothing and replies with nothing for a document the preview
     /// refuses, which opens with [`EditSession::open_docx`] instead.
-    pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
-        self.open_preview(bytes, blocks as usize)
+    #[wasm_bindgen(js_name = open_docx_preview)]
+    pub fn open_docx_preview_owned(
+        &self,
+        bytes: Vec<u8>,
+        blocks: u32,
+    ) -> Result<Option<String>, JsValue> {
+        self.open_preview_source(bytes, blocks as usize)
             .map_err(|error| js_err(&error))
     }
 
@@ -4180,7 +4234,7 @@ impl EditSession {
         .map_err(js_err)?;
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
-            self.docx_source.replace(Some(Arc::from(original)));
+            self.docx_source.replace(Some(PackageBytes::from(original)));
             self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));
         }
@@ -4976,6 +5030,109 @@ pub fn render_docx_markdown_with_pages_json(
 mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
+
+    #[test]
+    fn owned_full_open_keeps_input_allocation_and_matches_borrowed_open() {
+        for seed_stories in [false, true] {
+            let bytes = unidentified_docx("雪 &amp; café & 🦀");
+            let borrowed = EditSession::new(74.0).unwrap();
+            let expected = borrowed
+                .open_docx(&bytes, seed_stories, Some("fixed".to_owned()), None)
+                .unwrap();
+            let owned = EditSession::new(74.0).unwrap();
+            let pointer = bytes.as_ptr();
+            let actual = owned
+                .open_docx_owned(bytes, seed_stories, Some("fixed".to_owned()), None)
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(owned.encode_state(), borrowed.encode_state());
+            assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
+            assert_eq!(
+                owned.materialize_docx().unwrap(),
+                borrowed.materialize_docx().unwrap()
+            );
+            assert_eq!(owned.media_sources_json(), borrowed.media_sources_json());
+            assert_eq!(
+                owned.docx_source.borrow().as_ref().unwrap().as_ptr(),
+                pointer
+            );
+            assert_eq!(
+                owned.engine.doc().source_index().unwrap().bytes().as_ptr(),
+                pointer
+            );
+        }
+        let bytes = batch_docx();
+        let borrowed = EditSession::new(74.0).unwrap();
+        let expected = borrowed
+            .seed_from_docx(&bytes, Some("fixed".to_owned()))
+            .unwrap();
+        let owned = EditSession::new(74.0).unwrap();
+        let pointer = bytes.as_ptr();
+        let actual = owned
+            .seed_from_docx_owned(bytes, Some("fixed".to_owned()))
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(owned.encode_state(), borrowed.encode_state());
+        assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
+        assert_eq!(
+            owned.docx_source.borrow().as_ref().unwrap().as_ptr(),
+            pointer
+        );
+    }
+
+    #[test]
+    fn owned_preview_open_matches_borrowed_open() {
+        for blocks in [1, 2, 3] {
+            let bytes = batch_docx();
+            let borrowed = EditSession::new(74.0).unwrap();
+            let expected = borrowed.open_docx_preview(&bytes, blocks).unwrap();
+            let owned = EditSession::new(74.0).unwrap();
+            let actual = owned.open_docx_preview_owned(bytes, blocks).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(owned.encode_state(), borrowed.encode_state());
+            assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
+            assert_eq!(
+                owned.materialize_docx().unwrap(),
+                borrowed.materialize_docx().unwrap()
+            );
+        }
+        let bytes = script_fonts_docx(
+            r#"<w:p><w:r><w:t>First</w:t></w:r></w:p><w:sectPr><w:cols w:num="2"/></w:sectPr>"#,
+            "",
+        );
+        let borrowed = EditSession::new(74.0).unwrap();
+        let owned = EditSession::new(74.0).unwrap();
+        let expected = borrowed.open_docx_preview(&bytes, 1).unwrap();
+        assert!(expected.is_none());
+        assert_eq!(owned.open_docx_preview_owned(bytes, 1).unwrap(), expected);
+        assert_eq!(owned.encode_state(), borrowed.encode_state());
+        assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
+    }
+
+    #[test]
+    fn owned_open_matches_borrowed_validation_errors() {
+        for bytes in [Vec::new(), b"not a zip".to_vec(), batch_docx()] {
+            for digest in [None, Some("malformed")] {
+                let borrowed = EditSession::new(74.0).unwrap();
+                let owned = EditSession::new(74.0).unwrap();
+                assert_eq!(
+                    owned.open_docx_retaining_source(
+                        bytes.clone().into(),
+                        true,
+                        Some("fixed"),
+                        digest
+                    ),
+                    borrowed.open_docx_retaining(&bytes, true, Some("fixed"), digest)
+                );
+                assert_eq!(owned.encode_state(), borrowed.encode_state());
+                assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
+                assert_eq!(
+                    owned.open_preview_source(b"not a zip".to_vec(), 1),
+                    borrowed.open_preview(b"not a zip", 1)
+                );
+            }
+        }
+    }
 
     #[test]
     fn seeded_docx_retains_original_images_for_materialization_and_save() {
