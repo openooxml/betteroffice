@@ -2422,6 +2422,79 @@ fn compact_region_placements(
     Ok(())
 }
 
+fn region_options_match_except_reservations(
+    previous: &serde_json::Value,
+    next: &serde_json::Value,
+) -> bool {
+    previous
+        .as_object()
+        .zip(next.as_object())
+        .is_some_and(|(previous, next)| {
+            previous.iter().chain(next.iter()).all(|(key, _)| {
+                key == "footnoteReservedHeights" || previous.get(key) == next.get(key)
+            })
+        })
+}
+
+fn region_reservation_restart_index(
+    input: &LayoutInput,
+    retained: &RegionPlacementState,
+    dirty: usize,
+) -> Option<usize> {
+    let previous = retained
+        .checkpoints
+        .first()?
+        .flow
+        .footnote_reserved_heights
+        .as_deref();
+    let next = input.options.footnote_reserved_heights.as_ref();
+    if previous == next {
+        return Some(dirty);
+    }
+    let reservation = |heights: Option<&BTreeMap<String, f64>>, page: u32| {
+        heights
+            .and_then(|heights| heights.get(&page.to_string()).copied())
+            .unwrap_or(0.0)
+    };
+    let changed_page = previous
+        .into_iter()
+        .flat_map(|heights| heights.keys())
+        .chain(next.into_iter().flat_map(|heights| heights.keys()))
+        .filter_map(|key| key.parse::<u32>().ok())
+        .filter(|&page| page > 0 && reservation(previous, page) != reservation(next, page))
+        .min();
+    let Some(changed_page) = changed_page else {
+        return Some(dirty);
+    };
+    let page = retained
+        .layout
+        .pages
+        .iter()
+        .find(|page| page.number == changed_page)?;
+    let mut first = input.measured.len();
+    for fragment in &page.fragments {
+        let id = match fragment {
+            Fragment::Paragraph(fragment) => &fragment.block_id,
+            Fragment::Table(fragment) => &fragment.block_id,
+            Fragment::Image(fragment) => &fragment.block_id,
+            Fragment::TextBox(fragment) => &fragment.block_id,
+            Fragment::Shape(fragment) => &fragment.block_id,
+            Fragment::Chart(fragment) => &fragment.block_id,
+        };
+        let mut matching = input
+            .measured
+            .iter()
+            .enumerate()
+            .filter(|(_, measured)| fragment_identity(&measured.block) == Some(id));
+        let (index, _) = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        first = first.min(index);
+    }
+    (first < input.measured.len()).then_some(dirty.min(first))
+}
+
 fn place_region_pass(
     input: &mut LayoutInput,
     fingerprints: &[Fingerprint],
@@ -2447,6 +2520,19 @@ fn place_region_pass(
                 .previous
                 .iter()
                 .position(|pass| pass.phase == phase && pass.options == options)
+                .map(|index| passes.previous.remove(index))
+        })
+        .or_else(|| {
+            if phase != RegionPlacementPhase::Body {
+                return None;
+            }
+            passes
+                .previous
+                .iter()
+                .position(|pass| {
+                    pass.phase == phase
+                        && region_options_match_except_reservations(&pass.options, &options)
+                })
                 .map(|index| passes.previous.remove(index))
         });
     let mut incremental = false;
@@ -2477,14 +2563,23 @@ fn place_region_pass(
                 fingerprints,
                 dirty,
             );
-            match docx_layout::place::layout_document_incremental_ranges(
-                input,
-                &mut retained.layout,
-                &retained.checkpoints,
-                &retained.fingerprints,
-                fingerprints,
-                dirty,
-            ) {
+            let run = region_reservation_restart_index(input, &retained, dirty)
+                .ok_or_else(|| {
+                    docx_layout::LayoutError::Unsupported(
+                        "missing reservation page block".to_owned(),
+                    )
+                })
+                .and_then(|dirty| {
+                    docx_layout::place::layout_document_incremental_ranges(
+                        input,
+                        &mut retained.layout,
+                        &retained.checkpoints,
+                        &retained.fingerprints,
+                        fingerprints,
+                        dirty,
+                    )
+                });
+            match run {
                 Ok(run) => {
                     incremental = true;
                     run
@@ -16043,9 +16138,7 @@ mod tests {
                 let mut content = preview_fixture::run(&format!("Paragraph {index}"));
                 if index == 0 || index == 32 {
                     let id = if index == 0 { 5 } else { 6 };
-                    content.push_str(&format!(
-                        r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#
-                    ));
+                    content.push_str(&format!(r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#));
                 }
                 let paragraph = preview_pagination_paragraph(index, &content);
                 if index == 31 {

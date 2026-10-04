@@ -275,7 +275,21 @@ impl Paginator {
         section_index: usize,
         footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     ) -> Result<Self, LayoutError> {
-        if geometry.footnote_reserved_heights.as_deref() != footnote_reserved_heights.as_ref() {
+        let previous = geometry.footnote_reserved_heights.as_deref();
+        let next = footnote_reserved_heights.as_ref();
+        let reservation = |heights: Option<&std::collections::BTreeMap<String, f64>>, page: u32| {
+            heights
+                .and_then(|heights| heights.get(&page.to_string()).copied())
+                .unwrap_or(0.0)
+        };
+        if previous
+            .into_iter()
+            .flat_map(|heights| heights.keys())
+            .chain(next.into_iter().flat_map(|heights| heights.keys()))
+            .filter_map(|key| key.parse::<u32>().ok())
+            .filter(|&page| page > 0 && page <= start_page_number)
+            .any(|page| reservation(previous, page) != reservation(next, page))
+        {
             return Err(LayoutError::Unsupported(
                 "checkpoint note reservations changed".into(),
             ));
