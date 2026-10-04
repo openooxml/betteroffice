@@ -2,6 +2,7 @@ pub(crate) mod batch;
 mod staging;
 pub(crate) mod target;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, hash_map::Entry};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
@@ -309,6 +310,7 @@ pub struct Workbook {
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
+    recalculated_since_open: bool,
     moved_references_since_open: bool,
     active_sheet: SheetId,
     undo: UndoStack,
@@ -391,7 +393,7 @@ impl Workbook {
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, None)?;
-        workbook.recalculate_all(options);
+        workbook.recalculate(options);
         Ok(workbook)
     }
 
@@ -402,7 +404,7 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, Some(client_id))?;
-        workbook.recalculate_all(options);
+        workbook.recalculate(options);
         Ok(workbook)
     }
 
@@ -506,6 +508,7 @@ impl Workbook {
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
+            recalculated_since_open: false,
             moved_references_since_open: false,
             active_sheet,
             undo: UndoStack::new(),
@@ -874,6 +877,11 @@ impl Workbook {
                     },
                     self.active_sheet,
                 )?;
+                if parts.iter().all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
+                    && let Some(source) = &self.source_container
+                {
+                    return Ok(source.as_bytes().to_vec());
+                }
                 self.rezip(&parts)
             }
             None => self.rezip(&xlsx_parse::serialize_workbook_with_active_sheet(
@@ -907,7 +915,7 @@ impl Workbook {
             axes: &self.preserved.axes,
             calculation: &self.last_calculation,
             created: &self.preserved.created,
-            edited: self.edited_since_open,
+            edited: self.edited_since_open || self.recalculated_since_open,
             part_hashes: &self.source_part_hashes,
             sheet_ids: self.sheet_keys(),
         }
@@ -1451,9 +1459,17 @@ impl Workbook {
     /// reports about results: the cells left in a cycle or at a limit, or, on the first
     /// calculation, formulas the file stored no result for. One that moves none of these
     /// leaves it. Such a recalculation also notifies observers with an empty
-    /// [`UpdateOrigin::Recalculation`] event.
+    /// [`UpdateOrigin::Recalculation`] event. It counts as an edit, so the next save writes
+    /// the recalculated values; the recalculation at open does not.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
-        let first = !self.edited_since_open && self.has_uncached_source_formulas();
+        let result = self.recalculate(options);
+        self.edited_since_open = true;
+        result
+    }
+
+    fn recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
+        let first = !(self.edited_since_open || self.recalculated_since_open)
+            && self.has_uncached_source_formulas();
         let before = calculation_status(&self.last_calculation);
         let result = self.rebuild_and_recalculate(options);
         if !result.changed.is_empty() || first || calculation_status(&result) != before {
@@ -1514,6 +1530,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.undo.undo(&mut self.model)?;
+        self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
             self.preserved = history.before.clone();
@@ -1550,6 +1567,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.undo.redo(&mut self.model)?;
+        self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
             self.preserved = history.after.clone();
@@ -2440,7 +2458,7 @@ impl Workbook {
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
         self.bump_model_epoch();
-        self.edited_since_open = true;
+        self.recalculated_since_open = true;
         let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
         self.graph = Some(graph);
         let result = calculation_result(&result);
