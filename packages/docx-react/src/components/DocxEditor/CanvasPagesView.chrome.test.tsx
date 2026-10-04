@@ -738,7 +738,7 @@ for (const scenario of ['busy', 'no idle', 'dispose', 'dispose no idle', 'expiry
     const built = () => hosts.map((host) => host.textContent);
     const pages = blankPages(3, (index) => [{
       kind: 'text', x: 10, y: 10, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
-    }]);
+    } as unknown as DisplayPrimitive]);
     const rendered = renderInactiveMirrors(pages);
     const { unmount } = rendered;
     hosts = Array.from(rendered.container.querySelectorAll('.canvas-page-mirror'));
