@@ -18,7 +18,7 @@ use wasm_bindgen::prelude::*;
 mod retained;
 mod sanitize;
 
-pub use retained::RetainedPackage;
+pub use retained::{PackageBytes, RetainedPackage};
 
 pub use sanitize::{
     DocumentKind, DocumentKindError, detect_package_kind, sanitize_package,

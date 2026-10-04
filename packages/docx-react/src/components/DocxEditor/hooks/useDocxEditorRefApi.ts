@@ -193,26 +193,40 @@ const VIEWER_NAVIGATION = {
   scrollToCommentId: 'scrollToComment',
   scrollToChangeId: 'scrollToChange',
 } as const;
+const VIEWER_REF_REFUSALS = {
+  getEditorRef: null,
+  setParagraphStyle: false,
+  applyFormatting: false,
+  insertBreak: false,
+  addComment: null,
+  replyToComment: null,
+  insertComment: null,
+  insertCommentReply: null,
+  resolveComment: undefined,
+} as const;
 
 export function routeViewerRefAccess(
   api: DocxEditorRef,
   viewer: () => boolean,
-  viewerApi: Partial<DocxEditorRef> = {}
+  viewerApi: Partial<DocxEditorRef> = {},
+  refusing: () => boolean = viewer
 ): DocxEditorRef {
   const routed = { ...api };
-  const members = new Set([...Object.keys(DOCX_REF_ASYNC_TWINS), ...DOCX_REF_ASYNC_TWIN_EXEMPTIONS, ...Object.keys(viewerApi)]);
+  const members = new Set([...Object.keys(DOCX_REF_ASYNC_TWINS), ...DOCX_REF_ASYNC_TWIN_EXEMPTIONS, ...Object.keys(VIEWER_REF_REFUSALS), ...Object.keys(viewerApi)]);
   for (const name of members) {
     const member = name as keyof DocxEditorRef;
     const twin = member in DOCX_REF_ASYNC_TWINS
       ? DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS]
-      : member === 'getEditorRef' ? "the editor ref's members" : 'commands';
+      : member === 'getEditorRef' ? 'getParagraphIdentities, resolveParagraphAnchors, readParagraphs, readSelectionInfo, findParagraphs, exportStructuredWithPages or proposeChanges' : 'commands';
     const use = typeof twin === 'string' ? twin : twin.join(' or ');
     const navigation = VIEWER_NAVIGATION[member as keyof typeof VIEWER_NAVIGATION];
     Object.defineProperty(routed, member, {
       enumerable: true,
       value: (...args: unknown[]) => {
-        if (!viewer()) return Reflect.apply(api[member] as Function, api, args);
-        const behaviour = VIEWER_REF_ROUTING[member] === 'async-only' ? 'throws DocxAsyncOnlyError in viewer sessions'
+        const refusal = member in VIEWER_REF_REFUSALS;
+        if (!(refusal ? refusing() : viewer())) return Reflect.apply(api[member] as Function, api, args);
+        const behaviour = refusal ? `returns ${String(VIEWER_REF_REFUSALS[member as keyof typeof VIEWER_REF_REFUSALS])} in viewer sessions`
+          : VIEWER_REF_ROUTING[member] === 'async-only' ? 'throws DocxAsyncOnlyError in viewer sessions'
           : navigation ? 'starts async navigation and returns true in viewer sessions'
           : member === 'proposeChange' && viewerApi.proposeChange ? 'queues allowed host proposals through the worker in viewer sessions'
           : member === 'onContentChange' ? 'does not fire in viewer sessions'
@@ -220,6 +234,10 @@ export function routeViewerRefAccess(
           : 'keeps its synchronous behaviour in viewer sessions';
         if (member in DOCX_REF_ASYNC_TWINS || DOCX_REF_ASYNC_TWIN_EXEMPTIONS.has(member)) {
           warnDeprecatedViewerMember(member, behaviour, use);
+        }
+        if (refusal) {
+          const value = VIEWER_REF_REFUSALS[member as keyof typeof VIEWER_REF_REFUSALS];
+          return member === 'insertComment' || member === 'insertCommentReply' ? Promise.resolve(value) : value;
         }
         if (VIEWER_REF_ROUTING[member] === 'async-only') throw new DocxAsyncOnlyError(member, use);
         if (navigation) {
@@ -584,6 +602,7 @@ export function useDocxEditorRefApi({
   settledDisplayList,
   awaitingDocument,
   experimentalWorkerOpen = false,
+  viewerSession = false,
   hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
@@ -628,10 +647,13 @@ export function useDocxEditorRefApi({
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
+  viewerSession?: boolean;
   hostSearch: DocxHostSearch;
 }) {
   const proposalWarningRef = useRef(false);
   const proposalQueueRef = useRef(Promise.resolve());
+  const viewerSessionRef = useRef(viewerSession);
+  viewerSessionRef.current = viewerSession;
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
     () => ({
@@ -676,6 +698,7 @@ export function useDocxEditorRefApi({
   };
   const createApi = (): DocxEditorRef => {
     const viewer = () => isWorkerViewer(pagedEditorRef.current);
+    const refusing = () => viewerSessionRef.current || viewer();
     const flush = async () => {
       const result = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
       if (!result.ok && result.code !== 'editor-unavailable') throw result.error;
@@ -1108,7 +1131,7 @@ export function useDocxEditorRefApi({
         });
         return true;
       },
-    });
+    }, refusing);
   };
   useImperativeHandle(
     ref,
@@ -1128,6 +1151,7 @@ export function useDocxEditorRefApi({
       settledDisplayList,
       awaitingDocument,
       experimentalWorkerOpen,
+      viewerSession,
       hostSearch,
     ]
   );
