@@ -53,11 +53,7 @@ fn tail() -> String {
             paragraph(
                 &format!("{:08X}", 0x7100_0200 + id),
                 20,
-                if id == 0 {
-                    "<w:pageBreakBefore/>"
-                } else {
-                    ""
-                },
+                if id == 0 { "<w:pageBreakBefore/>" } else { "" },
                 &fixture::r("Tail"),
             )
         })
@@ -448,9 +444,7 @@ fn growing_a_multiline_note_keeps_its_reference_page_and_pushes_body_text() {
             > note_area(&before, 1)["height"].as_f64().unwrap()
     );
     assert!(
-        pages(&after)[2]["footnoteReservedHeight"]
-            .as_f64()
-            .unwrap()
+        pages(&after)[2]["footnoteReservedHeight"].as_f64().unwrap()
             > pages(&before)[2]["footnoteReservedHeight"]
                 .as_f64()
                 .unwrap()
