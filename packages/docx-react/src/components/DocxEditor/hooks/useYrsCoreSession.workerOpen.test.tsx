@@ -675,6 +675,73 @@ test("a worker save's own paragraph ID claims leave no story dirty for the next 
   expect(harness.errors).toEqual([]);
 }, 20_000);
 
+test('overlapping editor worker saves capture their stories in call order', async () => {
+  const { workers, posted, received, reply } = installWorker({ holdReply: (request) => request.type === 'save' });
+  const savedStories = () => posted.filter((request) => request.type === 'save').map((request) => request.stories);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const events: string[] = [];
+  const worker = workers[0]!;
+  const postMessage = worker.postMessage.bind(worker);
+  const send = spyOn(worker, 'postMessage').mockImplementation((request, transfer) => {
+    if (request.type === 'save') events.push('request');
+    postMessage(request, transfer);
+  });
+  try {
+    await act(async () => {
+      const save = workerOpenSave(session)!;
+      const first = save.save([], session).then((bytes) => {
+        events.push('resolved');
+        return bytes;
+      });
+      const second = save.save([], session);
+      const firstRequest = await received('save');
+      expect(savedStories()).toEqual([['body']]);
+      expect(events).toEqual(['request']);
+      reply(firstRequest);
+      const secondRequest = await received('save', firstRequest.id);
+      expect(events).toEqual(['request', 'resolved', 'request']);
+      expect(savedStories()).toEqual([['body'], []]);
+      reply(secondRequest);
+      for (const bytes of await Promise.all([first, second])) {
+        expect(bytes).toBeInstanceOf(ArrayBuffer);
+        expect(bytes.byteLength).toBeGreaterThan(0);
+      }
+    });
+    expect(harness.errors).toEqual([]);
+  } finally {
+    send.mockRestore();
+  }
+}, 20_000);
+
 test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   if (!document.fonts) Object.defineProperty(document, 'fonts', {

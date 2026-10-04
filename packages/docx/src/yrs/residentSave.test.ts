@@ -11,10 +11,12 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
   DirtyProjectionStories,
+  EditorDirtyStories,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   proposalProjectionStories,
   saveEditorDocument,
+  serialWorkerSaves,
 } from './editorSave';
 import type { DocxEditRequest } from './edits';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
@@ -641,6 +643,42 @@ describe('worker save', () => {
     const saved = await compareSave(opened);
     expect(commentMarkers(opened.bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
     expect(commentMarkers(saved, 1)).toEqual(commentMarkers(opened.bytes, 1));
+  }, TIMEOUT);
+
+  it('matches consecutive editor saves for overlapping worker saves after a header and host edit', async () => {
+    const opened = await open(zeroLengthBodyComment());
+    const peer = await peerReplica(opened);
+    expect(hostComments(opened).map((comment) => comment.id)).toEqual([1]);
+    expect(peer.listComments()).toEqual([]);
+    const editorStories = new EditorDirtyStories();
+    editHeader(peer);
+    editorStories.add('hf:rIdH1');
+    opened.replica.dirtyStories.add('hf:rIdH1');
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const save = serialWorkerSaves(editorStories);
+    const run = async (stories: string[]) => {
+      const saved = await opened.client.save({
+        comments: hostComments(opened), host: hostSaveMetadata(opened.host),
+        stories, stateVector: peer.encodeStateVector(),
+      });
+      editorStories.adoptWorkerSaveUpdates(() => {
+        for (const update of saved.updates) peer.applyUpdate(update);
+      });
+      return new Uint8Array(saved.bytes);
+    };
+    const [first, second] = await Promise.all([save(run), save(run)]);
+    const expectedFirst = await opened.replica.save(hostComments(opened));
+    const expectedSecond = await opened.replica.save(hostComments(opened));
+    expect(difference(first, expectedFirst)).toBeNull();
+    expect(first).toEqual(expectedFirst);
+    expect(commentMarkers(first, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    expect(difference(second, expectedSecond)).toBeNull();
+    expect(second).toEqual(expectedSecond);
+    expect(commentMarkers(expectedSecond, 1)).not.toContain('RangeStart');
+    expect(commentMarkers(expectedSecond, 1)).not.toContain('RangeEnd');
+    expect(commentMarkers(second, 1)).toEqual(commentMarkers(expectedSecond, 1));
   }, TIMEOUT);
 
   for (const owner of ['peer', 'worker'] as const) {

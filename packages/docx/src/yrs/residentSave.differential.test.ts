@@ -13,6 +13,7 @@ import {
   hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
+  serialWorkerSaves,
 } from './editorSave';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
 import type { DocxProposalInput, DocxProposalResult } from './proposals';
@@ -32,16 +33,32 @@ import { yrsToDocument } from './yrsToDocument';
  * Projection roots/empty-set fallback: DocxEditor/hooks/useYrsCoreSession.ts:1060-1098.
  */
 
-async function saveWorkerArm(arms: Arms) {
-  const dirty = arms.peer ? arms.editorStories.captureWorkerSave() : undefined;
-  arms.log.push(`worker save stories=${dirty ? JSON.stringify([...dirty.stories].sort()) : 'resident'}`);
-  const saved = await arms.client.save({
+async function saveWorkerArm(arms: Arms, oracle: () => Promise<Uint8Array>) {
+  if (arms.peer) return arms.workerSaves!(async (stories) => {
+    arms.log.push(`worker save stories=${JSON.stringify([...stories].sort())}`);
+    const actual = await arms.client.save({
+      comments: hostComments(arms.workerHost),
+      host: hostSaveMetadata(arms.workerHost),
+      stateVector: arms.peer!.encodeStateVector(), stories,
+    });
+    const expected = await oracle();
+    if (actual.updates.length !== 1) throw new Error('Editor save did not return exactly one diff');
+    arms.adoptingWorkerSaveUpdates = true;
+    try {
+      arms.editorStories.adoptWorkerSaveUpdates(() => {
+        for (const update of actual.updates) arms.peer!.applyUpdate(update);
+      });
+    } finally {
+      arms.adoptingWorkerSaveUpdates = false;
+    }
+    return { actual, expected };
+  });
+  arms.log.push('worker save stories=resident');
+  const actual = await arms.client.save({
     comments: hostComments(arms.workerHost),
     host: hostSaveMetadata(arms.workerHost),
-    ...(arms.peer && dirty ? { stateVector: arms.peer.encodeStateVector(), stories: dirty.stories } : {}),
   });
-  dirty?.clear();
-  return saved;
+  return { actual, expected: await oracle() };
 }
 
 const DATE = '2026-10-02T12:00:00Z';
@@ -54,7 +71,7 @@ type Story = (typeof STORIES)[number];
 type Topology = 'A/editor' | 'B/viewer';
 type Action =
   | 'insert' | 'split' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
-  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save';
+  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save' | 'overlapSave';
 interface Operation {
   action: Action;
   story: Story;
@@ -237,6 +254,7 @@ interface Arms {
   workerHost: Document;
   main: MainArm;
   editorStories: EditorDirtyStories;
+  workerSaves?: ReturnType<typeof serialWorkerSaves>;
   peer?: YrsSession;
   unsubscribe?: () => void;
   adoptingWorkerSaveUpdates: boolean;
@@ -282,7 +300,7 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
         ? (story) => editorStories.add(story) : undefined),
       editorStories,
       adoptingWorkerSaveUpdates: false, handbackRemoteUpdates: 0, otherRemoteUpdates: 0,
-      ...(topology === 'A/editor' ? { peer: session } : {}),
+      ...(topology === 'A/editor' ? { peer: session, workerSaves: serialWorkerSaves(editorStories) } : {}),
       commentStories: new Map<number, Story>([[1, 'body'], [2, 'hf:rIdH1']]),
       nextComment: 3, nextProposal: 1,
     };
@@ -604,12 +622,13 @@ function operations(topology: Topology, random: Random): Operation[] {
     ],
     group(random.pick(STORIES), ['insert', 'undo', 'redo']),
     group(random.pick(STORIES), ['split', 'save', 'save']),
+    group(random.pick(STORIES), ['split', 'overlapSave']),
     group(random.pick(STORIES), ['save', 'save'])
   );
   const required = random.shuffle(groups).flat();
   const weighted: Action[] = ['insert', 'insert', 'delete', 'delete', 'addComment', 'addComment',
     'reply', 'reply', 'deleteComment', 'workerDeleteComment', 'proposal', 'decide', 'withdraw', 'flush', 'save',
-    ...(topology === 'A/editor' ? ['project', 'split', 'undo', 'redo'] as const : [])];
+    ...(topology === 'A/editor' ? ['project', 'split', 'overlapSave', 'undo', 'redo'] as const : [])];
   while (required.length < OPS) {
     const action = random.pick(weighted);
     required.push({
@@ -743,13 +762,7 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       arms = await openArms(seed, topology, log);
       const current = arms;
       let saveNumber = 0;
-      const compareSave = async () => {
-        await flushPeer(current);
-        const dirty = JSON.stringify([...current.main.dirtyStories].sort());
-        const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
-        log.push(`save ${++saveNumber} dirty=${dirty} comments=${comments}`);
-        const actual = await saveWorkerArm(current);
-        const expected = await current.main.save();
+      const compareSaved = ({ actual, expected }: Awaited<ReturnType<typeof saveWorkerArm>>) => {
         savesCompared += 1;
         const differences = partDifferences(new Uint8Array(actual.bytes), expected);
         if (differences.length > 0) {
@@ -768,19 +781,16 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
             );
           }
         }
-        if (current.peer) {
-          if (actual.updates.length !== 1) throw new Error('Editor save did not return exactly one diff');
-          current.adoptingWorkerSaveUpdates = true;
-          try {
-            current.editorStories.adoptWorkerSaveUpdates(() => {
-              for (const update of actual.updates) current.peer!.applyUpdate(update);
-            });
-          } finally {
-            current.adoptingWorkerSaveUpdates = false;
-          }
-        } else if (actual.updates.length !== 0) {
+        if (!current.peer && actual.updates.length !== 0) {
           throw new Error('Viewer save returned peer updates without a peer');
         }
+      };
+      const compareSave = async () => {
+        await flushPeer(current);
+        const dirty = JSON.stringify([...current.main.dirtyStories].sort());
+        const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
+        log.push(`save ${++saveNumber} dirty=${dirty} comments=${comments}`);
+        compareSaved(await saveWorkerArm(current, () => current.main.save()));
       };
       await compareSave();
       await compareSave();
@@ -790,9 +800,22 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       for (let index = 0; index < planned.length; index += 1) {
         log.push(`op ${index + 1}/${planned.length}: ${JSON.stringify(planned[index])}`);
         const operation = planned[index]!;
-        if (operation.action === 'save') {
+        if (operation.action === 'save' || operation.action === 'overlapSave') {
           focus(current, operation.story, random);
-          await compareSave();
+          if (operation.action === 'overlapSave' && current.peer) {
+            await flushPeer(current);
+            const dirty = JSON.stringify([...current.main.dirtyStories].sort());
+            const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
+            log.push(`overlap save dirty=${dirty} comments=${comments}`);
+            const oracle = () => current.main.save();
+            const saves = await Promise.all([saveWorkerArm(current, oracle), saveWorkerArm(current, oracle)]);
+            for (const [part, saved] of saves.entries()) {
+              log.push(`overlap save ${++saveNumber} (${part + 1}/2)`);
+              compareSaved(saved);
+            }
+          } else {
+            await compareSave();
+          }
         } else {
           await applyOperation(current, operation, random);
         }
