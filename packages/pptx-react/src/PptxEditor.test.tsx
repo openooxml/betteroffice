@@ -23,6 +23,7 @@ import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
+import * as presenceRendering from './presence-rendering';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
@@ -79,20 +80,6 @@ describe('PptxEditor slide layout cache', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
-  function queueThumbnailTasks() {
-    const tasks: Array<() => void> = [];
-    const originalTimeout = globalThis.setTimeout;
-    const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((...args: Parameters<typeof setTimeout>) => {
-      const [callback, delay, ...params] = args;
-      if (typeof callback === 'function' && callback.name === 'step' && delay === 0) {
-        tasks.push(() => callback(...params));
-        return 0 as unknown as ReturnType<typeof setTimeout>;
-      }
-      return originalTimeout(...args);
-    }) as typeof setTimeout);
-    return { tasks, timers };
-  }
-
   for (const scenario of [
     { name: 'instant layouts', layoutMs: 0, failAt: undefined },
     { name: 'layouts exceeding the budget', layoutMs: 13, failAt: undefined },
@@ -102,40 +89,47 @@ describe('PptxEditor slide layout cache', () => {
       const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
       const originalOpen = pptx.openPresentation;
       const peer = originalOpen(fixture, { clientId: 9440, fonts });
-      let count = peer.snapshot().slides.length;
-      while (count < 50) peer.insertSlide(count++);
-      const seed = peer.encodeStateAsUpdate();
-      const expected = peer.snapshot().slides.map((_slide, index) => peer.layoutSlide(index));
       const calls: number[] = [];
       const errors: Error[] = [];
       const failure = new Error('layout failed');
       let clock = 0;
-      const now = spyOn(performance, 'now').mockImplementation(() => clock);
-      const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
-        const handle = originalOpen(bytes, options);
-        const layout = handle.layoutSlide.bind(handle);
-        handle.layoutSlide = (index) => {
-          calls.push(index);
-          clock += scenario.layoutMs;
-          if (index === scenario.failAt) throw failure;
-          return layout(index);
-        };
-        return handle;
-      });
       let finishPaint!: () => void;
       const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
       const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
-      const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame, _dpr, scale) => {
-        paintedFrames.set(ctx.canvas, frame);
-        return scale === 1 ? firstPaint : Promise.resolve();
-      });
-      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
-        getContext as unknown as HTMLCanvasElement['getContext']
-      );
-      const { tasks, timers } = queueThumbnailTasks();
+      const restorers: Array<() => void> = [];
       let api: PptxEditorApi | undefined;
       let view: ReturnType<typeof render> | undefined;
       try {
+        let count = peer.snapshot().slides.length;
+        while (count < 50) peer.insertSlide(count++);
+        const seed = peer.encodeStateAsUpdate();
+        const expected = peer.snapshot().slides.map((_slide, index) => peer.layoutSlide(index));
+        const now = spyOn(performance, 'now').mockImplementation(() => clock);
+        restorers.push(() => now.mockRestore());
+        const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+          const handle = originalOpen(bytes, options);
+          const originalLayout = handle.layoutSlide.bind(handle);
+          const layout = spyOn(handle, 'layoutSlide').mockImplementation((index) => {
+            calls.push(index);
+            clock += scenario.layoutMs;
+            if (index === scenario.failAt) throw failure;
+            return originalLayout(index);
+          });
+          restorers.push(() => layout.mockRestore());
+          return handle;
+        });
+        restorers.push(() => open.mockRestore());
+        const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame, _dpr, scale) => {
+          paintedFrames.set(ctx.canvas, frame);
+          return scale === 1 ? firstPaint : Promise.resolve();
+        });
+        restorers.push(() => paint.mockRestore());
+        const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+          getContext as unknown as HTMLCanvasElement['getContext']
+        );
+        restorers.push(() => context.mockRestore());
+        const presence = spyOn(presenceRendering, 'groupPresenceBySlide');
+        restorers.push(() => presence.mockRestore());
         view = render(<PptxEditor file={fixture} fonts={fonts}
           collaboration={{ clientId: 9441, initialUpdate: seed }}
           onError={(error) => errors.push(error)}
@@ -143,55 +137,61 @@ describe('PptxEditor slide layout cache', () => {
         await waitFor(() => expect(api).toBeDefined());
         await waitFor(() => expect(paint).toHaveBeenCalled());
         expect(calls).toEqual([0]);
-        expect(tasks).toHaveLength(0);
+        expect(presence).toHaveBeenCalled();
+        const presenceCalls = presence.mock.calls.length;
         const cache = (api!.handle as unknown as Record<symbol, {
           activate(slideId: string, key: string): boolean;
         }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
-        const activate = spyOn(cache, 'activate');
-        try {
-          await act(async () => { finishPaint(); await firstPaint; });
-          expect(tasks).toHaveLength(1);
-          const batches: number[][] = [];
-          while (tasks.length > 0) {
-            expect(batches.length).toBeLessThan(50);
-            const before = calls.length;
-            await act(async () => { tasks.shift()!(); });
-            batches.push(calls.slice(before));
-          }
-          if (scenario.layoutMs === 0) {
-            expect(batches.length).toBeLessThanOrEqual(3);
-          } else {
-            expect(batches).toEqual(Array.from({ length: 49 }, (_, index) => [index + 1]));
-          }
-          expect(activate).toHaveBeenCalledTimes(batches.length);
-          const activeId = api!.handle.snapshot().slides[0].id;
-          expect(activate.mock.calls.every(([id]) => id === activeId)).toBe(true);
-          expect(activate.mock.results.every((result) =>
-            result.type === 'return' && result.value === true)).toBe(true);
-          const completed = scenario.failAt ?? 50;
-          const attempted = scenario.failAt === undefined ? 50 : completed + 1;
-          expect(calls).toEqual(Array.from({ length: attempted }, (_, index) => index));
-          expect(errors).toEqual(scenario.failAt === undefined ? [] : [failure]);
-          await waitFor(() => {
-            const canvases = view!.container.querySelectorAll<HTMLCanvasElement>('aside canvas');
-            expect(canvases).toHaveLength(completed);
-            expected.slice(0, completed).forEach((frame, index) => {
-              expect(paintedFrames.get(canvases[index])).toEqual(frame);
-              expect(paint.mock.calls.filter(([ctx]) => ctx.canvas === canvases[index])).toHaveLength(1);
-            });
+        const batches: number[][] = [];
+        let batchStart = calls.length;
+        const originalActivate = cache.activate.bind(cache);
+        const activate = spyOn(cache, 'activate').mockImplementation((id, key) => {
+          batches.push(calls.slice(batchStart));
+          batchStart = calls.length;
+          return originalActivate(id, key);
+        });
+        restorers.push(() => activate.mockRestore());
+        expect(activate).not.toHaveBeenCalled();
+        await act(async () => { finishPaint(); await firstPaint; });
+        const completed = scenario.failAt ?? 50;
+        const attempted = scenario.failAt === undefined ? 50 : completed + 1;
+        await waitFor(() => {
+          const canvases = view!.container.querySelectorAll<HTMLCanvasElement>('aside canvas');
+          expect(canvases).toHaveLength(completed);
+          expected.slice(0, completed).forEach((frame, index) => {
+            expect(paintedFrames.get(canvases[index])).toEqual(frame);
+            expect(paint.mock.calls.filter(([ctx]) => ctx.canvas === canvases[index])).toHaveLength(1);
           });
-        } finally {
-          activate.mockRestore();
+          expect(calls).toHaveLength(attempted);
+          expect(errors).toEqual(scenario.failAt === undefined ? [] : [failure]);
+        }, { timeout: 15_000 });
+        if (scenario.failAt !== undefined) {
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
         }
+        if (scenario.layoutMs === 0) {
+          expect(batches).toEqual([Array.from({ length: attempted - 1 }, (_, index) => index + 1)]);
+        } else {
+          expect(batches).toEqual(Array.from({ length: 49 }, (_, index) => [index + 1]));
+        }
+        expect(activate).toHaveBeenCalledTimes(batches.length);
+        const activeId = api!.handle.snapshot().slides[0].id;
+        expect(activate.mock.calls.every(([id]) => id === activeId)).toBe(true);
+        expect(activate.mock.results.every((result) =>
+          result.type === 'return' && result.value === true)).toBe(true);
+        expect(calls).toEqual(Array.from({ length: attempted }, (_, index) => index));
+        expect(errors).toEqual(scenario.failAt === undefined ? [] : [failure]);
+        expect(presence).toHaveBeenCalledTimes(presenceCalls);
       } finally {
         finishPaint();
-        view?.unmount();
-        peer.dispose();
-        timers.mockRestore();
-        open.mockRestore();
-        paint.mockRestore();
-        context.mockRestore();
-        now.mockRestore();
+        try {
+          view?.unmount();
+          peer.dispose();
+        } finally {
+          for (const restore of restorers.reverse()) restore();
+        }
       }
     }, 60_000);
   }

@@ -46,6 +46,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import type {
   CSSProperties,
@@ -242,8 +243,55 @@ interface EditorModel {
   version: string;
   slideIndex: number;
   frame: SlideDisplayList | null;
-  thumbnails: Map<string, SlideDisplayList>;
   layoutKeys: Record<string, string>;
+}
+
+class SlideThumbnailStore {
+  private frames = new Map<string, SlideDisplayList>();
+  private listeners = new Map<string, Set<() => void>>();
+
+  get(id: string): SlideDisplayList | undefined {
+    return this.frames.get(id);
+  }
+
+  get size(): number {
+    return this.frames.size;
+  }
+
+  subscribe(id: string, listener: () => void): () => void {
+    const listeners = this.listeners.get(id) ?? new Set<() => void>();
+    this.listeners.set(id, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.listeners.delete(id);
+    };
+  }
+
+  replace(frames: Map<string, SlideDisplayList>): void {
+    const previous = this.frames;
+    this.frames = frames;
+    for (const [id, frame] of previous) {
+      if (frames.get(id) !== frame) this.notify(id);
+    }
+    for (const id of frames.keys()) {
+      if (!previous.has(id)) this.notify(id);
+    }
+  }
+
+  add(entries: Map<string, SlideDisplayList>): void {
+    const changed: string[] = [];
+    for (const [id, frame] of entries) {
+      if (this.frames.get(id) === frame) continue;
+      this.frames.set(id, frame);
+      changed.push(id);
+    }
+    for (const id of changed) this.notify(id);
+  }
+
+  private notify(id: string): void {
+    this.listeners.get(id)?.forEach((listener) => listener());
+  }
 }
 
 interface SlideLayoutCache {
@@ -529,6 +577,7 @@ function PptxEditorContent({
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
+  const [thumbnailStore] = useState(() => new SlideThumbnailStore());
   const activePaintRef = useRef<Promise<unknown>>(Promise.resolve());
   const afterActivePaint = useCallback(() => activePaintRef.current, []);
   const [selection, setSelection, selectionRef] = useSyncedState<PptxTextSelection | null>(null);
@@ -622,7 +671,7 @@ function PptxEditorContent({
         if (slideId && !refreshAll) layoutKeys[slideId] = cache.key(index);
         const retained = slideId && cache.activate(slideId, layoutKeys[slideId]);
         const cachedFrame = slideId && modelRef.current?.layoutKeys[slideId] === layoutKeys[slideId]
-          ? modelRef.current?.thumbnails.get(slideId)
+          ? thumbnailStore.get(slideId)
           : undefined;
         const frame = slideId
           ? (retained && cachedFrame) || handle.layoutSlide(index)
@@ -631,14 +680,14 @@ function PptxEditorContent({
         for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
           const slide = snapshot.slides[slideIndex];
           if (slideIndex === index) continue;
-          const cached = modelRef.current?.thumbnails.get(slide.id);
+          const cached = thumbnailStore.get(slide.id);
           const cachedKey = modelRef.current?.layoutKeys[slide.id];
           if (!refreshAll && (!cached || cachedKey !== layoutKeys[slide.id] || slide.id === editedSlideId)) {
             layoutKeys[slide.id] = cache.key(slideIndex);
           }
           if (cached && cachedKey === layoutKeys[slide.id]) thumbnails.set(slide.id, cached);
         }
-        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails, layoutKeys };
+        const next = { snapshot, version: handle.version(), slideIndex: index, frame, layoutKeys };
         const activeSlide = snapshot.slides[index];
         setSelection((current) =>
           current && activeSlide && findShape(activeSlide.shapes, current.shapeId) ? current : null
@@ -670,6 +719,7 @@ function PptxEditorContent({
           setResizeDelta(null);
         }
         modelRef.current = next;
+        thumbnailStore.replace(thumbnails);
         setModel(next);
         setProposals(handle.listProposals());
         setError(null);
@@ -680,7 +730,7 @@ function PptxEditorContent({
         return null;
       }
     },
-    [reportError]
+    [reportError, thumbnailStore]
   );
 
   const refresh = useCallback(() => {
@@ -917,6 +967,7 @@ function PptxEditorContent({
     setCollaborationReplica(null);
     modelRef.current = null;
     setModel(null);
+    thumbnailStore.replace(new Map());
     setSelection(null);
     setShapeSelection(null);
     setDragPreview(null);
@@ -1032,6 +1083,7 @@ function PptxEditorContent({
     setActiveTool,
     setSelection,
     setShapeSelection,
+    thumbnailStore,
   ]);
 
   useEffect(() => {
@@ -1105,7 +1157,7 @@ function PptxEditorContent({
   useEffect(() => {
     const handle = handleRef.current;
     const pending = model;
-    if (!handle || !pending || pending.thumbnails.size === pending.snapshot.slides.length) return;
+    if (!handle || !pending || thumbnailStore.size === pending.snapshot.slides.length) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let index = 0;
@@ -1114,14 +1166,14 @@ function PptxEditorContent({
       if (cancelled || handleRef.current !== handle || !current ||
           current.layoutKeys !== pending.layoutKeys || handle.version() !== current.version) return;
       const started = performance.now();
-      const thumbnails = new Map(current.thumbnails);
+      const thumbnails = new Map<string, SlideDisplayList>();
       let failure: { value: unknown } | undefined;
       try {
         try {
           while (index < current.snapshot.slides.length) {
             const slideIndex = index++;
             const slideId = current.snapshot.slides[slideIndex].id;
-            if (thumbnails.has(slideId)) continue;
+            if (thumbnailStore.get(slideId)) continue;
             thumbnails.set(slideId, handle.layoutSlide(slideIndex));
             if (performance.now() - started >= THUMBNAIL_SLICE_MS) break;
           }
@@ -1132,16 +1184,12 @@ function PptxEditorContent({
       } catch (value) {
         failure = { value };
       }
-      if (thumbnails.size !== current.thumbnails.size) {
-        const next = { ...current, thumbnails };
-        modelRef.current = next;
-        setModel(next);
-      }
+      thumbnailStore.add(thumbnails);
       if (failure) {
         reportError(failure.value);
         return;
       }
-      if (index < current.snapshot.slides.length && thumbnails.size < current.snapshot.slides.length)
+      if (index < current.snapshot.slides.length && thumbnailStore.size < current.snapshot.slides.length)
         timer = setTimeout(step, 0);
     };
     void activePaintRef.current.then(() => {
@@ -1151,7 +1199,7 @@ function PptxEditorContent({
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [model?.layoutKeys, reportError]);
+  }, [model?.layoutKeys, reportError, thumbnailStore]);
 
   const selectedShape = useMemo(() => {
     if (!model?.frame || !shapeSelection) return null;
@@ -2621,18 +2669,13 @@ function PptxEditorContent({
               >
                 <span style={styles.slideNumber}>{index + 1}</span>
                 <span style={styles.slidePreview}>
-                  {model.thumbnails.get(slide.id) ? (
-                    <SlideThumbnail
-                      frame={model.thumbnails.get(slide.id)!}
-                      resolveImage={resolveSlideImage}
-                      afterPaint={afterActivePaint}
-                    />
-                  ) : (
-                    <span style={styles.slideTitle}>
-                      {slideTitle(slide.shapes) ||
-                        t('slides.fallbackTitle', { number: index + 1 })}
-                    </span>
-                  )}
+                  <SlideThumbnailSlot
+                    store={thumbnailStore}
+                    slideId={slide.id}
+                    title={slideTitle(slide.shapes) || t('slides.fallbackTitle', { number: index + 1 })}
+                    resolveImage={resolveSlideImage}
+                    afterPaint={afterActivePaint}
+                  />
                   {slide.id !== currentSlideId &&
                   slidePresence &&
                   (slidePresence.visible.length > 0 || slidePresence.overflow > 0) ? (
@@ -3039,6 +3082,27 @@ function NotesPanel({
     </div>
   );
 }
+
+const SlideThumbnailSlot = memo(function SlideThumbnailSlot({
+  store,
+  slideId,
+  title,
+  resolveImage,
+  afterPaint,
+}: {
+  store: SlideThumbnailStore;
+  slideId: string;
+  title: string;
+  resolveImage: CanvasImageResolver;
+  afterPaint: () => Promise<unknown>;
+}) {
+  const subscribe = useCallback((listener: () => void) => store.subscribe(slideId, listener), [store, slideId]);
+  const getFrame = useCallback(() => store.get(slideId), [store, slideId]);
+  const frame = useSyncExternalStore(subscribe, getFrame, getFrame);
+  return frame
+    ? <SlideThumbnail frame={frame} resolveImage={resolveImage} afterPaint={afterPaint} />
+    : <span style={styles.slideTitle}>{title}</span>;
+});
 
 const SlideThumbnail = memo(function SlideThumbnail({
   frame,
