@@ -39,6 +39,7 @@ export type ResidentEngineSession = Pick<
   | 'applyDeleteProfiled'
   | 'applyInput'
   | 'applyInputProfiled'
+  | 'applyRawOps'
   | 'applyUpdate'
   | 'beginRegionLayout'
   | 'buildDisplayListFrame'
@@ -130,23 +131,47 @@ export async function createResidentEngineSession(
 
   const geometrySpans = new Map<string, { revision: number; spans: YrsParagraphLength[] }>();
   const geometryOutlines = new Map<string, { version: string; outline: YrsPositionOutline | null }>();
+  const storyRevisions = new Map<string, number>();
+  let nativeStoryRevision = 0;
+  let storyRevision = 0;
 
-  const geometryStory = (story: string) => {
-    let cached = geometryStories.get(story);
-    const changes = JSON.parse(
-      session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
-    ) as {
+  const syncStoryRevisions = (): number => {
+    const changes = JSON.parse(session.stories_changed_since(nativeStoryRevision)) as {
       revision: number;
       stories: string[];
     };
-    if (!cached || changes.stories.includes(story)) {
+    if (changes.revision !== nativeStoryRevision) {
+      nativeStoryRevision = changes.revision;
+      storyRevision += 1;
+      for (const story of changes.stories) storyRevisions.set(story, storyRevision);
+    }
+    return storyRevision;
+  };
+
+  const storiesChangedSince = (since: number) => {
+    const revision = syncStoryRevisions();
+    if (since >= revision) return { revision, stories: [] };
+    return {
+      revision,
+      stories: [...storyRevisions].filter(([, changed]) => changed > since)
+        .map(([story]) => story).sort(),
+    };
+  };
+
+  const storyChangedSince = (story: string, since: number): boolean =>
+    (storyRevisions.get(story) ?? 0) > since;
+
+  const geometryStory = (story: string) => {
+    const revision = syncStoryRevisions();
+    let cached = geometryStories.get(story);
+    if (!cached || storyChangedSince(story, cached.revision)) {
       cached = {
-        revision: changes.revision,
+        revision,
         segments: JSON.parse(session.story_segments(story)) as YrsStorySegment[],
       };
       geometryStories.set(story, cached);
     } else {
-      cached.revision = changes.revision;
+      cached.revision = revision;
     }
     return cached;
   };
@@ -213,16 +238,14 @@ export async function createResidentEngineSession(
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
     paragraphIdCount: (story, paraId) => session.paragraph_id_count(story, paraId),
     paragraphSpans: (story) => {
+      const revision = syncStoryRevisions();
       const cached = geometrySpans.get(story);
-      const changes = JSON.parse(
-        session.stories_changed_since(cached?.revision ?? Number.MAX_SAFE_INTEGER)
-      ) as { revision: number; stories: string[] };
-      if (cached && !changes.stories.includes(story)) {
-        cached.revision = changes.revision;
+      if (cached && !storyChangedSince(story, cached.revision)) {
+        cached.revision = revision;
         return cached.spans;
       }
       const spans = JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[];
-      geometrySpans.set(story, { revision: changes.revision, spans });
+      geometrySpans.set(story, { revision, spans });
       return spans;
     },
     storySegments: (story) => geometryStory(story).segments,
@@ -298,8 +321,7 @@ export async function createResidentEngineSession(
       JSON.parse(
         session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
       ) as DocxContentControlsResult,
-    storiesChangedSince: (since) =>
-      JSON.parse(session.stories_changed_since(since)) as { revision: number; stories: string[] },
+    storiesChangedSince,
     openDocx: (bytes, digest, generation) => {
       geometryStories.clear();
       return resolveHostJsonCommentMedia(
@@ -378,6 +400,19 @@ export async function createResidentEngineSession(
       return session.apply_delete(direction, expectedFrameEpoch, count);
     },
     residentDeletedUnits: () => session.resident_deleted_units(),
+    applyRawOps: (story, ops) => {
+      geometryStories.clear();
+      const version = session.version();
+      try {
+        session.apply_raw_ops(story, JSON.stringify(ops));
+      } finally {
+        if (session.version() !== version) {
+          syncStoryRevisions();
+          storyRevision += 1;
+          storyRevisions.set(story, storyRevision);
+        }
+      }
+    },
     applyInputProfiled: (text, expectedFrameEpoch) => {
       ensureUndo();
       const frame = session.apply_input_profiled(text, expectedFrameEpoch);
@@ -417,6 +452,7 @@ export async function createResidentEngineSession(
       destroyed = true;
       listeners.clear();
       geometryStories.clear();
+      storyRevisions.clear();
       if (observing) session.clear_update_observer();
       session.free();
     },

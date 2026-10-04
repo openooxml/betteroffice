@@ -2,7 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { useEffect, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import { DocxEditor, defineDocxPlugin, type DocxEditorRef } from '@betteroffice/docx-react';
-import type { YrsSession } from '@betteroffice/docx/yrs';
+import { ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
@@ -67,6 +67,12 @@ const loadMethods = ['openDocx', 'openDocxPreview', 'loadState', 'applyUpdate'] 
 type DocumentLoads = Record<typeof loadMethods[number], number>;
 const documentLoads: DocumentLoads[] = [];
 const loadEvents: { session: number; method: typeof loadMethods[number]; at: number }[] = [];
+let documentWorker: ResidentEngineWorkerClient | null = null;
+const documentRead = ResidentEngineWorkerClient.prototype.documentRead;
+ResidentEngineWorkerClient.prototype.documentRead = function (this: ResidentEngineWorkerClient, ...args) {
+  documentWorker = this;
+  return documentRead.apply(this, args);
+} as typeof documentRead;
 const probe = {
   editor: null as DocxEditorRef | null,
   sessions: [] as YrsSession[],
@@ -113,6 +119,14 @@ const probe = {
     return { started: loaded, loaded };
   },
   sessionReads() { return { ...counts }; },
+  async commentAnchors(id: string) {
+    if (!this.editor || !documentWorker) throw new Error('Viewer is not ready');
+    const { version } = await this.editor.getProposals();
+    const { value } = await documentWorker.documentRead({
+      kind: 'sidebar', commentIds: [id], expectVersion: version,
+    });
+    return value?.comments.find((comment) => comment.id === id)?.anchors ?? null;
+  },
 };
 
 export type ViewerSidebarsProbe = typeof probe;
