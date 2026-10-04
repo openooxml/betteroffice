@@ -1001,7 +1001,7 @@ test('a queued drag across cells in one table publishes the cell selection', asy
   const source = await zip.generateAsync({ type: 'uint8array' });
   const direct = await createYrsSession();
   sessions.push(direct);
-  direct.openDocx(source, false);
+  direct.openDocx(source, true);
   const projection = createYrsPositionProjection(direct, 'body')!;
   const position = (story: string) => projection.positionForLoc({
     story, paraId: direct.paragraphs(story)[0].paraId, offset: 1,
