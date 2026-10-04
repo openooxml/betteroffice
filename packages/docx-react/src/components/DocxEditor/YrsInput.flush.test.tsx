@@ -13,6 +13,7 @@ import {
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { DisplayListQuerySnapshot } from './hooks/displayListQueryEpochGate';
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
@@ -82,7 +83,7 @@ function inputFor(
     YrsInputProps,
     'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries' |
     'replicaReadyRef' | 'inputEpoch' | 'onStateChange' | 'onDirectInput' |
-    'holdInput' | 'inputScope' | 'seedSelection'
+    'holdInput' | 'inputScope' | 'seedSelection' | 'resolveDisplayTarget'
   >> = {}
 ) {
   const map = (story = 'body') =>
@@ -269,6 +270,7 @@ test.each([false, true])('opening body Tab keeps native focus movement with shif
   const props = { inputScope: 1, replicaReadyRef };
   const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
   const textarea = view.getByTestId('yrs-input');
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
   fireEvent.input(textarea, { target: { value: 'A' } });
   expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
   fireEvent.input(textarea, { target: { value: 'B' } });
@@ -278,6 +280,202 @@ test.each([false, true])('opening body Tab keeps native focus movement with shif
   expect(text(session)).toBe('SeedAB');
   expect(session.selection()?.head.offset).toBe(6);
   expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+});
+
+test.each([false, true])('held click in a table prevents Tab and replays cell navigation with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  const story = stories[shift ? 1 : 0];
+  const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  act(() => {
+    input.current!.focus();
+    expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
+  });
+  expect(fireEvent.keyDown(textarea, { key: 'ArrowLeft' })).toBe(false);
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+  expect(session.selection()?.head).toEqual(body);
+  view.rerender(inputFor(session, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(session.selection()?.head.story).toBe(stories[shift ? 0 : 1]);
+  expect(session.selection()?.head.offset).toBe(0);
+  expect(session.cellSelection()?.head.column).toBe(shift ? 0 : 1);
+  expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['', '']);
+  expect(document.activeElement).toBe(textarea);
+});
+
+test.each([false, true])('held click outside a table keeps native Tab after navigation with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  session.setSelection({ story: stories[0], paraId: session.paragraphs(stories[0])[0]!.paraId, offset: 0 });
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const verticalMove = mock(() => ({ position: 1, goalX: 0 }));
+  const props = { inputScope: 1, replicaReadyRef,
+    resolveDisplayListQueries: async () => ({ queries: { verticalMove } as unknown as DisplayListQuerySnapshot['queries'], frameEpoch: 1 }),
+    resolveDisplayTarget: () => ({ story: stories[0], displayPosition: 1 }) };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  act(() => {
+    input.current!.focus();
+    expect(input.current!.queueSelection!(async () => () => session.setSelection(body), false, () => false)).toBe(true);
+  });
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  expect(fireEvent.keyDown(textarea, { key: 'ArrowUp' })).toBe(false);
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  view.rerender(inputFor(session, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(verticalMove).toHaveBeenCalledTimes(1);
+  expect(session.selection()?.head.story).toBe(stories[0]);
+  expect(session.selection()?.head.offset).toBe(1);
+  expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['B', '']);
+  expect(document.activeElement).toBe(textarea);
+});
+
+test.each([false, true])('held Tab replayed outside a table leaves document, selection and focus unchanged with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const story = 'body:t0:r0c0';
+  const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
+  const state = session.encodeState();
+  const version = session.version();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const verticalMove = mock(() => ({ position: 1, goalX: 0 }));
+  const props = { inputScope: 1, replicaReadyRef,
+    resolveDisplayListQueries: async () => ({ queries: { verticalMove } as unknown as DisplayListQuerySnapshot['queries'], frameEpoch: 1 }),
+    resolveDisplayTarget: () => ({ story: 'body', displayPosition: 1 }) };
+  const rectangles = spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(() =>
+    [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList
+  );
+  const restore = registerRestore(() => rectangles.mockRestore());
+  try {
+    const previous = render(<button data-testid="previous" />);
+    const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+    const next = render(<button data-testid="next" />);
+    const textarea = view.getByTestId('yrs-input');
+    act(() => {
+      input.current!.focus();
+      expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
+    });
+    expect(fireEvent.keyDown(textarea, { key: 'ArrowDown' })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    const focused = shift ? next.getByTestId('next') : previous.getByTestId('previous');
+    act(() => { focused.focus(); });
+    view.rerender(inputFor(session, input, undefined, undefined, props));
+    await act(async () => { await bounded(input.current!.flushPendingInput()); });
+    expect(verticalMove).toHaveBeenCalledTimes(1);
+    const caret = { ...body, offset: 1 };
+    expect(session.selection()).toEqual({ anchor: caret, head: caret });
+    expect(session.cellSelection()).toBeNull();
+    expect(session.encodeState()).toEqual(state);
+    expect(session.version()).toBe(version);
+    expect(document.activeElement).toBe(focused);
+  } finally {
+    restore();
+  }
+});
+
+test.each([false, true])('held Tab outside a table at replay is a no-op and the next typed key lands in the editor with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  const story = stories[0];
+  const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const verticalMove = mock(() => ({ position: 1, goalX: 0 }));
+  const props = { inputScope: 1, replicaReadyRef,
+    resolveDisplayListQueries: async () => ({ queries: { verticalMove } as unknown as DisplayListQuerySnapshot['queries'], frameEpoch: 1 }),
+    resolveDisplayTarget: () => ({ story: 'body', displayPosition: 1 }) };
+  const rectangles = spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(() =>
+    [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList
+  );
+  const restore = registerRestore(() => rectangles.mockRestore());
+  try {
+    const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+    const textarea = view.getByTestId('yrs-input');
+    act(() => {
+      input.current!.focus();
+      expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
+    });
+    expect(document.activeElement).toBe(textarea);
+    expect(fireEvent.keyDown(textarea, { key: 'ArrowDown' })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+    fireEvent.input(textarea, { target: { value: 'X' } });
+    expect(document.activeElement).toBe(textarea);
+    view.rerender(inputFor(session, input, undefined, undefined, props));
+    await act(async () => { await bounded(input.current!.flushPendingInput()); });
+    expect(verticalMove).toHaveBeenCalledTimes(1);
+    expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['', '']);
+    expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === body.paraId)?.text).toBe('SXeed');
+    const caret = { ...body, offset: 2 };
+    expect(session.selection()).toEqual({ anchor: caret, head: caret });
+    expect(session.cellSelection()).toBeNull();
+    expect(document.activeElement).toBe(textarea);
+  } finally {
+    restore();
+  }
+});
+
+test('held no-op first-cell Shift+Tab keeps two undo steps across an 800 ms edit gap', async () => {
+  const source = await seededSession();
+  const paraId = source.paragraphs('body')[0]!.paraId;
+  source.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
+  const story = 'body:t0:r0c0';
+  const state = source.encodeState();
+  let now = 1_000;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  const undoClock = spyOn(Date, 'now').mockImplementation(() => now);
+  const restore = registerRestore(() => {
+    undoClock.mockRestore();
+    clock.mockRestore();
+  });
+  try {
+    for (const held of [false, true]) {
+      now = 1_000;
+      const session = await createYrsSession();
+      sessions.push(session);
+      session.loadState(state);
+      session.setSelection({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 });
+      const input = createRef<YrsInputRef>();
+      const props = { inputScope: 1, replicaReadyRef: { current: true } };
+      const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: held }));
+      const textarea = view.getByTestId('yrs-input');
+      fireEvent.input(textarea, { target: { value: 'A' } });
+      if (!held) await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      now += 400;
+      expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })).toBe(false);
+      if (!held) await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      now += 400;
+      fireEvent.input(textarea, { target: { value: 'B' } });
+      if (held) view.rerender(inputFor(session, input, undefined, undefined, props));
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(session.paragraphs(story)[0]!.text).toBe('AB');
+      expect(session.selection()?.head.story).toBe(story);
+      expect(session.undo()).toBe(true);
+      expect(session.paragraphs(story)[0]!.text).toBe('A');
+      expect(session.undo()).toBe(true);
+      expect(session.paragraphs(story)[0]!.text).toBe('');
+      expect(session.canUndo()).toBe(false);
+      view.unmount();
+    }
+  } finally {
+    restore();
+  }
 });
 
 test('held selection deletion follows select-all on the full session', async () => {

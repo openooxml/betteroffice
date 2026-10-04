@@ -1,12 +1,14 @@
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { yieldToMainThread } from './yieldToMainThread';
 
+type LayoutProgress = 'page' | 'provisional' | 'complete';
+
 interface PendingReplica {
   ready: Promise<void>;
   start(): void;
   ensure(): void;
   requestReady(): void;
-  layoutProgress(complete: boolean): void;
+  layoutProgress(progress: LayoutProgress): void;
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
@@ -170,10 +172,10 @@ export function deferWorkerOpenReplica(
       readinessRequested = true;
       commit();
     },
-    layoutProgress(complete) {
+    layoutProgress(progress) {
       if (!current()) return;
-      layoutComplete ||= complete;
-      if (layoutComplete) commit();
+      if (progress !== 'page') layoutComplete = progress === 'complete';
+      if (progress === 'complete') commit();
       else if (hydrated && stallTimer !== null) resetStallTimer();
     },
     cancel() {
@@ -237,8 +239,8 @@ export function requestWorkerOpenReplicaReadiness(session: YrsSession): void {
   if (replica.pending && replica.onDemand?.active() === true) replica.onDemand.request();
 }
 
-export function notifyWorkerOpenLayoutProgress(session: YrsSession, complete = false): void {
-  replicas.get(session)?.layoutProgress(complete);
+export function notifyWorkerOpenLayoutProgress(session: YrsSession, progress: LayoutProgress): void {
+  replicas.get(session)?.layoutProgress(progress);
 }
 
 /** The version `session` had when its replica loaded; a later version holds a newer change. */

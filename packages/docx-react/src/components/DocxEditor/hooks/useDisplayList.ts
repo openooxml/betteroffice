@@ -2109,7 +2109,7 @@ export function useRustDisplayList(
               snapshotRef.current = nextSnapshot;
               if (worker && release.length === 0 && batch.some((index) =>
                 previous.displayList?.pages[index]?.unbuilt && !nextFrame.displayList.pages[index]?.unbuilt
-              )) notifyWorkerOpenLayoutProgress(targetEngine);
+              )) notifyWorkerOpenLayoutProgress(targetEngine, 'page');
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background && workerOpen) startTransition(() => setSnapshot(nextSnapshot));
               else setSnapshot(nextSnapshot);
@@ -2468,7 +2468,7 @@ export function useRustDisplayList(
         const computation = workerLayoutComputation(result.layoutJson, result.layoutRevision);
         if (isCurrentWorker(hostEngine, owner) &&
           hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision) {
-          notifyWorkerOpenLayoutProgress(hostEngine, !result.layoutProvisional);
+          notifyWorkerOpenLayoutProgress(hostEngine, result.layoutProvisional ? 'provisional' : 'complete');
         }
         if (base === undefined) return computation;
         workerLayoutFramesRef.current.set(computation.layout, {

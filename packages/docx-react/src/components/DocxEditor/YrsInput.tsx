@@ -371,6 +371,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
   const heldReplayBatchRef = useRef<HeldReplayBatch | null>(null);
+  const pendingCaretTableRef = useRef<(() => boolean) | undefined>(undefined);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
@@ -447,7 +448,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (
       operation: (waited: boolean) => void | Promise<void>,
       kind: 'mutation' | 'selection' = 'selection',
-      onDropped?: () => void
+      onDropped?: () => void,
+      inTable?: () => boolean
     ): void => {
       sealInputBatches();
       const replay = heldReplayBatchRef.current;
@@ -458,6 +460,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           replay.operations.push(Promise.reject(error));
         }
         return;
+      }
+      if (inTable) pendingCaretTableRef.current = inTable;
+      else if (!inputOperationQueueRef.current?.hasPending()) {
+        const current = session?.selection();
+        const currentInTable = current ? !!yrsCellLocFromStory(current.head.story) : false;
+        pendingCaretTableRef.current = () => currentInTable;
       }
       const admitted = session;
       const queue = inputOperationQueueRef.current;
@@ -510,7 +518,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const replaySelection = useCallback((entry: HeldSelection): void => {
-    enqueueInputOperation(() => entry.apply?.(), 'mutation');
+    enqueueInputOperation(() => entry.apply?.(), 'mutation', undefined, entry.inTable);
   }, [enqueueInputOperation]);
   const queueSelection = useCallback(
     (prepare: HeldSelection['prepare'], force = false, inTable?: () => boolean): boolean => {
@@ -1291,18 +1299,28 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [ensureSelection, session, setSelection]
   );
 
-  const handleTab = useCallback((shift: boolean): boolean => {
+  const handleTab = useCallback((shift: boolean, replayed = false): boolean => {
     if (readOnly) return false;
-    if (holdInput) {
-      const selection = pendingSelectionsRef.current[pendingSelectionsRef.current.length - 1];
-      const inTable = selection?.inTable?.();
-      holdOperation({ kind: 'tab', shift });
-      return inTable ?? !!yrsCellLocFromStory(readSelection()?.head.story ?? story);
+    if (!replayed) {
+      const pending = inputOperationQueueRef.current?.hasPending();
+      if (holdInput || replicaReadyRef?.current === false) {
+        const last = heldInputRef.current.entries.slice().reverse().find(
+          (entry): entry is HeldSelection => entry.kind === 'selection' && !!entry.inTable
+        );
+        const current = !last && !pending ? readSelection() : null;
+        const inTable = last
+          ? last.inTable?.()
+          : pending ? pendingCaretTableRef.current?.()
+          : current ? !!yrsCellLocFromStory(current.head.story) : undefined;
+        if (!inTable) return false;
+        if (holdOperation({ kind: 'tab', shift })) return true;
+      } else if (!moveTableCell(shift, false)) return false;
     }
-    if (!moveTableCell(shift, false)) return false;
-    enqueueInputOperation(() => { moveTableCell(shift); }, 'mutation');
+    enqueueInputOperation(() => {
+      moveTableCell(shift);
+    }, 'mutation');
     return true;
-  }, [enqueueInputOperation, holdInput, holdOperation, moveTableCell, readOnly, readSelection, story]);
+  }, [enqueueInputOperation, holdInput, holdOperation, moveTableCell, readOnly, readSelection, replicaReadyRef]);
 
   const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab });
   inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab };
@@ -1310,7 +1328,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (entry.kind === 'selection') handlers.replaySelection(entry);
     else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
     else if (entry.kind === 'text' || entry.kind === 'composition') handlers.insertText(entry.text);
-    else if (entry.kind === 'tab') handlers.handleTab(entry.shift);
+    else if (entry.kind === 'tab') handlers.handleTab(entry.shift, true);
     else if (entry.kind === 'split') handlers.splitParagraph();
     else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
     else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
@@ -1318,6 +1336,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, []);
   const replayHeldBatch = useCallback((entries: HeldInput[]): void => {
     const handlers = inputHandlersRef.current;
+    const last = entries.slice().reverse().find(
+      (entry): entry is HeldSelection => entry.kind === 'selection' && !!entry.inTable
+    );
     let prepareFailure: { error: unknown } | undefined;
     for (const entry of entries) {
       if (entry.kind !== 'selection') continue;
@@ -1349,9 +1370,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             entry.kind === 'navigation' || entry.kind === 'select-all' ||
             entry.kind === 'composition' || entry.kind === 'undo-boundary'
           ) session.addUndoBoundary();
+          const version = entry.kind === 'tab' ? session.version() : null;
           replayHeldEntry(entry, handlers);
           if (entry.kind === 'composition') session.addUndoBoundary();
-          previousTime = entry.inputTime;
+          if (entry.kind !== 'tab' || session.version() !== version) previousTime = entry.inputTime;
           previousStory = activeStory;
         }
       } finally {
@@ -1363,7 +1385,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       await Promise.all(batch.operations);
       if (prepareFailure) throw prepareFailure.error;
-    }, 'mutation');
+    }, 'mutation', undefined, last?.inTable);
   }, [emitSelection, enqueueInputOperation, ensureSelection, onCaretInput, readOnly, replayHeldEntry, replicaReadyRef, session]);
   const heldReplayHandlersRef = useRef({ replayHeldBatch, replayHeldEntry, enqueueInputOperation });
   heldReplayHandlersRef.current = { replayHeldBatch, replayHeldEntry, enqueueInputOperation };

@@ -1315,6 +1315,51 @@ test('a click during hydration preserves A, ArrowLeft, B in order and places the
   }
 });
 
+test('table Tab during hydration follows held input and moves to the next cell', async () => {
+  const zip = await JSZip.loadAsync(longBytes);
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const cells = ['Left', 'Right'].map((text) =>
+    `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`
+  ).join('');
+  zip.file('word/document.xml', xml.replace(
+    '<w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>',
+    `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${cells}</w:tr></w:tbl>`
+  ));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const direct = await createYrsSession();
+  sessions.push(direct);
+  direct.openDocx(source, true);
+  const projection = createYrsPositionProjection(direct, 'body')!;
+  const left = 'body:t0:r0c0';
+  const right = 'body:t0:r0c1';
+  const position = projection.positionForLoc({ story: left, paraId: direct.paragraphs(left)[0]!.paraId, offset: 1 })!;
+  const opened = await openingEditor(true, false, { source });
+  try {
+    opened.click(position);
+    opened.type('A');
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    expect(opened.harness.core.opening).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(full.storyIds()).toEqual([]);
+    const textarea = opened.view.getByTestId('yrs-input');
+    expect(fireEvent.keyDown(textarea, { key: 'Tab' })).toBe(false);
+    opened.type('B');
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(full.storyIds()).toEqual([]);
+    await opened.loadPeer(full);
+    expect(full.paragraphs(left)[0]!.text).toBe('LAeft');
+    expect(full.paragraphs(right)[0]!.text).toBe('BRight');
+    expect(full.selection()?.head.story).toBe(right);
+    expect(full.selection()?.head.offset).toBe(1);
+    expect(full.cellSelection()?.head.column).toBe(1);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
 test('a ready click binds its position before an outstanding resident edit reply', async () => {
   const zip = await JSZip.loadAsync(await longFixture(1));
   const xml = await zip.file('word/document.xml')!.async('string');
@@ -2083,6 +2128,81 @@ test('a completed worker layout commits readiness as soon as hydration finishes'
   }
 });
 
+test('a new provisional layout keeps held input pending after an earlier pass completes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('Q');
+    const pending = requestWorkerOpenReplica(full)!;
+    let ready = false;
+    void pending.then(() => { ready = true; });
+    act(() => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'provisional');
+    });
+    await finishHeldHydration(opened, tasks);
+    expect(ready).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(fallback.timers.size).toBe(2);
+    await act(async () => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      await pending;
+    });
+    expect(ready).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    await waitFor(() => {
+      expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    });
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('page progress after layout completion commits readiness as soon as hydration finishes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    const pending = requestWorkerOpenReplica(full)!;
+    let ready = false;
+    void pending.then(() => { ready = true; });
+    act(() => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'page');
+    });
+    expect(ready).toBe(false);
+    await finishHeldHydration(opened, tasks);
+    expect(ready).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
 test('flushing held input commits a hydrated peer before worker layout completes', async () => {
   const opened = await openingEditor(true, false, {
     holdReply: (request) => request.type === 'completeLayout',
@@ -2150,7 +2270,7 @@ test('layout progress keeps readiness pending past ten seconds until it stalls f
     for (let step = 0; step < 6; step += 1) {
       act(() => {
         fallback.advance(2000);
-        replicaHelpers.notifyWorkerOpenLayoutProgress(full);
+        replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'page');
       });
       expect(opened.harness.core.replicaReady).toBe(false);
     }
@@ -2181,7 +2301,7 @@ test('readiness commits thirty seconds after hydration even with ongoing layout 
     for (let step = 0; step < 14; step += 1) {
       act(() => {
         fallback.advance(2000);
-        replicaHelpers.notifyWorkerOpenLayoutProgress(full);
+        replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'provisional');
       });
       expect(opened.harness.core.replicaReady).toBe(false);
     }
@@ -2219,7 +2339,7 @@ test('replacing a document discards its hydrated peer waiting for layout complet
     expect(fallback.timers.size).toBe(0);
     await act(async () => {
       opened.reply(completion);
-      replicaHelpers.notifyWorkerOpenLayoutProgress(full, true);
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
       fallback.advance(30_000);
     });
     const replacement = await opened.switchToFull();
@@ -2270,7 +2390,7 @@ test('worker hydration opens and loads in separate tasks before publishing readi
     expect(ready).toBe(false);
     expect(replicas).toEqual([]);
     await act(async () => {
-      replicaHelpers.notifyWorkerOpenLayoutProgress(session, true);
+      replicaHelpers.notifyWorkerOpenLayoutProgress(session, 'complete');
       await tasks.run();
       await pending;
     });

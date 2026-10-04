@@ -616,8 +616,9 @@ test.each(SYNC_REPLICA_CALLS.filter(([member]) => DOCX_REF_REPLICA_LOADING_MUTAT
     let caught: unknown;
     try { call(); } catch (error) { caught = error; }
     expect(caught).toBeInstanceOf(DocxReplicaNotReadyError);
-    expect(caught).toMatchObject({ member, message: expect.stringContaining('await flushPendingInput()') });
+    expect((caught as DocxReplicaNotReadyError).member).toBe(member);
     expect((caught as Error).message).toContain(member);
+    expect((caught as Error).message).toContain('await flushPendingInput()');
     if (member in DOCX_REF_ASYNC_TWINS) {
       const twin = DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS];
       expect((caught as Error).message).toContain(typeof twin === 'string' ? twin : twin.join(' or '));

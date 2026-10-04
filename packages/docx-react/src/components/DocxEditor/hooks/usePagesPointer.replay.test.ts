@@ -201,7 +201,7 @@ test('a single click during replica loading replays the caret', () => {
   expect(selections).toEqual([[20, 20, 'body']]);
 });
 
-test.each([false, true])('a queued opening click exposes its table target without the replica: %s', async (inTable) => {
+test.each([{ inTable: false }, { inTable: true }])('a queued opening click exposes its table target without the replica: $inTable', async ({ inTable }) => {
   const { opts, queries, entries, selections, replay } = queuedOptions();
   queries.displayList.pages[0]!.primitives = [{
     kind: 'text', text: 'text', x: 0, baselineY: 410, width: 800,
@@ -211,13 +211,14 @@ test.each([false, true])('a queued opening click exposes its table target withou
   const projection = mock(() => { throw new Error('Replica projection is unavailable'); });
   const readyProjection = opts.getYrsPositionProjection;
   opts.getYrsPositionProjection = projection;
-  renderHook(() => usePagesPointer(opts));
+  const view = renderHook(() => usePagesPointer(opts));
   click(1);
   expect(entries).toHaveLength(1);
   expect(entries[0].inTable!()).toBe(inTable);
   expect(projection).not.toHaveBeenCalled();
   expect(selections).toEqual([]);
   opts.getYrsPositionProjection = readyProjection;
+  view.rerender();
   await replay();
   expect(selections).toEqual([[20, 20, 'body']]);
 });
