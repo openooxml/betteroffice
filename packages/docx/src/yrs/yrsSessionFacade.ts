@@ -390,10 +390,14 @@ export function wrapSession(session: EditSession, clientId: number): YrsSession 
 
   const facade: YrsSession = {
     clientId,
-    openDocxPreview: (bytes, blocks) => {
+    openDocxPreview: (bytes, blocks, paragraphBudget) => {
       markDirty('all');
       resetMedia();
-      const json = mutateAlways(() => session.open_docx_preview(bytes, blocks));
+      const json = mutateAlways(() =>
+        paragraphBudget === undefined
+          ? session.open_docx_preview(bytes, blocks)
+          : session.open_docx_preview_with_budget(bytes, blocks, paragraphBudget)
+      );
       if (json === undefined) return null;
       displayOnly = true;
       partialDocument = true;

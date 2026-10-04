@@ -1359,8 +1359,21 @@ impl EditSession {
     }
 
     pub fn open_docx_preview(&self, bytes: &[u8], blocks: u32) -> Result<Option<String>, JsValue> {
-        self.open_preview_source(bytes, blocks as usize)
-            .map_err(|error| js_err(&error))
+        self.open_docx_preview_with_budget(bytes, blocks, None)
+    }
+
+    pub fn open_docx_preview_with_budget(
+        &self,
+        bytes: &[u8],
+        blocks: u32,
+        paragraph_budget: Option<u32>,
+    ) -> Result<Option<String>, JsValue> {
+        self.open_preview_source(
+            bytes,
+            blocks as usize,
+            paragraph_budget.map(|value| value as usize),
+        )
+        .map_err(|error| js_err(&error))
     }
 
     fn open_docx_inner(
@@ -1456,25 +1469,28 @@ impl EditSession {
 
     #[cfg(test)]
     fn open_preview(&self, bytes: &[u8], blocks: usize) -> Result<Option<String>, String> {
-        self.open_preview_source(bytes, blocks)
+        self.open_preview_source(bytes, blocks, None)
     }
 
     fn open_preview_source(
         &self,
         bytes: impl Into<PackageBytes>,
         blocks: usize,
+        paragraph_budget: Option<usize>,
     ) -> Result<Option<String>, String> {
         // A preview holds a cut of the document and must never be saved, so
         // it only opens into a session with nothing to save.
         if self.docx_source.borrow().is_some() || !self.story_ids().is_empty() {
             return Err("a preview opens only into an empty session".to_owned());
         }
-        let Some((envelope, media)) = crate::seed::parse_docx_preview(bytes.into(), blocks)? else {
+        let Some((envelope, media, budget_stopped)) =
+            crate::seed::parse_docx_preview(bytes.into(), blocks, paragraph_budget)?
+        else {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
-        // The cut stops only once it holds `blocks` blocks.
-        let whole_body = envelope.document.package.document.content.len() < blocks;
+        let whole_body =
+            !budget_stopped && envelope.document.package.document.content.len() < blocks;
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
@@ -2400,8 +2416,22 @@ impl EditSession {
         bytes: Vec<u8>,
         blocks: u32,
     ) -> Result<Option<String>, JsValue> {
-        self.open_preview_source(bytes, blocks as usize)
-            .map_err(|error| js_err(&error))
+        self.open_docx_preview_with_budget_owned(bytes, blocks, None)
+    }
+
+    #[wasm_bindgen(js_name = open_docx_preview_with_budget)]
+    pub fn open_docx_preview_with_budget_owned(
+        &self,
+        bytes: Vec<u8>,
+        blocks: u32,
+        paragraph_budget: Option<u32>,
+    ) -> Result<Option<String>, JsValue> {
+        self.open_preview_source(
+            bytes,
+            blocks as usize,
+            paragraph_budget.map(|value| value as usize),
+        )
+        .map_err(|error| js_err(&error))
     }
 
     /// Whether [`EditSession::open_docx`] seeds images as `media:{n}` tokens,
@@ -5110,6 +5140,30 @@ mod tests {
     }
 
     #[test]
+    fn owned_weighted_preview_open_matches_borrowed_open() {
+        let p = "<w:p><w:r><w:t>Cell</w:t></w:r></w:p>";
+        let table = format!("<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>", p.repeat(10));
+        let bytes = script_fonts_docx(&table.repeat(60), "");
+        for paragraph_budget in [None, Some(256), Some(400)] {
+            let borrowed = EditSession::new(74.0).unwrap();
+            let expected = borrowed
+                .open_docx_preview_with_budget(&bytes, 200, paragraph_budget)
+                .unwrap();
+            let owned = EditSession::new(74.0).unwrap();
+            let actual = owned
+                .open_docx_preview_with_budget_owned(bytes.clone(), 200, paragraph_budget)
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(owned.encode_state(), borrowed.encode_state());
+            assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
+            assert_eq!(
+                owned.materialize_docx().unwrap(),
+                borrowed.materialize_docx().unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn owned_open_matches_borrowed_validation_errors() {
         for bytes in [Vec::new(), b"not a zip".to_vec(), batch_docx()] {
             for digest in [None, Some("malformed")] {
@@ -5127,7 +5181,7 @@ mod tests {
                 assert_eq!(owned.encode_state(), borrowed.encode_state());
                 assert_eq!(owned.encode_state_vector(), borrowed.encode_state_vector());
                 assert_eq!(
-                    owned.open_preview_source(b"not a zip".to_vec(), 1),
+                    owned.open_preview_source(b"not a zip".to_vec(), 1, None),
                     borrowed.open_preview(b"not a zip", 1)
                 );
             }
@@ -6004,6 +6058,35 @@ mod tests {
         let host: Value =
             serde_json::from_str(&full.open_docx(&bytes, true, None, None).unwrap()).unwrap();
         assert!(host.get("wholeBody").is_none());
+    }
+
+    #[test]
+    fn a_weighted_preview_reports_budget_cuts_and_genuine_exhaustion() {
+        let p = "<w:p><w:r><w:t>Cell</w:t></w:r></w:p>";
+        let table = format!("<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>", p.repeat(10));
+        for (count, tail, paragraph_budget, whole) in [
+            (60, 170, Some(256), false),
+            (60, 170, None, false),
+            (60, 0, Some(256), true),
+            (20, 0, Some(256), true),
+            (32, 0, Some(256), true),
+            (40, 0, Some(1000), true),
+        ] {
+            let bytes = script_fonts_docx(&(table.repeat(count) + &p.repeat(tail)), "");
+            let preview = EditSession::new(83.0).unwrap();
+            let host: Value = serde_json::from_str(
+                &preview
+                    .open_preview_source(&bytes[..], 200, paragraph_budget)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                host.get("wholeBody").is_some(),
+                whole,
+                "{count} tables, {tail} paragraphs, budget={paragraph_budget:?}"
+            );
+        }
     }
 
     #[test]

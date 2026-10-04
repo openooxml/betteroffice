@@ -1,6 +1,8 @@
 //! grid geometry: cumulative pixel offsets for columns and rows. tables cover
 //! only the explicitly-sized prefix; past it, default sizes are extrapolated analytically.
 
+#[cfg(feature = "test-counters")]
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 
@@ -9,6 +11,25 @@ use xlsx_model::workbook::Sheet;
 use xlsx_model::{CellRef, ColId, RowId};
 
 use crate::Viewport;
+
+#[cfg(feature = "test-counters")]
+thread_local! {
+    static GEOMETRY_CONSTRUCTIONS: Cell<u64> = const { Cell::new(0) };
+    static AUTOFIT_CELL_VISITS: Cell<u64> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn geometry_counters() -> (u64, u64) {
+    (GEOMETRY_CONSTRUCTIONS.get(), AUTOFIT_CELL_VISITS.get())
+}
+
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn reset_geometry_counters() {
+    GEOMETRY_CONSTRUCTIONS.set(0);
+    AUTOFIT_CELL_VISITS.set(0);
+}
 
 /// default column width in characters of max-digit-width (excel default).
 pub const DEFAULT_COL_WIDTH_CHARS: f64 = 8.43;
@@ -182,6 +203,8 @@ fn autofit_rows(
         .map(|range| (range.start.row, range.start.col))
         .collect();
     for (at, cell) in sheet.iter_cells() {
+        #[cfg(feature = "test-counters")]
+        AUTOFIT_CELL_VISITS.set(AUTOFIT_CELL_VISITS.get().wrapping_add(1));
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
@@ -293,6 +316,8 @@ impl GridGeometry {
         normal: NormalFace<'_>,
         column_pixels: impl Fn(f64) -> f32,
     ) -> Self {
+        #[cfg(feature = "test-counters")]
+        GEOMETRY_CONSTRUCTIONS.set(GEOMETRY_CONSTRUCTIONS.get().wrapping_add(1));
         let default_row_px = row_pt_to_px(default_row_pt);
         let fitted = autofit_rows(sheet, styles, default_row_pt, normal);
         let scale = stored_height_scale(sheet, normal);

@@ -1039,12 +1039,15 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * Opens a DOCX for display only, from the body's first `blocks` blocks:
    * enough to lay out its first pages with a prefix pass before the whole
-   * document is opened. The session cannot save. `null`, opening nothing,
+   * document is opened. With `paragraphBudget`, the cut also ends at the first
+   * whole block (from the 32nd on) where the paragraphs read, table cells
+   * included, reach the budget, only when the block limit would also cut the body.
+   * The session cannot save. `null`, opening nothing,
    * for a document with a float placed from outside the text or a section
    * with columns, which no cut of the body lays out like the whole: open it
    * with {@link openDocx}. @internal
    */
-  openDocxPreview(bytes: Uint8Array, blocks: number): YrsDocxHost | null;
+  openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): YrsDocxHost | null;
   /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
   isDisplayOnly(): boolean;
   /**

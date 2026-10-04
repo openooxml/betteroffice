@@ -1217,8 +1217,10 @@ dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
  "betteroffice-pptx-render",
+ "serde",
  "serde_json",
  "wasm-bindgen",
+ "yrs",
 ]
 
 [[package]]
