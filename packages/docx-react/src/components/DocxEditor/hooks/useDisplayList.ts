@@ -1198,6 +1198,11 @@ export function useRustDisplayList(
   // A failure no request handled by the next task leaves the dead worker current.
   workerFailureListenerRef.current = (client, failure) => {
     if (!workerOpenEnabledRef.current) return;
+    const owner = workerRef.current;
+    if (owner?.client === client && isCurrentWorker(owner.engine, owner) &&
+      isViewerPreview(owner.engine) && frameEngineRef.current === owner.engine) {
+      viewerPreviewRetryLoadRef.current = owner.load;
+    }
     setTimeout(() => {
       const owner = workerRef.current;
       if (unmountedRef.current || owner?.client !== client || workerFailureRef.current.has(owner.engine)) return;

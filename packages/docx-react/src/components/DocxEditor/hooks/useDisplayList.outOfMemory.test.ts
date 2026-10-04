@@ -606,6 +606,50 @@ test('a shown viewer preview crash spends the full open retry before the full op
   }
 });
 
+test('a shown viewer preview crash spends the retry when full open starts before deferred recovery', async () => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const preview = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const first = FakeWorker.spawned[0]!;
+    await act(async () => { replyOpened(first); await preview; });
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(source.frame(1), 1); });
+    await waitFor(() => expect(hook.result.current.presentedEngine).toBe(source.engine));
+    const shown = hook.result.current.displayList;
+    const full = { ...source.engine, isDisplayOnly: () => false } as YrsSession;
+    let pending: Promise<unknown> | undefined;
+    act(() => {
+      first.onerror?.({ message: 'preview crashed' } as ErrorEvent);
+      pending = hook.result.current.openInWorker(full, Uint8Array.of(2))
+        .catch((error: unknown) => error);
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.displayList).toBe(shown);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'open', bytes: Uint8Array.of(2).buffer });
+    await act(async () => {
+      second.trapped();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(hook.result.current.error).toBeInstanceOf(DocxWorkerError);
+    const failure = await pending;
+    expect((failure as DocxWorkerError).stage).toBe('open');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls[0]![1]).toBe(failure);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    errors.mockRestore();
+    hook.unmount();
+    source.native.free();
+  }
+});
+
 test('a held viewer missing its retained source reports a layout error without a main preflight', async () => {
   const source = viewerFixture();
   const hook = viewerDisplay(source);
