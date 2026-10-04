@@ -18,8 +18,6 @@ import {
   awaitWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenDocumentHeld,
-  workerOpenReplicaLoadedVersion,
-  workerOpenReplicaPending,
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
@@ -32,7 +30,7 @@ const INSERT_IMAGE_MAX_WIDTH_PX = 612;
 
 /**
  * Saves in the document's worker; null when the save falls back to the main
- * thread. A viewer whose copy has not loaded saves in its worker or not at all.
+ * thread. A viewer has no main-thread copy, so it saves in its worker or not at all.
  */
 function saveInWorker(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
@@ -42,12 +40,11 @@ function saveInWorker(
   assertCurrent: () => void
 ): Promise<ArrayBuffer | null> | null {
   const saver = workerOpenSave(session);
-  const workerOnly = workerOpenDocumentHeld(session) || (viewer && workerOpenReplicaPending(session));
   if (!saver || (!viewer && !saver.available())) {
-    if (workerOnly) throw new ResidentWorkerSaveUnavailableError('No document worker');
+    if (viewer) throw new ResidentWorkerSaveUnavailableError('No document worker');
     return null;
   }
-  return saveWithWorker(pagedEditorRef, session, saver, viewer, workerOnly, comments, assertCurrent);
+  return saveWithWorker(pagedEditorRef, session, saver, viewer, comments, assertCurrent);
 }
 
 async function saveWithWorker(
@@ -55,12 +52,11 @@ async function saveWithWorker(
   session: YrsSession,
   saver: WorkerOpenSave,
   viewer: boolean,
-  workerOnly: boolean,
   comments: Comment[],
   assertCurrent: () => void
 ): Promise<ArrayBuffer | null> {
   let peer: YrsSession | undefined;
-  if (viewer ? workerOpenReplicaLoadedVersion(session) !== undefined : workerOpenReplicaStarted(session)) {
+  if (!viewer && workerOpenReplicaStarted(session)) {
     await awaitWorkerOpenReplica(session);
     peer = (await flushedSession(pagedEditorRef)).session;
     assertCurrent();
@@ -79,7 +75,7 @@ async function saveWithWorker(
     return buffer;
   } catch (error) {
     assertCurrent();
-    if (viewer ? workerOnly : !(error instanceof ResidentWorkerSaveUnavailableError)) throw error;
+    if (viewer || !(error instanceof ResidentWorkerSaveUnavailableError)) throw error;
     return null;
   }
 }
