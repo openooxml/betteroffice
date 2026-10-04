@@ -1,4 +1,5 @@
 import type { MethodPolicies, SessionState } from '../../../../shared/office-session';
+import type { DisplayList } from '../display-list/types';
 import type {
   XlsxEditRequest,
   XlsxEditResult,
@@ -8,7 +9,26 @@ import type {
   XlsxReadResult,
   XlsxValidationResult,
 } from '../edits';
-import type { CalculationStatus, OpenWorkbookOptions } from '../wasm/loader';
+import type { CalculationStatus, OpenWorkbookOptions, Viewport } from '../wasm/loader';
+
+/** @experimental */
+export interface WorkbookFrameOptions {
+  sheet?: number;
+}
+
+/** @experimental */
+export interface WorkbookFrame {
+  displayList: DisplayList;
+  version: string;
+  epoch: number;
+  sheet: number;
+  viewport: Viewport;
+}
+
+/** @experimental */
+export type WorkbookWireFrame = Omit<WorkbookFrame, 'displayList'> & {
+  displayList: ArrayBuffer;
+};
 
 /**
  * Structured-cloneable workbook open options.
@@ -58,6 +78,7 @@ export type WorkbookSessionMethods = {
   findText(request: XlsxFindRequest): XlsxFindResult;
   validateEdits(request: XlsxEditRequest): XlsxValidationResult;
   applyEdits(request: XlsxEditRequest): XlsxEditResult;
+  frame(viewport: Viewport, options?: WorkbookFrameOptions): WorkbookWireFrame;
   sheets(): WorkbookSheetSummary[];
   calculationStatus(): CalculationStatus;
   save(): ArrayBuffer;
@@ -71,6 +92,7 @@ export const WORKBOOK_SESSION_METHODS = {
   findText: true,
   validateEdits: true,
   applyEdits: true,
+  frame: true,
   sheets: true,
   calculationStatus: true,
   save: true,
@@ -84,6 +106,7 @@ export const WORKBOOK_SESSION_POLICIES: MethodPolicies<WorkbookSessionMethods> =
   findText: { lane: 'interactive' },
   validateEdits: { lane: 'interactive' },
   applyEdits: { lane: 'input', mutates: true, userInput: true },
+  frame: { lane: 'interactive', reframes: true, key: 'frame', replaceableBy: 'frame' },
   sheets: { lane: 'interactive' },
   calculationStatus: { lane: 'interactive' },
   save: { lane: 'interactive' },

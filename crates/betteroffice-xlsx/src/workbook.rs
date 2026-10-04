@@ -21,6 +21,7 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
+use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
 use xlsx_render::chart::chart_regions_with_geometry;
 #[cfg(feature = "raster")]
 use xlsx_render::region::{
@@ -332,24 +333,24 @@ pub struct Workbook {
     version_nonce: String,
     /// Changes committed since the nonce was minted; the other half.
     committed_changes: u64,
-    /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
-    /// stored epoch and part-bytes hash.
-    chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
+    /// Chart plans by part path and resolutions by part path and owner sheet.
+    chart_cache: Mutex<ChartCache>,
     /// SHA-256 of retained source parts that exports have cited.
     source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
 
-struct CachedChartSpace {
-    bytes_hash: u64,
-    epoch: u64,
-    space: Arc<ChartSpace>,
+#[derive(Default)]
+struct ChartCache {
+    plans: HashMap<String, Arc<ChartRefreshPlan>>,
+    spaces: HashMap<(String, String), CachedChartSpace>,
 }
 
-fn chart_bytes_hash(bytes: &[u8]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hasher::write(&mut h, bytes);
-    std::hash::Hasher::write_usize(&mut h, bytes.len());
-    std::hash::Hasher::finish(&h)
+struct CachedChartSpace {
+    plan: Arc<ChartRefreshPlan>,
+    refresh: ChartRefresh,
+    theme: xlsx_model::styles::Theme,
+    epoch: u64,
+    space: Arc<ChartSpace>,
 }
 
 impl Workbook {
@@ -525,7 +526,7 @@ impl Workbook {
             geometry_cache: Mutex::new(HashMap::new()),
             version_nonce,
             committed_changes: 0,
-            chart_cache: Mutex::new(HashMap::new()),
+            chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
         })
     }
@@ -2902,15 +2903,11 @@ impl StagedApply {
 
 impl Workbook {
     /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
-    /// the bump invalidates chart resolutions.
+    /// charts revalidate against their refresh value after the bump.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
         self.geometry_cache
             .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        self.chart_cache
-            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
     }
@@ -3906,13 +3903,28 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 }
 
 impl Workbook {
-    /// `ChartSpace` for a chart part, resolved against `owner`; cached per
-    /// epoch and part bytes.
+    /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
     fn resolve_chart_space(
         &self,
         owner: &str,
         chart: &SheetChart,
     ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
+        let epoch = self.model_epoch;
+        let key = (chart.part.clone(), owner.to_owned());
+        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = if let Some(hit) = cache.spaces.get_mut(&key) {
+            if hit.epoch == epoch {
+                return Ok(Arc::clone(&hit.space));
+            }
+            let refresh = hit.plan.refresh(&self.model, owner);
+            if refresh == hit.refresh && hit.theme == self.model.styles.theme {
+                hit.epoch = epoch;
+                return Ok(Arc::clone(&hit.space));
+            }
+            Some((Arc::clone(&hit.plan), refresh))
+        } else {
+            None
+        };
         let package =
             self.source_package
                 .as_ref()
@@ -3925,28 +3937,34 @@ impl Workbook {
                 .ok_or_else(|| RenderError::ChartPartMissing {
                     part: chart.part.clone(),
                 })?;
-        let bytes_hash = chart_bytes_hash(bytes);
-        let epoch = self.model_epoch;
-        let key = (chart.part.clone(), owner.to_owned());
-        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(hit) = cache.get(&key)
-            && hit.epoch == epoch
-            && hit.bytes_hash == bytes_hash
-        {
-            return Ok(hit.space.clone());
-        }
-        let space =
-            xlsx_parse::preserved_chart_space(bytes, &self.model, owner, &self.model.styles.theme)
-                .ok_or_else(|| RenderError::ChartParseFailed {
-                    part: chart.part.clone(),
-                })
-                .map(Arc::new)?;
-        cache.insert(
+        let (plan, refresh) = changed.unwrap_or_else(|| {
+            let plan = Arc::clone(
+                cache
+                    .plans
+                    .entry(chart.part.clone())
+                    .or_insert_with(|| Arc::new(ChartRefreshPlan::new(bytes))),
+            );
+            let refresh = plan.refresh(&self.model, owner);
+            (plan, refresh)
+        });
+        let space = plan
+            .chart_space(&refresh, bytes, &self.model.styles.theme)
+            .ok_or_else(|| RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            })
+            .map(Arc::new)?;
+        let sheets = &self.model.sheets;
+        cache
+            .spaces
+            .retain(|(_, owner), _| sheets.iter().any(|sheet| sheet.name == *owner));
+        cache.spaces.insert(
             key,
             CachedChartSpace {
-                bytes_hash,
+                plan,
+                refresh,
+                theme: self.model.styles.theme.clone(),
                 epoch,
-                space: space.clone(),
+                space: Arc::clone(&space),
             },
         );
         Ok(space)

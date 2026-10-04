@@ -81,17 +81,18 @@ function harness(laidOut = () => Promise.resolve()) {
   };
   const relayout = mock(() => {});
   const contentChanged = mock(() => {});
+  const projectionChanged = mock((_stories: readonly string[]) => {});
   let current = true;
   const authority = registerWorkerProposalAuthority(
     session, worker as unknown as WorkerOpenedDocument,
     {
-      relayout, current: () => current, laidOut, contentChanged,
+      relayout, current: () => current, laidOut, contentChanged, projectionChanged,
       adopted: () => {}, handedOver: () => {},
     }
   );
   deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
   return {
-    session, worker, events, authority, proposalChange, relayout, contentChanged,
+    session, worker, events, authority, proposalChange, relayout, contentChanged, projectionChanged,
     replace: () => { current = false; },
     mainVersion: (version: string) => { mainVersion = version; },
   };
@@ -99,6 +100,67 @@ function harness(laidOut = () => Promise.resolve()) {
 
 const request: DocxProposalRequest = { expectVersion: 'worker-1', proposals: [] };
 const unusedMain = async () => { throw new Error('unexpected main call'); };
+
+test('worker mutation marks reach the peer before mirror listeners and queued saves', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.worker.proposal.mockResolvedValueOnce({ ...reply('worker-2', ['body']), projectionStories: ['hf:rId7'] });
+  h.projectionChanged.mockImplementation((stories) => {
+    expect(h.session.version()).toBe('worker-1~');
+    expect(stories).toEqual(['hf:rId7']);
+  });
+  await h.authority.propose(request, unusedMain);
+  expect(h.projectionChanged).toHaveBeenCalledWith(['hf:rId7']);
+  h.projectionChanged.mockImplementation(() => {});
+  await h.authority.save(async () => {
+    expect(h.projectionChanged).toHaveBeenCalledWith(['hf:rId7']);
+    return new ArrayBuffer(1);
+  });
+});
+
+test('save runs after every proposal call already queued without opening the replica', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const held = deferred<ResidentProposalReply>();
+  h.worker.proposal.mockImplementationOnce(async () => {
+    h.events.push('propose');
+    return held.promise;
+  });
+  const proposal = h.authority.propose(request, unusedMain);
+  const save = mock(async () => {
+    h.events.push('save');
+    return new ArrayBuffer(1);
+  });
+  const saving = h.authority.save(save);
+  await Promise.resolve();
+  expect(save).not.toHaveBeenCalled();
+  held.resolve(reply());
+  await proposal;
+  expect(await saving).toBeInstanceOf(ArrayBuffer);
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('a failed authority rejects queued saves without running them', async () => {
+  const h = harness();
+  const error = new Error('Worker stopped');
+  failWorkerProposalAuthority(h.session, error);
+  const save = mock(async () => new ArrayBuffer(1));
+  expect(await h.authority.save(save).catch((failure) => failure)).toBe(error);
+  expect(save).not.toHaveBeenCalled();
+});
+
+test('save remains queued after the peer has taken over proposal calls', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  const handover = await beginWorkerProposalHandover(h.session);
+  handover!.complete();
+  const bytes = new ArrayBuffer(1);
+  expect(await h.authority.save(async () => {
+    h.events.push('save');
+    return bytes;
+  })).toBe(bytes);
+  expect(h.events).toEqual(['snapshot', 'handOver', 'save']);
+});
 
 function navigationReply(version = 'worker-1', position = 42): ResidentProposalReply {
   const snapshot = reply(version);
