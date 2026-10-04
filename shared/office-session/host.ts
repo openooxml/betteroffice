@@ -89,9 +89,16 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     return () => { clearTimeout(id); timeouts.delete(id); };
   }
   function track(cancel: (reason?: unknown) => void) {
+    let ended = false;
     const task = {
+      end() {
+        ended = true;
+        tasks.delete(task);
+      },
       cancel(reason?: unknown) {
-        if (tasks.delete(task)) cancel(reason);
+        if (ended) return;
+        task.end();
+        cancel(reason);
       },
     };
     tasks.add(task);
@@ -111,10 +118,21 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
         return;
       }
       resident.schedule({
-        ...task,
+        kind: task.kind,
+        idleAfterInputMs: task.idleAfterInputMs,
+        get version() { return task.version; },
+        set version(value) { task.version = value; },
+        get generation() { return task.generation; },
+        set generation(value) { task.generation = value; },
+        onStale: task.onStale ? () => task.onStale!() : undefined,
         cancel: () => tracked.cancel(),
         fail: task.fail ? (error) => {
-          if (tasks.delete(tracked)) task.fail!(error);
+          if (terminal(error)) {
+            fail(classify(error));
+            return;
+          }
+          tracked.end();
+          task.fail!(error);
         } : undefined,
         async run(budgetMs) {
           if (ended()) {
@@ -127,20 +145,29 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
               tracked.cancel();
               return 'done';
             }
-            if (step === 'done') tasks.delete(tracked);
+            if (step === 'done') tracked.end();
             return step;
           } catch (error) {
             if (terminal(error)) {
               fail(classify(error));
               return 'done';
             }
+            tracked.end();
             throw error;
           }
         },
       });
     },
     dispatch(task) {
-      const tracked = track((reason) => task.cancel?.(reason));
+      const tracked = track((reason) => {
+        try { task.cancel?.(reason); } catch (error) {
+          if (terminal(error)) {
+            fail(classify(error));
+            return;
+          }
+          throw error;
+        }
+      });
       if (ended()) {
         try { tracked.cancel(); } catch {}
         return;
@@ -167,7 +194,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
           }
           try {
             await task.install(result);
-            tasks.delete(tracked);
+            tracked.end();
           } catch (error) {
             if (terminal(error)) fail(classify(error));
             throw error;
