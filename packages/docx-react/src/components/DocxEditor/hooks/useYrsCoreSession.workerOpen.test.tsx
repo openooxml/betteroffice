@@ -41,7 +41,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
-import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { flushEditorInput } from '../editorBatches';
@@ -1893,6 +1893,58 @@ function holdPeerFallback() {
   };
 }
 
+function holdLayoutFallback() {
+  const schedule = globalThis.setTimeout;
+  const unschedule = globalThis.clearTimeout;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  let now = 0;
+  let nextId = 0;
+  globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
+    const [callback, delay, ...args] = input;
+    if ((delay === 3000 || delay === 30_000) && typeof callback === 'function') {
+      const id = --nextId;
+      timers.set(id, { at: now + delay, callback: () => callback(...args) });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    }
+    return schedule(callback, delay, ...args);
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id?: ReturnType<typeof setTimeout>) => {
+    if (!timers.delete(id as unknown as number)) unschedule(id);
+  }) as typeof clearTimeout;
+  return {
+    timers,
+    advance(ms: number) {
+      const target = now + ms;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        const [id, timer] = next;
+        now = timer.at;
+        timers.delete(id);
+        timer.callback();
+      }
+      now = target;
+    },
+    restore: registerRestore(() => {
+      globalThis.setTimeout = schedule;
+      globalThis.clearTimeout = unschedule;
+    }),
+  };
+}
+
+async function finishHeldHydration(
+  opened: Awaited<ReturnType<typeof openingEditor>>,
+  tasks: ReturnType<typeof holdHydrationTasks>
+) {
+  await waitFor(() => expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(true));
+  await act(async () => opened.workers.at(-1)!.release());
+  await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+  await act(async () => tasks.run());
+  await act(async () => tasks.run());
+  tasks.restore();
+}
+
 function holdFrames() {
   const request = globalThis.requestAnimationFrame;
   const cancel = globalThis.cancelAnimationFrame;
@@ -1963,6 +2015,226 @@ function stubDocumentVisibility(initial: 'visible' | 'hidden') {
   };
 }
 
+test('held input and loading reads wait for the current worker layout after hydration', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('A');
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowLeft' });
+    opened.type('B');
+    const pending = requestWorkerOpenReplica(full)!;
+    let ready = false;
+    void pending.then(() => { ready = true; });
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.replies.has(completion.id)).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(false);
+    expect(ready).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.harness.ref.current!.getDocument()).toBeNull();
+    expect(opened.harness.ref.current!.findInDocument('First')).toEqual([]);
+    expect(() => opened.harness.ref.current!.insertBreak({ paraId: '00000001', type: 'page' })).toThrow(DocxReplicaNotReadyError);
+    let saved = false;
+    const save = opened.harness.ref.current!.save().then(() => { saved = true; });
+    await act(async () => {});
+    expect(saved).toBe(false);
+    await act(async () => {
+      opened.reply(completion);
+      await pending;
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    await save;
+    expect(full.paragraphs('body')[0].text).toBe('FirstBA paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.ref.current!.getDocument()).not.toBeNull();
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('a completed worker layout commits readiness as soon as hydration finishes', async () => {
+  const opened = await openingEditor();
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    await finishHeldHydration(opened, tasks);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('flushing held input commits a hydrated peer before worker layout completes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('Q');
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(opened.replies.has(completion.id)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('an on-demand request commits a hydrated peer before worker layout completes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => opened.harness.core.requestReplica());
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.replies.has(completion.id)).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('layout progress keeps readiness pending past ten seconds until it stalls for three seconds', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    for (let step = 0; step < 6; step += 1) {
+      act(() => {
+        fallback.advance(2000);
+        replicaHelpers.notifyWorkerOpenLayoutProgress(full);
+      });
+      expect(opened.harness.core.replicaReady).toBe(false);
+    }
+    act(() => fallback.advance(2999));
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => fallback.advance(1));
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('readiness commits thirty seconds after hydration even with ongoing layout progress', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    for (let step = 0; step < 14; step += 1) {
+      act(() => {
+        fallback.advance(2000);
+        replicaHelpers.notifyWorkerOpenLayoutProgress(full);
+      });
+      expect(opened.harness.core.replicaReady).toBe(false);
+    }
+    act(() => fallback.advance(1999));
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => fallback.advance(1));
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('Q');
+    const pending = requestWorkerOpenReplica(full)!;
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(fallback.timers.size).toBe(2);
+    await opened.replace();
+    await expect(pending).rejects.toThrow('The document changed');
+    expect(fallback.timers.size).toBe(0);
+    await act(async () => {
+      opened.reply(completion);
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, true);
+      fallback.advance(30_000);
+    });
+    const replacement = await opened.switchToFull();
+    expect(replacement).not.toBe(full);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
 test('worker hydration opens and loads in separate tasks before publishing readiness', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
@@ -1998,6 +2270,7 @@ test('worker hydration opens and loads in separate tasks before publishing readi
     expect(ready).toBe(false);
     expect(replicas).toEqual([]);
     await act(async () => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(session, true);
       await tasks.run();
       await pending;
     });
@@ -2247,6 +2520,7 @@ test.each([false, true])('a loadState error after yielding preserves replica fal
 test('a hidden document starts the editor peer immediately without layout or idle', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
+  const fallback = holdLayoutFallback();
   const visibility = stubDocumentVisibility('hidden');
   const { result, unmount } = renderHook(useHarness, { initialProps });
   try {
@@ -2260,8 +2534,11 @@ test('a hidden document starts the editor peer immediately without layout or idl
     act(() => frames.run());
     act(() => frames.runIdle());
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(fallback.timers.size).toBe(2));
+    expect(result.current.core.replicaReady).toBe(false);
     await act(async () => {
-      workers[0].release();
+      fallback.advance(3000);
       await awaitWorkerOpenReplica(session);
     });
     expect(result.current.core.replicaReady).toBe(true);
@@ -2270,6 +2547,7 @@ test('a hidden document starts the editor peer immediately without layout or idl
   } finally {
     unmount();
     visibility.restore();
+    fallback.restore();
     frames.restore();
   }
 });
@@ -3684,6 +3962,7 @@ test('opening the comments sidebar hydrates the pending replica and keeps worker
 
 test('a first-layout font setup failure starts the replica for pending reads, save and commands', async () => {
   const { workers, posted } = installWorker({ holdState: true });
+  const fallback = holdLayoutFallback();
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
@@ -3708,6 +3987,9 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     act(() => { result.current.core.failOpening(failure, session); });
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     await act(async () => { workers[0].release(); });
+    await waitFor(() => expect(fallback.timers.size).toBe(2));
+    expect(completed.value).toBe(false);
+    act(() => fallback.advance(3000));
     await waitFor(() => expect(completed.value).toBe(true));
     const settled = await calls;
     expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
@@ -3718,6 +4000,7 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     expect(result.current.renderer.frame).toBeNull();
   } finally {
     registerFont.mockRestore();
+    fallback.restore();
   }
 });
 

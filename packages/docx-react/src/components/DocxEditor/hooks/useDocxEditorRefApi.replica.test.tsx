@@ -154,7 +154,7 @@ function apiFor(
   return { api, events, pagedEditorRef, openingRef };
 }
 
-async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, hydrateOnDemand = false) {
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, hydrateOnDemand = false, waitForLayout = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -183,7 +183,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
       session.openDocx(bytes, true);
     },
     () => { readiness.current = true; },
-    { active: () => hydrateOnDemand, request: () => replica.start() }
+    { active: () => hydrateOnDemand, request: () => replica.start() },
+    { current: () => true, cancel: () => {}, waitForLayout }
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
   return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
@@ -317,6 +318,21 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   expect(new TextDecoder().decode(values[10]!)).toBe(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n'));
   expect(values[12]).toMatchObject({ ok: false, version: session.version(), failure: { code: 'layout-unavailable' } });
   expect(values[13]).toBe(0);
+});
+
+test('ref flush bypasses the layout wait and drains queued input', async () => {
+  const { api, session, replica, release, pagedEditorRef, fallbackReasons } = await pendingReplica('editing', true, false, true);
+  act(() => pagedEditorRef.current!.insertText('Q'));
+  replica.start();
+  await act(async () => release());
+  const before = session.paragraphs('body')[0]!.text;
+  expect(replica.pending).toBe(true);
+  expect(api.getDocument()).toBeNull();
+  await act(async () => api.flushPendingInput());
+  expect(replica.pending).toBe(false);
+  expect(session.paragraphs('body')[0]!.text).toBe(`Q${before}`);
+  expect(api.getDocument()).not.toBeNull();
+  expect(fallbackReasons).toEqual([]);
 });
 
 test('synchronous reads return loading answers until the owner opens the editor replica', async () => {

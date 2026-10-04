@@ -40,7 +40,7 @@ import {
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
-import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
@@ -1641,6 +1641,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
   const flushPendingInputRef = useRef<(() => Promise<void>) | null>(null);
   const flushPendingInput = useCallback(async (): Promise<void> => {
+    if (session && !session.isDisplayOnly()) requestWorkerOpenReplicaReadiness(session);
     if (hasHeldInput()) {
       const scope = heldInputRef.current;
       let notify!: () => void;
@@ -1657,6 +1658,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               reject(new Error('The document changed while flushing input'));
               return;
             }
+            if (!lifetime.session.isDisplayOnly()) requestWorkerOpenReplicaReadiness(lifetime.session);
             if (flushing || holdInputRef.current || hasHeldInput()) return;
             flushing = true;
             flushPendingInputRef.current!().then(resolve, reject);

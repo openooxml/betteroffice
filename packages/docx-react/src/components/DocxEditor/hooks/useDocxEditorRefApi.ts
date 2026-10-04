@@ -33,6 +33,7 @@ import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
   requestOnDemandWorkerOpenReplica,
+  requestWorkerOpenReplicaReadiness,
   workerOpenReplicaOnDemand,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
@@ -334,6 +335,7 @@ function gateReplicaAccess(
               }
             }
           } else {
+            if (key === 'flushPendingInput') requestWorkerOpenReplicaReadiness(session);
             if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
               return Reflect.apply(call, api, args);
             }

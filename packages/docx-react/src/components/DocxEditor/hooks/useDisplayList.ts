@@ -82,6 +82,7 @@ import {
 import {
   ensureWorkerOpenReplica,
   failWorkerOpenReplica,
+  notifyWorkerOpenLayoutProgress,
   workerOpenReplicaPending,
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
@@ -2106,6 +2107,9 @@ export function useRustDisplayList(
                 });
               }
               snapshotRef.current = nextSnapshot;
+              if (worker && release.length === 0 && batch.some((index) =>
+                previous.displayList?.pages[index]?.unbuilt && !nextFrame.displayList.pages[index]?.unbuilt
+              )) notifyWorkerOpenLayoutProgress(targetEngine);
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background && workerOpen) startTransition(() => setSnapshot(nextSnapshot));
               else setSnapshot(nextSnapshot);
@@ -2462,6 +2466,10 @@ export function useRustDisplayList(
           throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
         }
         const computation = workerLayoutComputation(result.layoutJson, result.layoutRevision);
+        if (isCurrentWorker(hostEngine, owner) &&
+          hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision) {
+          notifyWorkerOpenLayoutProgress(hostEngine, !result.layoutProvisional);
+        }
         if (base === undefined) return computation;
         workerLayoutFramesRef.current.set(computation.layout, {
           result,

@@ -5,6 +5,8 @@ interface PendingReplica {
   ready: Promise<void>;
   start(): void;
   ensure(): void;
+  requestReady(): void;
+  layoutProgress(complete: boolean): void;
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
@@ -26,6 +28,8 @@ export interface WorkerOpenReplicaDemand {
 }
 
 const replicas = new WeakMap<YrsSession, PendingReplica>();
+const LAYOUT_STALL_MS = 3000;
+const LAYOUT_WAIT_LIMIT_MS = 30_000;
 
 export function deferWorkerOpenReplica(
   session: YrsSession,
@@ -33,12 +37,17 @@ export function deferWorkerOpenReplica(
   fallback: () => void,
   onReady: () => void,
   onDemand?: WorkerOpenReplicaDemand,
-  lifecycle?: { current(): boolean; cancel(): void }
+  lifecycle?: { current(): boolean; cancel(): void; waitForLayout?: boolean }
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
   let started = false;
   let finishing = false;
+  let hydrated = false;
+  let layoutComplete = false;
+  let readinessRequested = false;
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  let limitTimer: ReturnType<typeof setTimeout> | null = null;
   let failure: unknown;
   let steps: readonly (() => void)[] | null = null;
   let nextStep = 0;
@@ -54,7 +63,30 @@ export function deferWorkerOpenReplica(
     replica.cancel();
     return false;
   };
-  const finish = (load: () => void, handoff = false): void => {
+  const clearLayoutWait = (): void => {
+    if (stallTimer !== null) clearTimeout(stallTimer);
+    if (limitTimer !== null) clearTimeout(limitTimer);
+    stallTimer = null;
+    limitTimer = null;
+  };
+  const commit = (): void => {
+    if (!hydrated || !current()) return;
+    clearLayoutWait();
+    replica.pending = false;
+    controller.abort();
+    try {
+      onReady();
+      resolve();
+    } catch (error) {
+      failure = error;
+      reject(error);
+    }
+  };
+  const resetStallTimer = (): void => {
+    if (stallTimer !== null) clearTimeout(stallTimer);
+    stallTimer = setTimeout(commit, LAYOUT_STALL_MS);
+  };
+  const finish = (load: () => void, handoff = false, force = false): void => {
     if (!current() || finishing) return;
     finishing = true;
     try {
@@ -66,18 +98,21 @@ export function deferWorkerOpenReplica(
         if (!handoff) throw error;
         if (!current()) return;
         fallback();
+        handoff = false;
       }
       if (!current()) return;
       replica.loadedVersion = session.version();
-      replica.pending = false;
+      hydrated = true;
       steps = null;
-      controller.abort();
-      onReady();
-      resolve();
+      if (lifecycle?.waitForLayout && handoff && !force && !readinessRequested && !layoutComplete) {
+        resetStallTimer();
+        limitTimer = setTimeout(commit, LAYOUT_WAIT_LIMIT_MS);
+      } else commit();
     } catch (error) {
       failure = error;
       replica.pending = false;
       steps = null;
+      clearLayoutWait();
       controller.abort();
       reject(error);
     } finally {
@@ -128,8 +163,18 @@ export function deferWorkerOpenReplica(
       );
     },
     ensure() {
-      finish(steps ? loadRemaining : fallback, steps !== null);
+      finish(hydrated ? () => {} : steps ? loadRemaining : fallback, steps !== null, true);
       if (failure !== undefined) throw failure;
+    },
+    requestReady() {
+      readinessRequested = true;
+      commit();
+    },
+    layoutProgress(complete) {
+      if (!current()) return;
+      layoutComplete ||= complete;
+      if (layoutComplete) commit();
+      else if (hydrated && stallTimer !== null) resetStallTimer();
     },
     cancel() {
       if (!replica.pending) return;
@@ -140,6 +185,7 @@ export function deferWorkerOpenReplica(
       if (!replica.pending) return;
       replica.pending = false;
       steps = null;
+      clearLayoutWait();
       controller.abort();
       failure = error;
       reject(error);
@@ -169,7 +215,7 @@ export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | u
 
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
   const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+  if (replica?.pending && replica.onDemand?.active() === true) requestWorkerOpenReplicaReadiness(session);
   return replica?.ready;
 }
 
@@ -181,7 +227,18 @@ export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
 /** Asks an on-demand replica of `session` to load; see {@link WorkerOpenReplicaDemand}. */
 export function requestOnDemandWorkerOpenReplica(session: YrsSession): void {
   const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+  if (replica?.pending && replica.onDemand?.active() === true) requestWorkerOpenReplicaReadiness(session);
+}
+
+export function requestWorkerOpenReplicaReadiness(session: YrsSession): void {
+  const replica = replicas.get(session);
+  if (!replica?.pending) return;
+  replica.requestReady();
+  if (replica.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+}
+
+export function notifyWorkerOpenLayoutProgress(session: YrsSession, complete = false): void {
+  replicas.get(session)?.layoutProgress(complete);
 }
 
 /** The version `session` had when its replica loaded; a later version holds a newer change. */

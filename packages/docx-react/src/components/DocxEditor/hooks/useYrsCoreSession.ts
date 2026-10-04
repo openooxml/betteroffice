@@ -632,6 +632,7 @@ export function useYrsCoreSession(
             const source = bytes;
             const gate = { reached: false, wanted: eagerReplica };
             const request = (): void => {
+              pending.requestReady();
               if (!gate.wanted) {
                 gate.wanted = true;
                 setReplicaRequestVersion((version) => version + 1);
@@ -670,6 +671,7 @@ export function useYrsCoreSession(
                 current: () => !stale() && sessionRef.current === next &&
                   pendingReplicaRef.current === pending,
                 cancel: () => worker.destroy(),
+                waitForLayout: eagerReplica,
               }
             );
             if (workerOpenRef.current?.workerProposals) {
