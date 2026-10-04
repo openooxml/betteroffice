@@ -16,11 +16,12 @@ test('export versions map document and layout tokens and preserve their original
   const adapter = workerExportVersions(peer, owner, 1);
   const first = adapter.adapt(exported('W1', 7), 'P', 'W1');
   const second = adapter.adapt(exported('W2', 8), 'P', 'W2');
-  expect(first).toMatchObject({
-    version: 'P', content: { layout: { documentVersion: 'P', layoutVersion: expect.stringMatching(/^P:\d+:7$/) } },
-  });
-  expect(second).toMatchObject({ content: { layout: { layoutVersion: expect.stringMatching(/^P:\d+:8$/) } } });
   if (!first.ok || !second.ok) throw new Error('Expected success');
+  expect(first).toMatchObject({
+    version: 'P', content: { layout: { documentVersion: 'P' } },
+  });
+  expect(first.content.layout.layoutVersion).toMatch(/^P:\d+:7$/);
+  expect(second.content.layout.layoutVersion).toMatch(/^P:\d+:8$/);
   expect(adapter.workerLayoutVersion(first.content.layout.layoutVersion)).toBe('W1:7');
   expect(adapter.workerLayoutVersion(second.content.layout.layoutVersion)).toBe('W2:8');
   expect(adapter.workerLayoutVersion('unknown:7')).toBe('unknown:7');

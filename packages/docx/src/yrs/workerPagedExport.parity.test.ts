@@ -394,7 +394,11 @@ test('editor-style worker export after hydration and peer edits strictly preserv
       const exported = JSON.parse(read.value) as PagedExport;
       const source = seeded.exportStructuredWithPagesFor(options, request);
       expect(normalize(exported)).toEqual(normalize(source));
-      if (!exported.ok) throw new Error(exported.failure.message);
+      expect(exported.ok).toBe(options.revisionView === 'markup');
+      if (!exported.ok) {
+        expect(exported.failure.code).toBe('unsupported-revision-layout');
+        continue;
+      }
       expect(JSON.stringify(exported.content.structured)).toContain('"breakType":"page"');
       expect(exported.content.structured.diagnostics.some(({ code }) => code === 'provenance-unavailable')).toBe(false);
       const comments = exported.content.structured.stories.filter(({ kind }) => kind === 'comment');
