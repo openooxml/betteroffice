@@ -2373,7 +2373,7 @@ fn a_refused_array_formula_saves_its_rectangle() {
     sheet.set_array_formula(cell("C20"), rectangle);
     model.sheets.push(sheet);
     let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
-    let workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
+    let mut workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
     assert!(
         workbook
             .last_calculation()
@@ -2393,6 +2393,23 @@ fn a_refused_array_formula_saves_its_rectangle() {
     let sheet = &reopened.model().sheets[0];
     assert_eq!(sheet.array_formula(cell("C20")), Some(rectangle));
     assert_eq!(sheet.cell(cell("C20")).unwrap().value, CellValue::Empty);
+    assert_eq!(
+        sheet.cell(cell("D25")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
+
+    workbook
+        .edit_cell(SheetId(0), cell("A12"), "4", CalculationOptions::default())
+        .unwrap();
+    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+    let sheet = &reopened.model().sheets[0];
+    assert_eq!(sheet.array_formula(cell("C20")), Some(rectangle));
+    assert_eq!(
+        sheet.cell(cell("C20")).unwrap().value,
+        CellValue::Error {
+            value: ErrorValue::Num
+        }
+    );
     assert_eq!(
         sheet.cell(cell("D25")).unwrap().value,
         CellValue::Number { value: 7.0 }
@@ -4958,6 +4975,113 @@ fn no_edit_round_trip_keeps_calculation_chain_and_source_parts() {
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
     assert_eq!(after, before);
     assert!(package_map(&saved).contains_key("xl/calcChain.xml"));
+}
+
+fn stored_zip_with_duplicate_members(parts: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut directory = Vec::new();
+    for (name, contents) in parts {
+        let offset = u32::try_from(bytes.len()).unwrap();
+        let size = u32::try_from(contents.len()).unwrap();
+        let name_len = u16::try_from(name.len()).unwrap();
+        let mut crc = u32::MAX;
+        for &byte in contents {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb88320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let crc = !crc;
+
+        let mut local = [0_u8; 30];
+        local[..4].copy_from_slice(&0x04034b50_u32.to_le_bytes());
+        local[4..6].copy_from_slice(&20_u16.to_le_bytes());
+        local[12..14].copy_from_slice(&0x0021_u16.to_le_bytes());
+        local[14..18].copy_from_slice(&crc.to_le_bytes());
+        local[18..22].copy_from_slice(&size.to_le_bytes());
+        local[22..26].copy_from_slice(&size.to_le_bytes());
+        local[26..28].copy_from_slice(&name_len.to_le_bytes());
+        bytes.extend_from_slice(&local);
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(contents);
+
+        let mut central = [0_u8; 46];
+        central[..4].copy_from_slice(&0x02014b50_u32.to_le_bytes());
+        central[4..6].copy_from_slice(&20_u16.to_le_bytes());
+        central[6..8].copy_from_slice(&20_u16.to_le_bytes());
+        central[14..16].copy_from_slice(&0x0021_u16.to_le_bytes());
+        central[16..20].copy_from_slice(&crc.to_le_bytes());
+        central[20..24].copy_from_slice(&size.to_le_bytes());
+        central[24..28].copy_from_slice(&size.to_le_bytes());
+        central[28..30].copy_from_slice(&name_len.to_le_bytes());
+        central[42..46].copy_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(&central);
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let mut end = [0_u8; 22];
+    let count = u16::try_from(parts.len()).unwrap();
+    end[..4].copy_from_slice(&0x06054b50_u32.to_le_bytes());
+    end[8..10].copy_from_slice(&count.to_le_bytes());
+    end[10..12].copy_from_slice(&count.to_le_bytes());
+    end[12..16].copy_from_slice(&u32::try_from(directory.len()).unwrap().to_le_bytes());
+    end[16..20].copy_from_slice(&u32::try_from(bytes.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&directory);
+    bytes.extend_from_slice(&end);
+    bytes
+}
+
+#[test]
+fn no_edit_save_drops_conflicting_duplicate_members() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    model.sheets[0].cell_mut(cell("A1")).unwrap().value = CellValue::Number { value: 2.0 };
+    let last_sheet = xlsx_parse::serialize_workbook(&model)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    parts.push(last_sheet.clone());
+    let source = stored_zip_with_duplicate_members(&parts);
+    assert_eq!(
+        ooxml_opc::SourceContainer::new(source.clone()).declared_member_count(),
+        Some(parts.len())
+    );
+    assert_eq!(
+        ooxml_opc::unzip_parts(&source).unwrap().len(),
+        parts.len() - 1
+    );
+    let workbook = Workbook::open_recalculated(&source, CalculationOptions::default()).unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 2.0 }
+    );
+    let saved = workbook.save().unwrap();
+    assert_ne!(saved, source);
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(saved_parts.len(), parts.len() - 1);
+    assert_eq!(
+        ooxml_opc::SourceContainer::new(saved).declared_member_count(),
+        Some(saved_parts.len())
+    );
+    let sheets: Vec<_> = saved_parts
+        .iter()
+        .filter(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .collect();
+    assert_eq!(sheets.len(), 1);
+    assert_eq!(sheets[0], &last_sheet);
 }
 
 fn recalculation_fixture(formula: &str, cache: &str) -> Vec<u8> {

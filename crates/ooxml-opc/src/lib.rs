@@ -210,6 +210,29 @@ impl SourceContainer {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// Returns the declared ZIP member count, or None for unsupported or invalid records.
+    pub fn declared_member_count(&self) -> Option<usize> {
+        let bytes = self.as_bytes();
+        let end = bytes.len().checked_sub(22)?;
+        let start = end.saturating_sub(u16::MAX as usize);
+        for pos in (start..=end).rev() {
+            let record = &bytes[pos..pos + 22];
+            if record[..4] != 0x06054b50_u32.to_le_bytes() {
+                continue;
+            }
+            let field = |offset: usize| u16::from_le_bytes([record[offset], record[offset + 1]]);
+            if pos + 22 + usize::from(field(20)) != bytes.len() {
+                continue;
+            }
+            let total = field(10);
+            if field(4) != 0 || field(6) != 0 || field(8) != total || total == u16::MAX {
+                return None;
+            }
+            return Some(usize::from(total));
+        }
+        None
+    }
 }
 
 impl std::fmt::Debug for SourceContainer {
@@ -356,6 +379,64 @@ mod tests {
         let zipped = rezip_parts(&sample()).expect("rezip");
         let back = unzip_parts(&zipped).expect("unzip");
         assert_eq!(back, sample());
+    }
+
+    #[test]
+    fn source_container_reports_declared_member_count() {
+        let parts = sample();
+        let bytes = rezip_parts(&parts).unwrap();
+        assert_eq!(
+            SourceContainer::new(bytes).declared_member_count(),
+            Some(parts.len())
+        );
+    }
+
+    #[test]
+    fn source_container_reports_member_count_with_archive_comment() {
+        for comment in [
+            b"archive comment PK\x05\x06 with trailing comment bytes".to_vec(),
+            vec![0; u16::MAX as usize],
+        ] {
+            let parts = sample();
+            let mut bytes = rezip_parts(&parts).unwrap();
+            let end = bytes.len();
+            bytes[end - 2..].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&comment);
+            assert_eq!(
+                SourceContainer::new(bytes).declared_member_count(),
+                Some(parts.len())
+            );
+        }
+    }
+
+    #[test]
+    fn source_container_rejects_missing_or_truncated_records() {
+        let mut truncated = rezip_parts(&sample()).unwrap();
+        truncated.pop();
+        let mut trailing = rezip_parts(&sample()).unwrap();
+        trailing.push(0);
+        for bytes in [
+            Vec::new(),
+            vec![0; 22],
+            b"not a zip".to_vec(),
+            truncated,
+            trailing,
+        ] {
+            assert_eq!(SourceContainer::new(bytes).declared_member_count(), None);
+        }
+    }
+
+    #[test]
+    fn source_container_rejects_split_or_unknown_member_counts() {
+        for (offset, value) in [(4, 1_u16), (6, 1), (8, 2), (10, u16::MAX)] {
+            let mut bytes = rezip_parts(&sample()).unwrap();
+            let pos = bytes.len() - 22;
+            bytes[pos + offset..pos + offset + 2].copy_from_slice(&value.to_le_bytes());
+            if value == u16::MAX {
+                bytes[pos + 8..pos + 12].fill(0xff);
+            }
+            assert_eq!(SourceContainer::new(bytes).declared_member_count(), None);
+        }
     }
 
     #[test]

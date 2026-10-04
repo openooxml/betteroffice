@@ -881,6 +881,7 @@ impl Workbook {
                     .iter()
                     .all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
                     && let Some(source) = &self.source_container
+                    && source.declared_member_count() == Some(parts.len())
                 {
                     return Ok(source.as_bytes().to_vec());
                 }
