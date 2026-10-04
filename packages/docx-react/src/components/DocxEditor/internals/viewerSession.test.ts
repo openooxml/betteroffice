@@ -11,11 +11,11 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-function session(workerProposals: boolean, generation = 1, workerOpen = true) {
+function session(workerProposals: boolean, generation = 1, workerOpen = true, mediaTokens = false) {
   return renderHook(
-    (props: { workerOpen: boolean; workerProposals: boolean; generation: number }) =>
-      useViewerSession(props.workerOpen, props.workerProposals, props.generation),
-    { initialProps: { workerOpen, workerProposals, generation } }
+    (props: { workerOpen: boolean; workerProposals: boolean; generation: number; mediaTokens?: boolean }) =>
+      useViewerSession(props.workerOpen && !props.mediaTokens, props.workerProposals, props.generation),
+    { initialProps: { workerOpen, workerProposals, generation, mediaTokens } }
   );
 }
 
@@ -52,4 +52,21 @@ test('the next document opened while viewing is a viewer session again', () => {
   rerender({ workerOpen: true, workerProposals: true, generation: 1 });
   rerender({ workerOpen: true, workerProposals: true, generation: 2 });
   expect(result.current).toBe(true);
+});
+
+test('a media-token document stays editor kind for its generation', () => {
+  const { result, rerender } = session(true, 1, true, true);
+  expect(result.current).toBe(false);
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: false });
+  expect(result.current).toBe(false);
+  rerender({ workerOpen: true, workerProposals: true, generation: 2, mediaTokens: false });
+  expect(result.current).toBe(true);
+});
+
+test('enabling media tokens leaves viewer kind permanently for the current document', () => {
+  const { result, rerender } = session(true);
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: true });
+  expect(result.current).toBe(false);
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: false });
+  expect(result.current).toBe(false);
 });

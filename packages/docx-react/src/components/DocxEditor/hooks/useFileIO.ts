@@ -27,6 +27,7 @@ import {
 import type { PagedEditorRef } from '../PagedEditor';
 import { flushedSession } from '../editorBatches';
 import { dirtyProjectionStory } from './useYrsCoreSession';
+import { loadHeldDocumentForSave, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
@@ -238,6 +239,12 @@ export function useFileIO({
         if (!pagedEditorRef.current) return null;
         const { editor, session } = await flushedSession(pagedEditorRef);
         if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
+        if (workerOpenDocumentHeld(session)) {
+          await loadHeldDocumentForSave(session);
+          if (pagedEditorRef.current?.getYrsSession() !== session) {
+            throw new Error('The document changed while saving');
+          }
+        }
         const projected = editor.getDocument();
         if (!projected) return null;
         const capture = projected.originalBuffer ? captureSessionSave(session) : null;

@@ -602,17 +602,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
       commandBridgeRef,
     } = props;
-    // A viewer whose document fell back to this thread selects through the copy it holds here.
-    const viewerDocumentRead =
-      viewerDocumentReadProp &&
-      !(
-        displayListQueries &&
-        presentedWorkerVersion(displayListQueries) === null &&
-        yrsCore.session &&
-        !workerOpenReplicaPending(yrsCore.session)
-      )
-        ? viewerDocumentReadProp
-        : undefined;
+    const viewerDocumentRead = viewerDocumentReadProp;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container
@@ -2121,7 +2111,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
-      hydrateOnDemand: yrsCore.hydrateOnDemand,
+      viewerSession: viewerDocumentRead !== undefined,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -2199,7 +2189,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             requestReplica={yrsCore.experimentalWorkerOpen ? yrsCore.requestReplica : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}
-            seedSelection={!yrsCore.hydrateOnDemand}
+            seedSelection={viewerDocumentRead === undefined}
             session={yrsCore.session}
             story={activeYrsRootStory}
             isSuggesting={isSuggesting}

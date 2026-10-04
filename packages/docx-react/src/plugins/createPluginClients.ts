@@ -18,10 +18,12 @@ import type { EditorMode } from '../components/DocxEditor/internals/editing-mode
 import { isLayoutQueued, sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import {
   requestWorkerOpenReplica,
+  workerOpenDocumentHeld,
   workerOpenSourceVersion,
 } from '../components/DocxEditor/internals/workerOpenReplica';
 import {
   handedOverRequest,
+  registeredWorkerProposalAuthority,
   workerProposalAuthority,
   type WorkerProposalAuthority,
 } from '../components/DocxEditor/internals/workerProposalAuthority';
@@ -196,6 +198,22 @@ export function createPluginClients(
     },
     findText: async (request) => {
       const session = access.pagedEditorRef.current?.getYrsSession();
+      if (session && (access.viewer?.() === true || workerOpenDocumentHeld(session))) {
+        const before = invalid(session);
+        if (before) return before;
+        const authority = registeredWorkerProposalAuthority(session) ?? workerProposalAuthority(session);
+        if (!authority) return pluginRefusal('input-failed');
+        const fallback = pluginRefusal('input-failed');
+        try {
+          const result = await authority.findText(request, async () => { throw fallback; });
+          return invalid(session) ?? result;
+        } catch (error) {
+          const refused = invalid(session);
+          if (refused) return refused;
+          if (error === fallback) return fallback;
+          throw error;
+        }
+      }
       if (session && workerProposalAuthority(session)) {
         const refused = await replicaReady(session);
         if (refused) return refused;

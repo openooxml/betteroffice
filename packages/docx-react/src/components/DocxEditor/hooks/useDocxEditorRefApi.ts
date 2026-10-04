@@ -33,9 +33,8 @@ import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
   ensureWorkerOpenReplica,
-  requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
-  workerOpenReplicaOnDemand,
+  workerOpenDocumentHeld,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
 import {
@@ -137,22 +136,6 @@ export const DOCX_REF_REPLICA_ACCESS = {
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
 /**
- * Synchronous APIs that an on-demand replica still loading answers without loading it at once:
- * `direct` needs no replica (the display list, print, focus, or a call that waits for the replica
- * itself), `unselected` has nothing selected before the replica, and `request` answers as unready
- * and asks for the replica.
- */
-const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'unselected' | 'request'>> = {
-  focus: 'direct',
-  scrollToPosition: 'direct',
-  openPrintPreview: 'direct',
-  print: 'direct',
-  highlightRange: 'direct',
-  getSelectionInfo: 'unselected',
-  getPositionAtPoint: 'direct',
-};
-
-/**
  * Thrown by a synchronous editor ref member that needs the document on the main thread while a
  * read-only `experimentalWorkerOpen` editor still holds it, with host proposals, in its worker. The
  * document starts loading; await `flushPendingInput()` (or the member's async counterpart) and call
@@ -195,6 +178,7 @@ const VIEWER_NAVIGATION = {
 } as const;
 const VIEWER_REF_REFUSALS = {
   getEditorRef: null,
+  getSelectionInfo: null,
   setParagraphStyle: false,
   applyFormatting: false,
   insertBreak: false,
@@ -279,7 +263,8 @@ const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
 function gateReplicaAccess(
   api: DocxEditorRef,
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
-  enabled: boolean
+  enabled: boolean,
+  viewer: () => boolean
 ): DocxEditorRef {
   if (!enabled) return api;
   const gated = { ...api };
@@ -290,27 +275,21 @@ function gateReplicaAccess(
     Object.defineProperty(gated, key, {
       value: (...args: unknown[]) => {
         const session = pagedEditorRef.current?.getYrsSession();
+        if (viewer() || (session && workerOpenDocumentHeld(session))) {
+          return Reflect.apply(call, api, args);
+        }
         if (session) {
           if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
             return Reflect.apply(call, api, args);
           }
           if (access === 'sync') {
-            const onDemand = workerOpenReplicaOnDemand(session) ? ON_DEMAND_SYNC_ACCESS[key] : undefined;
-            if (onDemand === 'unselected') return null;
-            if (onDemand === 'request') {
-              requestOnDemandWorkerOpenReplica(session);
-              return null;
-            }
             // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
-            if (onDemand === undefined && workerProposalAuthority(session)?.holdsWorkerState()) {
+            if (workerProposalAuthority(session)?.holdsWorkerState()) {
               void requestWorkerOpenReplica(session)?.catch(() => {});
               throw new DocxReplicaNotReadyError(key);
             }
-            if (onDemand === undefined) ensureWorkerOpenReplica(session, key);
+            ensureWorkerOpenReplica(session, key);
           } else {
-            if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {
-              return Reflect.apply(call, api, args);
-            }
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
               const timeoutMs =
@@ -454,7 +433,8 @@ async function exportWithPagesInWorker(
   authority: WorkerProposalAuthority,
   options: DocxPageExportOptions,
   settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen = false,
+  viewer: () => boolean = () => false
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
   const editor = (): PagedEditorRef => {
     const current = pagedEditorRef.current;
@@ -478,7 +458,8 @@ async function exportWithPagesInWorker(
         request = await editor().readLayoutRequest();
         return request;
       },
-      () => {
+      async () => {
+        if (viewer() || workerOpenDocumentHeld(session)) return unavailable('The worker document is unavailable.');
         fellBack = true;
         return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
       }
@@ -492,7 +473,7 @@ async function exportWithPagesInWorker(
     editor();
     if (result === 'timeout') return unavailable('The document is not laid out yet.');
     if (result !== null) return result;
-    if (!workerOpenReplicaPending(session)) {
+    if (!viewer() && !workerOpenDocumentHeld(session) && !workerOpenReplicaPending(session)) {
       fellBack = true;
       return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
     }
@@ -666,7 +647,11 @@ export function useDocxEditorRefApi({
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   const proposalAuthority = () => {
     const session = pagedEditorRef.current?.getYrsSession();
-    return experimentalWorkerOpen && session ? workerProposalAuthority(session) : null;
+    return experimentalWorkerOpen && session
+      ? viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current) || workerOpenDocumentHeld(session)
+        ? registeredWorkerProposalAuthority(session)
+        : workerProposalAuthority(session)
+      : null;
   };
   /** A proposal call on the worker's registry while it holds them, else on the main session. */
   const routedProposalCall = <R extends { expectVersion: string }>(
@@ -677,13 +662,15 @@ export function useDocxEditorRefApi({
     ) => Promise<DocxProposalResult>,
     call: (session: YrsSession, request: R) => DocxProposalResult
   ): Promise<DocxProposalResult> => {
-    const main = (input: R) =>
-      applyProposalCall(
+    const main = (input: R) => {
+      if (viewerSessionRef.current) return Promise.reject(new Error('The worker proposal authority is unavailable'));
+      return applyProposalCall(
         pagedEditorRef,
         hostProposalsAllowed,
         (session) => call(session, handedOverRequest(session, input)),
         experimentalWorkerOpen
       );
+    };
     const authority = proposalAuthority();
     if (!authority) return main(request);
     if (!hostProposalsAllowed()) {
@@ -696,7 +683,14 @@ export function useDocxEditorRefApi({
     return onWorker(authority, main);
   };
   const createApi = (): DocxEditorRef => {
-    const viewer = () => viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current);
+    const viewer = () => {
+      const session = pagedEditorRef.current?.getYrsSession();
+      return viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current) || (!!session && workerOpenDocumentHeld(session));
+    };
+    const mainSession = async () => {
+      if (viewer()) throw new Error('The worker document authority is unavailable');
+      return flushedSession(pagedEditorRef, experimentalWorkerOpen);
+    };
     const flush = async () => {
       const result = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
       if (!result.ok && result.code !== 'editor-unavailable') throw result.error;
@@ -735,18 +729,18 @@ export function useDocxEditorRefApi({
 
       readParagraphs: (request) => {
         const main = async (input: typeof request) =>
-          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.readParagraphs(input);
+          (await mainSession()).session.readParagraphs(input);
         const authority = proposalAuthority();
         return authority ? authority.readParagraphs(request, main) : main(request);
       },
       getParagraphIdentities: () => {
         const main = async () =>
-          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.paragraphIdentities();
+          (await mainSession()).session.paragraphIdentities();
         return proposalAuthority()?.paragraphIdentities(main) ?? main();
       },
       resolveParagraphAnchors: (anchors) => {
         const main = async (input: typeof anchors) => {
-          const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
+          const { session } = await mainSession();
           return { version: session.version(), results: input.map((anchor) => session.resolveParagraphAnchor(anchor)) };
         };
         const authority = proposalAuthority();
@@ -754,31 +748,31 @@ export function useDocxEditorRefApi({
       },
       listContentControls: (options) => {
         const main = async () =>
-          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options);
+          (await mainSession()).session.listContentControls(options);
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
-        const authority = session && workerOpenReplicaPending(session)
+        const authority = session
           ? registeredWorkerProposalAuthority(session)
           : null;
         return authority ? authority.listContentControls(options, main) : main();
       },
       findContentControls: (query, options) => {
         const main = async () =>
-          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options);
+          (await mainSession()).session.findContentControls(query, options);
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
-        const authority = session && workerOpenReplicaPending(session)
+        const authority = session
           ? registeredWorkerProposalAuthority(session)
           : null;
         return authority ? authority.findContentControls(query, options, main) : main();
       },
       findText: (request) => {
         const main = async () =>
-          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request);
+          (await mainSession()).session.findText(request);
         const session = pagedEditorRef.current?.getYrsSession();
         const authority = viewer() && session ? registeredWorkerProposalAuthority(session) : null;
         return authority ? authority.findText(request, main) : main();
       },
       validateEdits: async (request) => {
-        const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
+        const { session } = await mainSession();
         return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
       },
       applyEdits: async (request) => {
@@ -803,18 +797,20 @@ export function useDocxEditorRefApi({
         ),
       getProposals: () => {
         const main = async () =>
-          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.getProposals();
+          (await mainSession()).session.getProposals();
         return proposalAuthority()?.getProposals(main) ?? main();
       },
 
       exportStructuredWithPages: (options) => {
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
-        const authority = session && workerOpenReplicaPending(session)
+        const authority = session
           ? registeredWorkerProposalAuthority(session)
           : null;
         return session && authority
-          ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen)
-          : exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+          ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen, viewer)
+          : viewer()
+            ? Promise.reject(new Error('The worker document authority is unavailable'))
+            : exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
       },
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
@@ -826,7 +822,7 @@ export function useDocxEditorRefApi({
         return api.getSelectionInfo();
       },
       findParagraphs: async (query, options) => {
-        const main = async () => { await flush(); return api.findInDocument(query, options); };
+        const main = async () => { if (viewer()) throw new Error('The worker document authority is unavailable'); await flush(); return api.findInDocument(query, options); };
         if (viewer()) {
           const session = pagedEditorRef.current?.getYrsSession();
           const authority = session ? registeredWorkerProposalAuthority(session) : null;
@@ -1083,7 +1079,7 @@ export function useDocxEditorRefApi({
       },
       ...hostSearch,
     };
-    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen);
+    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen, viewer);
     const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
       const session = pagedEditorRef.current?.getYrsSession();
       return session ? modeRefusal(session, modeRef.current, request) : null;
@@ -1096,14 +1092,14 @@ export function useDocxEditorRefApi({
       findContentControls: direct.findContentControls,
       exportStructuredWithPages: direct.exportStructuredWithPages,
       proposeChange: (options) => {
-        if (!hostProposalsAllowed()) return api.proposeChange(options);
+        if (!hostProposalsAllowed()) return false;
         if (!options.search && !options.replaceWith) return false;
         proposalQueueRef.current = proposalQueueRef.current.then(async () => {
           const session = pagedEditorRef.current?.getYrsSession();
           const authority = session ? registeredWorkerProposalAuthority(session) : null;
           if (!session || !authority) throw new Error('The worker proposal authority is unavailable');
           const identities = await authority.paragraphIdentities(async () =>
-            (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.paragraphIdentities()
+            (await mainSession()).session.paragraphIdentities()
           );
           const paragraph = identities.paragraphs.find(({ session: anchor }) =>
             anchor?.paraId === options.paraId && (anchor.story === 'body' || anchor.story.startsWith('body:'))

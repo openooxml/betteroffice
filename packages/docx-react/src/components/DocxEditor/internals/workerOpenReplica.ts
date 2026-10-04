@@ -68,6 +68,7 @@ export function holdWorkerOpenDocument(session: YrsSession, release: () => Pendi
   releases.set(session, release);
 }
 
+/** Whether `session` is a viewer document held in its worker; a failed hold still never loads here. */
 export function workerOpenDocumentHeld(session: YrsSession): boolean {
   return replicas.get(session)?.held === true;
 }
@@ -86,6 +87,12 @@ export function releaseWorkerOpenDocument(session: YrsSession): PendingReplica |
   replica.mirrorVersion = held.mirrorVersion;
   replica.handoverVersion = held.handoverVersion;
   return replica;
+}
+
+export async function loadHeldDocumentForSave(session: YrsSession): Promise<void> {
+  const replica = releaseWorkerOpenDocument(session);
+  const ready = requestWorkerOpenReplica(session);
+  await (replica?.ready ?? ready);
 }
 
 export function deferWorkerOpenReplica(
