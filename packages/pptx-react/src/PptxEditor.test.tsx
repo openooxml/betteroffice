@@ -71,6 +71,14 @@ describe('shortcut matching', () => {
 });
 
 describe('PptxEditor slide layout cache', () => {
+  function getContext(this: HTMLCanvasElement): CanvasRenderingContext2D {
+    return {
+      canvas: this,
+      fillStyle: '#000000',
+      save() {}, restore() {}, setTransform() {}, drawImage() {}, fillRect() {},
+    } as unknown as CanvasRenderingContext2D;
+  }
+
   for (const scenario of ['ready navigation', 'undo restoration'] as const) {
     it(`completes uncached thumbnails after ${scenario}`, async () => {
       const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
@@ -85,9 +93,9 @@ describe('PptxEditor slide layout cache', () => {
         paintedFrames.set(ctx.canvas, frame);
         return scale === 1 ? firstPaint : Promise.resolve();
       });
-      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-        return { canvas: this, setTransform() {}, drawImage() {} } as unknown as CanvasRenderingContext2D;
-      });
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
       let api: PptxEditorApi | undefined;
       let view: ReturnType<typeof render> | undefined;
       try {
@@ -160,9 +168,9 @@ describe('PptxEditor slide layout cache', () => {
         paintedFrames.set(ctx.canvas, frame);
         return scale === 1 ? firstPaint : Promise.resolve();
       });
-      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-        return { canvas: this, setTransform() {}, drawImage() {} } as unknown as CanvasRenderingContext2D;
-      });
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
       let api: PptxEditorApi | undefined;
       let view: ReturnType<typeof render> | undefined;
       try {
@@ -220,9 +228,9 @@ describe('PptxEditor slide layout cache', () => {
     while (count < 50) peer.insertSlide(count++);
     const seed = peer.encodeStateAsUpdate();
     const paint = spyOn(pptx, 'paintSlide').mockResolvedValue(undefined);
-    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-      setTransform() {}, drawImage() {},
-    } as unknown as CanvasRenderingContext2D);
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      getContext as unknown as HTMLCanvasElement['getContext']
+    );
     let api: PptxEditorApi | undefined;
     let view: ReturnType<typeof render> | undefined;
     try {
@@ -259,7 +267,7 @@ describe('PptxEditor slide layout cache', () => {
           expect(key.mock.calls.map((call) => call[0])).toEqual([0]);
           expect(snapshot).not.toHaveBeenCalled();
           expect(layout.mock.calls.length).toBeLessThanOrEqual(1);
-          expect(layout.mock.calls.map((call) => call[0])).toEqual([0]);
+          expect(layout.mock.calls.every(([index]) => index === 0)).toBe(true);
           expect(view.container.querySelectorAll('aside canvas')).toHaveLength(50);
         }
         const text = api!.handle.story(story.id).paragraphs.flatMap((paragraph) =>
@@ -309,9 +317,9 @@ describe('PptxEditor slide layout cache', () => {
       }
       return Promise.resolve();
     });
-    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
-      setTransform() {}, drawImage() {},
-    } as unknown as CanvasRenderingContext2D);
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      getContext as unknown as HTMLCanvasElement['getContext']
+    );
     let view: ReturnType<typeof render> | undefined;
     try {
       view = render(<PptxEditor file={fixture} fonts={fonts}

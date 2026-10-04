@@ -643,9 +643,8 @@ mod tests {
 
     #[test]
     fn parent_digests_stay_bounded_under_layout_path_churn() {
-        let document = PptxDocument::open_collaborative(DECK, 915.0).unwrap();
-        let session = document.session();
-        let scope = slide_scope(session, 0).unwrap();
+        let session = pptx_edit::DeckSession::open(DECK, 915).unwrap();
+        let scope = session.slide_scope(0).unwrap();
         let mut parents = ParentKeys::default();
         let expected = parents.key(session.package(), &scope.slide).unwrap();
         let mut slide = scope.slide.clone();
@@ -664,30 +663,25 @@ mod tests {
     #[test]
     fn public_layout_prunes_keys_during_slide_churn() {
         let document = PptxDocument::open_collaborative(DECK, 913.0).unwrap();
+        let session = document.session();
+        let context = EditCtx::local("test");
         let mut renderer = PptxRenderer::new();
         renderer
             .register_fallback_font("Fallback", false, false, FONT)
             .unwrap();
-        let live = document.session().slide_ids().unwrap().len();
+        let live = session.slide_ids().unwrap().len();
         renderer.layout_slide_json(&document, 0).unwrap();
         for _ in 0..1_000 {
-            let receipt: pptx_edit::SlideReceipt = serde_json::from_str(
-                &document
-                    .insert_slide_json(&serde_json::json!({ "index": live }).to_string())
-                    .unwrap(),
-            )
-            .unwrap();
+            let receipt = session.insert_slide(&context, live as u32, None).unwrap();
             renderer.layout_slide_json(&document, live as u32).unwrap();
             assert_eq!(renderer.layout_keys.len(), 1);
             assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
-            document
-                .delete_slide_json(&serde_json::json!({ "slideId": receipt.slide_id }).to_string())
-                .unwrap();
+            session.delete_slide(&context, &receipt.slide_id).unwrap();
             assert!(renderer.layout_keys.len() <= live + LAYOUT_KEY_CACHE_CAPACITY);
             renderer.layout_slide_json(&document, 0).unwrap();
             assert_eq!(renderer.layout_keys.len(), 1);
             assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
-            let version = document.session().version().to_string();
+            let version = session.version().to_string();
             assert!(
                 renderer
                     .layout_keys
@@ -695,18 +689,18 @@ mod tests {
                     .all(|(at, epoch, _)| { *at == version && *epoch == renderer.font_epoch })
             );
         }
-        assert_eq!(document.session().slide_ids().unwrap().len(), live);
+        assert_eq!(session.slide_ids().unwrap().len(), live);
     }
 
     #[test]
     fn public_key_lookup_caps_entries_and_prunes_old_font_epochs() {
         let document = PptxDocument::open_collaborative(DECK, 914.0).unwrap();
+        let session = document.session();
+        let context = EditCtx::local("test");
         let mut renderer = PptxRenderer::new();
-        let live = document.session().slide_ids().unwrap().len();
+        let live = session.slide_ids().unwrap().len();
         for index in live..LAYOUT_KEY_CACHE_CAPACITY + 2 {
-            document
-                .insert_slide_json(&serde_json::json!({ "index": index }).to_string())
-                .unwrap();
+            session.insert_slide(&context, index as u32, None).unwrap();
         }
         for index in 0..LAYOUT_KEY_CACHE_CAPACITY + 2 {
             renderer.slide_layout_key(&document, index as u32).unwrap();
