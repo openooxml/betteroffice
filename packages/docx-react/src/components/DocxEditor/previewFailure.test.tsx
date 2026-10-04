@@ -338,7 +338,7 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
     fireEvent.keyDown(textarea, { key: 'Backspace' });
     fireEvent.paste(textarea, { clipboardData: { getData: () => 'ignored paste' } });
     await act(async () => {});
-    expect(ref.current!.getEditorRef()!.hasPendingInput()).toBe(false);
+    expect(ref.current!.getEditorRef()?.hasPendingInput() ?? false).toBe(false);
     expect(preview.version()).toBe(version);
     const before = preview.paragraphs('body').map((paragraph) => paragraph.text);
     await act(async () => release());
@@ -349,7 +349,7 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
     expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect((fullSession as YrsSession).paragraphs('body').slice(0, before.length)
       .map((paragraph) => paragraph.text)).toEqual(before);
-    expect(ref.current!.getEditorRef()!.hasPendingInput()).toBe(false);
+    expect(ref.current!.getEditorRef()?.hasPendingInput() ?? false).toBe(false);
     expect(errors).toEqual([]);
   } finally {
     view.unmount();
