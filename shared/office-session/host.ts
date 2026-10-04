@@ -117,11 +117,30 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
       return reject(error);
     }
   }
+  function settled<T>(promise: Promise<T>): Promise<T> {
+    const guarded = promise.then();
+    const guard = <A>(hook: (value: A) => unknown) => (value: A) => {
+      if (ended()) return undefined;
+      try { return hook(value); } catch (error) {
+        fail(classify(error));
+        return undefined;
+      }
+    };
+    guarded.then = ((resolved?: (value: T) => unknown, rejected?: (error: unknown) => unknown) =>
+      Promise.prototype.then.call(guarded, resolved && guard(resolved), rejected && guard(rejected))
+    ) as typeof guarded.then;
+    return guarded;
+  }
+  const executor = options.executor;
   const resident = createResidentScheduler({
     now: Date.now,
     turn: (callback) => { timeout(callback, 0); },
     timer: timeout,
-    executor: options.executor,
+    executor: executor && {
+      run<Input, Result>(job: { kind: string; input: Input; transfer?: Transferable[] }): Promise<Result> {
+        return settled(executor.run<Input, Result>(job));
+      },
+    },
     failed: (error) => fail(classify(error)),
   });
   const scheduler: SessionScheduler = {

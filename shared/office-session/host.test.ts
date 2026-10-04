@@ -510,6 +510,53 @@ describe('session host and cloned transport', () => {
     await s.client.dispose();
   });
 
+  it('fails the session when a cancel throws after an executor rejects transferred input', async () => {
+    const result = deferred<unknown>();
+    const s = session({
+      run<Input, Result>(_job: { kind: string; input: Input; transfer?: Transferable[] }) {
+        return result.promise as Promise<Result>;
+      },
+    });
+    const failed = deferred<SessionFailure>();
+    let cancels = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.dispatch({
+      kind: 'pure', version: 0, generation: 0, input: new ArrayBuffer(4), transfer: [new ArrayBuffer(4)],
+      compute(input) { return input; },
+      install() {},
+      cancel() { cancels += 1; throw new Error('cancel'); },
+    });
+    result.reject(new Error('executor'));
+    expect((await failed.promise).code).toBe('crash');
+    expect(cancels).toBe(1);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
+  });
+
+  it('drops executor results that settle after disposal', async () => {
+    const result = deferred<unknown>();
+    const s = session({
+      run<Input, Result>(_job: { kind: string; input: Input; transfer?: Transferable[] }) {
+        return result.promise as Promise<Result>;
+      },
+    });
+    let installs = 0;
+    let cancels = 0;
+    s.host.scheduler.dispatch({
+      kind: 'pure', version: 0, generation: 0, input: 1,
+      compute(input) { return input; },
+      install() { installs += 1; },
+      cancel() { cancels += 1; },
+    });
+    await s.client.dispose();
+    await s.disposed.promise;
+    result.resolve(2);
+    await new Promise((done) => setTimeout(done, 10));
+    expect(installs).toBe(0);
+    expect(cancels).toBe(1);
+    expect(s.host.scheduler.pending()).toEqual({ foreground: 0, background: 0 });
+  });
+
   it('makes background session failures terminal before task fail hooks', async () => {
     const s = session();
     const failed = deferred<SessionFailure>();
