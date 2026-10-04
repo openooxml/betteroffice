@@ -1,11 +1,7 @@
-import {
-  createSessionClient,
-  createWorkerTransport,
-  type Promisified,
-  type SessionClient,
-  type SessionFailure,
-  type SessionTransport,
-} from '../../../../shared/office-session';
+import { createSessionClient, type SessionClient } from '../../../../shared/office-session/client';
+import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
+import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenWorkbookOptions } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -16,6 +12,7 @@ import {
 } from './methods';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
+const wasmModules = new Map<string, WebAssembly.Module>();
 
 /**
  * Options for opening a workbook in a dedicated worker.
@@ -62,6 +59,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     input.wasm = copyBytes(options.wasm as ArrayBuffer).buffer;
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
+  else input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -75,7 +73,11 @@ export async function openWorkbookSession(
 ): Promise<WorkbookSession> {
   const transport = createWorkerTransport(
     options.worker ? options.worker() :
-      new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
+      new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), {
+        type: 'module',
+        name: options.wasm !== undefined || wasmModules.has(wasmAssetUrl().href)
+          ? 'office-session-wasm-provided' : 'office-session-wasm-default',
+      })
   );
   return createWorkbookSession(bytes, options, transport);
 }
@@ -93,6 +95,9 @@ export async function createWorkbookSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<WorkbookSessionMethods, Events>(transport, {
       methods: WORKBOOK_SESSION_METHODS,
+      onWasmModule: options.wasm === undefined ? (url, module) => {
+        if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
+      } : undefined,
     });
   } catch (error) {
     try { transport.close(); } catch {}

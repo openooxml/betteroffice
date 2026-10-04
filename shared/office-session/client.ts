@@ -9,6 +9,7 @@ export interface SessionClientOptions<M extends SessionMethods> {
   silenceMs?: number;
   now?(): number;
   timer?(callback: () => void, ms: number): () => void;
+  onWasmModule?(url: string, module: WebAssembly.Module): void;
 }
 
 export interface SessionClient<M extends SessionMethods, E extends SessionEvents> {
@@ -102,6 +103,8 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
       end(new SessionFailure('message', 'Session received a malformed host message'));
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
+    } else if (message.kind === 'wasm-module') {
+      options.onWasmModule?.(message.url, message.module);
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);

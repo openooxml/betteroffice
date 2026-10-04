@@ -11,6 +11,7 @@ export interface ReplyError {
 }
 
 export type HostMessage =
+  | { protocol: 1; kind: 'wasm-module'; url: string; module: WebAssembly.Module }
   | { protocol: 1; kind: 'reply'; id: number; ok: true; value: unknown }
   | { protocol: 1; kind: 'reply'; id: number; ok: false; error: ReplyError }
   | { protocol: 1; kind: 'event'; name: string; payload: unknown }
@@ -72,6 +73,9 @@ export function isClientMessage(value: unknown): value is ClientMessage {
 export function isHostMessage(value: unknown): value is HostMessage {
   if (!record(value) || value.protocol !== 1) return false;
   switch (value.kind) {
+    case 'wasm-module':
+      return typeof value.url === 'string' && typeof WebAssembly !== 'undefined' &&
+        value.module instanceof WebAssembly.Module;
     case 'reply':
       return requestId(value.id) && (
         (value.ok === true && hasOwn(value, 'value')) ||

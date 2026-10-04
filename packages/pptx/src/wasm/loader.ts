@@ -9,6 +9,7 @@ import initWasmModule, {
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
+import { wasmAssetUrl } from './asset';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
 import type {
@@ -249,7 +250,7 @@ export function isProposalsAvailable(): boolean {
 let initialization: Promise<void> | undefined;
 
 export function initWasm(
-  input: WasmInitInput = new URL('./generated/pptx_wasm_bg.wasm', import.meta.url)
+  input: WasmInitInput = wasmAssetUrl()
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
