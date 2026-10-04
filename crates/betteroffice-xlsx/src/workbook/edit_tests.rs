@@ -233,12 +233,13 @@ fn workbook_bytes() -> Vec<u8> {
     ooxml_opc::rezip_parts_borrowed(&parts).unwrap()
 }
 
-fn open_identical(bytes: &[u8], collaborative: bool) -> Workbook {
+fn open_identical(bytes: &[u8], collaborative: bool, rand_seed: Option<u32>) -> Workbook {
     let mut workbook = Workbook::open_internal(bytes, true, Some(73)).unwrap();
     if !collaborative {
         workbook.mode = WorkbookMode::Standalone;
     }
     workbook.version_nonce = "singleton-oracle".into();
+    workbook.set_rand_seed(rand_seed);
     workbook
 }
 
@@ -253,9 +254,13 @@ struct Lockstep {
 
 impl Lockstep {
     fn new(collaborative: bool) -> Self {
+        Self::with_rand_seed(collaborative, None)
+    }
+
+    fn with_rand_seed(collaborative: bool, rand_seed: Option<u32>) -> Self {
         let bytes = workbook_bytes();
-        let fast = open_identical(&bytes, collaborative);
-        let oracle = open_identical(&bytes, collaborative);
+        let fast = open_identical(&bytes, collaborative, rand_seed);
+        let oracle = open_identical(&bytes, collaborative, rand_seed);
         let fast_events = Arc::new(Mutex::new(Vec::new()));
         let oracle_events = Arc::new(Mutex::new(Vec::new()));
         let events = fast_events.clone();
@@ -487,6 +492,27 @@ fn collaborative_singleton_lockstep_matches_full_materialization() {
         pair.step(true, |workbook| workbook.redo(options()))
             .unwrap();
     }
+    pair.assert_equal(true);
+}
+
+#[test]
+fn rand_seeded_lockstep_matches_full_materialization() {
+    let mut pair = Lockstep::with_rand_seed(false, Some(0x5eed));
+    let count = fast_set_cell_count();
+    for (sheet, at, input) in [
+        (0, "A5", "=RANDBETWEEN(1,1000000)"),
+        (0, "B5", "=RANDBETWEEN(1,1000)+A1"),
+        (0, "A1", "7"),
+        (1, "D1", "=RANDBETWEEN(1,1000)*Sheet1!A1"),
+        (0, "A1", "8"),
+    ] {
+        pair.edit(sheet, r(at), input).unwrap();
+        pair.step(true, |workbook| workbook.undo(options()))
+            .unwrap();
+        pair.step(true, |workbook| workbook.redo(options()))
+            .unwrap();
+    }
+    assert!(fast_set_cell_count() > count);
     pair.assert_equal(true);
 }
 
