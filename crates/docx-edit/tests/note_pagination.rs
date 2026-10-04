@@ -38,6 +38,92 @@ fn fresh(engine: &EngineSession, request: &str, client_id: u64) -> (String, Valu
 }
 
 #[test]
+fn synthetic_note_sections_typing_and_preview_toggles_match_cold_bytes() {
+    let body: String = (0..16)
+        .map(|index| {
+            let mut content = if index == 7 {
+                r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:pPr>"#.to_owned()
+            } else {
+                String::new()
+            };
+            content += &fixture::r(&format!("Editable paragraph {index}"));
+            if index == 2 {
+                content += r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#;
+            }
+            if index == 5 {
+                content += r#"<w:ins w:id="10" w:author="BetterOffice" w:date="2026-10-01T00:00:00Z"><w:r><w:t> pending</w:t></w:r></w:ins>"#;
+            }
+            fixture::p(&format!("{:08X}", 0x7100_0000 + index), &content)
+        })
+        .collect();
+    let bytes = fixture::with_body_and_note(
+        &small_page(&body),
+        &fixture::p("71000100", &fixture::r("A synthetic footnote")),
+    );
+    let (engine, request) = fixture::laid_out(&bytes, 9380);
+    let mut request: Value = serde_json::from_str(&request).unwrap();
+    assert!(request["regions"]["sections"].as_array().unwrap().len() >= 2);
+    engine
+        .build_display_list_frame(&extras(&request.to_string()), 0)
+        .unwrap();
+    let assert_cold = |request: &Value| {
+        let (cold, cold_display) = fresh(&engine, &request.to_string(), 9381);
+        let cold: Value = serde_json::from_str(&cold).unwrap();
+        let retained: Value =
+            serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
+        let inputs: Value =
+            serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+        for (actual, expected) in [
+            (&retained["layout"], &cold["layout"]),
+            (&inputs["measured"], &cold["measured"]),
+            (&inputs["options"], &cold["options"]),
+        ] {
+            assert_eq!(
+                serde_json::to_vec(actual).unwrap(),
+                serde_json::to_vec(expected).unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&display(&engine)).unwrap(),
+            serde_json::to_vec(&cold_display).unwrap()
+        );
+    };
+    assert_cold(&request);
+    for decision in ["accepted", "rejected"] {
+        for text in [Some("x"), Some("y"), None] {
+            match text {
+                Some(text) => engine
+                    .doc()
+                    .insert_text(
+                        &EditCtx::local("", ""),
+                        Position::new("body", 3),
+                        text,
+                        FormatPolicy::Inherit,
+                    )
+                    .map(|_| ()),
+                None => engine
+                    .doc()
+                    .delete_range(&EditCtx::local("", ""), StoryRange::new("body", 3, 4))
+                    .map(|_| ()),
+            }
+            .unwrap();
+            let epoch = engine.stats().frame_epoch;
+            engine.apply_and_layout("body", epoch).unwrap();
+            assert_cold(&request);
+        }
+        request["renderEnv"]["revisionPreview"] = json!({"10": decision});
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        let epoch = engine.stats().frame_epoch;
+        engine
+            .build_display_list_frame(&extras(&request.to_string()), epoch)
+            .unwrap();
+        assert_cold(&request);
+    }
+}
+
+#[test]
 fn a_body_edit_beside_notes_repaginates_incrementally_as_a_fresh_layout_would() {
     let (engine, request) = fixture::laid_out(&fixture::unrevised_docx(), 9301);
     let reserved = |layout: &str| {
