@@ -353,7 +353,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       hostJson =
         request.previewBlocks === undefined
           ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
-          : opening.openDocxPreview(new Uint8Array(request.bytes), request.previewBlocks);
+          : opening.openDocxPreview(
+              new Uint8Array(request.bytes),
+              request.previewBlocks,
+              request.previewParagraphBudget
+            );
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;
@@ -491,6 +495,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           break;
         case 'withdraw':
           result = registry.withdraw(request.operation.request);
+          break;
+        case 'removeComment':
+          try {
+            session.applyRawOps('body', [{ op: 'removeComment', id: request.operation.id }]);
+          } catch {}
           break;
       }
       committed = request.operation.kind !== 'snapshot';

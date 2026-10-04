@@ -6095,7 +6095,7 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     blocks: usize,
 ) -> Result<bool, String> {
-    let Some((envelope, media)) = parse_docx_preview(bytes.into(), blocks)? else {
+    let Some((envelope, media, _)) = parse_docx_preview(bytes.into(), blocks, None)? else {
         return Ok(false);
     };
     seed_preview_envelope(document, envelope, media).map(|_| true)
@@ -6106,10 +6106,18 @@ pub fn seed_docx_preview(
 pub(crate) fn parse_docx_preview(
     bytes: PackageBytes,
     blocks: usize,
-) -> Result<Option<(docx_parse::S9WireEnvelope, docx_parse::media::MediaTable)>, String> {
+    paragraph_budget: Option<usize>,
+) -> Result<
+    Option<(
+        docx_parse::S9WireEnvelope,
+        docx_parse::media::MediaTable,
+        bool,
+    )>,
+    String,
+> {
     let (parts, media) =
         docx_parse::media_table_parts_bytes(&bytes).map_err(|error| error.to_string())?;
-    let envelope = docx_parse::parse_docx_s9_preview_with_media_table(
+    let envelope = docx_parse::parse_docx_s9_preview_with_media_table_with_budget(
         &parts,
         &media,
         blocks,
@@ -6119,9 +6127,10 @@ pub(crate) fn parse_docx_preview(
             ..docx_parse::S9ParseOptions::default()
         },
         &docx_parse::xml::ParseLimits::default(),
+        paragraph_budget,
     )
     .map_err(|error| error.to_string())?;
-    Ok(envelope.map(|envelope| (envelope, media)))
+    Ok(envelope.map(|(envelope, budget_stopped)| (envelope, media, budget_stopped)))
 }
 
 /// Seeds a preview parse and keeps the media its images name; returns the

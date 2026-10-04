@@ -63,6 +63,7 @@ export interface WorkerProposalAuthority {
     request: DocxProposalWithdrawRequest,
     main: (request: DocxProposalWithdrawRequest) => Promise<DocxProposalResult>
   ): Promise<DocxProposalResult>;
+  removeComment(id: string, main: () => void | Promise<void>): Promise<void>;
   getProposals(main: () => Promise<DocxProposalSnapshot>): Promise<DocxProposalSnapshot>;
   readParagraphs(
     request: DocxReadParagraphsRequest,
@@ -222,13 +223,12 @@ export function registerWorkerProposalAuthority(
       return main();
     });
   };
-  const mutate = (
-    op: Parameters<WorkerOpenedDocument['proposal']>[0],
-    main: () => Promise<DocxProposalResult>
-  ): Promise<DocxProposalResult> => route(async () => {
+  const sendMutation = async (
+    op: Parameters<WorkerOpenedDocument['proposal']>[0]
+  ): Promise<ResidentProposalReply> => {
     const previous = mirror!;
     const previousPreview = JSON.stringify(proposalRevisionPreview(session.getProposals()));
-    const pending = op.kind === 'propose' || op.kind === 'withdraw';
+    const pending = op.kind === 'propose' || op.kind === 'withdraw' || op.kind === 'removeComment';
     if (pending) session.mirrorWorkerDocument({ ...previous, version: previous.version + '~' });
     let reply: ResidentProposalReply;
     mutating += 1;
@@ -254,6 +254,13 @@ export function registerWorkerProposalAuthority(
       JSON.stringify(proposalRevisionPreview(session.getProposals())) !== previousPreview
     ) hooks.relayout();
     if (reply.changedStories.length > 0) hooks.contentChanged();
+    return reply;
+  };
+  const mutate = (
+    op: Parameters<WorkerOpenedDocument['proposal']>[0],
+    main: () => Promise<DocxProposalResult>
+  ): Promise<DocxProposalResult> => route(async () => {
+    const reply = await sendMutation(op);
     if (!reply.result) throw new Error('The resident worker did not return a proposal result');
     return reply.result;
   }, main);
@@ -301,6 +308,9 @@ export function registerWorkerProposalAuthority(
     propose: (request, main) => mutate({ kind: 'propose', request }, () => main(request)),
     setStates: (request, main) => mutate({ kind: 'setStates', request }, () => main(request)),
     withdraw: (request, main) => mutate({ kind: 'withdraw', request }, () => main(request)),
+    removeComment: (id, main) => route(async () => {
+      await sendMutation({ kind: 'removeComment', id });
+    }, main),
     handedOverRequest: (request) =>
       versionRewrite &&
       request.expectVersion === versionRewrite.worker &&

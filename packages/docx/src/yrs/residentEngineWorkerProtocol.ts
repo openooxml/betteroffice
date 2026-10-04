@@ -49,6 +49,7 @@ export type ResidentProposalOperation =
   | { kind: 'propose'; request: DocxProposalRequest }
   | { kind: 'setStates'; request: DocxProposalStateRequest }
   | { kind: 'withdraw'; request: DocxProposalWithdrawRequest }
+  | { kind: 'removeComment'; id: string }
   | { kind: 'snapshot' };
 
 /** @internal */
@@ -170,6 +171,8 @@ export type ResidentEngineWorkerRequest =
        * `open` of the whole document replaces it.
        */
       previewBlocks?: number;
+      /** Optional paragraph weight budget for the display-only body cut. */
+      previewParagraphBudget?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }

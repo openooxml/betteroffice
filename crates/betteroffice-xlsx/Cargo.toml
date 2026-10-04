@@ -30,4 +30,5 @@ sha2 = "0.10"
 yrs = "0.27.3"
 
 [dev-dependencies]
+xlsx-render = { workspace = true, features = ["test-counters"] }
 png = "0.18"

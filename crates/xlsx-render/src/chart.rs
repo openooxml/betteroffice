@@ -304,11 +304,20 @@ pub fn chart_regions(
     viewport: &Viewport,
 ) -> Result<Vec<ChartRegion>, RenderError> {
     let geometry = GridGeometry::new(sheet, styles);
+    chart_regions_with_geometry(sheet, &geometry, viewport)
+}
+
+#[doc(hidden)]
+pub fn chart_regions_with_geometry(
+    sheet: &Sheet,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+) -> Result<Vec<ChartRegion>, RenderError> {
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
     Ok(
-        visible_charts(sheet, &geometry, viewport, frozen_rows, frozen_cols)?
+        visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)?
             .into_iter()
             .map(|visible| visible.region)
             .collect(),
