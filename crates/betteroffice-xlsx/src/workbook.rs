@@ -1,4 +1,6 @@
 pub(crate) mod batch;
+#[cfg(test)]
+mod edit_tests;
 mod staging;
 pub(crate) mod target;
 
@@ -9,7 +11,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use ooxml_drawingml::chart::ChartSpace;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
+use xlsx_calc::{RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_seed};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
     FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
@@ -105,10 +107,10 @@ enum WorkbookMode {
 /// Package identity the model does not carry: per current sheet, the source
 /// sheet it came from and the shared-string entry each of its cells was
 /// authored against.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct PreservedSheetState {
     origins: Vec<Option<usize>>,
-    shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+    shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
     /// Where each sheet's source rows and columns sit after the row and column
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
@@ -118,12 +120,30 @@ struct PreservedSheetState {
     created: Vec<bool>,
 }
 
+impl Clone for PreservedSheetState {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        let shared_string_cells = if crate::authority::force_full_materialization() {
+            Arc::new(self.shared_string_cells.as_ref().clone())
+        } else {
+            self.shared_string_cells.clone()
+        };
+        #[cfg(not(test))]
+        let shared_string_cells = self.shared_string_cells.clone();
+        Self {
+            origins: self.origins.clone(),
+            shared_string_cells,
+            axes: self.axes.clone(),
+            created: self.created.clone(),
+        }
+    }
+}
+
 impl PreservedSheetState {
     /// Sheets a restored state added carry no package identity.
     fn resize(&mut self, sheets: usize) {
         self.origins.resize(sheets, None);
-        self.shared_string_cells
-            .resize_with(sheets, Default::default);
+        Arc::make_mut(&mut self.shared_string_cells).resize_with(sheets, Default::default);
         self.axes.resize(sheets, None);
         self.created.resize(sheets, false);
     }
@@ -131,7 +151,7 @@ impl PreservedSheetState {
     fn insert(&mut self, index: usize) {
         let index = index.min(self.origins.len());
         self.origins.insert(index, None);
-        self.shared_string_cells
+        Arc::make_mut(&mut self.shared_string_cells)
             .insert(index, xlsx_parse::SharedStringCells::new());
         self.axes.insert(index, None);
         self.created.insert(index.min(self.created.len()), true);
@@ -140,7 +160,7 @@ impl PreservedSheetState {
     fn remove(&mut self, index: usize) {
         if index < self.origins.len() {
             self.origins.remove(index);
-            self.shared_string_cells.remove(index);
+            Arc::make_mut(&mut self.shared_string_cells).remove(index);
         }
         if index < self.axes.len() {
             self.axes.remove(index);
@@ -153,9 +173,10 @@ impl PreservedSheetState {
     /// Carries each cell's shared-string provenance to the address the op moves
     /// it to; a cell inside a deleted span loses it with the cell.
     fn shift(&mut self, sheet: SheetId, op: &Op) {
-        let Some(cells) = self.shared_string_cells.get_mut(sheet.0 as usize) else {
+        if sheet.0 as usize >= self.shared_string_cells.len() {
             return;
-        };
+        }
+        let cells = &mut Arc::make_mut(&mut self.shared_string_cells)[sheet.0 as usize];
         *cells = cells
             .iter()
             .filter_map(|(&(row, col), &index)| {
@@ -180,7 +201,7 @@ impl PreservedSheetState {
 
     /// Drops shared-string provenance after identity-less replay.
     fn forget_shared_strings(&mut self) {
-        for cells in &mut self.shared_string_cells {
+        for cells in Arc::make_mut(&mut self.shared_string_cells) {
             cells.clear();
         }
     }
@@ -319,6 +340,7 @@ pub struct Workbook {
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
+    rand_seed: Option<u32>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
@@ -400,6 +422,25 @@ impl Workbook {
         let mut workbook = Self::open_internal(bytes, false, None)?;
         workbook.recalculate(options);
         Ok(workbook)
+    }
+
+    pub fn open_recalculated_with_seed(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        workbook.recalculate(options);
+        Ok(workbook)
+    }
+
+    pub fn set_rand_seed(&mut self, seed: Option<u32>) {
+        self.rand_seed = seed;
+    }
+
+    pub fn rand_seed(&self) -> Option<u32> {
+        self.rand_seed
     }
 
     /// Opens and recalculates a replica with a peer-unique client ID.
@@ -488,15 +529,17 @@ impl Workbook {
                 origins: (0..model.sheets.len())
                     .map(|index| (index < package.source_sheet_count()).then_some(index))
                     .collect(),
-                shared_string_cells: (0..model.sheets.len())
-                    .map(|index| package.source_shared_string_cells(index))
-                    .collect(),
+                shared_string_cells: Arc::new(
+                    (0..model.sheets.len())
+                        .map(|index| package.source_shared_string_cells(index))
+                        .collect(),
+                ),
                 axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
-                shared_string_cells: vec![Default::default(); model.sheets.len()],
+                shared_string_cells: Arc::new(vec![Default::default(); model.sheets.len()]),
                 axes: vec![None; model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
@@ -518,6 +561,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -637,7 +681,8 @@ impl Workbook {
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
-        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
@@ -794,7 +839,8 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
@@ -1353,11 +1399,12 @@ impl Workbook {
         );
         mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
@@ -1430,11 +1477,12 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
@@ -1596,7 +1644,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
-        self.undo.undo(&mut self.model)?;
+        self.apply_model_history(|undo, model| undo.undo(model))?;
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
@@ -1634,7 +1682,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
-        self.undo.redo(&mut self.model)?;
+        self.apply_model_history(|undo, model| undo.redo(model))?;
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
@@ -1747,7 +1795,7 @@ impl Workbook {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
         }
-        rebuild_and_recalc_all(&mut preview, options.now_serial);
+        rebuild_and_recalc_all_with_seed(&mut preview, options.now_serial, self.rand_seed);
 
         let mut edits = Vec::with_capacity(request.edits.len());
         for edit in request.edits {
@@ -1856,7 +1904,7 @@ impl Workbook {
         }
         if !force {
             let mut review = preview.clone();
-            rebuild_and_recalc_all(&mut review, options.now_serial);
+            rebuild_and_recalc_all_with_seed(&mut review, options.now_serial, self.rand_seed);
             let mut refreshed = proposal.clone();
             for edit in &mut refreshed.edits {
                 edit.new_text = display_text_at(
@@ -1903,11 +1951,12 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         let mutation = self.mutation_result(true, result, &seeds);
         self.proposals.remove(id);
@@ -2350,7 +2399,7 @@ impl Workbook {
                 .apply_ops(ops, SyncOrigin::User, &self.model.styles)
                 .map_err(authority_error)?;
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
+            self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             update
         };
@@ -2364,6 +2413,23 @@ impl Workbook {
         }
         self.edited_since_open = true;
         Ok(update)
+    }
+
+    fn apply_model_history<T>(
+        &mut self,
+        apply: impl FnOnce(
+            &mut UndoStack,
+            &mut WorkbookModel,
+        ) -> std::result::Result<T, xlsx_ops::OpError>,
+    ) -> std::result::Result<T, xlsx_ops::OpError> {
+        #[cfg(test)]
+        if crate::authority::force_full_materialization() {
+            let mut model = self.model.clone();
+            let result = apply(&mut self.undo, &mut model)?;
+            self.model = model;
+            return Ok(result);
+        }
+        apply(&mut self.undo, &mut self.model)
     }
 
     /// Makes a committed change visible: advances [`Workbook::version`], then hands observers
@@ -2540,7 +2606,8 @@ impl Workbook {
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
-        let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
+        let (graph, result) =
+            rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
         self.graph = Some(graph);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();

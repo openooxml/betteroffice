@@ -1,10 +1,7 @@
-import {
-  createSessionHost,
-  transferable,
-  type MethodHandlers,
-  type SessionHost,
-  type SessionTransport,
-} from '../../../../shared/office-session';
+import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
+import { transferable } from '../../../../shared/office-session/protocol';
+import type { SessionTransport } from '../../../../shared/office-session/transport';
+import type { MethodHandlers } from '../../../../shared/office-session/types';
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import type { PptxFontFace, SlideDisplayList } from '../types';
 import {

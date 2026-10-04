@@ -38,7 +38,7 @@ async function tick() {
 
 function frame(sheet: number, viewport: Viewport): WorkbookFrame {
   return {
-    sheet, viewport, version: 'v1', epoch: 1, mergedRanges: [],
+    sheet, viewport, version: 'v1', epoch: 1, sequence: 0, mergedRanges: [],
     displayList: {
       width: viewport.width, height: viewport.height,
       commands: [{ op: 'text', text: `Sheet ${sheet}`, x: 8, y: 18, fontSize: 11,

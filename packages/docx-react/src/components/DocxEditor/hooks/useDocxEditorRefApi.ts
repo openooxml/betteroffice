@@ -30,6 +30,13 @@ import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
 import { documentPageCount } from './documentPageCount';
+import {
+  workerOpenExport,
+  LAYOUT_WAIT_MS,
+  VIEWER_LAYOUT_WAIT_MS,
+  LAYOUT_POLL_MS,
+  LAYOUT_REFUSALS,
+} from '../internals/workerOpenExport';
 import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
@@ -281,6 +288,9 @@ function gateReplicaAccess(
           return Reflect.apply(call, api, args);
         }
         if (session) {
+          if (key === 'exportStructuredWithPages' && workerOpenExport(session)) {
+            return Reflect.apply(call, api, args);
+          }
           if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
             return Reflect.apply(call, api, args);
           }
@@ -355,16 +365,6 @@ function helperTarget(story: string, paraId: string, search?: string): DocxTextT
 function storyOffset(session: YrsSession, loc: YrsLoc): number {
   return session.locateParagraph(loc.story, loc.paraId).start + loc.offset;
 }
-
-/** How long a paged export waits for fonts and a layout of the flushed document. */
-const LAYOUT_WAIT_MS = 2_000;
-const VIEWER_LAYOUT_WAIT_MS = 60_000;
-const LAYOUT_POLL_MS = 16;
-const LAYOUT_REFUSALS: ReadonlySet<string> = new Set([
-  'stale-document',
-  'stale-layout',
-  'layout-unavailable',
-]);
 
 /**
  * Flushes input, then exports with pages when the session's retained layout is of the current
@@ -808,6 +808,25 @@ export function useDocxEditorRefApi({
       },
 
       exportStructuredWithPages: (options) => {
+        const peer = !viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const operation = peer ? workerOpenExport(peer) : null;
+        if (peer && operation) {
+          const editor = (): PagedEditorRef => {
+            const current = pagedEditorRef.current;
+            if (!current || current.getYrsSession() !== peer) throw new Error('The document changed while exporting');
+            return current;
+          };
+          return operation.export(options, {
+            current: () => pagedEditorRef.current?.getYrsSession() === peer && workerOpenExport(peer) === operation,
+            flush: () => editor().flushPendingInput(),
+            request: async () => editor().getLayoutRequest(),
+            settleLayout: async (timeoutMs, requestLayout) => {
+              if (requestLayout) editor().relayout();
+              await settledDisplayList?.(null, timeoutMs, 'window');
+              editor();
+            },
+          });
+        }
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
         const authority = session && workerOpenReplicaPending(session)
           ? registeredWorkerProposalAuthority(session)
