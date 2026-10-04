@@ -745,7 +745,7 @@ function refApiOptions(
     yrsInputRef: opts.yrsInputRef,
     layout: null,
     runLayoutPipeline: () => {},
-    getLayoutRequest: () => null,
+    getLayoutRequest: () => null, readLayoutRequest: async () => null,
     scrollToPositionImpl: () => {},
     revealPositionImpl: () => 'layout-unavailable',
     scrollToParaIdImpl: () => false,

@@ -72,6 +72,7 @@ export interface DocxCommandInputs {
   document: Document | null;
   session: YrsSession | null;
   readOnly: boolean;
+  viewerSession?: boolean;
   mode: EditorMode;
   modeControlled: boolean;
   onModeChange: ((mode: EditorMode) => void) | undefined;
@@ -359,21 +360,24 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
 
   const binding = useMemo<DocxCommandBinding>(() => {
     const bridge = () => latest.current.bridgeRef.current;
+    const viewer = () => latest.current.viewerSession || latest.current.pagedEditorRef.current?.isWorkerViewer?.() === true;
 
     const environment = (executing: boolean): DocxCommandEnvironment => {
       const current = latest.current;
       const editor = bridge();
-      const session = current.session;
+      const authoritySession = current.session;
+      const session = viewer() ? null : authoritySession;
       const t = translationRef.current;
       const status: DocxCommandEnvironment['status'] = current.isLoading
         ? 'loading'
         : current.parseError || !current.document
           ? 'empty'
-          : !session || !editor || editor.session() !== session
+          : !authoritySession || !editor || editor.session() !== authoritySession
             ? 'loading'
             : 'ready';
       let toolbar: YrsToolbarSelection | null | undefined;
       const readToolbar = () => {
+        if (viewer()) return null;
         if (toolbar === undefined) toolbar = editor?.toolbarSelection(executing) ?? null;
         return toolbar;
       };
@@ -411,7 +415,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           const read = status === 'ready' ? readToolbar() : null;
           selectionMemo = read
             ? selectionEnvironment(read, current)
-            : status === 'ready' && editor?.hasSelection()
+            : !viewer() && status === 'ready' && editor?.hasSelection()
               ? 'unsupported'
               : null;
           return selectionMemo;
@@ -426,7 +430,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         },
         get image() {
           if (imageMemo !== undefined) return imageMemo;
-          const selected = status === 'ready' ? (editor?.selectedImage() ?? null) : null;
+          const selected = !viewer() && status === 'ready' ? (editor?.selectedImage() ?? null) : null;
           imageMemo = selected ? { wrap: imageWrapTarget(selected.attrs) } : null;
           return imageMemo;
         },
@@ -711,7 +715,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
             try {
               if (!editor || !session) throw new DocxCommandAdmissionError('editor-unavailable');
               // A replica still to load has no input to wait for; the pages print as shown.
-              if (!workerOpenReplicaOnDemand(session)) await editor.runAfterPendingInput(() => undefined);
+              if (!viewer() && !workerOpenReplicaOnDemand(session)) await editor.runAfterPendingInput(() => undefined);
               const displayList = await latest.current.renderedDisplayList();
               assertCurrent();
               await job.prepare(displayList);
@@ -725,6 +729,25 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         }
         case 'find':
         case 'replace': {
+          const pagedEditor = current.pagedEditorRef.current;
+          if (pagedEditor?.isWorkerViewer?.() === true) {
+            return (async () => {
+              let timer: ReturnType<typeof setTimeout> | undefined;
+              let selectedText = '';
+              try {
+                selectedText = (await Promise.race([
+                  Promise.resolve(pagedEditor.readSelectedText()),
+                  new Promise<string>((resolve) => { timer = setTimeout(() => resolve(''), 500); }),
+                ])) ?? '';
+              } catch {} finally {
+                clearTimeout(timer);
+              }
+              openDialog('replace');
+              if (id === 'find') current.findReplace.openFind(selectedText);
+              else current.findReplace.openReplace(selectedText);
+              return OPENED;
+            })();
+          }
           const session = editor?.session();
           const selectedText = session ? yrsSelectedText(session) : '';
           openDialog('replace');
@@ -753,12 +776,18 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     };
 
     return {
+      isViewer: viewer,
       environment,
       ordered: (id, args) => {
+        if (
+          (id === 'reviewAccept' || id === 'reviewReject' || id === 'reviewNext' || id === 'reviewPrevious') &&
+          viewer()
+        ) return false;
         const session = latest.current.session;
         if (
           latest.current.experimentalWorkerOpen && session && workerOpenReplicaPending(session) &&
-          (id === 'find' || id === 'replace' || id === 'insertImage' ||
+          (((id === 'find' || id === 'replace') &&
+            latest.current.pagedEditorRef.current?.isWorkerViewer?.() !== true) || id === 'insertImage' ||
             id === 'imageProperties' || id === 'pageSetup' || id === 'watermark')
         ) return true;
         return (

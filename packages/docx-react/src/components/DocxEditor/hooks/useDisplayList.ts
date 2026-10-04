@@ -38,6 +38,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
+  type ResidentDocumentRead,
   ResidentWorkerFailureError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
@@ -63,12 +64,15 @@ import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   isLayoutQueued,
   isSupersededLayout,
+  presentedWorkerFrame,
   readSessionVersion,
   revisionPreviewKey,
   revisionPreviewKeyOf,
   sourceVersionOf,
   stampRevisionPreviewKey,
   stampSourceVersion,
+  stampWorkerFrameVersion,
+  workerFrameVersionOf,
   UNKNOWN_REVISION_PREVIEW_KEY,
 } from '../internals/layoutProvenance';
 import {
@@ -216,6 +220,8 @@ export interface UseRustDisplayListResult {
   release(): void;
   openInWorker: OpenInWorker;
   openPreviewInWorker: OpenPreviewInWorker;
+  /** Reads the document the resident worker holds now; rejects when no worker holds one. */
+  readWorkerDocument: ResidentEngineWorkerClient['documentRead'];
   fontRequirementsInWorker: FontRequirementsInWorker;
   /**
    * The pages `[start, end)` near the viewport. Only these are built; every
@@ -338,7 +344,18 @@ type PageBuildInFlight =
   | { kind: 'build'; background: boolean; cancel(): void; promote(): void };
 
 type DisplayPagesFrame = Pick<ResidentEngineWorkerFrame, 'frame' | 'pageFrames'> &
-  Partial<Pick<ResidentEngineWorkerFrame, 'caret' | 'selection' | 'caretPainted' | 'layoutRevision'>>;
+  Partial<
+    Pick<
+      ResidentEngineWorkerFrame,
+      | 'caret'
+      | 'selection'
+      | 'caretPainted'
+      | 'layoutRevision'
+      | 'documentVersion'
+      | 'documentPreview'
+      | 'documentAsOpened'
+    >
+  >;
 
 function isPageBuildTask(scheduled: PageBuildTimer): scheduled is PageBuildTask {
   return typeof scheduled === 'object' && 'cancel' in scheduled;
@@ -400,6 +417,10 @@ interface BuiltDisplay {
   provisional?: boolean;
   /** The preview a worker frame was built with; absent for a frame of `layout` itself. */
   previewKey?: string | null;
+  /** The worker document version a worker frame lays out. */
+  workerVersion?: string;
+  workerPreview?: boolean;
+  workerAsOpened?: boolean;
 }
 
 // A replacement worker's frames follow the frame on screen.
@@ -1344,7 +1365,10 @@ export function useRustDisplayList(
           previous,
           readSessionVersion(worker.engine),
           workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
-          line
+          line,
+          result.documentVersion ?? null,
+          result.documentPreview ?? false,
+          result.documentAsOpened ?? false
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -1568,6 +1592,16 @@ export function useRustDisplayList(
       workerFor,
     ]
   );
+
+  const readWorkerDocument = useCallback(
+    <K extends ResidentDocumentRead['kind']>(read: ResidentDocumentRead & { kind: K }) => {
+      const owner = workerRef.current;
+      return owner
+        ? owner.client.documentRead<K>(read)
+        : Promise.reject(new Error('No document worker'));
+    },
+    []
+  ) as ResidentEngineWorkerClient['documentRead'];
 
   const openInWorker = useCallback<OpenInWorker>(
     async (hostEngine, bytes, digest, generation) => {
@@ -2075,7 +2109,16 @@ export function useRustDisplayList(
                       worker
                         ? workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision!)
                         : revisionPreviewKeyOf(previous.queries),
-                      line
+                      line,
+                      worker
+                        ? (result.documentVersion ?? workerFrameVersionOf(previous.queries))
+                        : null,
+                      !!worker && (result.documentVersion === undefined
+                        ? (presentedWorkerFrame(previous.queries)?.preview ?? false)
+                        : (result.documentPreview ?? false)),
+                      !!worker && (result.documentVersion === undefined
+                        ? (presentedWorkerFrame(previous.queries)?.asOpened ?? false)
+                        : (result.documentAsOpened ?? false))
                     )
                   : { displayList: nextFrame.displayList, frame: nextFrame, queries: null, caret };
               if (worker) {
@@ -2967,6 +3010,9 @@ export function useRustDisplayList(
               workerOwner: owner,
               caretPainted: result.caretPainted,
               previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+              ...(result.documentVersion === undefined ? {} : { workerVersion: result.documentVersion }),
+              workerPreview: result.documentPreview ?? false,
+              workerAsOpened: result.documentAsOpened ?? false,
             };
           })
           .catch((error) => {
@@ -3017,6 +3063,9 @@ export function useRustDisplayList(
             caretPainted: result.caretPainted,
             provisional: prebuilt.provisional,
             previewKey: workerPreviewKey(workerPreviewKeysRef.current, result.layoutRevision),
+            ...(result.documentVersion === undefined ? {} : { workerVersion: result.documentVersion }),
+            workerPreview: result.documentPreview ?? false,
+            workerAsOpened: result.documentAsOpened ?? false,
           });
         } else {
           pending = handedOverPreviewFrame
@@ -3051,7 +3100,10 @@ export function useRustDisplayList(
             ? workerOpenSourceVersion(residentEngine, sourceVersion)
             : sourceVersion,
           result.previewKey === undefined ? previewKey : result.previewKey,
-          line
+          line,
+          result.workerVersion ?? null,
+          result.workerPreview ?? false,
+          result.workerAsOpened ?? false
         );
         snapshotRef.current = nextSnapshot;
         provisionalPageFrameRef.current = result.provisional === true;
@@ -3239,6 +3291,7 @@ export function useRustDisplayList(
     release,
     openInWorker,
     openPreviewInWorker,
+    readWorkerDocument,
     fontRequirementsInWorker,
     setDisplayWindow,
     setRetainBuiltPages,
@@ -3298,11 +3351,16 @@ function createRustDisplayListSnapshot(
   previous: RustDisplayListSnapshot,
   sourceVersion: string | null,
   previewKey: string | null,
-  line: object
+  line: object,
+  workerVersion: string | null = null,
+  workerPreview = false,
+  workerAsOpened = false
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
   const queries = createDisplayListQueries(displayList, residentQueries, previous.queries, line);
   stampSourceVersion(queries, sourceVersion);
+  stampWorkerFrameVersion(queries, workerVersion, workerPreview, workerAsOpened);
+  stampWorkerFrameVersion(displayList, workerVersion, workerPreview, workerAsOpened);
   if (previewKey !== null) stampRevisionPreviewKey(queries, previewKey);
   return { displayList, frame, queries, caret };
 }
@@ -3434,6 +3492,8 @@ export interface UseCanvasRendererResult {
   layoutInWorker: LayoutInWorker;
   openInWorker: OpenInWorker;
   openPreviewInWorker: OpenPreviewInWorker;
+  /** Reads the document the resident worker holds now; rejects when no worker holds one. */
+  readWorkerDocument: ResidentEngineWorkerClient['documentRead'];
   fontRequirementsInWorker: FontRequirementsInWorker;
   /** The pages `[start, end)` near the viewport, built before the others. */
   setDisplayWindow(start: number, end: number): void;
@@ -3532,6 +3592,7 @@ export function useCanvasRenderer(
     release,
     openInWorker,
     openPreviewInWorker,
+    readWorkerDocument,
     fontRequirementsInWorker,
     setDisplayWindow,
     setRetainBuiltPages,
@@ -3669,6 +3730,7 @@ export function useCanvasRenderer(
     layoutInWorker,
     openInWorker,
     openPreviewInWorker,
+    readWorkerDocument,
     fontRequirementsInWorker,
     setDisplayWindow,
     setRetainBuiltPages,

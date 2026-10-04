@@ -1,4 +1,4 @@
-import { useImperativeHandle, useMemo } from 'react';
+import { useImperativeHandle, useMemo, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document } from '@betteroffice/docx/types/document';
 import type {
@@ -19,12 +19,12 @@ import type {
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { DocxInput, ScrollToParaIdOptions } from '@betteroffice/docx/utils';
 import type { DisplayList } from '@betteroffice/docx/layout/render';
-import type { DocxEditorRef } from '../../DocxEditor';
+import type { DocxDocumentChange, DocxEditorRef } from '../../DocxEditor';
 import type { DocxCommandStore } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
-import { applyEditBatch, applyProposalCall, flushedSession, modeRefusal } from '../editorBatches';
+import { applyEditBatch, applyProposalCall, flushEditorInput, flushedSession, modeRefusal } from '../editorBatches';
 import type { EditorMode } from '../internals/editing-modes';
 import type { SelectionState } from '../types';
 import { readMemoryStats } from '../memoryStats';
@@ -36,12 +36,37 @@ import {
   requestOnDemandWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenReplicaOnDemand,
+  workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
 import {
   handedOverRequest,
+  registeredWorkerProposalAuthority,
   workerProposalAuthority,
   type WorkerProposalAuthority,
 } from '../internals/workerProposalAuthority';
+
+import { isWorkerViewer } from '../internals/workerViewer';
+import { warnDeprecatedViewerMember } from '../internals/deprecatedViewerMembers';
+
+export const DOCX_REF_ASYNC_TWINS = {
+  getDocument: ['readParagraphs', 'exportStructuredWithPages'],
+  getPageContent: 'exportStructuredWithPages',
+  getPositionAtPoint: 'readPositionAtPoint',
+  getSelectionInfo: 'readSelectionInfo',
+  findInDocument: 'findParagraphs',
+  scrollToParaId: 'scrollToParagraph',
+  scrollToCommentId: 'scrollToComment',
+  scrollToChangeId: 'scrollToChange',
+  addComment: 'insertComment',
+  replyToComment: 'insertCommentReply',
+  proposeChange: 'proposeChanges',
+  setParagraphStyle: 'applyEdits',
+  onContentChange: 'onDocumentChange',
+} as const satisfies Partial<Record<keyof DocxEditorRef, string | readonly string[]>>;
+
+export const DOCX_REF_ASYNC_TWIN_EXEMPTIONS: ReadonlySet<string> = new Set([
+  'getEditorRef', 'applyFormatting', 'insertBreak',
+]);
 
 export const DOCX_REF_REPLICA_ACCESS = {
   commands: 'commands',
@@ -76,6 +101,7 @@ export const DOCX_REF_REPLICA_ACCESS = {
   getProposals: 'await',
   exportStructuredWithPages: 'await',
   getPositionAtPoint: 'sync',
+  readPositionAtPoint: 'independent',
   addComment: 'sync',
   replyToComment: 'independent',
   resolveComment: 'independent',
@@ -100,6 +126,14 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onSearchChange: 'independent',
   onContentChange: 'independent',
   onSelectionChange: 'independent',
+  readSelectionInfo: 'independent',
+  findParagraphs: 'independent',
+  scrollToParagraph: 'independent',
+  scrollToComment: 'independent',
+  scrollToChange: 'independent',
+  insertComment: 'independent',
+  insertCommentReply: 'independent',
+  onDocumentChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
 /**
@@ -115,7 +149,7 @@ const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'uns
   print: 'direct',
   highlightRange: 'direct',
   getSelectionInfo: 'unselected',
-  getPositionAtPoint: 'request',
+  getPositionAtPoint: 'direct',
 };
 
 /**
@@ -132,6 +166,90 @@ export class DocxReplicaNotReadyError extends Error {
     );
     this.name = 'DocxReplicaNotReadyError';
   }
+}
+
+/**
+ * A synchronous viewer read with an async replacement. Retrying does not help, so it is not a
+ * {@link DocxReplicaNotReadyError}.
+ */
+export class DocxAsyncOnlyError extends Error {
+  constructor(readonly member: string, readonly use: string) {
+    super(`${member} cannot read the document synchronously in a viewer session; use ${use}`);
+    this.name = 'DocxAsyncOnlyError';
+  }
+}
+
+const VIEWER_REF_ROUTING: Partial<Record<keyof DocxEditorRef, 'async-only' | 'navigate' | 'gated'>> = {
+  getDocument: 'async-only',
+  getPageContent: 'async-only',
+  findInDocument: 'async-only',
+  scrollToParaId: 'navigate',
+  scrollToCommentId: 'navigate',
+  scrollToChangeId: 'navigate',
+  proposeChange: 'gated',
+};
+const VIEWER_NAVIGATION = {
+  scrollToParaId: 'scrollToParagraph',
+  scrollToCommentId: 'scrollToComment',
+  scrollToChangeId: 'scrollToChange',
+} as const;
+const VIEWER_REF_REFUSALS = {
+  getEditorRef: null,
+  setParagraphStyle: false,
+  applyFormatting: false,
+  insertBreak: false,
+  addComment: null,
+  replyToComment: null,
+  insertComment: null,
+  insertCommentReply: null,
+  resolveComment: undefined,
+} as const;
+
+export function routeViewerRefAccess(
+  api: DocxEditorRef,
+  viewer: () => boolean,
+  viewerApi: Partial<DocxEditorRef> = {},
+  refusing: () => boolean = viewer
+): DocxEditorRef {
+  const routed = { ...api };
+  const members = new Set([...Object.keys(DOCX_REF_ASYNC_TWINS), ...DOCX_REF_ASYNC_TWIN_EXEMPTIONS, ...Object.keys(VIEWER_REF_REFUSALS), ...Object.keys(viewerApi)]);
+  for (const name of members) {
+    const member = name as keyof DocxEditorRef;
+    const twin = member in DOCX_REF_ASYNC_TWINS
+      ? DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS]
+      : member === 'getEditorRef' ? 'getParagraphIdentities, resolveParagraphAnchors, readParagraphs, readSelectionInfo, findParagraphs, exportStructuredWithPages or proposeChanges' : 'commands';
+    const use = typeof twin === 'string' ? twin : twin.join(' or ');
+    const navigation = VIEWER_NAVIGATION[member as keyof typeof VIEWER_NAVIGATION];
+    Object.defineProperty(routed, member, {
+      enumerable: true,
+      value: (...args: unknown[]) => {
+        const refusal = member in VIEWER_REF_REFUSALS;
+        if (!(refusal ? refusing() : viewer())) return Reflect.apply(api[member] as Function, api, args);
+        const behaviour = refusal ? `returns ${String(VIEWER_REF_REFUSALS[member as keyof typeof VIEWER_REF_REFUSALS])} in viewer sessions`
+          : VIEWER_REF_ROUTING[member] === 'async-only' ? 'throws DocxAsyncOnlyError in viewer sessions'
+          : navigation ? 'starts async navigation and returns true in viewer sessions'
+          : member === 'proposeChange' && viewerApi.proposeChange ? 'queues allowed host proposals through the worker in viewer sessions'
+          : member === 'onContentChange' ? 'does not fire in viewer sessions'
+          : member === 'getSelectionInfo' ? 'returns null in viewer sessions'
+          : 'keeps its synchronous behaviour in viewer sessions';
+        if (member in DOCX_REF_ASYNC_TWINS || DOCX_REF_ASYNC_TWIN_EXEMPTIONS.has(member)) {
+          warnDeprecatedViewerMember(member, behaviour, use);
+        }
+        if (refusal) {
+          const value = VIEWER_REF_REFUSALS[member as keyof typeof VIEWER_REF_REFUSALS];
+          return member === 'insertComment' || member === 'insertCommentReply' ? Promise.resolve(value) : value;
+        }
+        if (VIEWER_REF_ROUTING[member] === 'async-only') throw new DocxAsyncOnlyError(member, use);
+        if (navigation) {
+          void Reflect.apply(routed[navigation], routed, args).catch(() => {});
+          return true;
+        }
+        if (viewerApi[member]) return Reflect.apply(viewerApi[member] as Function, viewerApi, args);
+        return Reflect.apply(api[member] as Function, api, args);
+      },
+    });
+  }
+  return routed;
 }
 
 function withDeadline(ready: Promise<void>, timeoutMs: number | undefined): Promise<void> {
@@ -260,6 +378,7 @@ function storyOffset(session: YrsSession, loc: YrsLoc): number {
 
 /** How long a paged export waits for fonts and a layout of the flushed document. */
 const LAYOUT_WAIT_MS = 2_000;
+const VIEWER_LAYOUT_WAIT_MS = 60_000;
 const LAYOUT_POLL_MS = 16;
 const LAYOUT_REFUSALS: ReadonlySet<string> = new Set([
   'stale-document',
@@ -330,6 +449,84 @@ async function exportWithPages(
   return result;
 }
 
+async function exportWithPagesInWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  authority: WorkerProposalAuthority,
+  options: DocxPageExportOptions,
+  settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
+  experimentalWorkerOpen = false
+): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
+  const editor = (): PagedEditorRef => {
+    const current = pagedEditorRef.current;
+    if (!current || current.getYrsSession() !== session) {
+      throw new Error('The document changed while it was being laid out');
+    }
+    return current;
+  };
+  let request: string | null = null;
+  let fellBack = false;
+  const unavailable = (message: string): DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>> => ({
+    ok: false,
+    version: session.version(),
+    failure: { code: 'layout-unavailable', target: null, message },
+  });
+  const attempt = async (): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> => {
+    editor();
+    const read = authority.exportStructuredWithPages(
+      options,
+      async () => {
+        request = await editor().readLayoutRequest();
+        return request;
+      },
+      () => {
+        fellBack = true;
+        return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+      }
+    );
+    void read.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      read,
+      new Promise<'timeout'>((resolve) => { timer = setTimeout(() => resolve('timeout'), VIEWER_LAYOUT_WAIT_MS); }),
+    ]).finally(() => clearTimeout(timer));
+    editor();
+    if (result === 'timeout') return unavailable('The document is not laid out yet.');
+    if (result !== null) return result;
+    if (!workerOpenReplicaPending(session)) {
+      fellBack = true;
+      return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+    }
+    return unavailable('The fonts this document uses are not loaded yet.');
+  };
+  const showsMarkup = (): boolean => {
+    if (request === null) return false;
+    const preview = (JSON.parse(request) as { renderEnv?: { revisionPreview?: object } })
+      .renderEnv?.revisionPreview;
+    return !preview || Object.keys(preview).length === 0;
+  };
+  let result = await attempt();
+  if (fellBack || options.expectLayoutVersion !== undefined) return result;
+  if (
+    !result.ok &&
+    (LAYOUT_REFUSALS.has(result.failure.code) ||
+      (result.failure.code === 'unsupported-revision-layout' && showsMarkup()))
+  ) {
+    await settledDisplayList?.(
+      null, VIEWER_LAYOUT_WAIT_MS, experimentalWorkerOpen ? 'window' : 'document'
+    ).catch(() => {});
+    result = await attempt();
+    if (fellBack) return result;
+  }
+  const deadline = Date.now() + LAYOUT_WAIT_MS;
+  while (!result.ok && LAYOUT_REFUSALS.has(result.failure.code) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, LAYOUT_POLL_MS));
+    result = await attempt();
+    if (fellBack) return result;
+  }
+  return result;
+}
+
 function normalizeSelection(session: YrsSession): YrsStoryRange | null {
   const selection = session.selection();
   if (!selection || selection.anchor.story !== selection.head.story) return null;
@@ -392,6 +589,7 @@ export function useDocxEditorRefApi({
   setComments,
   setShowCommentsSidebar,
   contentChangeSubscribersRef,
+  documentChangeSubscribersRef,
   onContentSubscribersChange,
   selectionChangeSubscribersRef,
   getCachedStyleResolver,
@@ -404,6 +602,7 @@ export function useDocxEditorRefApi({
   settledDisplayList,
   awaitingDocument,
   experimentalWorkerOpen = false,
+  viewerSession = false,
   hostSearch,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
@@ -423,6 +622,7 @@ export function useDocxEditorRefApi({
   setComments: React.Dispatch<React.SetStateAction<Comment[]>>;
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   contentChangeSubscribersRef: React.RefObject<Set<(doc: Document) => void>>;
+  documentChangeSubscribersRef?: React.RefObject<Set<(change: DocxDocumentChange) => void>>;
   onContentSubscribersChange?: (count: number) => void;
   selectionChangeSubscribersRef: React.RefObject<Set<(state: SelectionState | null) => void>>;
   getCachedStyleResolver: (
@@ -447,8 +647,13 @@ export function useDocxEditorRefApi({
   /** Whether a document load has not yet produced its first layout. */
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
+  viewerSession?: boolean;
   hostSearch: DocxHostSearch;
 }) {
+  const proposalWarningRef = useRef(false);
+  const proposalQueueRef = useRef(Promise.resolve());
+  const viewerSessionRef = useRef(viewerSession);
+  viewerSessionRef.current = viewerSession;
   const opening = (): boolean => openingRef?.current === true;
   const pagedEditorRef = useMemo<React.RefObject<PagedEditorRef | null>>(
     () => ({
@@ -491,9 +696,14 @@ export function useDocxEditorRefApi({
     }
     return onWorker(authority, main);
   };
-  useImperativeHandle(
-    ref,
-    () => gateReplicaAccess({
+  const createApi = (): DocxEditorRef => {
+    const viewer = () => isWorkerViewer(pagedEditorRef.current);
+    const refusing = () => viewerSessionRef.current || viewer();
+    const flush = async () => {
+      const result = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
+      if (!result.ok && result.code !== 'editor-unavailable') throw result.error;
+    };
+    const direct: DocxEditorRef = {
       commands,
       getDocument: () =>
         opening() ? null : (pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document),
@@ -544,11 +754,31 @@ export function useDocxEditorRefApi({
         const authority = proposalAuthority();
         return authority ? authority.resolveParagraphAnchors(anchors, main) : main(anchors);
       },
-      listContentControls: async (options) =>
-        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options),
-      findContentControls: async (query, options) =>
-        (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options),
-      findText: async (request) => (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request),
+      listContentControls: (options) => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.listContentControls(options);
+        const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const authority = session && workerOpenReplicaPending(session)
+          ? registeredWorkerProposalAuthority(session)
+          : null;
+        return authority ? authority.listContentControls(options, main) : main();
+      },
+      findContentControls: (query, options) => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findContentControls(query, options);
+        const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const authority = session && workerOpenReplicaPending(session)
+          ? registeredWorkerProposalAuthority(session)
+          : null;
+        return authority ? authority.findContentControls(query, options, main) : main();
+      },
+      findText: (request) => {
+        const main = async () =>
+          (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.findText(request);
+        const session = pagedEditorRef.current?.getYrsSession();
+        const authority = viewer() && session ? registeredWorkerProposalAuthority(session) : null;
+        return authority ? authority.findText(request, main) : main();
+      },
       validateEdits: async (request) => {
         const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
         return modeRefusal(session, modeRef.current, request) ?? session.validateEdits(request);
@@ -579,9 +809,61 @@ export function useDocxEditorRefApi({
         return proposalAuthority()?.getProposals(main) ?? main();
       },
 
-      exportStructuredWithPages: (options) => exportWithPages(pagedEditorRef, options, experimentalWorkerOpen),
+      exportStructuredWithPages: (options) => {
+        const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
+        const authority = session && workerOpenReplicaPending(session)
+          ? registeredWorkerProposalAuthority(session)
+          : null;
+        return session && authority
+          ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen)
+          : exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
+      },
       getPositionAtPoint: (clientX, clientY) =>
         pagedEditorRef.current?.getPositionAtPoint(clientX, clientY) ?? null,
+      readPositionAtPoint: async (clientX, clientY) =>
+        (await pagedEditorRef.current?.readPositionAtPoint(clientX, clientY)) ?? null,
+      readSelectionInfo: async () => {
+        if (viewer()) return (await pagedEditorRef.current?.readViewerSelectionInfo()) ?? null;
+        await flush();
+        return api.getSelectionInfo();
+      },
+      findParagraphs: async (query, options) => {
+        const main = async () => { await flush(); return api.findInDocument(query, options); };
+        if (viewer()) {
+          const session = pagedEditorRef.current?.getYrsSession();
+          const authority = session ? registeredWorkerProposalAuthority(session) : null;
+          if (authority) return authority.findParagraphs(query, options, main);
+        }
+        return main();
+      },
+      scrollToParagraph: async (paraId, options) => {
+        if (viewer()) return (await pagedEditorRef.current?.navigateViewer({ kind: 'paragraphTarget', paraId }, options)) ?? false;
+        await flush();
+        return api.scrollToParaId(paraId, options);
+      },
+      scrollToComment: async (commentId) => {
+        if (viewer()) return (await pagedEditorRef.current?.navigateViewer({ kind: 'commentTarget', commentId: String(commentId) })) ?? false;
+        await flush();
+        return api.scrollToCommentId(commentId);
+      },
+      scrollToChange: async (revisionId) => {
+        if (viewer()) return (await pagedEditorRef.current?.navigateViewer({ kind: 'revisionTarget', revisionId: String(revisionId) })) ?? false;
+        await flush();
+        return api.scrollToChangeId(revisionId);
+      },
+      insertComment: async (options) => {
+        await flush();
+        return api.addComment(options);
+      },
+      insertCommentReply: async (commentId, text, author) => {
+        if (!viewer()) await flush();
+        return api.replyToComment(commentId, text, author);
+      },
+      onDocumentChange: (listener) => {
+        const subscribers = documentChangeSubscribersRef?.current;
+        subscribers?.add(listener);
+        return () => { subscribers?.delete(listener); };
+      },
 
       addComment: (options) => {
         const editor = pagedEditorRef.current;
@@ -802,7 +1084,58 @@ export function useDocxEditorRefApi({
         return () => selectionChangeSubscribersRef.current.delete(listener);
       },
       ...hostSearch,
-    }, pagedEditorRef, experimentalWorkerOpen),
+    };
+    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen);
+    const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
+      const session = pagedEditorRef.current?.getYrsSession();
+      return session ? modeRefusal(session, modeRef.current, request) : null;
+    };
+    return routeViewerRefAccess(api, viewer, {
+      applyEdits: async (request) => editRefusal(request) ?? api.applyEdits(request),
+      validateEdits: async (request) => editRefusal(request) ?? api.validateEdits(request),
+      findText: direct.findText,
+      listContentControls: direct.listContentControls,
+      findContentControls: direct.findContentControls,
+      exportStructuredWithPages: direct.exportStructuredWithPages,
+      proposeChange: (options) => {
+        if (!hostProposalsAllowed()) return api.proposeChange(options);
+        if (!options.search && !options.replaceWith) return false;
+        proposalQueueRef.current = proposalQueueRef.current.then(async () => {
+          const session = pagedEditorRef.current?.getYrsSession();
+          const authority = session ? registeredWorkerProposalAuthority(session) : null;
+          if (!session || !authority) throw new Error('The worker proposal authority is unavailable');
+          const identities = await authority.paragraphIdentities(async () =>
+            (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session.paragraphIdentities()
+          );
+          const paragraph = identities.paragraphs.find(({ session: anchor }) =>
+            anchor?.paraId === options.paraId && (anchor.story === 'body' || anchor.story.startsWith('body:'))
+          )?.session;
+          if (!paragraph) throw new Error(`Paragraph ${options.paraId} was not found`);
+          if (pagedEditorRef.current?.getYrsSession() !== session) throw new Error('The document changed while proposing a change');
+          const result = await direct.proposeChanges({
+            expectVersion: authority.geometry()?.version ?? session.version(),
+            proposals: [{
+              id: crypto.randomUUID(),
+              paragraph: { kind: 'session', sessionId: identities.sessionId, story: paragraph.story, paraId: options.paraId },
+              suggest: { author: options.author, date: new Date().toISOString() },
+              ...(options.search
+                ? { op: 'replaceText', search: options.search, replaceWith: options.replaceWith }
+                : { op: 'insertText', at: 'end', text: options.replaceWith }),
+            }],
+          });
+          if (!result.ok) throw new Error(result.failure.message);
+        }).catch((error: unknown) => {
+          if (proposalWarningRef.current) return;
+          proposalWarningRef.current = true;
+          console.warn('[DocxEditor] proposeChange:', error);
+        });
+        return true;
+      },
+    }, refusing);
+  };
+  useImperativeHandle(
+    ref,
+    createApi,
     [
       document,
       documentFromYrs,
@@ -818,6 +1151,7 @@ export function useDocxEditorRefApi({
       settledDisplayList,
       awaitingDocument,
       experimentalWorkerOpen,
+      viewerSession,
       hostSearch,
     ]
   );

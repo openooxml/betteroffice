@@ -68,7 +68,7 @@ export interface YrsInputRef {
    */
   runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
   hasPendingInput(): boolean;
-  setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
+  setSelectionFromDisplay(anchor: number, head?: number, story?: string, gesture?: number): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
   displaySelection(): YrsDisplaySelection | null;
@@ -80,6 +80,11 @@ export interface YrsInputRef {
   insertText(text: string): void;
   deleteSelection(): void;
   selectAll(): void;
+  /** The selection's plain text, for an input whose document lives in the worker. */
+  readSelectedText?(): Promise<string> | null;
+  beginGesture?(): number;
+  currentGesture?(): number;
+  isGestureCurrent?(gesture: number): boolean;
 }
 
 export type YrsStoredFormattingAction =
@@ -759,14 +764,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const map = activeStory ? inputPositionMap(activeStory) : null;
         if (!current || !activeStory || !map) return;
         const caret = current.head;
-        const paragraphs = session.paragraphs(activeStory);
-        const index = paragraphs.findIndex((paragraph) => paragraph.paraId === caret.paraId);
-        if (index < 0) return;
-        const paragraph = paragraphs[index];
+        const mapIndex = map.paragraphs.findIndex((entry) => entry.paraId === caret.paraId);
         const hasTarget =
-          direction === 'backward'
-            ? caret.offset > 0 || index > 0
-            : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
+          mapIndex >= 0 &&
+          (direction === 'backward'
+            ? caret.offset > 0 || mapIndex > 0
+            : caret.offset < map.paragraphs[mapIndex].length ||
+              mapIndex + 1 < map.paragraphs.length);
         if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
           if (!isCurrentInput(session)) return;
@@ -776,6 +780,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             continue;
           }
         }
+        const paragraphs = session.paragraphs(activeStory);
+        const index = paragraphs.findIndex((paragraph) => paragraph.paraId === caret.paraId);
+        if (index < 0) return;
+        const paragraph = paragraphs[index];
         if (direction === 'backward') {
           if (caret.offset > 0) {
             const start = previousCodePointOffset(paragraph.text, caret.offset);
