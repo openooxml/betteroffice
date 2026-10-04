@@ -877,7 +877,9 @@ impl Workbook {
                     },
                     self.active_sheet,
                 )?;
-                if parts.iter().all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
+                if parts
+                    .iter()
+                    .all(|(_, bytes)| matches!(bytes, Cow::Borrowed(_)))
                     && let Some(source) = &self.source_container
                 {
                     return Ok(source.as_bytes().to_vec());

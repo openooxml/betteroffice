@@ -7351,8 +7351,7 @@ fn an_unrecalculated_array_formula_round_trips_byte_identically() {
 #[test]
 fn an_edit_saves_recalculated_array_values() {
     let source = spill_fixture();
-    let mut workbook =
-        Workbook::open_recalculated(&source, CalculationOptions::default()).unwrap();
+    let mut workbook = Workbook::open_recalculated(&source, CalculationOptions::default()).unwrap();
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();
     let value = |address: &str| {
         sheet
