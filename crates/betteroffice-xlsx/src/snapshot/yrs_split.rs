@@ -4,7 +4,8 @@ use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_BINARY_REF_NUMBER,
     BLOCK_ITEM_DELETED_REF_NUMBER, BLOCK_ITEM_DOC_REF_NUMBER, BLOCK_ITEM_EMBED_REF_NUMBER,
     BLOCK_ITEM_FORMAT_REF_NUMBER, BLOCK_ITEM_JSON_REF_NUMBER, BLOCK_ITEM_STRING_REF_NUMBER,
-    BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, HAS_ORIGIN, HAS_PARENT_SUB, HAS_RIGHT_ORIGIN,
+    BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, HAS_ORIGIN, HAS_PARENT_SUB,
+    HAS_RIGHT_ORIGIN,
 };
 use yrs::types::{
     TYPE_REFS_ARRAY, TYPE_REFS_DOC, TYPE_REFS_MAP, TYPE_REFS_TEXT, TYPE_REFS_UNDEFINED,
@@ -414,8 +415,10 @@ impl<'a> Scanner<'a> {
                     self.buffer()?;
                     1
                 }
-                BLOCK_ITEM_STRING_REF_NUMBER => u32::try_from(self.string()?.encode_utf16().count())
-                    .map_err(|_| SplitError::Malformed)?,
+                BLOCK_ITEM_STRING_REF_NUMBER => {
+                    u32::try_from(self.string()?.encode_utf16().count())
+                        .map_err(|_| SplitError::Malformed)?
+                }
                 BLOCK_ITEM_EMBED_REF_NUMBER => {
                     self.json()?;
                     1
@@ -772,13 +775,7 @@ mod tests {
         encoder.to_vec()
     }
 
-    fn assert_parts(
-        update: &[u8],
-        vector: &[u8],
-        client_id: u64,
-        limit: usize,
-        parts: &[Vec<u8>],
-    ) {
+    fn assert_parts(update: &[u8], vector: &[u8], client_id: u64, limit: usize, parts: &[Vec<u8>]) {
         assert!(!parts.is_empty());
         let mut original_structs = Vec::new();
         let (delete_start, _) = append_structs(update, &mut original_structs, &mut HashMap::new());
@@ -808,7 +805,10 @@ mod tests {
         let txn = doc.transact();
         assert_eq!(txn.state_vector(), StateVector::decode_v1(vector).unwrap());
         assert_eq!(vector_bytes(&txn.state_vector()), vector);
-        assert_eq!(txn.encode_state_as_update_v1(&StateVector::default()), update);
+        assert_eq!(
+            txn.encode_state_as_update_v1(&StateVector::default()),
+            update
+        );
     }
 
     fn assert_workbook(workbook: &Workbook, allow_refusal: bool) {
@@ -847,10 +847,7 @@ mod tests {
 
     #[test]
     fn rich_workbook_snapshot_is_exact() {
-        let saved = Workbook::from_model(rich_model())
-            .unwrap()
-            .save()
-            .unwrap();
+        let saved = Workbook::from_model(rich_model()).unwrap().save().unwrap();
         let workbook = Workbook::open(&saved).unwrap();
         assert_eq!(workbook.sheet_count(), 3);
         assert!(!workbook.model().shared_strings.is_empty());
@@ -930,7 +927,9 @@ mod tests {
         let source = Doc::with_client_id(9);
         let map = source.get_or_insert_map("map");
         map.insert(&mut source.transact_mut(), "key", "first");
-        let update = source.transact().encode_state_as_update_v1(&StateVector::default());
+        let update = source
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         let peer = Doc::with_client_id(1);
         hydrate_snapshot_part(&peer, &update).unwrap();
         let map = peer.get_or_insert_map("map");
@@ -943,14 +942,21 @@ mod tests {
         let source = Doc::with_client_id(1);
         let map = source.get_or_insert_map("map");
         map.insert(&mut source.transact_mut(), "key", "first");
-        let update = source.transact().encode_state_as_update_v1(&StateVector::default());
+        let update = source
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         let peer = Doc::with_client_id(9);
         hydrate_snapshot_part(&peer, &update).unwrap();
         let map = peer.get_or_insert_map("map");
         map.insert(&mut peer.transact_mut(), "key", "second");
-        let update = peer.transact().encode_state_as_update_v1(&StateVector::default());
+        let update = peer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         for limit in LIMITS {
-            assert_eq!(split_update_v1(&update, limit), Err(SplitError::MissingDependency));
+            assert_eq!(
+                split_update_v1(&update, limit),
+                Err(SplitError::MissingDependency)
+            );
         }
     }
 
@@ -991,7 +997,7 @@ mod tests {
     fn content_boundaries_and_utf16_clocks_are_preserved() {
         let update = raw_update(14, |encoder| {
             item(encoder, BLOCK_ITEM_BINARY_REF_NUMBER);
-            encoder.write_buf(&[0, 1, 128, 255]);
+            encoder.write_buf([0, 1, 128, 255]);
             item(encoder, BLOCK_ITEM_STRING_REF_NUMBER);
             encoder.write_string("a🦀é");
             item(encoder, BLOCK_ITEM_EMBED_REF_NUMBER);
