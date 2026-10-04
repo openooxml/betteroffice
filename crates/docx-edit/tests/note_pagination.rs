@@ -178,6 +178,92 @@ fn a_body_edit_moves_note_backlinks_on_later_pages_as_a_fresh_layout_would() {
 }
 
 #[test]
+fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
+    let body: String = (1..=10)
+        .map(|page| {
+            let mut content = if page == 1 {
+                String::new()
+            } else {
+                "<w:pPr><w:pageBreakBefore/></w:pPr>".to_owned()
+            };
+            content += &fixture::r(&format!("Page {page}"));
+            if page == 4 {
+                content += r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#;
+            }
+            fixture::p(&format!("{:08X}", 0x7000_0000 + page), &content)
+        })
+        .collect();
+    let bytes = fixture::with_body_and_note(
+        &small_page(&body),
+        &fixture::p("70000100", &fixture::r("Note")),
+    );
+    let (engine, request) = fixture::laid_out(&bytes, 9321);
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    let initial = display(&engine);
+    assert_eq!(initial["pages"].as_array().unwrap().len(), 10);
+    let anchor = initial["pages"][3]["noteAreas"][0]["notes"][0]["anchorDocStart"]
+        .as_i64()
+        .unwrap();
+    let before = engine.stats();
+
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            engine.doc().paragraph_mark_position("70000002").unwrap(),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let early = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&early), 10);
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + 1
+    );
+
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            engine.doc().paragraph_mark_position("70000008").unwrap(),
+            "y",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&layout), 10);
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + 2
+    );
+    engine
+        .build_display_list_frame(&extras(&request), before.frame_epoch)
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds + 1
+    );
+    let actual = display(&engine);
+    let (expected_layout, expected) = fresh(&engine, &request, 9322);
+    assert_eq!(layout, expected_layout);
+    assert_eq!(
+        expected["pages"][3]["noteAreas"][0]["notes"][0]["anchorDocStart"],
+        anchor + 1
+    );
+    assert_eq!(actual["pages"][3]["noteAreas"], expected["pages"][3]["noteAreas"]);
+    assert_eq!(actual["pages"][1], expected["pages"][1]);
+    assert_eq!(
+        serde_json::to_vec(&actual).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+}
+
+#[test]
 fn removing_a_page_break_before_the_second_page_pulls_it_back_as_a_fresh_layout_would() {
     let body = format!(
         "{}{}{}",

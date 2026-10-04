@@ -1017,7 +1017,7 @@ struct PaginationState {
     measured_table_wrap_frames: Vec<bool>,
     measured_float_geometry: Option<[f64; 5]>,
     measured_with_floats: bool,
-    /// Pages whose note areas the last region pass changed.
+    /// Pages whose note areas changed since the last display build.
     note_changed_pages: Vec<usize>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
@@ -1033,6 +1033,8 @@ struct PaginationState {
     rebuilt_page_end: usize,
     /// The pages the last pass placed afresh, within the range above.
     rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
+    display_rebuilt_pages: BTreeSet<usize>,
+    display_full_rebuild: bool,
     position_deltas: HashMap<String, i64>,
     last_incremental: bool,
     /// Pages whose stamps changed since the last display build, when known.
@@ -1041,6 +1043,16 @@ struct PaginationState {
     pagination_calls: u64,
     incremental_pagination_calls: u64,
     pagination_blocks_placed: u64,
+}
+
+impl PaginationState {
+    fn clear_display_damage(&mut self) {
+        self.display_rebuilt_pages.clear();
+        self.display_full_rebuild = false;
+        self.position_deltas.clear();
+        self.note_changed_pages.clear();
+        self.restamped_pages = Some(BTreeSet::new());
+    }
 }
 
 #[derive(Debug, Default)]
@@ -4272,7 +4284,7 @@ impl EngineSession {
         layout.partial = provisional || self.partial_document.get();
         layout.cached_page_totals = cached_page_totals;
         apply_document_regions(layout, &regions);
-        let restamped_pages = self
+        let restamped_pages: BTreeSet<usize> = self
             .display
             .borrow()
             .list
@@ -4340,9 +4352,11 @@ impl EngineSession {
                 state.layout.as_ref().expect("retained region layout"),
             )?;
         }
-        pagination.note_changed_pages = note_changed_pages;
+        pagination.note_changed_pages.extend(note_changed_pages);
+        pagination.note_changed_pages.sort_unstable();
+        pagination.note_changed_pages.dedup();
         if let Some(pages) = &mut pagination.restamped_pages {
-            *pages = restamped_pages;
+            pages.extend(restamped_pages);
         }
         let serial = pagination.layout_epoch;
         let headers_footers = measured_value.or_else(|| regions.headers_footers.clone());
@@ -5116,7 +5130,6 @@ impl EngineSession {
         pagination.measured_font_dependencies.clear();
         pagination.lowered_from = None;
         pagination.input_lowering = None;
-        pagination.note_changed_pages.clear();
         pagination.region_placements.clear();
         let mut layout = run.layout;
         // Every pass over part of a package, the resident edit paths' too.
@@ -5135,7 +5148,29 @@ impl EngineSession {
         pagination.rebuilt_page_start = run.rebuilt_page_start;
         pagination.rebuilt_page_end = run.rebuilt_page_end;
         pagination.rebuilt_page_ranges = rebuilt_page_ranges;
-        pagination.position_deltas = deltas;
+        pagination.display_full_rebuild |= !incremental || !same_page_count;
+        if !pagination.display_full_rebuild {
+            let state = &mut *pagination;
+            if state.rebuilt_page_ranges.is_empty() {
+                state
+                    .display_rebuilt_pages
+                    .extend(run.rebuilt_page_start..run.rebuilt_page_end);
+            } else {
+                state
+                    .display_rebuilt_pages
+                    .extend(state.rebuilt_page_ranges.iter().flat_map(Clone::clone));
+            }
+            for (key, delta) in deltas {
+                let pending = state.position_deltas.entry(key).or_default();
+                match pending.checked_add(delta) {
+                    Some(delta) => *pending = delta,
+                    None => {
+                        state.display_full_rebuild = true;
+                        break;
+                    }
+                }
+            }
+        }
         pagination.last_incremental = incremental;
         if !incremental || !same_page_count {
             pagination.restamped_pages = None;
@@ -5980,7 +6015,7 @@ impl EngineSession {
         display.resident_input = None;
         display.frame_epoch = display.frame_epoch.wrapping_add(1);
         display.display_builds = display.display_builds.wrapping_add(1);
-        self.pagination.borrow_mut().restamped_pages = Some(BTreeSet::new());
+        self.pagination.borrow_mut().clear_display_damage();
         Ok(display_json)
     }
 
@@ -6040,6 +6075,7 @@ impl EngineSession {
             let font_cache_identity =
                 docx_layout::measure_font_cache_identity(&display.font_chains);
             let build = if pagination.last_incremental
+                && !pagination.display_full_rebuild
                 && display.extras_fingerprint == extras_fingerprint
                 && display.font_cache_identity == Some(font_cache_identity)
             {
@@ -6048,10 +6084,10 @@ impl EngineSession {
                 // references the edit moved, and retained pages whose section or
                 // numbering stamps changed are rebuilt too.
                 let first = pagination
-                    .rebuilt_page_ranges
+                    .display_rebuilt_pages
                     .first()
-                    .cloned()
-                    .unwrap_or(pagination.rebuilt_page_start..pagination.rebuilt_page_end);
+                    .map(|&index| index..index + 1)
+                    .unwrap_or(0..0);
                 let restamped = match &pagination.restamped_pages {
                     Some(pages) => pages
                         .iter()
@@ -6074,10 +6110,9 @@ impl EngineSession {
                         .unwrap_or_default(),
                 };
                 let note_pages: Vec<usize> = pagination
-                    .rebuilt_page_ranges
+                    .display_rebuilt_pages
                     .iter()
-                    .skip(1)
-                    .flat_map(Clone::clone)
+                    .copied()
                     .chain(pagination.note_changed_pages.iter().copied())
                     .chain(restamped)
                     .filter(|&index| !first.contains(&index))
@@ -6170,7 +6205,7 @@ impl EngineSession {
             }
             build
         };
-        self.pagination.borrow_mut().restamped_pages = Some(BTreeSet::new());
+        self.pagination.borrow_mut().clear_display_damage();
         observe_display_phase();
         let mut display = self.display.borrow_mut();
         display.frame_epoch = display
