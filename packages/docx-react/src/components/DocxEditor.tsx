@@ -82,7 +82,7 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { requestWorkerOpenReplica, workerOpenReplicaPending } from './DocxEditor/internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, workerOpenReplicaPending } from './DocxEditor/internals/workerOpenReplica';
 import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
 import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
 import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
@@ -1625,7 +1625,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     if (!session) return;
     notifyDocumentVersion(session.version());
     if (!onChange && contentChangeSubscribersRef.current.size === 0) return;
-    void requestWorkerOpenReplica(session)?.then(
+    void awaitWorkerOpenReplica(session)?.then(
       () => {
         if (coreSessionRef.current === session) projectYrsContentChange();
       },

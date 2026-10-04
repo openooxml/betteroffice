@@ -21,7 +21,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
-import { deferWorkerOpenReplica, workerOpenReplicaOnDemand, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_REPLICA_ACCESS, DOCX_REF_REPLICA_LOADING_ANSWERS, useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -154,7 +154,7 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
   const opens: boolean[] = [];
-  const fallbackReasons: WorkerOpenFallbackReason[] = [];
+  const fallbackReasons: string[] = [];
   const readiness = { current: false };
   const replica = deferWorkerOpenReplica(
     session,
@@ -168,8 +168,8 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
         handover?.complete();
       };
     },
-    (reason) => {
-      fallbackReasons.push(reason);
+    () => {
+      fallbackReasons.push('failure');
       opens.push(true);
       session.openDocx(bytes, true);
     },
