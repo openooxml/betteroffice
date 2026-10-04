@@ -356,7 +356,10 @@ fn moving_a_footnote_reuses_the_unchanged_tail_for_layout_and_display() {
         after.incremental_display_builds,
         before.incremental_display_builds + 1,
     );
-    assert_eq!(after.rebuilt_display_pages - before.rebuilt_display_pages, 3);
+    assert_eq!(
+        after.rebuilt_display_pages - before.rebuilt_display_pages,
+        3
+    );
 
     let fresh = EngineSession::new(75404);
     fresh
