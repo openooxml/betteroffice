@@ -13,19 +13,21 @@ import { yrsToDocument } from './yrsToDocument';
 /** Earlier saves of the worker's document and the projection the next one starts from. @internal */
 export interface ResidentSaveRecord extends EditorSaveRecord {
   base?: Document;
-  /** Story revision `base` reflects; stories changed since are projected again. */
+  /** Revision `base` reflects; changes since are projected again. */
   revision?: number;
 }
 
 /**
  * Saves the worker's opened session as the editor saves its own: the stories
  * changed since the last save projected over that save's projection (every
- * story when none changed), with `host`'s metadata (the open's when omitted),
- * and `record` updated. @internal
+ * story when none are dirty), with `host`'s metadata (the open's when omitted),
+ * and `record` updated. Revisions come from `storiesChangedSince`, the resident
+ * session's revision stream, with comment ID changes also projecting the body. @internal
  */
 export async function saveResidentDocument(
   raw: EditSession,
   clientId: number,
+  storiesChangedSince: (since: number) => { revision: number; stories: string[]; comments?: boolean },
   source: Uint8Array,
   hostJson: string,
   host: Document | undefined,
@@ -35,11 +37,11 @@ export async function saveResidentDocument(
   const opened = wrapOpenedEditSession(raw, clientId, source, hostJson);
   const base = record.base ?? opened.session.materializeDocx();
   if (!base?.originalBuffer) throw new Error('The resident worker holds no opened package');
-  const storyIds = new Set(
-    record.revision === undefined
-      ? []
-      : opened.session.storiesChangedSince(record.revision).stories.map(dirtyProjectionStory)
-  );
+  const changes = record.revision === undefined ? undefined : storiesChangedSince(record.revision);
+  const storyIds = new Set(changes?.stories.map(dirtyProjectionStory) ?? []);
+  if (changes?.comments === true) {
+    storyIds.add(dirtyProjectionStory('body'));
+  }
   const projected = yrsToDocument(
     opened.session,
     mergeDocxHostMetadata(base, host ?? opened.host.document),
@@ -48,6 +50,6 @@ export async function saveResidentDocument(
   const buffer = await saveEditorDocument(opened.session, projected, comments, record);
   projected.originalBuffer = buffer;
   record.base = projected;
-  record.revision = opened.session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+  record.revision = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
   return buffer;
 }

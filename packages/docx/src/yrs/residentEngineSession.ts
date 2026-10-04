@@ -146,27 +146,31 @@ export async function createResidentEngineSession(
   const storyRevisions = new Map<string, number>();
   let nativeStoryRevision = 0;
   let storyRevision = 0;
+  let commentRevision = 0;
 
   const syncStoryRevisions = (): number => {
     const changes = JSON.parse(session.stories_changed_since(nativeStoryRevision)) as {
       revision: number;
       stories: string[];
+      comments?: boolean;
     };
     if (changes.revision !== nativeStoryRevision) {
       nativeStoryRevision = changes.revision;
       storyRevision += 1;
       for (const story of changes.stories) storyRevisions.set(story, storyRevision);
+      if (changes.comments === true) commentRevision = storyRevision;
     }
     return storyRevision;
   };
 
   const storiesChangedSince = (since: number) => {
     const revision = syncStoryRevisions();
-    if (since >= revision) return { revision, stories: [] };
+    if (since >= revision) return { revision, stories: [], comments: false };
     return {
       revision,
       stories: [...storyRevisions].filter(([, changed]) => changed > since)
         .map(([story]) => story).sort(),
+      comments: commentRevision > since,
     };
   };
 
@@ -358,7 +362,9 @@ export async function createResidentEngineSession(
         : session.encode_diff(remoteStateVector.slice()),
     save: async (source, hostJson, host, comments, record) => {
       const { saveResidentDocument } = await import('./residentSave');
-      return saveResidentDocument(session, clientId, source, hostJson, host, comments, record);
+      return saveResidentDocument(
+        session, clientId, storiesChangedSince, source, hostJson, host, comments, record
+      );
     },
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
