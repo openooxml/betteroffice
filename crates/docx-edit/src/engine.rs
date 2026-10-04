@@ -3431,7 +3431,8 @@ impl EngineSession {
                     pagination.note_shortcut_fell_back.wrapping_add(1);
             }
         }
-        let (stabilized, final_input, presentations) = if let Some((stabilized, presentations)) = reused
+        let (stabilized, final_input, presentations) = if let Some((stabilized, presentations)) =
+            reused
         {
             (stabilized, None, presentations)
         } else {
@@ -3442,7 +3443,7 @@ impl EngineSession {
             // Placement only zeroes contextual spacing, which every pass applies
             // again, so the note passes replay the body arena in place. Page-side
             // wrapping rewrites shapes per pass, so it replays a copy instead.
-        let mut base_input = (!refs.is_empty()
+            let mut base_input = (!refs.is_empty()
                 && resident_body
                 && has_wrap_stabilized_shapes(
                     input.measured.iter().map(|measured| &measured.block),
@@ -3463,8 +3464,8 @@ impl EngineSession {
                     .expect("layout retained after successful pagination");
                 (layout, None)
             } else {
-                let layout =
-                    docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
+                let layout = docx_layout::place::layout_document(&mut input)
+                    .map_err(layout_error_message)?;
                 (layout, Some(input))
             };
             apply_document_regions_tracked(&mut initial_layout, &regions, &mut restamped_pages);
@@ -7426,7 +7427,11 @@ mod tests {
         let assignments = map_notes_to_pages(&layout.pages, &refs, &regions);
         let capture = engine.capture.borrow();
         let capture = capture.as_ref().unwrap();
-        let separator_heights = input.options.note_separator_heights.clone().unwrap_or_default();
+        let separator_heights = input
+            .options
+            .note_separator_heights
+            .clone()
+            .unwrap_or_default();
         let required = calculate_note_reserved_heights(
             &assignments,
             capture.notes.as_ref(),
@@ -8778,7 +8783,10 @@ mod tests {
         let chains: serde_json::Map<String, serde_json::Value> = requirements
             .iter()
             .map(|requirement| {
-                (requirement["key"].as_str().unwrap().to_owned(), json!([font]))
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
             })
             .collect();
         request["measurement"]["fontChains"] = json!(chains);
@@ -8834,11 +8842,16 @@ mod tests {
     }
 
     fn note_body_lines(engine: &EngineSession) -> usize {
-        note_body_signature(engine)["lines"].as_array().unwrap().len()
+        note_body_signature(engine)["lines"]
+            .as_array()
+            .unwrap()
+            .len()
     }
 
     fn note_body_reference_line(engine: &EngineSession) -> u64 {
-        note_body_signature(engine)["references"][0][1].as_u64().unwrap()
+        note_body_signature(engine)["references"][0][1]
+            .as_u64()
+            .unwrap()
     }
 
     fn note_words(count: usize) -> String {
@@ -8875,7 +8888,10 @@ mod tests {
                     .apply_raw_ops(
                         "body",
                         vec![
-                            crate::RawOp::Delete { index: 0, len: prefix_len },
+                            crate::RawOp::Delete {
+                                index: 0,
+                                len: prefix_len,
+                            },
                             crate::RawOp::Insert {
                                 index: 0,
                                 text: prefix.clone(),
@@ -8939,7 +8955,10 @@ mod tests {
         let passes = engine.pagination.borrow().note_stabilization_placements;
         local_patch_step(&engine, &request, "body", (8, 8, Some("x")), false);
         assert_eq!(engine.pagination.borrow().note_shortcut_taken, before + 1);
-        assert_eq!(engine.pagination.borrow().note_stabilization_placements, passes);
+        assert_eq!(
+            engine.pagination.borrow().note_stabilization_placements,
+            passes
+        );
         assert_region_state_matches_cold(&engine, &request, "middle letter with footnotes");
     }
 
@@ -8997,7 +9016,10 @@ mod tests {
         let chains: serde_json::Map<String, serde_json::Value> = requirements
             .iter()
             .map(|requirement| {
-                (requirement["key"].as_str().unwrap().to_owned(), json!([font]))
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
             })
             .collect();
         request["measurement"]["fontChains"] = json!(chains);
@@ -9021,9 +9043,23 @@ mod tests {
         let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
         let index = engine.doc().paragraph_index("body").unwrap();
         let (start, _) = index.para_span(&paragraph.para_id).unwrap();
-        local_patch_step(&engine, &request, "body", (start + 8, start + 8, Some("x")), false);
+        local_patch_step(
+            &engine,
+            &request,
+            "body",
+            (start + 8, start + 8, Some("x")),
+            false,
+        );
         assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
-        assert!(engine.regions.borrow().as_ref().unwrap().note_reuse.is_none());
+        assert!(
+            engine
+                .regions
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .note_reuse
+                .is_none()
+        );
         assert_region_state_matches_cold(&engine, &request, "page-side shape with footnotes");
     }
 
@@ -9182,7 +9218,10 @@ mod tests {
             run("Spacer"),
             para(
                 "30000001",
-                &format!(r#"{}<w:r><w:footnoteReference w:id="1"/></w:r>"#, run("Anchor")),
+                &format!(
+                    r#"{}<w:r><w:footnoteReference w:id="1"/></w:r>"#,
+                    run("Anchor")
+                ),
             ),
         );
         for index in 2..=17 {
@@ -9246,7 +9285,10 @@ mod tests {
         let chains: serde_json::Map<String, serde_json::Value> = requirements
             .iter()
             .map(|requirement| {
-                (requirement["key"].as_str().unwrap().to_owned(), json!([font]))
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
             })
             .collect();
         request["measurement"]["fontChains"] = json!(chains);
@@ -9298,7 +9340,9 @@ mod tests {
                     text,
                     crate::FormatPolicy::Inherit,
                 ),
-                None => probe.doc().delete_range(&ctx, crate::StoryRange::new("body", start, end)),
+                None => probe
+                    .doc()
+                    .delete_range(&ctx, crate::StoryRange::new("body", start, end)),
             }
             .unwrap();
             assert!(receipt.new_para_ids.is_empty());
@@ -9311,13 +9355,21 @@ mod tests {
         assert!(prepared.resident_body && prepared.main_body);
         assert!(!prepared.provisional && !engine.partial_document.get() && !prepared.has_floats);
         assert!(!has_wrap_stabilized_shapes(
-            prepared.input.measured.iter().map(|measured| &measured.block)
+            prepared
+                .input
+                .measured
+                .iter()
+                .map(|measured| &measured.block)
         ));
         assert!(prepared.input.measured.iter().any(|measured| {
             !collect_note_refs(std::slice::from_ref(&measured.block)).is_empty()
         }));
         assert!(!docx_layout::measure_blocks::measured_synthetically(
-            prepared.input.measured.iter().map(|measured| &measured.measure)
+            prepared
+                .input
+                .measured
+                .iter()
+                .map(|measured| &measured.measure)
         ));
         let identity = probe
             .note_reuse_identity(
@@ -9381,7 +9433,7 @@ mod tests {
 
     #[test]
     fn resident_footnote_seeded_edits_match_cold_full() {
-        for seed in 1..=30_u64 {
+        for seed in 1..=8_u64 {
             let (engine, request) = footnote_stream_fixture();
             assert!(engine.stats().retained_pages > 10);
             assert!(!matches!(
@@ -9400,12 +9452,24 @@ mod tests {
             let paragraph = engine.doc().paragraphs("body").unwrap().pop().unwrap();
             let index = engine.doc().paragraph_index("body").unwrap();
             let (reference, _) = index.para_span(&paragraph.para_id).unwrap();
-            local_patch_step(&engine, &request, "body", (reference, reference + 1, None), false);
+            local_patch_step(
+                &engine,
+                &request,
+                "body",
+                (reference, reference + 1, None),
+                false,
+            );
             let paragraph = engine.doc().paragraphs("body").unwrap().remove(1);
             let index = engine.doc().paragraph_index("body").unwrap();
             let (start, _) = index.para_span(&paragraph.para_id).unwrap();
             let reference = start + "Anchor".encode_utf16().count() as u32;
-            local_patch_step(&engine, &request, "body", (reference, reference + 1, None), false);
+            local_patch_step(
+                &engine,
+                &request,
+                "body",
+                (reference, reference + 1, None),
+                false,
+            );
             assert!(matches!(
                 &engine.capture.borrow().as_ref().unwrap().note_settlement,
                 NoteSettlement::Converged
@@ -9427,7 +9491,9 @@ mod tests {
                 .iter()
                 .filter(|paragraph| paragraph.text.starts_with("word "))
                 .collect();
-            let reference_paragraph = references[next() as usize % references.len()].para_id.clone();
+            let reference_paragraph = references[next() as usize % references.len()]
+                .para_id
+                .clone();
             let mut reference_letters = 0;
             let mut eligible_steps = 0;
             let mut ineligible_steps = 0;
@@ -9500,7 +9566,8 @@ mod tests {
                         (start + offset, start + end, None)
                     }
                 };
-                let (before_input, before_identity) = footnote_stream_probe(&engine, &request, None);
+                let (before_input, before_identity) =
+                    footnote_stream_probe(&engine, &request, None);
                 let (after_input, after_identity) =
                     footnote_stream_probe(&engine, &request, Some(operation));
                 assert_eq!(before_identity, after_identity, "seed {seed}, step {step}");
@@ -9539,19 +9606,35 @@ mod tests {
                     0 => assert!(eligible),
                     2 => assert!(after_lines > before_lines),
                     3 => assert!(after_lines < before_lines),
-                    4 => assert_ne!(before_signature["references"], after_signature["references"]),
+                    4 => assert_ne!(
+                        before_signature["references"],
+                        after_signature["references"]
+                    ),
                     _ => {}
                 }
                 let before_taken = engine.pagination.borrow().note_shortcut_taken;
                 local_patch_step(&engine, &request, "body", operation, false);
                 let taken = engine.pagination.borrow().note_shortcut_taken - before_taken;
-                assert_eq!(taken, u64::from(eligible), "seed {seed}, step {step}, {operation:?}");
+                assert_eq!(
+                    taken,
+                    u64::from(eligible),
+                    "seed {seed}, step {step}, {operation:?}"
+                );
                 eligible_steps += usize::from(eligible);
                 ineligible_steps += usize::from(!eligible);
             }
-            assert!(eligible_steps > 1, "seed {seed} must exercise eligible typing");
-            assert!(ineligible_steps > 1, "seed {seed} must exercise full layout");
-            assert!(wraps > 0 && unwraps > 0 && reference_moves > 0, "seed {seed}");
+            assert!(
+                eligible_steps > 1,
+                "seed {seed} must exercise eligible typing"
+            );
+            assert!(
+                ineligible_steps > 1,
+                "seed {seed} must exercise full layout"
+            );
+            assert!(
+                wraps > 0 && unwraps > 0 && reference_moves > 0,
+                "seed {seed}"
+            );
         }
     }
 

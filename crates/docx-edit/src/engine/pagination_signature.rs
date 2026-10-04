@@ -66,7 +66,8 @@ fn boundary(run: Option<&Run>, offset: usize, end: bool) -> Option<f64> {
             .or_else(|| end.then_some(text.pm_end).flatten());
     }
     if end {
-        run.pm_end().or_else(|| run.pm_start().map(|start| start + 1.0))
+        run.pm_end()
+            .or_else(|| run.pm_start().map(|start| start + 1.0))
     } else {
         run.pm_start()
     }
@@ -110,7 +111,9 @@ fn paragraph_signature(paragraph: &ParagraphBlock, extent: &ParagraphExtent) -> 
             !line.ascent.is_finite()
                 || !line.descent.is_finite()
                 || !line.line_height.is_finite()
-                || line.float_skip_before.is_some_and(|height| !height.is_finite())
+                || line
+                    .float_skip_before
+                    .is_some_and(|height| !height.is_finite())
         })
     {
         return None;
@@ -130,9 +133,9 @@ fn paragraph_signature(paragraph: &ParagraphBlock, extent: &ParagraphExtent) -> 
             objects.push((index, reference_line(paragraph, extent, image.pm_start?)?));
         }
     }
-    for reference in docx_layout::footnotes::collect_note_refs(&[LayoutBlock::Paragraph(
-        paragraph.clone(),
-    )]) {
+    for reference in
+        docx_layout::footnotes::collect_note_refs(&[LayoutBlock::Paragraph(paragraph.clone())])
+    {
         references.push((
             reference.map_id(),
             reference_line(paragraph, extent, reference.pm_pos)?,
@@ -189,9 +192,14 @@ fn parts_signature(block: &LayoutBlock, measure: &BlockExtent) -> Option<Value> 
             if textbox.content.len() != extent.inner_measures.len() {
                 return None;
             }
-            block_value["content"] = json!(textbox.content.iter().zip(&extent.inner_measures)
-                .map(|(block, measure)| paragraph_signature(block, measure))
-                .collect::<Option<Vec<_>>>()?);
+            block_value["content"] = json!(
+                textbox
+                    .content
+                    .iter()
+                    .zip(&extent.inner_measures)
+                    .map(|(block, measure)| paragraph_signature(block, measure))
+                    .collect::<Option<Vec<_>>>()?
+            );
             extent_value["innerMeasures"] = Value::Null;
         }
         (LayoutBlock::Shape(shape), BlockExtent::Shape(extent)) => {
@@ -200,21 +208,31 @@ fn parts_signature(block: &LayoutBlock, measure: &BlockExtent) -> Option<Value> 
             if blocks.len() != measures.len() {
                 return None;
             }
-            block_value["innerText"] = json!(blocks.iter().zip(measures)
-                .map(|(block, measure)| paragraph_signature(block, measure))
-                .collect::<Option<Vec<_>>>()?);
+            block_value["innerText"] = json!(
+                blocks
+                    .iter()
+                    .zip(measures)
+                    .map(|(block, measure)| paragraph_signature(block, measure))
+                    .collect::<Option<Vec<_>>>()?
+            );
             block_value.as_object_mut()?.remove("innerMeasures");
             extent_value["innerMeasures"] = Value::Null;
-            block_value["children"] = json!(shape.children.iter().map(|child| {
-                parts_signature(
-                    &LayoutBlock::Shape(child.clone()),
-                    &BlockExtent::Shape(ShapeExtent {
-                        width: child.width,
-                        height: child.height,
-                        inner_measures: child.inner_measures.clone(),
-                    }),
-                )
-            }).collect::<Option<Vec<_>>>()?);
+            block_value["children"] = json!(
+                shape
+                    .children
+                    .iter()
+                    .map(|child| {
+                        parts_signature(
+                            &LayoutBlock::Shape(child.clone()),
+                            &BlockExtent::Shape(ShapeExtent {
+                                width: child.width,
+                                height: child.height,
+                                inner_measures: child.inner_measures.clone(),
+                            }),
+                        )
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            );
         }
         (LayoutBlock::Image(_), BlockExtent::Image(_))
         | (LayoutBlock::Chart(_), BlockExtent::Chart(_))
