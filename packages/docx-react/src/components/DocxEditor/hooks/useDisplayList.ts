@@ -946,6 +946,7 @@ export function useRustDisplayList(
         client: spare ?? new ResidentEngineWorkerClient(),
         load,
       };
+      if (replacement && !workerOpenReplicaPending(hostEngine)) retireWorkerOpenExport(hostEngine);
       workerRef.current.client.setRetainBuiltPages(retainBuiltPagesRef.current);
       watchWorkerFailure(workerRef.current.client);
       return workerRef.current;

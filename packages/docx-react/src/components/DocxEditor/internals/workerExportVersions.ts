@@ -1,7 +1,10 @@
 import { ResidentWorkerFailureError, type YrsSession } from '@betteroffice/docx/yrs';
 import type { WorkerPageExportResult } from './workerOpenExport';
 
+let nextGeneration = 0;
+
 export class WorkerExportVersions {
+  private readonly generation = ++nextGeneration;
   private readonly layouts = new Map<string, string>();
 
   workerLayoutVersion(outward: string): string {
@@ -17,7 +20,7 @@ export class WorkerExportVersions {
     if (layout.documentVersion !== worker || !layout.layoutVersion.startsWith(`${worker}:`)) {
       throw new ResidentWorkerFailureError('Resident engine worker returned an unexpected layout version');
     }
-    const outward = peer + layout.layoutVersion.slice(worker.length);
+    const outward = `${peer}:${this.generation}` + layout.layoutVersion.slice(worker.length);
     const previous = this.layouts.get(outward);
     if (previous !== undefined && previous !== layout.layoutVersion) {
       throw new ResidentWorkerFailureError('Resident engine worker reused an export layout token');

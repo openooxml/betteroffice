@@ -14,12 +14,15 @@ test('export versions map document and layout tokens and preserve their original
   const peer = {} as YrsSession;
   const owner = {};
   const adapter = workerExportVersions(peer, owner, 1);
-  expect(adapter.adapt(exported('W1', 7), 'P', 'W1')).toMatchObject({
-    version: 'P', content: { layout: { documentVersion: 'P', layoutVersion: 'P:7' } },
+  const first = adapter.adapt(exported('W1', 7), 'P', 'W1');
+  const second = adapter.adapt(exported('W2', 8), 'P', 'W2');
+  expect(first).toMatchObject({
+    version: 'P', content: { layout: { documentVersion: 'P', layoutVersion: expect.stringMatching(/^P:\d+:7$/) } },
   });
-  expect(adapter.adapt(exported('W2', 8), 'P', 'W2')).toMatchObject({ content: { layout: { layoutVersion: 'P:8' } } });
-  expect(adapter.workerLayoutVersion('P:7')).toBe('W1:7');
-  expect(adapter.workerLayoutVersion('P:8')).toBe('W2:8');
+  expect(second).toMatchObject({ content: { layout: { layoutVersion: expect.stringMatching(/^P:\d+:8$/) } } });
+  if (!first.ok || !second.ok) throw new Error('Expected success');
+  expect(adapter.workerLayoutVersion(first.content.layout.layoutVersion)).toBe('W1:7');
+  expect(adapter.workerLayoutVersion(second.content.layout.layoutVersion)).toBe('W2:8');
   expect(adapter.workerLayoutVersion('unknown:7')).toBe('unknown:7');
 });
 
@@ -27,24 +30,47 @@ test('layout associations are scoped to the peer, worker owner and load', () => 
   const peer = {} as YrsSession;
   const owner = {};
   const adapter = workerExportVersions(peer, owner, 1);
-  adapter.adapt(exported('W', 7), 'P', 'W');
+  const result = adapter.adapt(exported('W', 7), 'P', 'W');
+  if (!result.ok) throw new Error('Expected success');
+  const token = result.content.layout.layoutVersion;
   expect(workerExportVersions(peer, owner, 1)).toBe(adapter);
-  expect(workerExportVersions({} as YrsSession, owner, 1).workerLayoutVersion('P:7')).toBe('P:7');
-  expect(workerExportVersions(peer, {}, 1).workerLayoutVersion('P:7')).toBe('P:7');
-  expect(workerExportVersions(peer, owner, 2).workerLayoutVersion('P:7')).toBe('P:7');
+  expect(workerExportVersions({} as YrsSession, owner, 1).workerLayoutVersion(token)).toBe(token);
+  expect(workerExportVersions(peer, {}, 1).workerLayoutVersion(token)).toBe(token);
+  expect(workerExportVersions(peer, owner, 2).workerLayoutVersion(token)).toBe(token);
 });
+
+for (const replacement of ['owner', 'load', 'registration'] as const) {
+  test(`layout tokens remain unique after replacing the ${replacement} without peer edits`, () => {
+    const peer = {} as YrsSession;
+    const owner = {};
+    const adapter = workerExportVersions(peer, owner, 1);
+    const first = adapter.adapt(exported('W1', 7), 'P', 'W1');
+    if (!first.ok) throw new Error('Expected success');
+    const pinned = first.content.layout.layoutVersion;
+    if (replacement === 'registration') retireWorkerOpenExport(peer);
+    const next = workerExportVersions(peer, replacement === 'owner' ? {} : owner, replacement === 'load' ? 2 : 1);
+    const second = next.adapt(exported('W2', 7), 'P', 'W2');
+    if (!second.ok) throw new Error('Expected success');
+    expect(second.content.layout.layoutVersion).not.toBe(pinned);
+    expect(next.workerLayoutVersion(second.content.layout.layoutVersion)).toBe('W2:7');
+    expect(next.workerLayoutVersion(pinned)).toBe(pinned);
+    expect(adapter.workerLayoutVersion(pinned)).toBe('W1:7');
+  });
+}
 
 test('retiring a worker export drops its registration and layout associations', () => {
   const peer = {} as YrsSession;
   const owner = {};
   const adapter = workerExportVersions(peer, owner, 1);
-  adapter.adapt(exported('W', 7), 'P', 'W');
+  const result = adapter.adapt(exported('W', 7), 'P', 'W');
+  if (!result.ok) throw new Error('Expected success');
+  const token = result.content.layout.layoutVersion;
   registerWorkerOpenExport(peer, { export: async () => exported('W', 7) });
   expect(workerOpenExport(peer)).not.toBeNull();
   retireWorkerOpenExport(peer);
   expect(workerOpenExport(peer)).toBeNull();
   expect(workerExportVersions(peer, owner, 1)).not.toBe(adapter);
-  expect(workerExportVersions(peer, owner, 1).workerLayoutVersion('P:7')).toBe('P:7');
+  expect(workerExportVersions(peer, owner, 1).workerLayoutVersion(token)).toBe(token);
 });
 
 test('refusals use the captured peer version and mismatched reads cannot be relabeled', () => {
@@ -61,7 +87,8 @@ test('refusals use the captured peer version and mismatched reads cannot be rela
 
 test('a rotated worker token cannot overwrite an earlier pinned association', () => {
   const adapter = workerExportVersions({} as YrsSession, {}, 1);
-  adapter.adapt(exported('W1', 7), 'P', 'W1');
+  const first = adapter.adapt(exported('W1', 7), 'P', 'W1');
+  if (!first.ok) throw new Error('Expected success');
   expect(() => adapter.adapt(exported('W2', 7), 'P', 'W2')).toThrow(ResidentWorkerFailureError);
-  expect(adapter.workerLayoutVersion('P:7')).toBe('W1:7');
+  expect(adapter.workerLayoutVersion(first.content.layout.layoutVersion)).toBe('W1:7');
 });

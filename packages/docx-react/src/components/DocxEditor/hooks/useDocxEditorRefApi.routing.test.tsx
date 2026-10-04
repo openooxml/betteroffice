@@ -598,7 +598,7 @@ test('editor paged export flushes and reads the resident worker after hand-over'
   const handover = await beginWorkerProposalHandover(host.session)!;
   handover.complete();
   const result = await host.api.exportStructuredWithPages(PAGE_OPTIONS);
-  expect(result).toMatchObject({ ok: true, version: 'v', content: { layout: { documentVersion: 'v', layoutVersion: 'v:7' } } });
+  expect(result).toMatchObject({ ok: true, version: 'v', content: { layout: { documentVersion: 'v', layoutVersion: expect.stringMatching(/^v:\d+:7$/) } } });
   expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
   expect(worker.read).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST }, 'worker-v');
   expect(host.editor.getLayoutRequest).toHaveBeenCalledTimes(1);
@@ -626,6 +626,35 @@ test('editor export round-trips a peer layout token through the original worker 
     kind: 'exportStructuredWithPages', options: { ...PAGE_OPTIONS, expectLayoutVersion: 'worker-v:7' }, currentRequest: PAGE_REQUEST,
   }, 'worker-v');
   expect(worker.read).toHaveBeenCalledTimes(2);
+  expect(host.editor.relayout).not.toHaveBeenCalled();
+  expect(settled).not.toHaveBeenCalled();
+});
+
+test('an editor layout token pinned before worker replacement refuses the replacement layout', async () => {
+  const settled = mock(async () => ({} as DisplayList));
+  const host = apiFor(false, false, settled);
+  const worker = editorWorkerFor(host);
+  worker.read.mockImplementation(async (read, version) => {
+    if (read.kind !== 'exportStructuredWithPages') throw new Error('Expected paged export');
+    const value = read.options.expectLayoutVersion !== undefined && read.options.expectLayoutVersion !== 'worker-v:7'
+      ? PAGE_REFUSAL
+      : worker.result;
+    return { status: 'ok', version, value: JSON.stringify(value) };
+  });
+  const first = await host.api.exportStructuredWithPages(PAGE_OPTIONS);
+  if (!first.ok) throw new Error(first.failure.message);
+  worker.owner.current = {};
+  const replacement = await host.api.exportStructuredWithPages(PAGE_OPTIONS);
+  if (!replacement.ok) throw new Error(replacement.failure.message);
+  expect(replacement.version).toBe(first.version);
+  expect(replacement.content.layout.layoutVersion).not.toBe(first.content.layout.layoutVersion);
+  const pinned = { ...PAGE_OPTIONS, expectLayoutVersion: first.content.layout.layoutVersion };
+  expect(await host.api.exportStructuredWithPages(pinned)).toMatchObject({ ok: false, version: 'v', failure: { code: 'stale-layout' } });
+  expect(worker.read).toHaveBeenLastCalledWith({
+    kind: 'exportStructuredWithPages', options: pinned, currentRequest: PAGE_REQUEST,
+  }, 'worker-v');
+  expect(worker.read).toHaveBeenCalledTimes(3);
+  expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
   expect(host.editor.relayout).not.toHaveBeenCalled();
   expect(settled).not.toHaveBeenCalled();
 });
@@ -692,7 +721,7 @@ test('typing during a worker export keeps the captured peer version', async () =
   await posted.promise;
   host.state.version = 'later typing';
   pendingRead.resolve({ status: 'ok', version: 'worker-v', value: JSON.stringify(worker.result) });
-  expect(await pending).toMatchObject({ ok: true, version: 'flushed', content: { layout: { documentVersion: 'flushed', layoutVersion: 'flushed:7' } } });
+  expect(await pending).toMatchObject({ ok: true, version: 'flushed', content: { layout: { documentVersion: 'flushed', layoutVersion: expect.stringMatching(/^flushed:\d+:7$/) } } });
   expect(worker.catchUp).toHaveBeenCalledTimes(1);
   expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
 });
@@ -762,7 +791,7 @@ test('an editor retry reads the newly acknowledged worker token after layout set
   worker.read.mockResolvedValueOnce({ status: 'superseded' });
   worker.catchUp.mockResolvedValueOnce({ P: 'v', W: 'old-worker-v', changed: false });
   const result = await host.api.exportStructuredWithPages(PAGE_OPTIONS);
-  expect(result).toMatchObject({ ok: true, version: 'v', content: { layout: { layoutVersion: 'v:7' } } });
+  expect(result).toMatchObject({ ok: true, version: 'v', content: { layout: { layoutVersion: expect.stringMatching(/^v:\d+:7$/) } } });
   expect(worker.read.mock.calls.map(([, version]) => version)).toEqual(['old-worker-v', 'worker-v']);
   expect(host.editor.relayout).toHaveBeenCalledTimes(1);
   expect(settled).toHaveBeenCalledWith(null, 60_000, 'window');
