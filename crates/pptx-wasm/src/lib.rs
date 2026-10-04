@@ -669,6 +669,7 @@ mod tests {
         renderer
             .register_fallback_font("Fallback", false, false, FONT)
             .unwrap();
+        renderer.register_font("Test", false, false, FONT).unwrap();
         let live = session.slide_ids().unwrap().len();
         renderer.layout_slide_json(&document, 0).unwrap();
         for _ in 0..1_000 {
@@ -676,6 +677,13 @@ mod tests {
             renderer.layout_slide_json(&document, live as u32).unwrap();
             assert_eq!(renderer.layout_keys.len(), 1);
             assert!(renderer.rendered.len() <= LAYOUT_CACHE_CAPACITY);
+            let version = session.version().to_string();
+            assert!(
+                renderer
+                    .layout_keys
+                    .values()
+                    .all(|(at, epoch, _)| { *at == version && *epoch == renderer.font_epoch })
+            );
             session.delete_slide(&context, &receipt.slide_id).unwrap();
             assert!(renderer.layout_keys.len() <= live + LAYOUT_KEY_CACHE_CAPACITY);
             renderer.layout_slide_json(&document, 0).unwrap();
@@ -724,6 +732,13 @@ mod tests {
         );
         assert_eq!(renderer.layout_keys.len(), 1);
         assert_eq!(renderer.key_count, computed + 1);
+        let version = session.version().to_string();
+        assert!(
+            renderer
+                .layout_keys
+                .values()
+                .all(|(at, epoch, _)| { *at == version && *epoch == renderer.font_epoch })
+        );
     }
 
     fn key(package: &pptx_parse::PptxPackage, scope: &SlideScope, epoch: u64) -> String {
