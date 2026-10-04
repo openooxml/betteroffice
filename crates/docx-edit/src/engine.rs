@@ -8767,7 +8767,12 @@ mod tests {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         let mut retained_counts = Vec::new();
-        for page_count in [128, 512] {
+        for (trigger, page_count) in [
+            (RelayoutTrigger::Interactive, 128),
+            (RelayoutTrigger::Interactive, 512),
+            (RelayoutTrigger::Bulk, 128),
+            (RelayoutTrigger::Bulk, 512),
+        ] {
             let block_count = 6 * (page_count - 1) + 1;
             let body: String = (0..block_count)
                 .map(|index| {
@@ -8824,15 +8829,35 @@ mod tests {
                 .doc()
                 .paragraph_mark_position(&paragraphs[paragraphs.len() / 2].para_id)
                 .unwrap();
-            engine
-                .doc()
-                .insert_text(
-                    &crate::EditCtx::local("", ""),
-                    position,
-                    "x",
-                    crate::FormatPolicy::Inherit,
-                )
+            if trigger == RelayoutTrigger::Bulk {
+                let batch: crate::EditRequest = serde_json::from_value(json!({
+                    "expectVersion": engine.doc().version(),
+                    "history": "none",
+                    "steps": [{"op": "insertText", "at": "end", "text": "x", "target": {
+                        "kind": "paragraph", "story": "body", "paraId": paragraphs[paragraphs.len() / 2].para_id
+                    }}]
+                }))
                 .unwrap();
+                assert!(
+                    engine
+                        .doc()
+                        .apply_edits(&batch, &crate::UndoSession::new())
+                        .unwrap()
+                        .unwrap()
+                        .applied
+                );
+            } else {
+                engine
+                    .doc()
+                    .insert_text(
+                        &crate::EditCtx::local("", ""),
+                        position,
+                        "x",
+                        crate::FormatPolicy::Inherit,
+                    )
+                    .unwrap();
+            }
+            assert_eq!(engine.region_relayout_trigger(&request).unwrap(), trigger);
             let before = engine.stats();
             let output = engine
                 .layout_document_with_regions_retained_json(&request)
@@ -8840,8 +8865,15 @@ mod tests {
             {
                 let pagination = engine.pagination.borrow();
                 assert!(pagination.last_incremental);
-                assert!(pagination.region_placements.is_empty());
-                assert!(pagination.retain_matches.is_empty());
+                if trigger == RelayoutTrigger::Bulk {
+                    assert_eq!(pagination.region_placements.len(), 2);
+                    assert!(pagination.region_placements.iter().all(|pass| {
+                        pass.incremental && pass.compact.is_some() && pass.within_budget()
+                    }));
+                } else {
+                    assert!(pagination.region_placements.is_empty());
+                    assert!(pagination.retain_matches.is_empty());
+                }
             }
             assert_eq!(
                 engine.stats().incremental_pagination_calls,
@@ -8870,6 +8902,8 @@ mod tests {
         }
         assert!(retained_counts[0] > 0);
         assert_eq!(retained_counts[0], retained_counts[1]);
+        assert!(retained_counts[2] > 0);
+        assert_eq!(retained_counts[2], retained_counts[3]);
         docx_layout::clear_measure_fonts();
     }
 
@@ -9536,17 +9570,12 @@ mod tests {
         ]});
         let engine = preview_pagination_engine(&preview_fixture::document(&body), &request);
         let paragraphs = engine.doc().paragraphs("body").unwrap();
-        let at = engine
-            .doc()
-            .paragraph_mark_position(&paragraphs[11].para_id)
-            .unwrap();
         engine
             .doc()
-            .insert_embed(
-                &crate::EditCtx::local("", ""),
-                at,
-                "sectionBreak",
-                vec![("type".to_owned(), Any::from("nextPage"))],
+            .set_paragraph_attr(
+                &paragraphs[11].para_id,
+                "sectionBreakType",
+                Any::from("nextPage"),
             )
             .unwrap();
         engine
@@ -10165,6 +10194,17 @@ mod tests {
         assert_eq!(engine.pagination.borrow().retain_match_calls, before);
         assert!(engine.pagination.borrow().retain_matches.is_empty());
         assert_region_state_matches_cold(&engine, &request, "local prefix identity");
+        engine.set_relayout_trigger(RelayoutTrigger::Preview);
+        let before = engine.pagination.borrow().retain_match_calls;
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        assert!(engine.pagination.borrow().retain_match_calls > before);
+        assert!(Rc::ptr_eq(
+            &prefix,
+            &engine.render.borrow().stories["body"].blocks.shared()[0]
+        ));
+        assert_region_state_matches_cold(&engine, &request, "preview after local prefix patch");
     }
 
     #[test]
@@ -19772,12 +19812,25 @@ mod tests {
             preview_pagination_prime(&engine, &request);
             request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
             request["renderEnv"]["showHiddenText"] = json!(true);
+            engine.set_relayout_trigger(RelayoutTrigger::Bulk);
+            assert_eq!(
+                engine
+                    .region_relayout_trigger(&request.to_string())
+                    .unwrap(),
+                RelayoutTrigger::Bulk
+            );
             assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
             assert!(
                 !engine.pagination.borrow().last_incremental,
                 "global environment change must place afresh, floats={floats}"
             );
             request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+            assert_eq!(
+                engine
+                    .region_relayout_trigger(&request.to_string())
+                    .unwrap(),
+                RelayoutTrigger::Preview
+            );
             assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
             assert!(
                 engine.pagination.borrow().last_incremental,

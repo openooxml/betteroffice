@@ -12,6 +12,12 @@ const REF_ID: &str = "71001002";
 const FOLLOWER_ID: &str = "71001004";
 const NOTE_PARA_ID: &str = "71003001";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditClass {
+    Interactive,
+    Bulk,
+}
+
 struct Snapshot {
     output: Value,
     inputs: Value,
@@ -103,8 +109,8 @@ fn snapshot(engine: &EngineSession, output: &str) -> Snapshot {
 fn edit_and_compare(
     bytes: &[u8],
     sections: Value,
-    expect_resume: bool,
-    edit: impl FnOnce(&EngineSession),
+    class: EditClass,
+    edit: impl FnOnce(&EngineSession, EditClass),
 ) -> (Snapshot, Snapshot) {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
@@ -122,7 +128,7 @@ fn edit_and_compare(
         .unwrap();
     let original = snapshot(&engine, &original);
     let before = engine.stats();
-    edit(&engine);
+    edit(&engine, class);
     let output = engine
         .layout_document_with_regions_retained_json(&request)
         .unwrap();
@@ -143,10 +149,12 @@ fn edit_and_compare(
     assert_eq!(output.as_bytes(), expected.as_bytes());
     assert_eq!(engine.retained_layout_json().unwrap(), expected);
 
-    if expect_resume {
+    assert_eq!(after.pagination_calls, before.pagination_calls + 1);
+    if class == EditClass::Bulk {
         assert_eq!(
             after.incremental_pagination_calls,
             before.incremental_pagination_calls + 1,
+            "{class:?}",
         );
         let placed = after.pagination_blocks_placed - before.pagination_blocks_placed;
         let full_placement = fresh.stats().pagination_blocks_placed;
@@ -155,6 +163,16 @@ fn edit_and_compare(
             "{placed} of {full_placement}",
         );
         assert_eq!(fresh.stats().incremental_pagination_calls, 0);
+    } else {
+        assert_eq!(
+            after.incremental_pagination_calls, before.incremental_pagination_calls,
+            "{class:?}",
+        );
+        assert_eq!(after.rebuilt_pages, pages(&edited).len());
+        assert_eq!(
+            after.pagination_blocks_placed - before.pagination_blocks_placed,
+            fresh.stats().pagination_blocks_placed,
+        );
     }
     (original, edited)
 }
@@ -178,7 +196,34 @@ fn paragraph_range(engine: &EngineSession, story: &str, para_id: &str) -> StoryR
     panic!("missing paragraph {para_id} in {story}");
 }
 
-fn grow(engine: &EngineSession) {
+fn apply_host_edit(engine: &EngineSession, step: Value) {
+    let request = serde_json::from_value(json!({
+        "expectVersion": engine.doc().version(),
+        "history": "none",
+        "steps": [step],
+    }))
+    .unwrap();
+    assert!(
+        engine
+            .doc()
+            .apply_edits(&request, &docx_edit::UndoSession::new())
+            .unwrap()
+            .unwrap()
+            .applied
+    );
+}
+
+fn grow(engine: &EngineSession, class: EditClass) {
+    if class == EditClass::Bulk {
+        apply_host_edit(
+            engine,
+            json!({
+                "op": "insertText", "at": "end", "text": added_words(),
+                "target": {"kind": "paragraph", "story": "body", "paraId": EDIT_ID},
+            }),
+        );
+        return;
+    }
     let range = paragraph_range(engine, "body", EDIT_ID);
     engine
         .doc()
@@ -279,18 +324,26 @@ fn assert_note_on_page(snapshot: &Snapshot, note_id: u32, page: usize) {
 fn lengthening_a_paragraph_moves_a_footnote_forward_and_resumes() {
     let body = format!("{}{}<w:sectPr/>", moving_body(false, ""), tail());
     let bytes = fixture::with_body_and_note(&body, &note());
-    let (before, after) = edit_and_compare(&bytes, small_sections(), true, grow);
-    assert_note_on_page(&before, 1, 2);
-    assert_note_on_page(&after, 1, 3);
-    assert!(
-        pages(&after)[2]["noteAreas"]
-            .as_array()
-            .is_none_or(Vec::is_empty)
-    );
+    for class in [EditClass::Interactive, EditClass::Bulk] {
+        let (before, after) = edit_and_compare(&bytes, small_sections(), class, grow);
+        assert_note_on_page(&before, 1, 2);
+        assert_note_on_page(&after, 1, 3);
+        assert!(
+            pages(&after)[2]["noteAreas"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
+    }
 }
 
 #[test]
 fn moving_a_footnote_reuses_the_unchanged_tail_for_layout_and_display() {
+    for class in [EditClass::Interactive, EditClass::Bulk] {
+        assert_moving_footnote_tail_reuse(class);
+    }
+}
+
+fn assert_moving_footnote_tail_reuse(class: EditClass) {
     let tail: String = (0..20)
         .map(|id| {
             paragraph(
@@ -326,7 +379,7 @@ fn moving_a_footnote_reuses_the_unchanged_tail_for_layout_and_display() {
     engine.build_display_list_frame(&extras, 0).unwrap();
     let before = engine.stats();
 
-    grow(&engine);
+    grow(&engine, class);
     let output = engine
         .layout_document_with_regions_retained_json(&request)
         .unwrap();
@@ -347,19 +400,36 @@ fn moving_a_footnote_reuses_the_unchanged_tail_for_layout_and_display() {
         assert_eq!(block_page(&edited, &block_id), 4 + id / 5);
     }
     assert_eq!(after.pagination_calls, before.pagination_calls + 1);
-    assert_eq!(
-        after.incremental_pagination_calls,
-        before.incremental_pagination_calls + 1,
-    );
-    assert_eq!(after.rebuilt_pages, 3);
-    assert_eq!(
-        after.incremental_display_builds,
-        before.incremental_display_builds + 1,
-    );
-    assert_eq!(
-        after.rebuilt_display_pages - before.rebuilt_display_pages,
-        3
-    );
+    if class == EditClass::Bulk {
+        assert_eq!(
+            after.incremental_pagination_calls,
+            before.incremental_pagination_calls + 1,
+            "{class:?}",
+        );
+        assert_eq!(after.rebuilt_pages, 3);
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1,
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            3
+        );
+    } else {
+        assert_eq!(
+            after.incremental_pagination_calls, before.incremental_pagination_calls,
+            "{class:?}",
+        );
+        assert_eq!(after.rebuilt_pages, pages(&edited).len());
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds,
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            pages(&edited).len() as u64,
+        );
+    }
 
     let fresh = EngineSession::new(75404);
     fresh
@@ -381,29 +451,51 @@ fn moving_a_footnote_reuses_the_unchanged_tail_for_layout_and_display() {
             .unwrap()
     };
     assert_eq!(display_pages(&engine), display_pages(&fresh));
+    if class == EditClass::Interactive {
+        assert_eq!(
+            after.pagination_blocks_placed - before.pagination_blocks_placed,
+            fresh.stats().pagination_blocks_placed,
+        );
+    }
 }
 
 #[test]
 fn shortening_a_paragraph_moves_a_footnote_back_and_resumes() {
     let body = format!("{}{}<w:sectPr/>", moving_body(true, ""), tail());
     let bytes = fixture::with_body_and_note(&body, &note());
-    let (before, after) = edit_and_compare(&bytes, small_sections(), true, |engine| {
-        let range = paragraph_range(engine, "body", EDIT_ID);
-        engine
-            .doc()
-            .delete_range(
-                &EditCtx::local("", ""),
-                StoryRange::new("body", range.start + 4, range.end - 1),
-            )
-            .unwrap();
-    });
-    assert_note_on_page(&before, 1, 3);
-    assert_note_on_page(&after, 1, 2);
-    assert!(
-        pages(&after)[3]["noteAreas"]
-            .as_array()
-            .is_none_or(Vec::is_empty)
-    );
+    for class in [EditClass::Interactive, EditClass::Bulk] {
+        let (before, after) = edit_and_compare(&bytes, small_sections(), class, |engine, class| {
+            if class == EditClass::Bulk {
+                apply_host_edit(
+                    engine,
+                    json!({
+                        "op": "deleteText",
+                        "target": {
+                            "kind": "range", "story": "body", "view": "accepted",
+                            "start": {"paraId": EDIT_ID, "offset": 4},
+                            "end": {"paraId": EDIT_ID, "offset": 4 + added_words().encode_utf16().count()},
+                        },
+                    }),
+                );
+                return;
+            }
+            let range = paragraph_range(engine, "body", EDIT_ID);
+            engine
+                .doc()
+                .delete_range(
+                    &EditCtx::local("", ""),
+                    StoryRange::new("body", range.start + 4, range.end - 1),
+                )
+                .unwrap();
+        });
+        assert_note_on_page(&before, 1, 3);
+        assert_note_on_page(&after, 1, 2);
+        assert!(
+            pages(&after)[3]["noteAreas"]
+                .as_array()
+                .is_none_or(Vec::is_empty)
+        );
+    }
 }
 
 #[test]
@@ -439,29 +531,31 @@ fn lengthening_section_one_moves_a_footnote_onto_the_old_boundary_page_and_resum
             "sectionStart": "nextPage",
         },
     ]);
-    let (before, after) = edit_and_compare(&bytes, sections, true, grow);
-    assert_note_on_page(&before, 1, 2);
-    assert_note_on_page(&after, 1, 3);
-    assert_note_on_page(&before, 2, 3);
-    assert_note_on_page(&after, 2, 4);
-    assert_eq!(pages(&before)[3]["sectionIndex"], 1);
-    assert_eq!(pages(&after)[3]["sectionIndex"], 0);
-    assert_eq!(pages(&after)[4]["sectionIndex"], 1);
-    for snapshot in [&before, &after] {
-        let first = note_pages(snapshot, 1)[0];
-        let second = note_pages(snapshot, 2)[0];
-        assert_eq!(note_area(snapshot, 1)["sectionId"], "first");
-        assert_eq!(note_area(snapshot, 2)["sectionId"], "second");
-        assert_eq!(
-            pages(snapshot)[first]["size"],
-            json!({"w": 200.0, "h": 120.0}),
-        );
-        assert_eq!(
-            pages(snapshot)[second]["size"],
-            json!({"w": 240.0, "h": 140.0}),
-        );
-        assert_eq!(pages(snapshot)[first]["margins"]["left"], 10.0);
-        assert_eq!(pages(snapshot)[second]["margins"]["left"], 20.0);
+    for class in [EditClass::Interactive, EditClass::Bulk] {
+        let (before, after) = edit_and_compare(&bytes, sections.clone(), class, grow);
+        assert_note_on_page(&before, 1, 2);
+        assert_note_on_page(&after, 1, 3);
+        assert_note_on_page(&before, 2, 3);
+        assert_note_on_page(&after, 2, 4);
+        assert_eq!(pages(&before)[3]["sectionIndex"], 1);
+        assert_eq!(pages(&after)[3]["sectionIndex"], 0);
+        assert_eq!(pages(&after)[4]["sectionIndex"], 1);
+        for snapshot in [&before, &after] {
+            let first = note_pages(snapshot, 1)[0];
+            let second = note_pages(snapshot, 2)[0];
+            assert_eq!(note_area(snapshot, 1)["sectionId"], "first");
+            assert_eq!(note_area(snapshot, 2)["sectionId"], "second");
+            assert_eq!(
+                pages(snapshot)[first]["size"],
+                json!({"w": 200.0, "h": 120.0}),
+            );
+            assert_eq!(
+                pages(snapshot)[second]["size"],
+                json!({"w": 240.0, "h": 140.0}),
+            );
+            assert_eq!(pages(snapshot)[first]["margins"]["left"], 10.0);
+            assert_eq!(pages(snapshot)[second]["margins"]["left"], 20.0);
+        }
     }
 }
 
@@ -476,15 +570,20 @@ fn deleting_a_reference_paragraph_removes_its_note_and_reflows_a_later_note() {
         tail(),
     );
     let bytes = fixture::with_body_and_note(&body, &note());
-    let (before, after) = edit_and_compare(&bytes, small_sections(), false, |engine| {
-        engine
-            .doc()
-            .delete_range(
-                &EditCtx::local("", ""),
-                paragraph_range(engine, "body", REF_ID),
-            )
-            .unwrap();
-    });
+    let (before, after) = edit_and_compare(
+        &bytes,
+        small_sections(),
+        EditClass::Interactive,
+        |engine, _| {
+            engine
+                .doc()
+                .delete_range(
+                    &EditCtx::local("", ""),
+                    paragraph_range(engine, "body", REF_ID),
+                )
+                .unwrap();
+        },
+    );
     assert_note_on_page(&before, 1, 2);
     assert_note_on_page(&before, 2, 3);
     assert_eq!(reference_page(&after, 1), None);
@@ -517,18 +616,23 @@ fn growing_a_multiline_note_keeps_its_reference_page_and_pushes_body_text() {
         ),
     );
     let bytes = fixture::with_body_and_note(&body, &note);
-    let (before, after) = edit_and_compare(&bytes, small_sections(), false, |engine| {
-        let range = paragraph_range(engine, "fn:1", NOTE_PARA_ID);
-        engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new("fn:1", range.end - 1),
-                &added_words(),
-                FormatPolicy::Inherit,
-            )
-            .unwrap();
-    });
+    let (before, after) = edit_and_compare(
+        &bytes,
+        small_sections(),
+        EditClass::Interactive,
+        |engine, _| {
+            let range = paragraph_range(engine, "fn:1", NOTE_PARA_ID);
+            engine
+                .doc()
+                .insert_text(
+                    &EditCtx::local("", ""),
+                    Position::new("fn:1", range.end - 1),
+                    &added_words(),
+                    FormatPolicy::Inherit,
+                )
+                .unwrap();
+        },
+    );
     assert_note_on_page(&before, 1, 2);
     assert_note_on_page(&after, 1, 2);
     assert_eq!(block_page(&before, &json!(FOLLOWER_ID)), 2);
