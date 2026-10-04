@@ -107,6 +107,37 @@ describe('workbook calculation context', () => {
     }
   });
 
+  it('preserves shared draws when earlier independent random cells are inserted in different orders', () => {
+    const source = volatileBytes();
+    const first = openWorkbook(source, { calculation: CONTEXT });
+    const second = openWorkbook(source, { calculation: CONTEXT });
+    try {
+      const initial = values(first);
+      for (const value of initial.slice(2)) {
+        expect(value).toMatchObject({ kind: 'number' });
+      }
+      expect(values(second)).toEqual(initial);
+      for (const [handle, cols] of [[first, [0, 1]], [second, [1, 0]]] as const) {
+        for (const col of cols) {
+          expect(handle.editCell(0, 29, col, '=RANDBETWEEN(1,1000000)').applied).toBe(true);
+          expect(values(handle)).toEqual(initial);
+        }
+      }
+      expect(values(first)).toEqual(values(second));
+      for (const handle of [first, second]) {
+        const reopened = openWorkbook(handle.save(), { calculation: CONTEXT });
+        try {
+          expect(values(reopened)).toEqual(initial);
+        } finally {
+          reopened.dispose();
+        }
+      }
+    } finally {
+      first.dispose();
+      second.dispose();
+    }
+  });
+
   it('keeps chart edits, undo and redo deterministic', async () => {
     const source = volatileBytes('charts');
     const first = openWorkbook(source, { calculation: CONTEXT });

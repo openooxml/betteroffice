@@ -263,7 +263,7 @@ describe('workbook edit peers', () => {
     try {
       expect(edits.applyEdits(request(peer, 'B3', '301'))).toMatchObject({ ok: true, applied: true });
       expect(edits.applyEdits(request(peer, 'C3', '302'))).toMatchObject({ ok: true, applied: true });
-      expect(edits.editCells(0, [{ row: 2, col: 3, input: '=B3+C3' }]).applied).toBe(true);
+      expect(edits.editCells(0, [{ row: 2, col: 3, input: '=B3+C3+1' }]).applied).toBe(true);
       expect(edits.patchRangeStyle(0, 'B3:D3', { italic: true }).applied).toBe(true);
       expect(edits.sentSequence).toBe(4);
       expect(edits.acknowledgedSequence).toBe(0);
@@ -485,7 +485,9 @@ describe('workbook edit peers', () => {
       expect(session.state.stage).toBe('failed');
       expect(session.failure?.diagnostics).toContain('sequence 1 (applyEdits)');
       expect(session.failure?.diagnostics).toContain('missing-target');
-      expect(errors).toEqual([edits.error]);
+      const error = edits.error;
+      if (!error) throw new Error('Missing workbook edit peer failure');
+      expect(errors).toEqual([error]);
       expect(() => edits.editCell(0, 2, 1, 'lost edit')).toThrow(WorkbookEditPeerFailedError);
       expect(() => edits.undo()).toThrow(WorkbookEditPeerFailedError);
       await expect(edits.save()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
@@ -524,7 +526,9 @@ describe('workbook edit peers', () => {
       await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
       expect(edits.error?.name).toBe('WorkbookReplayOrderError');
       expect(edits.state).toBe('failed');
-      expect(errors).toEqual([edits.error]);
+      const error = edits.error;
+      if (!error) throw new Error('Missing workbook edit peer failure');
+      expect(errors).toEqual([error]);
       expect(session.failure).toBeUndefined();
       expect(session.state.stage).toBe('ready');
       expect(await digest(await session.save())).toBe(unchanged);
@@ -562,7 +566,9 @@ describe('workbook edit peers', () => {
         if (mode === 'crash') crash!(new SessionFailure('crash', 'Worker stopped'));
         await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
         expect(edits.state).toBe('failed');
-        expect(errors).toEqual([session.failure]);
+        const failure = session.failure;
+        if (!failure) throw new Error('Missing workbook session failure');
+        expect(errors).toEqual([failure]);
         expect(() => edits.redo()).toThrow(WorkbookEditPeerFailedError);
         if (mode === 'throw') expect(session.failure?.diagnostics).toContain('sequence 1 (moveChart)');
         expect(await digest(edits.recoverySave().bytes)).toBe(await digest(peer.save()));

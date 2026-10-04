@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellInput, CellRef, CellState, CellValue, EditRequest, Op, Sheet, SheetId,
-    Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellInput, CellRange, CellRef, CellState, CellValue, EditRequest, Op,
+    Sheet, SheetId, Workbook, WorkbookModel,
 };
 use serde_json::json;
 
@@ -19,6 +19,7 @@ fn fixture() -> Vec<u8> {
             ("A4", "RANDBETWEEN(1,1000000)"),
             ("A5", "RANDBETWEEN(1,1000000)*1000+RANDBETWEEN(1,1000000)"),
             ("B3", "RANDBETWEEN(1,1000000)"),
+            ("C3", "MAKEARRAY(2,2,LAMBDA(r,c,RANDBETWEEN(1,1000000)))"),
         ] {
             sheet.set_cell(
                 cell(address),
@@ -29,6 +30,7 @@ fn fixture() -> Vec<u8> {
                 },
             );
         }
+        sheet.set_array_formula(cell("C3"), CellRange::parse_a1("C3:D4").unwrap());
         model.sheets.push(sheet);
     }
     ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
@@ -53,7 +55,8 @@ fn values(workbook: &Workbook) -> Vec<CellValue> {
     (0..2)
         .flat_map(|sheet| {
             [
-                "A1", "A2", "A3", "A4", "A5", "B3", "B10", "B11", "B12", "C10", "D10",
+                "A1", "A2", "A3", "A4", "A5", "B3", "C3", "C4", "D3", "D4", "B10", "B11",
+                "B12", "C10", "D10",
             ]
             .map(|address| value(workbook, sheet, address))
         })
@@ -170,6 +173,41 @@ fn seeded_random_values_survive_full_and_incremental_recalculation() {
         .unwrap();
     assert_eq!(values(&workbook), before);
     workbook.recalculate_all(options);
+    assert_eq!(values(&workbook), before);
+}
+
+#[test]
+fn earlier_independent_random_cells_preserve_values_on_full_and_incremental_recalculation() {
+    let options = context();
+    let mut workbook = Workbook::open_recalculated_with_seed(&fixture(), options, Some(42)).unwrap();
+    for sheet in 0..2 {
+        for address in ["A3", "A4", "B3", "C3", "C4", "D3", "D4"] {
+            assert!(
+                matches!(value(&workbook, sheet, address), CellValue::Number { value } if (1.0..=1_000_000.0).contains(&value))
+            );
+        }
+        assert!(
+            matches!(value(&workbook, sheet, "A5"), CellValue::Number { value } if (1_001.0..=1_001_000_000.0).contains(&value))
+        );
+        assert_eq!(
+            workbook
+                .sheet(SheetId(sheet))
+                .unwrap()
+                .array_formula(cell("C3")),
+            Some(CellRange::parse_a1("C3:D4").unwrap())
+        );
+        assert_ne!(value(&workbook, sheet, "C3"), value(&workbook, sheet, "C4"));
+        assert_ne!(value(&workbook, sheet, "C3"), value(&workbook, sheet, "D3"));
+    }
+    let before = values(&workbook);
+    workbook
+        .edit_cell(SheetId(0), cell("B1"), "=RANDBETWEEN(1,1000000)", options)
+        .unwrap();
+    assert!(
+        matches!(value(&workbook, 0, "B1"), CellValue::Number { value } if (1.0..=1_000_000.0).contains(&value))
+    );
+    assert_eq!(values(&workbook), before);
+    assert!(workbook.recalculate_all(options).changed.is_empty());
     assert_eq!(values(&workbook), before);
 }
 
