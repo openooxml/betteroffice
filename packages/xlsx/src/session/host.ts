@@ -2,6 +2,7 @@ import { createSessionHost, type SessionHost } from '../../../../shared/office-s
 import { transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
 import { SessionFailure, type MethodHandlers } from '../../../../shared/office-session/types';
+import { wasmAssetUrl } from '../wasm/asset';
 import {
   initWasm, openWorkbook, workbookDisplayListJson,
   type SheetInfo, type WorkbookHandle,
@@ -99,8 +100,14 @@ export function createWorkbookSessionHost(
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
       if (handle) throw new Error('Workbook session is already open');
-      await (options.initWasm ?? initWasm)(input.wasm);
+      const retainPeerHydration = 'retainPeerHydration' in input && input.retainPeerHydration === true;
+      let wasm = input.wasm;
+      if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
+      await (options.initWasm ?? initWasm)(wasm);
       if (disposed) throw new Error('Workbook session is disposed');
+      if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
+        transport.post({ protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm });
+      }
       const opened = openWorkbook(new Uint8Array(bytes), {
         collaborative: input.collaborative,
         clientId: input.clientId,

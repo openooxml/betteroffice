@@ -7,6 +7,9 @@ export const WORKBOOK_REPLAY_MUTATORS = {
   editCells: true,
   applyEdits: true,
   applyOps: true,
+  propose: true,
+  acceptProposal: true,
+  rejectProposal: true,
   patchRangeStyle: true,
   setNumberFormat: true,
   applyFormat: true,
@@ -183,6 +186,17 @@ function validOp(value: unknown): boolean {
     case 'applyOps':
       return args.length === 1 && Array.isArray(args[0]) &&
         Array.from(args[0]).every((op) => record(op) && typeof op.type === 'string');
+    case 'propose':
+      return args.length === 3 && typeof args[0] === 'string' &&
+        (args[1] === null || typeof args[1] === 'string') && Array.isArray(args[2]) &&
+        Array.from(args[2]).every((edit) => record(edit) && integer(edit.sheet) && point(edit) &&
+          typeof edit.input === 'string' && optionalFields(edit, { numberFormat }));
+    case 'acceptProposal':
+      return args.length >= 1 && args.length <= 2 && typeof args[0] === 'string' &&
+        (args[1] === undefined || (record(args[1]) && optionalFields(args[1], {
+          force: (field) => typeof field === 'boolean',
+        })));
+    case 'rejectProposal': return args.length === 1 && typeof args[0] === 'string';
     case 'patchRangeStyle':
       return args.length === 3 && integer(args[0]) && typeof args[1] === 'string' && style(args[2]);
     case 'setNumberFormat':
@@ -224,6 +238,9 @@ export function applyWorkbookReplayOp(
     case 'editCells': return handle.editCells(...op.args);
     case 'applyEdits': return handle.applyEdits(...op.args);
     case 'applyOps': return handle.applyOps(...op.args);
+    case 'propose': return handle.propose(...op.args);
+    case 'acceptProposal': return handle.acceptProposal(...op.args);
+    case 'rejectProposal': return handle.rejectProposal(...op.args);
     case 'patchRangeStyle': return handle.patchRangeStyle(...op.args);
     case 'setNumberFormat': return handle.setNumberFormat(...op.args);
     case 'applyFormat': return handle.applyFormat(...op.args);

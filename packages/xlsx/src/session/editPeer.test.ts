@@ -14,6 +14,8 @@ import {
   workbookSessionInternals,
   type WorkbookReplayEnvelope,
   type WorkbookReplayMethod,
+  type WorkbookReplayOp,
+  type WorkbookReplayReply,
 } from './replay';
 import { batchRequests, createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
@@ -244,6 +246,86 @@ describe('workbook edit peers', () => {
       await matchingDigest(2, 'undo', edits, peer, session);
       expect(edits.redo().applied).toBe(true);
       await matchingDigest(3, 'redo', edits, peer, session);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('replays proposal mutators with identical results, versions and saved digests', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const replies: WorkbookReplayReply[] = [];
+    const peer = openWorkbook(fixture, { calculation });
+    const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), { calculation });
+    const internal = workbookSessionInternals.get(session);
+    if (!internal) throw new Error('Missing internal workbook replay helper');
+    const submitReplay = internal.replay;
+    internal.replay = async (envelope) => {
+      const reply = await submitReplay(envelope);
+      replies.push(reply);
+      return reply;
+    };
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    let batch = 0;
+    let revision = 0;
+    let version = peer.version();
+    async function check(method: WorkbookReplayMethod, result: WorkbookReplayReply['result']): Promise<void> {
+      const nextVersion = peer.version();
+      if (nextVersion !== version) revision += 1;
+      version = nextVersion;
+      await matchingDigest(++batch, method, edits, peer, session);
+      expect(replies[batch - 1]).toEqual({ sequence: batch, revision, version: revision, result });
+      expect(await session.call.version()).toBe(version);
+      expect(session.state).toMatchObject({ version: revision, stage: 'ready' });
+    }
+    try {
+      expect(peer.isProposalsAvailable()).toBe(true);
+      const proposal = edits.propose('agent', 'totals', [
+        { sheet: 0, row: 6, col: 4, input: '=NOW()+RANDBETWEEN(1,1000000)', numberFormat: 'number' },
+      ]);
+      await check('propose', proposal);
+      expect(peer.listProposals()).toContainEqual(proposal);
+      const accepted = edits.acceptProposal(proposal.id);
+      expect(accepted.applied).toBe(true);
+      await check('acceptProposal', accepted);
+      const rejected = edits.propose('agent', null, [
+        { sheet: 0, row: 6, col: 5, input: '0.5', numberFormat: 'percent' },
+      ]);
+      await check('propose', rejected);
+      expect(edits.rejectProposal(rejected.id)).toBe(true);
+      await check('rejectProposal', true);
+      expect(edits.rejectProposal(rejected.id)).toBe(false);
+      await check('rejectProposal', false);
+      expect(peer.listProposals()).toEqual([]);
+      const forced = edits.propose('agent', null, [{ sheet: 0, row: 6, col: 6, input: '42' }]);
+      await check('propose', forced);
+      await check('editCell', edits.editCell(0, 6, 6, '999'));
+      const forcedResult = edits.acceptProposal(forced.id, { force: true });
+      expect(forcedResult.applied).toBe(true);
+      await check('acceptProposal', forcedResult);
+      expect(peer.cell(0, 6, 6).input).toBe('42');
+      expect(new Set(envelopes.map((envelope) => envelope.calculation.randSeed)).size).toBe(batch);
+      expect(new Set(envelopes.map((envelope) => envelope.calculation.nowSerial)).size).toBe(batch);
+      expect(edits.state).toBe('ready');
+      expect(edits.error).toBeUndefined();
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('handles a false proposal rejection reply without failing the client', async () => {
+    const peer = openWorkbook(fixture, { calculation });
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      expect(edits.rejectProposal('missing-proposal')).toBe(false);
+      await matchingDigest(1, 'rejectProposal', edits, peer, session);
+      expect(edits.acknowledgedSequence).toBe(1);
+      expect(session.failure).toBeUndefined();
+      expect(edits.state).toBe('ready');
     } finally {
       edits.dispose();
       peer.dispose();
@@ -619,6 +701,20 @@ describe('workbook edit peers', () => {
         { ...envelope, sequence: 2, op: { method: 'applyFormat', args: [0, 'B3', {
           rows: 1, columns: 1, formats: [new Map()],
         }] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: [42, null, []] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', undefined, []] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', null, [{
+          sheet: -1, row: 0, col: 0, input: '42',
+        }]] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', null, [{
+          sheet: 0, row: 0, col: 0, input: '42', numberFormat: { type: 'custom', pattern: 1 },
+        }]] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: [42] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: ['p1', 42] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: ['p1', { force: 1 }] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: ['p1', null] } },
+        { ...envelope, sequence: 2, op: { method: 'rejectProposal', args: [42] } },
+        { ...envelope, sequence: 2, op: { method: 'rejectProposal', args: ['p1', true] } },
       ];
       for (const entry of [null, 42, {}]) {
         const operations = [
@@ -634,6 +730,8 @@ describe('workbook edit peers', () => {
           { method: 'patchRangeStyle', args: [0, 'B3', { clear: [entry] }] },
           { method: 'setNumberFormat', args: [0, 'B3', entry] },
           { method: 'setNumberFormat', args: [0, 'B3', [entry]] },
+          { method: 'propose', args: ['agent', null, [entry]] },
+          { method: 'propose', args: ['agent', null, entry] },
           { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
             op: 'setCellInputs', target: target('B3'), inputs: [[entry]],
           }] }] },
@@ -729,6 +827,130 @@ describe('workbook edit peers', () => {
         expect(reopened.cell(0, 2, 2).input).toBe('queued edit');
       } finally { reopened.dispose(); }
       expect(() => edits.recoverySave()).toThrow('already saved');
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('applies only unapplied materialized queued operations during recovery', async () => {
+    const session = await createTestWorkbookSession(fixture, (transport) => {
+      const batched = batchRequests(transport);
+      return { ...batched, listen: (listener) => batched.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'replay') {
+          const envelope = message.args[0] as WorkbookReplayEnvelope;
+          if (envelope.op.method === 'applyEdits') {
+            envelope.op.args[0].steps = [{
+              op: 'setCellInputs', target: { ...target('B3'), sheetId: 'missing-sheet' }, inputs: [['901']],
+            }];
+          }
+        }
+        listener(message);
+      }) };
+    }, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const errors: Error[] = [];
+    const edits = createWorkbookEditPeer({
+      session, peer, ...deterministicOptions(), onError: (error) => { errors.push(error); },
+    });
+    const committed: WorkbookReplayOp = { method: 'applyEdits', args: [request(peer, 'B3', '901')] };
+    const inserted: WorkbookReplayOp = {
+      method: 'applyOps', args: [[{ type: 'insertRows', sheet: 0, at: 2, count: 1 }]],
+    };
+    const unapplied: WorkbookReplayOp = {
+      method: 'applyOps', args: [[{ type: 'insertRows', sheet: 0, at: 2, count: 1 }]],
+    };
+    try {
+      expect(() => edits.applyRecoveryOp(unapplied)).toThrow('requires a failed');
+      const committedResult = edits.applyQueuedOp(committed);
+      expect(committedResult).toMatchObject({ ok: true, applied: true });
+      const insertedResult = edits.applyQueuedOp(inserted);
+      expect(insertedResult).toMatchObject({ applied: true });
+      const committedVersion = peer.version();
+      expect(edits.applyQueuedOp(inserted)).toBe(insertedResult);
+      expect(peer.version()).toBe(committedVersion);
+      const committedBytes = await digest(peer.save());
+      await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      expect(() => edits.applyQueuedOp(unapplied)).toThrow(WorkbookEditPeerFailedError);
+      expect(() => edits.applyOps(unapplied.args[0])).toThrow(WorkbookEditPeerFailedError);
+      expect(edits.applyRecoveryOp(committed)).toBe(committedResult);
+      expect(edits.applyRecoveryOp(inserted)).toBe(insertedResult);
+      expect(peer.version()).toBe(committedVersion);
+      expect(await digest(peer.save())).toBe(committedBytes);
+      const recoveredResult = edits.applyRecoveryOp(unapplied);
+      expect(recoveredResult).toMatchObject({ applied: true });
+      const recoveredVersion = peer.version();
+      const recoveredBytes = await digest(peer.save());
+      expect(peer.cell(0, 4, 1).input).toBe('901');
+      expect(edits.applyRecoveryOp(unapplied)).toBe(recoveredResult);
+      expect(peer.version()).toBe(recoveredVersion);
+      expect(await digest(peer.save())).toBe(recoveredBytes);
+      expect(edits.sentSequence).toBe(2);
+      expect(edits.acknowledgedSequence).toBe(0);
+      expect(await digest(edits.recoverySave().bytes)).toBe(recoveredBytes);
+      expect(() => edits.applyRecoveryOp(unapplied)).toThrow('already saved');
+      expect(errors).toEqual([edits.error!]);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('rejects normal waiters on failure even when replay never settles', async () => {
+    let crash: ((error: unknown) => void) | undefined;
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      onError(listener) { crash = listener; return transport.onError(listener); },
+    }), { calculation });
+    const internal = workbookSessionInternals.get(session);
+    if (!internal) throw new Error('Missing internal workbook replay helper');
+    internal.replay = () => new Promise<WorkbookReplayReply>(() => {});
+    const peer = openWorkbook(fixture, { calculation });
+    const errors: Error[] = [];
+    const edits = createWorkbookEditPeer({ session, peer, onError: (error) => { errors.push(error); } });
+    try {
+      edits.editCell(0, 2, 1, 'recover pending replay');
+      const waiting = Promise.allSettled([edits.flush(), edits.save()]);
+      if (!crash) throw new Error('Missing worker crash callback');
+      crash(new SessionFailure('crash', 'Worker stopped'));
+      for (const result of await waiting) {
+        if (result.status !== 'rejected') throw new Error('Normal waiter survived worker failure');
+        expect(result.reason).toBeInstanceOf(WorkbookEditPeerFailedError);
+      }
+      expect(await digest(edits.recoverySave().bytes)).toBe(await digest(peer.save()));
+      expect(errors).toEqual([edits.error!]);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('refuses an invalid recovery operation without changing or discarding peer state', async () => {
+    let crash: ((error: unknown) => void) | undefined;
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      onError(listener) { crash = listener; return transport.onError(listener); },
+    }), { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      edits.editCell(0, 2, 1, 'accepted');
+      await edits.flush();
+      if (!crash) throw new Error('Missing worker crash callback');
+      crash(new SessionFailure('crash', 'Worker stopped'));
+      await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      const before = await digest(peer.save());
+      const op: WorkbookReplayOp = {
+        method: 'applyEdits', args: [{ ...request(peer, 'B3', 'refused'), expectVersion: 'stale' }],
+      };
+      expect(() => edits.applyRecoveryOp(op)).toThrow('Engine refused workbook recovery');
+      expect(() => edits.applyRecoveryOp(op)).toThrow('Engine refused workbook recovery');
+      expect(await digest(peer.save())).toBe(before);
+      expect(edits.sentSequence).toBe(1);
+      expect(await digest(edits.recoverySave().bytes)).toBe(before);
     } finally {
       edits.dispose();
       peer.dispose();
