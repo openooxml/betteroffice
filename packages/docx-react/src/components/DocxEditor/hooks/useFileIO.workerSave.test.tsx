@@ -748,6 +748,50 @@ test('an editor without a live worker uses its main-thread peer', async () => {
   expect(opened.errors).toEqual([]);
 });
 
+test('a queued editor save falls back to its loaded copy when the worker fails during the preceding save', async () => {
+  const opened = await workerOpened(false, false, zeroLengthBodyComment());
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  const story = 'hf:rIdH1';
+  opened.session.insertText({ story, paraId: '0000A001', offset: 0 }, 'Unsaved header ');
+  opened.hook.result.current.core.publishDirectInput(story);
+  const body = opened.hook.result.current.host!.document.package.document;
+  body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+  const saver = workerOpenSave(opened.session)!;
+  const queued = spyOn(saver, 'save');
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  opened.worker.hold();
+  try {
+    const first = opened.hook.result.current.io.handleSave();
+    const second = opened.hook.result.current.io.handleSave();
+    await waitFor(() => {
+      expect(queued.mock.calls).toHaveLength(2);
+      expect(save.mock.calls).toHaveLength(1);
+      expect(opened.worker.requests.filter((type) => type === 'save')).toHaveLength(1);
+    });
+    expect(saver.available()).toBe(true);
+    opened.worker.onerror?.({ message: 'Worker stopped', preventDefault() {} } as ErrorEvent);
+    expect(saver.available()).toBe(false);
+    expect(await first).toBeNull();
+    const buffer = await second;
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    expect(save.mock.calls).toHaveLength(1);
+    expect(opened.project).toHaveBeenCalledTimes(1);
+    expect(opened.saved).toEqual([buffer!]);
+    expect(opened.errors.map((error) => error.message)).toEqual(['Resident engine worker failed: Worker stopped']);
+    const zip = await JSZip.loadAsync(buffer!);
+    const xml = await zip.file('word/document.xml')!.async('string');
+    expect(xml).toMatch(/<w:commentRangeStart\b[^>]*\bw:id="1"/);
+    expect(xml).toMatch(/<w:commentRangeEnd\b[^>]*\bw:id="1"/);
+    expect(xml).toContain('w:top="2000"');
+    expect(await zip.file('word/header1.xml')!.async('string')).toContain('Unsaved header ');
+    expect(opened.opens).toEqual([false]);
+  } finally {
+    opened.worker.release();
+    save.mockRestore();
+    queued.mockRestore();
+  }
+});
+
 test('a viewer with a main-thread selection surface still refuses a missing worker', async () => {
   const opened = await workerOpened();
   opened.hook.result.current.pagedEditorRef.current!.isWorkerViewer = () => false;

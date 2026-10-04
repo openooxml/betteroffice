@@ -10,6 +10,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import {
   EditorDirtyStories,
+  ResidentWorkerSaveUnavailableError,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   serialWorkerSaves,
@@ -655,6 +656,7 @@ export function useYrsCoreSession(
               available: () => !stale() && worker.canSave(),
               save: (comments, peer) => saveInOrder(async (stories) => {
                 if (stale()) throw new Error('The document changed while saving');
+                if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
                 const currentHost = documentRef.current ?? host?.document;
                 return worker.save({
                   comments,
