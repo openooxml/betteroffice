@@ -1682,6 +1682,11 @@ fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
+pub(crate) fn hydrate_snapshot_part(doc: &Doc, update: &[u8]) -> Result<(), String> {
+    hydrate_local_doc(doc, update)
+}
+
 fn has_pending(doc: &Doc) -> bool {
     let txn = doc.transact();
     txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()

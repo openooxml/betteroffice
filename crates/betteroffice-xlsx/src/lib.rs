@@ -3,6 +3,8 @@
 mod authority;
 mod error;
 mod sheet_json;
+#[cfg_attr(not(test), allow(dead_code))]
+mod snapshot;
 mod structured;
 mod types;
 mod workbook;
