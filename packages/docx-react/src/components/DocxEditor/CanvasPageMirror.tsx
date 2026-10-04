@@ -29,7 +29,7 @@ const mirrorLabels = (page: DisplayPage, t: TFunction) => ({
   },
 });
 const makeMirror = (page: DisplayPage, t: TFunction): HTMLElement =>
-  buildMirrorPage(page, mirrorLabels(page, t));
+  page ? document.createElement('div') : buildMirrorPage(page, mirrorLabels(page, t));
 const makeMirrorText = (
   page: DisplayPage,
   t: TFunction,
