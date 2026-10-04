@@ -995,6 +995,7 @@ export function useDocxEditorRefApi({
         const editor = pagedEditorRef.current;
         const session = editor?.getYrsSession();
         const layout = editor?.getLayout();
+        if (layout?.summaryOnly) throw new DocxAsyncOnlyError('getPageContent', 'exportStructuredWithPages');
         const page = layout && !layout.partial ? layout.pages[pageNumber - 1] : undefined;
         if (!editor || !session || !page) return null;
         const seen = new Set<string>();

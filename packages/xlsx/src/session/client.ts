@@ -1,11 +1,9 @@
 import {
-  createSessionClient,
-  createWorkerTransport,
-  type Promisified,
-  type SessionClient,
-  type SessionFailure,
-  type SessionTransport,
-} from '../../../../shared/office-session';
+  createSessionClient, requestWasmCompile, type SessionClient,
+} from '../../../../shared/office-session/client';
+import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { SessionFailure, type Promisified } from '../../../../shared/office-session/types';
+import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenWorkbookOptions, Viewport } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -19,6 +17,7 @@ import {
 } from './methods';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
+const wasmModules = new Map<string, WebAssembly.Module>();
 
 /**
  * Options for opening a workbook in a dedicated worker.
@@ -27,6 +26,8 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
+  /** Aborting closes the session worker while the open is still in flight. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -78,6 +79,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     input.wasm = copyBytes(options.wasm as ArrayBuffer).buffer;
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -93,6 +95,9 @@ export async function openWorkbookSession(
     options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
   );
+  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+    requestWasmCompile(transport);
+  }
   return createWorkbookSession(bytes, options, transport);
 }
 
@@ -109,6 +114,9 @@ export async function createWorkbookSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<WorkbookSessionMethods, Events>(transport, {
       methods: WORKBOOK_SESSION_METHODS,
+      onWasmModule: options.wasm === undefined && !options.worker ? (url, module) => {
+        if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
+      } : undefined,
     });
   } catch (error) {
     try { transport.close(); } catch {}
@@ -117,20 +125,30 @@ export async function createWorkbookSession(
   let state: WorkbookSessionState;
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });
+  const signal = options.signal;
+  const abort = () => {
+    void client.dispose().catch(() => {});
+    try { transport.close(); } catch {}
+  };
   try {
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     state = await client.callWithTransfer('open', [document, input], transfer);
+    if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
   } catch (error) {
     await client.dispose();
     throw error;
-  }
+  } finally { signal?.removeEventListener('abort', abort); }
 
   const {
-    version, readCells, findText, validateEdits, applyEdits, frame, sheets, calculationStatus, save,
+    version, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry,
+    cellInputs, sheets, calculationStatus, save,
   } = client.call;
   return {
     get state() { return state; },
     call: {
-      version, readCells, findText, validateEdits, applyEdits, sheets, calculationStatus, save,
+      version, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, cellInputs,
+      sheets, calculationStatus, save,
       frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),
     },
     save: async () => new Uint8Array(await save()),

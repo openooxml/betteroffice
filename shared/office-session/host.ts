@@ -261,7 +261,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
       disposed = true;
       cleanup();
       transport.close();
-    } else if (!failure) {
+    } else if (message.kind === 'call' && !failure) {
       const configured = hasOwn(options.policies, message.method)
         ? options.policies[message.method as keyof M] : undefined;
       if (!hasOwn(options.handlers, message.method) || !configured) {

@@ -550,6 +550,7 @@ export class EditSession {
      * via [`Self::retained_kernel_inputs_json`].
      */
     layout_document_with_regions_retained_json(input: string): string;
+    layout_document_with_regions_retained_meta(input: string): RetainedLayoutMeta;
     /**
      * Region-layout input JSON in, the font families and sizes that input
      * needs as JSON out, so the host can register fonts before laying out.
@@ -870,6 +871,7 @@ export class EditSession {
      * fallback after a retained-only region layout.
      */
     retained_kernel_inputs_json(): string;
+    retained_layout_json(): string;
     /**
      * Author and date stamps for the requested revision ids.
      */
@@ -1238,6 +1240,18 @@ export class EditSession {
     yrs_blocks_for_story(story: string, env_json: string): string;
 }
 
+export class RetainedLayoutMeta {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    layout_shell_json(): string;
+    page_sizes(): Float64Array;
+    readonly notes_converged: boolean;
+    readonly page_count: number;
+    readonly partial: boolean;
+    readonly provisional: boolean;
+}
+
 /**
  * wasm compatibility wrapper. Resident engine users call
  * [`build_display_list_value`] and keep the typed result.
@@ -1525,6 +1539,7 @@ export interface InitOutput {
     readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_editsession_free: (a: number, b: number) => void;
+    readonly __wbg_retainedlayoutmeta_free: (a: number, b: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
@@ -1613,6 +1628,7 @@ export interface InitOutput {
     readonly editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_retained_meta: (a: number, b: number, c: number) => [number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1661,6 +1677,7 @@ export interface InitOutput {
     readonly editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
     readonly editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
     readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+    readonly editsession_retained_layout_json: (a: number) => [number, number, number, number];
     readonly editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -1746,6 +1763,12 @@ export interface InitOutput {
     readonly render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly reset_wasm_peak_bytes: () => void;
+    readonly retainedlayoutmeta_layout_shell_json: (a: number) => [number, number];
+    readonly retainedlayoutmeta_notes_converged: (a: number) => number;
+    readonly retainedlayoutmeta_page_count: (a: number) => number;
+    readonly retainedlayoutmeta_page_sizes: (a: number) => [number, number];
+    readonly retainedlayoutmeta_partial: (a: number) => number;
+    readonly retainedlayoutmeta_provisional: (a: number) => number;
     readonly serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
     readonly serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
