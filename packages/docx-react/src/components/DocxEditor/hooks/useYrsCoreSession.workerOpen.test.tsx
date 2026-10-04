@@ -36,7 +36,7 @@ import { useFileIO } from './useFileIO';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
-import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -570,7 +570,7 @@ test('eager worker open preserves input and command order after first paint unti
 
 test('a viewer command preserves select-all while its worker read is pending', async () => {
   let heldUnit = false;
-  const { posted, replies, reply } = installWorker({
+  const { posted, replies, responses, reply } = installWorker({
     holdReply: (request) => {
       if (heldUnit || request.type !== 'documentRead' || request.read.kind !== 'selectionUnit') return false;
       heldUnit = true;
@@ -585,7 +585,7 @@ test('a viewer command preserves select-all while its worker read is pending', a
   const bridge = { current: null as PagedEditorCommandBridge | null };
   let harness!: ReturnType<typeof useHarness>;
   function ReadOnly() {
-    harness = useHarness({ ...initialProps, source, readOnly: true, viewer: true });
+    harness = useHarness({ ...initialProps, source, readOnly: true, viewer: true, workerProposals: true });
     return <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core} readOnly
       viewerDocumentRead={harness.renderer.readWorkerDocument}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
@@ -597,6 +597,9 @@ test('a viewer command preserves select-all while its worker read is pending', a
   const view = render(<ReadOnly />);
   try {
     await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+    await waitFor(() => expect(harness.core.workerProposalsReady).toBe(true));
+    act(() => harness.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(presentedWorkerVersion(harness.renderer.queries)).toBe(harness.core.session!.version()));
     act(() => harness.presentFrame());
     const session = harness.core.session!;
     const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
@@ -607,9 +610,16 @@ test('a viewer command preserves select-all while its worker read is pending', a
       unit = posted.find((request) => request.type === 'documentRead' && request.read.kind === 'selectionUnit')!;
       expect(unit && replies.has(unit.id)).toBe(true);
     });
+    expect(unit).toMatchObject({ read: { expectVersion: session.version() } });
+    expect(responses.get(unit)).toMatchObject({ ok: true, read: { version: session.version(), value: expect.anything() } });
     const operation = mock(() => editor.current!.readSelectedText());
-    const command = bridge.current!.runAfterPendingInput(operation);
+    let commandSettled = false;
+    const command = bridge.current!.runAfterPendingInput(operation).then((text) => {
+      commandSettled = true;
+      return text;
+    });
     await waitFor(() => expect(operation).toHaveBeenCalledTimes(1));
+    expect(commandSettled).toBe(false);
     let selected!: string | null;
     await act(async () => { reply(unit); });
     selected = await command;
@@ -3579,6 +3589,11 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
       await act(async () => { proposal = await received('proposal', snapshot.id); });
       expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
       act(() => { expect(() => api().getDocument()).toThrow(viewer ? DocxAsyncOnlyError : DocxReplicaNotReadyError); });
+      if (viewer) {
+        expect(() => api().getPageContent(1)).toThrow(DocxAsyncOnlyError);
+        expect(() => api().findInDocument('paragraph')).toThrow(DocxAsyncOnlyError);
+        expect(api().getSelectionInfo()).toBeNull();
+      }
       await act(async () => {});
       expect(authority.holdsWorkerState()).toBe(true);
       expect(workerProposalAuthority(session)).toBe(authority);

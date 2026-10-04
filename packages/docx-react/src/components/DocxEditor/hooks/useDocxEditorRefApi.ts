@@ -687,12 +687,12 @@ export function useDocxEditorRefApi({
     return onWorker(authority, main);
   };
   const createApi = (): DocxEditorRef => {
-    const viewer = () => isWorkerViewer(pagedEditorRef.current);
-    const refusing = () => viewerSessionRef.current || viewer();
     const held = () => {
       const session = pagedEditorRef.current?.getYrsSession();
       return !!session && workerOpenDocumentHeld(session);
     };
+    const viewer = () => held() || isWorkerViewer(pagedEditorRef.current);
+    const refusing = () => viewerSessionRef.current || viewer();
     const mainSession = async () => {
       if (held()) throw new Error('The worker document authority is unavailable');
       return flushedSession(pagedEditorRef, experimentalWorkerOpen);
