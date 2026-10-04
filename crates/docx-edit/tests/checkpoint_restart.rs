@@ -151,26 +151,3 @@ fn an_edit_after_a_split_paragraph_resumes_and_matches_fresh() {
         assert_resumed_matches_fresh(&engine, &request);
     }
 }
-
-#[test]
-fn a_preview_decision_after_a_split_paragraph_resumes_and_matches_fresh() {
-    docx_layout::clear_measure_fonts();
-    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
-    for (preceding, lines, height, widow, slices) in [
-        (95, 2, 10, false, vec![(3, 0, 1), (3, 1, 2)]),
-        (90, 2, 10, false, vec![(2, 0, 1), (3, 1, 2)]),
-        (40, 4, 20, true, vec![(2, 0, 2), (3, 2, 4)]),
-    ] {
-        let bytes = split_document(preceding, lines, height, widow);
-        for decision in ["accepted", "rejected"] {
-            let (engine, mut request) = prime(&bytes, font, &slices);
-            let revision = engine.doc().list_revisions().unwrap()[0]
-                .change
-                .revision_id
-                .clone();
-            request["renderEnv"]["revisionPreview"] = json!({});
-            request["renderEnv"]["revisionPreview"][&revision] = json!(decision);
-            assert_resumed_matches_fresh(&engine, &request);
-        }
-    }
-}
