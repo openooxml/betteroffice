@@ -4,6 +4,8 @@ import { useRef } from 'react';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
+import { layoutMetaSummary } from '@betteroffice/docx/yrs';
 import type {
   DocxContentControlsResult,
   DocxFindTextRequest,
@@ -103,7 +105,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     scrollToCommentId: mock(() => { events.push('comment'); return false; }),
     scrollToChangeId: mock(() => { events.push('change'); return true; }),
     syncYrsInputState: () => { events.push('sync'); return true; },
-    getLayout: () => null,
+    getLayout: (): Layout | null => null,
     getLayoutRequest: mock((): string | null => PAGE_REQUEST),
     readLayoutRequest: mock(async (): Promise<string | null> => PAGE_REQUEST),
     relayout: mock(() => {}),
@@ -402,11 +404,31 @@ test('viewer proposal decisions still use the worker after a refused revision co
   expectNoReplica(host);
 });
 
-test('viewer paged export reads the worker layout without a replica', async () => {
+test.each([false, true])('viewer paged export and synchronous refusal ignore the published layout (summary=%s)', async (summary) => {
+  spyOn(console, 'warn').mockImplementation(() => {});
   const host = apiFor(true, true);
   const worker = workerFor(host);
+  const layout: Layout = {
+    pageSize: { w: 816, h: 1056 },
+    pages: [{
+      number: 1, size: { w: 816, h: 1056 }, margins: { top: 72, right: 72, bottom: 72, left: 72 },
+      fragments: [{ kind: 'shape', blockId: 'shape', x: 72, y: 72, width: 40, height: 40 }],
+    }],
+  };
+  const published = summary ? layoutMetaSummary({
+    v: 1, layoutRevision: 1, pageCount: 1, partial: false, provisional: false,
+    notesConverged: true, pageSizes: Float64Array.of(816, 1056), headersFootersEpoch: 1,
+    layoutShell: JSON.stringify({ ...layout, pages: layout.pages.map((page) => ({ ...page, fragments: [] })) }),
+  }) : layout;
+  const getLayout = spyOn(host.editor, 'getLayout').mockReturnValue(published);
+  let caught: unknown;
+  try { host.api.getPageContent(1); } catch (error) { caught = error; }
+  const expected = new DocxAsyncOnlyError('getPageContent', 'exportStructuredWithPages');
+  expect(caught).toBeInstanceOf(DocxAsyncOnlyError);
+  expect(caught).toMatchObject({ member: expected.member, use: expected.use, message: expected.message });
   worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) });
   expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(getLayout).not.toHaveBeenCalled();
   expect(worker.documentRead).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST });
   expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(1);
   expectWorkerPageExport(host);
