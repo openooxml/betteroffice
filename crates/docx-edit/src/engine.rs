@@ -7848,6 +7848,18 @@ mod tests {
             let engine = EngineSession::new(9668);
             let mut input: serde_json::Value =
                 serde_json::from_str(&paragraph_pagination_input("x", false)).unwrap();
+            let measured = input["measured"].as_array_mut().unwrap();
+            for index in measured.len()..25 {
+                let start = index * 2;
+                let mut entry = measured.last().unwrap().clone();
+                entry["block"]["id"] = json!(format!("p{index}"));
+                entry["block"]["paraId"] = json!(format!("para-{index}"));
+                entry["block"]["pmStart"] = json!(start);
+                entry["block"]["pmEnd"] = json!(start + 2);
+                entry["block"]["runs"][0]["pmStart"] = json!(start + 1);
+                entry["block"]["runs"][0]["pmEnd"] = json!(start + 2);
+                measured.push(entry);
+            }
             input["measured"][5]["block"]["runs"] = json!([{
                 "kind": "tab", "width": 10, "pmStart": 11, "pmEnd": 12,
                 "leaderGlyphs": {"pmStart": 11}
@@ -7901,7 +7913,7 @@ mod tests {
                 panic!("tab expected");
             };
             tab.leader_glyphs.as_mut().unwrap()["pmStart"] = json!(12);
-            let LayoutBlock::Paragraph(dirty) = &mut input.measured[10].block else {
+            let LayoutBlock::Paragraph(dirty) = &mut input.measured[22].block else {
                 panic!("paragraph expected");
             };
             let Run::Text(run) = &mut dirty.runs[0] else {
@@ -7918,8 +7930,8 @@ mod tests {
                     Ok(extents[index].clone())
                 })
                 .unwrap();
-            assert_eq!(resident.block_fingerprints[..10], fingerprints[..10]);
-            assert_ne!(resident.block_fingerprints[10], fingerprints[10]);
+            assert_eq!(resident.block_fingerprints[..22], fingerprints[..22]);
+            assert_ne!(resident.block_fingerprints[22], fingerprints[22]);
             let cold = EngineSession::new(9669);
             cold.layout_document_value(resident.input.clone()).unwrap();
             let before = engine.stats();
@@ -7934,12 +7946,15 @@ mod tests {
                 )
                 .unwrap();
             let after = engine.stats();
+            assert!(
+                after.pagination_resolved_prefix_checked - before.pagination_resolved_prefix_checked
+                    > 0
+            );
             assert_eq!(
                 after.pagination_resolved_fragments_materialized
                     - before.pagination_resolved_fragments_materialized,
                 changed_fragments as u64
             );
-            assert!(after.pagination_resolved_prefix_checked > 0);
             engine.pagination.borrow_mut().materialize_resolved_lines();
             assert_eq!(retained_pages(&engine), retained_pages(&cold));
         }
