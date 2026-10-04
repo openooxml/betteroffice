@@ -2,6 +2,7 @@ import {
   createSessionClient,
   createWorkerTransport,
   type Promisified,
+  type SessionClient,
   type SessionFailure,
   type SessionTransport,
 } from '../../../../shared/office-session';
@@ -16,11 +17,19 @@ import {
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
 
+/**
+ * Options for opening a workbook in a dedicated worker.
+ * @experimental
+ */
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
 }
 
+/**
+ * Async workbook access and its current local projection.
+ * @experimental
+ */
 export interface WorkbookSession {
   readonly state: WorkbookSessionState;
   readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'dispose'>>;
@@ -56,6 +65,10 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
   return { document, input, transfer };
 }
 
+/**
+ * Opens a worker session, transferring copies so caller buffers stay usable.
+ * @experimental
+ */
 export async function openWorkbookSession(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenWorkbookSessionOptions = {}
@@ -75,15 +88,16 @@ export async function createWorkbookSession(
   let document: ArrayBuffer;
   let input: WorkbookSessionOpenOptions;
   let transfer: Transferable[];
+  let client: SessionClient<WorkbookSessionMethods, Events>;
   try {
     ({ document, input, transfer } = prepareOpen(bytes, options));
+    client = createSessionClient<WorkbookSessionMethods, Events>(transport, {
+      methods: WORKBOOK_SESSION_METHODS,
+    });
   } catch (error) {
     try { transport.close(); } catch {}
     throw error;
   }
-  const client = createSessionClient<WorkbookSessionMethods, Events>(transport, {
-    methods: WORKBOOK_SESSION_METHODS,
-  });
   let state: WorkbookSessionState;
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });

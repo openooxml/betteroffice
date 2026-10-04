@@ -10,16 +10,28 @@ import type {
 } from '../edits';
 import type { CalculationStatus, OpenWorkbookOptions } from '../wasm/loader';
 
+/**
+ * Structured-cloneable workbook open options.
+ * @experimental
+ */
 export interface WorkbookSessionOpenOptions extends OpenWorkbookOptions {
   wasm?: ArrayBuffer | WebAssembly.Module;
 }
 
+/**
+ * Sheet metadata; indices are zero-based.
+ * @experimental
+ */
 export interface WorkbookSheetSummary {
   id: string;
   index: number;
   name: string;
 }
 
+/**
+ * Workbook projection; version counts applied batches.
+ * @experimental
+ */
 export type WorkbookSessionState = Omit<SessionState, 'stage'> & {
   format: 'xlsx';
   stage: 'preview' | 'ready' | 'failed';
@@ -27,10 +39,18 @@ export type WorkbookSessionState = Omit<SessionState, 'stage'> & {
   activeSheet: number;
 };
 
+/**
+ * Workbook change notifications after applied batches.
+ * @experimental
+ */
 export interface WorkbookSessionEvents {
   changed: { version: number; dirty: boolean };
 }
 
+/**
+ * Workbook RPC methods; engine version tokens remain strings.
+ * @experimental
+ */
 export type WorkbookSessionMethods = {
   open(bytes: ArrayBuffer, options?: WorkbookSessionOpenOptions): WorkbookSessionState;
   version(): string;

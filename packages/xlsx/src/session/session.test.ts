@@ -340,4 +340,17 @@ describe('workbook sessions', () => {
     await expect(createWorkbookSession(detached, {}, pair.client)).rejects.toThrow();
     expect(() => pair.host.post({})).toThrow();
   });
+
+  test('closes the transport when the session client cannot attach', async () => {
+    const pair = createInProcessPair();
+    let closed = 0;
+    const transport: SessionTransport = {
+      post: (message, transfer) => pair.client.post(message, transfer),
+      listen: (listener) => pair.client.listen(listener),
+      onError() { throw new Error('attach'); },
+      close() { closed += 1; pair.client.close(); },
+    };
+    await expect(createWorkbookSession(fixture, {}, transport)).rejects.toThrow('attach');
+    expect(closed).toBe(1);
+  });
 });
