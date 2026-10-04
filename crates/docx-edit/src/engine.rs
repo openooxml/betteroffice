@@ -2733,6 +2733,17 @@ impl EngineSession {
         env: &RenderEnv,
         read: impl FnOnce(&[LayoutBlock]) -> T,
     ) -> Result<T, BridgeError> {
+        self.with_resident_story(story, env, |blocks| {
+            read(&blocks.iter().map(|block| block.as_ref().clone()).collect::<Vec<_>>())
+        })
+    }
+
+    fn with_resident_story<T>(
+        &self,
+        story: &str,
+        env: &RenderEnv,
+        read: impl FnOnce(&[Rc<LayoutBlock>]) -> T,
+    ) -> Result<T, BridgeError> {
         self.with_lowered_story_observed(story, env, &mut || {}, read)
     }
 
@@ -2789,7 +2800,7 @@ impl EngineSession {
         story: &str,
         env: &RenderEnv,
         after_lower: &mut dyn FnMut(),
-        read: impl FnOnce(&[LayoutBlock]) -> T,
+        read: impl FnOnce(&[Rc<LayoutBlock>]) -> T,
     ) -> Result<T, BridgeError> {
         self.with_lowered_story_mapped(story, env, after_lower, |blocks, _| read(blocks))
     }
@@ -2801,10 +2812,10 @@ impl EngineSession {
         story: &str,
         env: &RenderEnv,
         after_lower: &mut dyn FnMut(),
-        read: impl FnOnce(&[LayoutBlock], (u64, Rc<LoweringMap>)) -> T,
+        read: impl FnOnce(&[Rc<LayoutBlock>], (u64, Rc<LoweringMap>)) -> T,
     ) -> Result<T, BridgeError> {
         self.with_shared_lowered_story_mapped(story, env, after_lower, |blocks, lowering| {
-            read(blocks, lowering)
+            read(blocks.shared(), lowering)
         })
     }
 
@@ -2839,7 +2850,7 @@ impl EngineSession {
 
     /// Serializes resident lowered blocks.
     pub fn lower_story_json(&self, story: &str, env: &RenderEnv) -> Result<String, BridgeError> {
-        self.with_lowered_story(story, env, |_| ())?;
+        self.with_resident_story(story, env, |_| ())?;
         let mut render = self.render.borrow_mut();
         let lowered = render
             .stories
@@ -3091,22 +3102,24 @@ impl EngineSession {
                 .collect();
             stories.extend(note_stories.keys().cloned());
             for story in stories {
-                self.with_lowered_story(&story, &render_env, |blocks| {
-                    let blocks = if let Some(content) = note_stories.get(&story) {
-                        let mut blocks = blocks.to_vec();
+                self.with_resident_story(&story, &render_env, |blocks| {
+                    if let Some(content) = note_stories.get(&story) {
+                        let mut blocks: Vec<_> =
+                            blocks.iter().map(|block| block.as_ref().clone()).collect();
                         apply_note_presentation(
                             &mut blocks,
                             content.display_number.unwrap_or(1),
                             content.display_label.as_deref().unwrap_or("1"),
                         );
-                        Cow::Owned(blocks)
+                        if cache_key.is_some() {
+                            collector.collect_preview(blocks.iter(), default_family);
+                        } else {
+                            collector.collect(blocks.iter(), default_family);
+                        }
+                    } else if cache_key.is_some() {
+                        collector.collect_preview(blocks.iter().map(Rc::as_ref), default_family);
                     } else {
-                        Cow::Borrowed(blocks)
-                    };
-                    if cache_key.is_some() {
-                        collector.collect_preview(blocks.iter(), default_family);
-                    } else {
-                        collector.collect(blocks.iter(), default_family);
+                        collector.collect(blocks.iter().map(Rc::as_ref), default_family);
                     }
                 })
                 .map_err(|error| error.to_string())?;
@@ -4174,7 +4187,7 @@ impl EngineSession {
         let mut bytes = Vec::new();
         for story in stories {
             let lowered = self
-                .with_lowered_story(&story, env, |blocks| serde_json::to_vec(blocks).ok())
+                .with_resident_story(&story, env, |blocks| serde_json::to_vec(blocks).ok())
                 .ok()
                 .flatten();
             bytes.extend_from_slice(story.as_bytes());
@@ -4394,10 +4407,15 @@ impl EngineSession {
                 docx_layout::footnotes::NoteKind::Endnote => "en",
             };
             let mut blocks = self
-                .with_lowered_story(
+                .with_resident_story(
                     &format!("{prefix}:{}", content.id),
                     render_env,
-                    <[LayoutBlock]>::to_vec,
+                    |blocks| {
+                        blocks
+                            .iter()
+                            .map(|block| block.as_ref().clone())
+                            .collect::<Vec<_>>()
+                    },
                 )
                 .map_err(|error| error.to_string())?;
             for block in &mut blocks {
@@ -4497,7 +4515,12 @@ impl EngineSession {
                     continue;
                 };
                 let mut blocks = self
-                    .with_lowered_story(&format!("hf:{r_id}"), render_env, <[LayoutBlock]>::to_vec)
+                    .with_resident_story(&format!("hf:{r_id}"), render_env, |blocks| {
+                        blocks
+                            .iter()
+                            .map(|block| block.as_ref().clone())
+                            .collect::<Vec<_>>()
+                    })
                     .map_err(|error| error.to_string())?;
                 for block in &mut blocks {
                     resolve_line_unit_spacing(
@@ -9646,7 +9669,10 @@ mod tests {
             );
             if name == "marker formatting" {
                 let render = initial.render.borrow();
-                let LayoutBlock::Paragraph(block) = &render.stories["body"].blocks[paragraph]
+                let LayoutBlock::Paragraph(block) = render.stories["body"]
+                    .blocks
+                    .get(paragraph)
+                    .expect("list paragraph")
                 else {
                     panic!("list paragraph expected");
                 };
@@ -11554,7 +11580,7 @@ mod tests {
             .unwrap();
         let env = RenderEnv::default();
         let block = engine
-            .with_lowered_story("body", &env, |blocks| blocks[0].clone())
+            .with_resident_story("body", &env, |blocks| blocks[0].as_ref().clone())
             .unwrap();
         let envelope = serde_json::json!({
             "block": block,
@@ -11638,7 +11664,7 @@ mod tests {
             .unwrap();
         let env = RenderEnv::default();
         let block = engine
-            .with_lowered_story("body", &env, |blocks| blocks[0].clone())
+            .with_resident_story("body", &env, |blocks| blocks[0].as_ref().clone())
             .unwrap();
         let extent: ParagraphExtent = serde_json::from_str(
             &engine
@@ -11801,9 +11827,10 @@ mod tests {
             .split_paragraph(&ctx, crate::Position::new("body", 5), None)
             .unwrap();
         let para_ids: Vec<String> = engine
-            .with_lowered_story("body", &RenderEnv::default(), |blocks| {
+            .with_resident_story("body", &RenderEnv::default(), |blocks| {
                 blocks
                     .iter()
+                    .map(Rc::as_ref)
                     .filter_map(|block| {
                         paragraph_identity(block).map(|(id, _)| block_key(id).into_owned())
                     })
@@ -11838,7 +11865,7 @@ mod tests {
             .set_paragraph_attr(&para_ids[0], "indentLeft", yrs::Any::Number(-0.0))
             .unwrap();
         let lowered = engine
-            .with_lowered_story("body", &RenderEnv::default(), |blocks| {
+            .with_resident_story("body", &RenderEnv::default(), |blocks| {
                 serde_json::to_string(&blocks[0]).unwrap()
             })
             .unwrap();
@@ -16134,7 +16161,7 @@ mod tests {
     }
 
     fn preview_mapped_snapshot(
-        blocks: &[LayoutBlock],
+        blocks: &(impl Serialize + ?Sized),
         map: &LoweringMap,
         revealable: &[LayoutBlock],
     ) -> String {

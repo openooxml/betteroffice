@@ -1,31 +1,18 @@
-use std::cell::OnceCell;
-use std::ops::Deref;
 use std::rc::Rc;
 
 use docx_layout::regions::DocumentRegions;
 use docx_layout::types::{LayoutBlock, ParagraphBlock};
 use serde::{Serialize, Serializer};
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct SharedBlocks {
     blocks: Vec<Rc<LayoutBlock>>,
-    flat: OnceCell<Vec<LayoutBlock>>,
-}
-
-impl Clone for SharedBlocks {
-    fn clone(&self) -> Self {
-        Self {
-            blocks: self.blocks.clone(),
-            flat: OnceCell::new(),
-        }
-    }
 }
 
 impl From<Vec<LayoutBlock>> for SharedBlocks {
     fn from(blocks: Vec<LayoutBlock>) -> Self {
         Self {
             blocks: blocks.into_iter().map(Rc::new).collect(),
-            flat: OnceCell::new(),
         }
     }
 }
@@ -40,20 +27,11 @@ impl SharedBlocks {
     }
 
     pub(super) fn shared_mut(&mut self) -> &mut Vec<Rc<LayoutBlock>> {
-        self.flat.take();
         &mut self.blocks
     }
 
     pub(super) fn to_vec(&self) -> Vec<LayoutBlock> {
         self.iter().cloned().collect()
-    }
-}
-
-impl Deref for SharedBlocks {
-    type Target = [LayoutBlock];
-
-    fn deref(&self) -> &Self::Target {
-        self.flat.get_or_init(|| self.to_vec())
     }
 }
 
@@ -280,8 +258,18 @@ mod tests {
         assert!(Rc::ptr_eq(&original.shared()[1], &patched.shared()[1]));
         assert!(Rc::ptr_eq(&original.shared()[2], &patched.shared()[2]));
         assert_eq!(serde_json::to_vec(&original).unwrap(), before);
-        assert!(original.flat.get().is_none());
-        assert!(patched.flat.get().is_none());
+        assert!(
+            original
+                .iter()
+                .zip(original.shared())
+                .all(|(block, shared)| std::ptr::eq(block, shared.as_ref()))
+        );
+        assert!(
+            patched
+                .iter()
+                .zip(patched.shared())
+                .all(|(block, shared)| std::ptr::eq(block, shared.as_ref()))
+        );
     }
 
     #[test]
