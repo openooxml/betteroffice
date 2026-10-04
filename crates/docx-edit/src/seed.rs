@@ -1,7 +1,9 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+use ooxml_opc::PackageBytes;
 use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
@@ -199,20 +201,20 @@ impl StoryPlan {
     }
 }
 
-struct ProjectedCell {
+struct ProjectedCell<'a> {
     paragraph_formatting: Option<Value>,
     attrs: JsonObject,
-    content: Vec<Value>,
+    content: Cow<'a, [Value]>,
 }
 
-struct ProjectedRow {
+struct ProjectedRow<'a> {
     attrs: JsonObject,
-    cells: Vec<ProjectedCell>,
+    cells: Vec<ProjectedCell<'a>>,
 }
 
-struct ProjectedTable {
+struct ProjectedTable<'a> {
     attrs: JsonObject,
-    rows: Vec<ProjectedRow>,
+    rows: Vec<ProjectedRow<'a>>,
 }
 
 #[derive(Clone, Copy)]
@@ -662,6 +664,31 @@ fn array(value: Option<&Value>) -> &[Value] {
         .unwrap_or(&[])
 }
 
+fn identical_json(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            left == right && left.as_f64().map(f64::to_bits) == right.as_f64().map(f64::to_bits)
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| identical_json(left, right))
+        }
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|((left_key, left), (right_key, right))| {
+                        left_key == right_key && identical_json(left, right)
+                    })
+        }
+        _ => left == right,
+    }
+}
+
 fn field<'a>(value: Option<&'a Value>, key: &str) -> Option<&'a Value> {
     object(value)?.get(key)
 }
@@ -1069,22 +1096,25 @@ fn merge_font_family(target: Option<&Value>, source: &Value) -> Value {
 }
 
 fn merge_text_formatting(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
-    let target_object = object(target);
-    let source_object = object(source);
-    if source_object.is_none() {
+    if object(source).is_none() {
         return target.cloned();
     }
-    if target_object.is_none() {
+    if object(target).is_none() {
         return source.cloned();
     }
-    let target_object = target_object.unwrap();
-    let mut result = target_object.clone();
-    for (key, value) in source_object.unwrap() {
+    merge_text_formatting_owned(target.cloned(), source)
+}
+
+fn merge_text_formatting_owned(target: Option<Value>, source: Option<&Value>) -> Option<Value> {
+    let Some(source_object) = object(source) else {
+        return target;
+    };
+    let Some(Value::Object(mut result)) = target else {
+        return source.cloned();
+    };
+    for (key, value) in source_object {
         if key == "fontFamily" && value.is_object() {
-            result.insert(
-                key.clone(),
-                merge_font_family(target_object.get(key), value),
-            );
+            result.insert(key.clone(), merge_font_family(result.get(key), value));
         } else if key == "color" && value.is_object() {
             let explicit = truthy(field(Some(value), "rgb"))
                 || truthy(field(Some(value), "themeColor"))
@@ -1096,7 +1126,7 @@ fn merge_text_formatting(target: Option<&Value>, source: Option<&Value>) -> Opti
         } else if value.is_object() {
             result.insert(
                 key.clone(),
-                merge_plain(target_object.get(key), Some(value)).unwrap(),
+                merge_plain(result.get(key), Some(value)).unwrap(),
             );
         } else {
             result.insert(key.clone(), value.clone());
@@ -1194,13 +1224,19 @@ impl StyleResolver {
 
     fn set_table_paragraph_formatting(&mut self, formatting: Option<Value>) -> Option<Value> {
         let previous = std::mem::replace(&mut self.table_paragraph_formatting, formatting);
-        self.memo = StyleMemo::default();
+        let unchanged = match (&previous, &self.table_paragraph_formatting) {
+            (None, None) => true,
+            (Some(previous), Some(current)) => identical_json(previous, current),
+            _ => false,
+        };
+        if !unchanged {
+            self.memo = StyleMemo::default();
+        }
         previous
     }
 
     fn restore_table_paragraph_formatting(&mut self, state: Option<Value>) {
-        self.table_paragraph_formatting = state;
-        self.memo = StyleMemo::default();
+        let _ = self.set_table_paragraph_formatting(state);
     }
 
     fn resolve_paragraph_style(&self, style_id: Option<&str>) -> Arc<ResolvedParagraphStyle> {
@@ -1635,7 +1671,7 @@ fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolv
     let style_id = string(field(formatting, "styleId"));
     let run_style = styles.run_style_own(style_id);
     let inherited = merge_text_formatting(style_formatting, run_style);
-    let merged = merge_text_formatting(inherited.as_ref(), formatting);
+    let merged = merge_text_formatting_owned(inherited, formatting);
     let mut marks = formatting_to_marks(merged.as_ref());
     let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
         || style_id
@@ -3872,7 +3908,7 @@ fn structural_attrs(mut attrs: JsonObject, skipped: &[&str]) -> JsonObject {
     attrs
 }
 
-fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
+fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<'a> {
     let formatting = field(Some(cell), "formatting");
     let background =
         resolve_color_to_hex(field(field(formatting, "shading"), "fill"), options.theme);
@@ -3976,9 +4012,9 @@ fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
         paragraph_formatting: None,
         attrs,
         content: if content.is_empty() {
-            vec![json!({ "type": "paragraph", "content": [] })]
+            Cow::Owned(vec![json!({ "type": "paragraph", "content": [] })])
         } else {
-            content.to_vec()
+            Cow::Borrowed(content)
         },
     }
 }
@@ -4096,13 +4132,13 @@ fn table_cell_paragraph_formatting(
     result
 }
 
-fn project_row(
-    row: &Value,
+fn project_row<'a>(
+    row: &'a Value,
     table: &Value,
     row_index: usize,
     row_spans: &BTreeMap<(usize, usize), (usize, bool)>,
     style_context: &TableStyleContext<'_>,
-) -> ProjectedRow {
+) -> ProjectedRow<'a> {
     let formatting = field(Some(row), "formatting");
     let mut attrs = map_from_value(json!({
         "height": nullish(field(field(formatting, "height"), "value")),
@@ -4211,7 +4247,7 @@ fn project_row(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
-        let mut projected = project_cell(
+        let projected = project_cell(
             &synthetic,
             CellOptions {
                 is_header: row_index == 0
@@ -4231,15 +4267,18 @@ fn project_row(
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
         );
-        projected.paragraph_formatting = table_cell_paragraph_formatting(
-            table,
-            style_context.style,
-            row_index,
-            0,
-            total_columns,
-            style_context.column_count,
-        );
-        cells.push(projected);
+        cells.push(ProjectedCell {
+            paragraph_formatting: table_cell_paragraph_formatting(
+                table,
+                style_context.style,
+                row_index,
+                0,
+                total_columns,
+                style_context.column_count,
+            ),
+            attrs: projected.attrs,
+            content: Cow::Owned(projected.content.into_owned()),
+        });
     }
     ProjectedRow {
         attrs: structural_attrs(attrs, &[]),
@@ -4247,12 +4286,12 @@ fn project_row(
     }
 }
 
-fn project_table(
-    table: &Value,
+fn project_table<'a>(
+    table: &'a Value,
     styles: &StyleResolver,
     theme: Option<&Value>,
     compatibility_mode: u8,
-) -> ProjectedTable {
+) -> ProjectedTable<'a> {
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
     let style_id = string(field(formatting, "styleId"));
@@ -4973,46 +5012,67 @@ fn visit_story(
                     format!("{story_id}:t{current_table}"),
                     table_layout(block, &story_id, current_table),
                 );
-                let table = project_table(
+                let ProjectedTable {
+                    mut attrs,
+                    mut rows,
+                } = project_table(
                     block,
                     &context.styles,
                     context.theme.as_ref(),
                     context.compatibility_mode,
                 );
-                let rows: Vec<Value> = table
-                    .rows
-                    .iter()
+                let payload_rows = rows
+                    .iter_mut()
                     .enumerate()
                     .map(|(row_index, row)| {
-                        json!({
-                            "trPr": value_from_map(&row.attrs),
-                            "cells": row.cells.iter().enumerate().map(|(cell_index, cell)| {
-                                json!({
-                                    "tcPr": value_from_map(&cell.attrs),
-                                    "story": table_cell_story_id(
-                                        &story_id,
-                                        current_table,
-                                        row_index,
-                                        cell_index,
-                                    )
-                                })
-                            }).collect::<Vec<_>>()
-                        })
+                        let cells = row
+                            .cells
+                            .iter_mut()
+                            .enumerate()
+                            .map(|(cell_index, cell)| {
+                                Value::Object(Map::from_iter([
+                                    (
+                                        "tcPr".to_owned(),
+                                        Value::Object(
+                                            std::mem::take(&mut cell.attrs).into_iter().collect(),
+                                        ),
+                                    ),
+                                    (
+                                        "story".to_owned(),
+                                        Value::String(table_cell_story_id(
+                                            &story_id,
+                                            current_table,
+                                            row_index,
+                                            cell_index,
+                                        )),
+                                    ),
+                                ]))
+                            })
+                            .collect();
+                        Value::Object(Map::from_iter([
+                            (
+                                "trPr".to_owned(),
+                                Value::Object(std::mem::take(&mut row.attrs).into_iter().collect()),
+                            ),
+                            ("cells".to_owned(), Value::Array(cells)),
+                        ]))
                     })
                     .collect();
-                let tbl_pr = structural_attrs(table.attrs.clone(), &["columnWidths"]);
-                let mut grid = table
-                    .attrs
-                    .get("columnWidths")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
+                let mut grid = match attrs.remove("columnWidths") {
+                    Some(Value::Array(grid)) => grid,
+                    _ => Vec::new(),
+                };
+                let tbl_pr = structural_attrs(attrs, &[]);
                 grid.iter_mut().for_each(drop_nulls_in_place);
-                let mut payload = map_from_value(json!({
-                    "tblPr": value_from_map(&tbl_pr),
-                    "grid": grid,
-                    "rows": rows
-                }));
+                let mut payload = JsonObject::from([
+                    (
+                        "tblPr".to_owned(),
+                        Value::Object(tbl_pr.into_iter().collect()),
+                    ),
+                    ("grid".to_owned(), Value::Array(grid)),
+                    ("rows".to_owned(), Value::Array(payload_rows)),
+                ]);
+                payload.values_mut().for_each(drop_nulls_in_place);
                 if let Some(id) = result_table_ids.remove(&block_index) {
                     payload.insert("blockId".to_owned(), Value::String(id));
                 }
@@ -5021,7 +5081,7 @@ fn visit_story(
                     .push(embed_unit("table", payload, &[], 1));
                 let previous_table_state = context.styles.set_table_paragraph_formatting(None);
                 let sources = source_cells(block);
-                for (row_index, row) in table.rows.into_iter().enumerate() {
+                for (row_index, row) in rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
                         context
                             .styles
@@ -5350,7 +5410,7 @@ pub(crate) fn parse_docx_package_with_digest(
 /// [`parse_docx_package_with_digest`] leaving the media in the package: an
 /// image names its part by a `media:{n}` token of the returned table.
 pub(crate) fn parse_docx_package_with_media(
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     digest: String,
 ) -> Result<
     (
@@ -5360,7 +5420,7 @@ pub(crate) fn parse_docx_package_with_media(
     ),
     String,
 > {
-    docx_parse::parse_docx_s9_wire_with_media_table(
+    docx_parse::parse_docx_s9_wire_with_media_table_bytes(
         bytes,
         docx_parse::S9ParseOptions {
             source_ordinals: true,
@@ -5734,7 +5794,7 @@ pub(crate) fn seed_blocks(
 pub(crate) fn replica_source(
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     digest: String,
 ) -> Result<(SourceMetadata, SourceIndex, Vec<String>), String> {
     let ids = PackageIds::scan(&parts);
@@ -5882,7 +5942,7 @@ impl PackageIds {
 /// Indexes the package's paragraph identities: every story part with the
 /// root stories seeded from it, and the IDs `ids` read from the whole package.
 fn build_source_index(
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     digest: String,
     parts: &SourceParts,
     ids: PackageIds,
@@ -5954,11 +6014,11 @@ fn build_source_index(
 
 /// The identity index of a package, lowered without seeding.
 pub(crate) fn source_index(
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     digest: Option<String>,
 ) -> Result<SourceIndex, String> {
     let digest = digest.unwrap_or_else(|| package_digest(&bytes));
-    let (envelope, parts, _) = parse_docx_package_with_media(Arc::clone(&bytes), digest.clone())?;
+    let (envelope, parts, _) = parse_docx_package_with_media(bytes.clone(), digest.clone())?;
     let ids = PackageIds::scan(&parts);
     let parts = SourceParts::new(parts);
     let lowered = lower_docx(envelope, None)?;
@@ -5980,7 +6040,7 @@ pub(crate) fn seed_parsed_docx(
     document: &EditingDoc,
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     digest: String,
     media: SeedMedia<'_>,
 ) -> Result<SeededFonts, String> {
@@ -6035,7 +6095,7 @@ pub fn seed_docx_preview(
     bytes: &[u8],
     blocks: usize,
 ) -> Result<bool, String> {
-    let Some((envelope, media)) = parse_docx_preview(Arc::from(bytes), blocks)? else {
+    let Some((envelope, media)) = parse_docx_preview(bytes.into(), blocks)? else {
         return Ok(false);
     };
     seed_preview_envelope(document, envelope, media).map(|_| true)
@@ -6044,11 +6104,11 @@ pub fn seed_docx_preview(
 /// The parse [`seed_docx_preview`] seeds from and the media its images name,
 /// or `None` when it refuses one.
 pub(crate) fn parse_docx_preview(
-    bytes: Arc<[u8]>,
+    bytes: PackageBytes,
     blocks: usize,
 ) -> Result<Option<(docx_parse::S9WireEnvelope, docx_parse::media::MediaTable)>, String> {
     let (parts, media) =
-        docx_parse::media_table_parts(&bytes).map_err(|error| error.to_string())?;
+        docx_parse::media_table_parts_bytes(&bytes).map_err(|error| error.to_string())?;
     let envelope = docx_parse::parse_docx_s9_preview_with_media_table(
         &parts,
         &media,
@@ -6133,10 +6193,9 @@ fn retain_referenced_body_stories(plans: &mut Vec<StoryPlan>) {
 /// stories, tokens in layout.
 #[cfg(test)]
 pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
-    let source: Arc<[u8]> = Arc::from(bytes);
+    let source = PackageBytes::from(bytes);
     let digest = package_digest(&source);
-    let (envelope, parts, media) =
-        parse_docx_package_with_media(Arc::clone(&source), digest.clone())?;
+    let (envelope, parts, media) = parse_docx_package_with_media(source.clone(), digest.clone())?;
     seed_parsed_docx(
         document,
         envelope,
@@ -6155,9 +6214,8 @@ pub(crate) fn seed_with_layout_tokens(document: &EditingDoc, bytes: &[u8]) -> Re
 
 pub(crate) fn seed_stories(document: &EditingDoc, bytes: &[u8]) -> Result<(), String> {
     let digest = package_digest(bytes);
-    let bytes: Arc<[u8]> = Arc::from(bytes);
-    let (envelope, parts, media) =
-        parse_docx_package_with_media(Arc::clone(&bytes), digest.clone())?;
+    let bytes = PackageBytes::from(bytes);
+    let (envelope, parts, media) = parse_docx_package_with_media(bytes.clone(), digest.clone())?;
     seed_parsed_docx(
         document,
         envelope,
@@ -7390,14 +7448,353 @@ mod tests {
     }
 
     #[test]
+    fn owned_text_formatting_matches_reference_merging() {
+        fn reference(target: Option<&Value>, source: Option<&Value>) -> Option<Value> {
+            let Some(source_object) = object(source) else {
+                return target.cloned();
+            };
+            let Some(target_object) = object(target) else {
+                return source.cloned();
+            };
+            let mut result = target_object.clone();
+            for (key, value) in source_object {
+                if key == "fontFamily" && value.is_object() {
+                    result.insert(
+                        key.clone(),
+                        merge_font_family(target_object.get(key), value),
+                    );
+                } else if key == "color" && value.is_object() {
+                    let explicit = ["rgb", "themeColor", "themeTint", "themeShade"]
+                        .iter()
+                        .any(|key| truthy(field(Some(value), key)));
+                    if !truthy(field(Some(value), "auto")) || explicit {
+                        result.insert(key.clone(), value.clone());
+                    }
+                } else if value.is_object() {
+                    result.insert(
+                        key.clone(),
+                        merge_plain(target_object.get(key), Some(value)).unwrap(),
+                    );
+                } else {
+                    result.insert(key.clone(), value.clone());
+                }
+            }
+            Some(Value::Object(result))
+        }
+        let values = [
+            Value::Null,
+            json!(false),
+            json!(5),
+            json!("formatting"),
+            json!([null, {}]),
+            json!({}),
+            json!({ "bold": true, "italic": false, "fontSize": 22.0 }),
+            json!({ "fontSize": -0.0, "spacing": 0.0 }),
+            json!({ "fontSize": 0.0, "spacing": -0.0 }),
+            json!({ "fontFamily": { "ascii": "Explicit", "hAnsiTheme": "minorHAnsi", "cs": "Complex", "extra": null } }),
+            json!({ "fontFamily": { "asciiTheme": "majorHAnsi", "hAnsi": "Direct", "csTheme": "minorBidi", "extra": false } }),
+            json!({ "fontFamily": null, "color": { "rgb": "123456" }, "underline": { "style": "single", "color": null } }),
+            json!({ "color": { "auto": true }, "underline": { "style": "none" } }),
+            json!({ "color": { "auto": true, "themeColor": "accent1" }, "underline": { "color": { "rgb": "ABCDEF" } } }),
+            json!({ "color": { "auto": false, "rgb": null }, "nested": { "items": [null, { "keep": 1 }], "omit": null } }),
+        ];
+        for target in std::iter::once(None).chain(values.iter().map(Some)) {
+            for source in std::iter::once(None).chain(values.iter().map(Some)) {
+                let expected = reference(target, source);
+                assert_eq!(merge_text_formatting(target, source), expected);
+                let actual = merge_text_formatting_owned(target.cloned(), source);
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    serde_json::to_vec(&actual).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+                let inherited = reference(target, source);
+                for direct in std::iter::once(None).chain(values.iter().map(Some)) {
+                    assert_eq!(
+                        merge_text_formatting_owned(inherited.clone(), direct),
+                        reference(inherited.as_ref(), direct)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_style_memo_tracks_table_context_values() {
+        let definitions = json!({
+            "styles": [
+                { "styleId": "Shared", "type": "paragraph", "rPr": { "bold": true } },
+                { "styleId": "shared", "type": "paragraph", "rPr": { "bold": false } }
+            ]
+        });
+        let mut styles = StyleResolver::new(Some(&definitions));
+        for context in [
+            None,
+            Some(Value::Null),
+            Some(json!({})),
+            Some(json!({ "alignment": "center", "runProperties": { "bold": false } })),
+            Some(json!({ "alignment": "right", "runProperties": { "bold": false } })),
+            Some(
+                json!({ "spaceBefore": -0.0, "runProperties": { "fontSize": -0.0 }, "tabs": [{ "position": -0.0 }] }),
+            ),
+            Some(
+                json!({ "spaceBefore": 0.0, "runProperties": { "fontSize": 0.0 }, "tabs": [{ "position": 0.0 }] }),
+            ),
+            None,
+        ] {
+            let previous = styles.set_table_paragraph_formatting(context.clone());
+            if previous.is_some() != context.is_some()
+                || serde_json::to_vec(&previous).unwrap() != serde_json::to_vec(&context).unwrap()
+            {
+                assert_eq!(styles.memo.state.lock().unwrap().bytes, 0);
+            }
+            let cached: Vec<_> = [None, Some("Missing"), Some("Shared"), Some("shared")]
+                .into_iter()
+                .map(|id| {
+                    let resolved = styles.resolve_paragraph_style(id);
+                    let (paragraph, run) = styles.resolve_paragraph_style_uncached(id);
+                    assert_eq!(resolved.paragraph, paragraph);
+                    assert_eq!(
+                        serde_json::to_vec(&resolved.paragraph).unwrap(),
+                        serde_json::to_vec(&paragraph).unwrap()
+                    );
+                    assert_eq!(resolved.run.as_deref(), run.as_ref());
+                    (id, resolved)
+                })
+                .collect();
+            let bytes = styles.memo.state.lock().unwrap().bytes;
+            let same = styles.set_table_paragraph_formatting(context.clone());
+            assert_eq!(same, context);
+            assert_eq!(styles.memo.state.lock().unwrap().bytes, bytes);
+            styles.restore_table_paragraph_formatting(same);
+            assert_eq!(styles.memo.state.lock().unwrap().bytes, bytes);
+            for (id, resolved) in cached {
+                assert!(Arc::ptr_eq(&resolved, &styles.resolve_paragraph_style(id)));
+            }
+        }
+    }
+
+    #[test]
+    fn table_lowering_preserves_reference_payloads_and_synthetic_stories() {
+        let paragraph = |id, text| {
+            json!({
+                "type": "paragraph", "paraId": id,
+                "content": [{ "type": "run", "content": [{ "type": "text", "text": text }] }]
+            })
+        };
+        let nested = json!({
+            "type": "table", "columnWidths": [900.0],
+            "rows": [
+                { "cells": [{ "content": [paragraph("10000002", "inner")] }] },
+                { "cells": [] }
+            ]
+        });
+        let mut table = json!({
+            "type": "table",
+            "formatting": {
+                "look": { "firstRow": true },
+                "borders": { "top": { "style": "single", "color": { "rgb": "123456", "omit": null } } },
+                "floating": { "items": [null, { "keep": 1, "omit": null }], "omit": null }
+            },
+            "propertyChanges": [null, { "keep": 1, "omit": null }],
+            "rows": [
+                {
+                    "formatting": { "header": true, "height": { "value": 200.0, "omit": null } },
+                    "propertyChanges": [null, { "keep": false, "omit": null }],
+                    "cells": [
+                        {
+                            "formatting": { "gridSpan": 2, "vMerge": "restart" },
+                            "propertyChanges": [null, { "nested": { "keep": 0, "omit": null } }],
+                            "content": [paragraph("10000001", "before"), nested, paragraph("10000003", "after")]
+                        },
+                        { "content": [] }
+                    ]
+                },
+                { "cells": [
+                    { "formatting": { "gridSpan": 2, "vMerge": "continue" }, "content": [paragraph("10000004", "skip")] },
+                    { "content": [paragraph("10000005", "right")] }
+                ] },
+                { "cells": [] }
+            ]
+        });
+        let continuation = json!({
+            "type": "table", "columnWidths": [100.0, 200.0, 300.0],
+            "rows": [
+                { "cells": [{ "formatting": { "gridSpan": 3, "vMerge": "restart" }, "content": [] }] },
+                { "cells": [{ "formatting": { "gridSpan": 3, "vMerge": "continue" }, "content": [] }] }
+            ]
+        });
+        let reference = |table: &ProjectedTable<'_>, parent: &str, table_index| {
+            let rows: Vec<_> = table
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(row_index, row)| {
+                    json!({
+                        "trPr": value_from_map(&row.attrs),
+                        "cells": row.cells.iter().enumerate().map(|(cell_index, cell)| {
+                            json!({
+                                "tcPr": value_from_map(&cell.attrs),
+                                "story": table_cell_story_id(parent, table_index, row_index, cell_index)
+                            })
+                        }).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            let tbl_pr = structural_attrs(table.attrs.clone(), &["columnWidths"]);
+            let mut grid = table
+                .attrs
+                .get("columnWidths")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            grid.iter_mut().for_each(drop_nulls_in_place);
+            map_from_value(json!({ "tblPr": value_from_map(&tbl_pr), "grid": grid, "rows": rows }))
+        };
+        for grid in [
+            None,
+            Some(Value::Null),
+            Some(json!("invalid")),
+            Some(json!([])),
+            Some(json!([1200.0, 1800.0, 2000.0])),
+            Some(json!([-0.0, 0.0, 1.0])),
+            Some(
+                json!([1200.0, null, { "items": [null, { "keep": 1, "omit": null }], "omit": null }]),
+            ),
+        ] {
+            table.as_object_mut().unwrap().remove("columnWidths");
+            if let Some(grid) = grid {
+                table
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("columnWidths".to_owned(), grid);
+            }
+            let package = json!({ "document": { "content": [
+                table, continuation, { "type": "table", "rows": [] }
+            ] } });
+            let (context, _) = lower_package(&package, BTreeMap::new());
+            assert_eq!(
+                context
+                    .plans
+                    .iter()
+                    .map(|plan| plan.story_id.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "body",
+                    "body:t0:r0c0",
+                    "body:t0:r0c0:t0:r0c0",
+                    "body:t0:r0c0:t0:r1c0",
+                    "body:t0:r0c1",
+                    "body:t0:r1c0",
+                    "body:t0:r2c0",
+                    "body:t1:r0c0",
+                    "body:t1:r1c0",
+                ]
+            );
+            for (parent, table_index, source) in [
+                ("body", 0, &table),
+                (
+                    "body:t0:r0c0",
+                    0,
+                    &table["rows"][0]["cells"][0]["content"][1],
+                ),
+                ("body", 1, &continuation),
+                ("body", 2, &package["document"]["content"][2]),
+            ] {
+                let projected = project_table(source, &context.styles, None, 12);
+                let plan = context
+                    .plans
+                    .iter()
+                    .find(|plan| plan.story_id == parent)
+                    .unwrap();
+                let actual = plan
+                    .units
+                    .iter()
+                    .filter_map(|unit| match &unit.content {
+                        UnitContent::Embed { kind, payload } if kind == "table" => Some(payload),
+                        _ => None,
+                    })
+                    .nth(table_index)
+                    .unwrap();
+                let expected = reference(&projected, parent, table_index);
+                assert_eq!(actual, &expected);
+                assert_eq!(
+                    serde_json::to_vec(actual).unwrap(),
+                    serde_json::to_vec(&expected).unwrap()
+                );
+            }
+            let projected = project_table(&table, &context.styles, None, 12);
+            let source_content = table["rows"][0]["cells"][0]["content"].as_array().unwrap();
+            let Cow::Borrowed(content) = &projected.rows[0].cells[0].content else {
+                panic!("nonempty source content must be borrowed");
+            };
+            assert!(std::ptr::eq(*content, source_content.as_slice()));
+            assert_eq!(projected.rows[0].cells[0].attrs["rowspan"], json!(2));
+            assert_eq!(projected.rows[0].cells[0].attrs["colspan"], json!(2.0));
+            assert_eq!(projected.rows[1].cells.len(), 1);
+            for cell in [&projected.rows[0].cells[1], &projected.rows[2].cells[0]] {
+                assert!(matches!(&cell.content, Cow::Owned(_)));
+                assert_eq!(
+                    cell.content.as_ref(),
+                    &[json!({ "type": "paragraph", "content": [] })]
+                );
+            }
+            for story in [
+                "body:t0:r0c0:t0:r1c0",
+                "body:t0:r0c1",
+                "body:t0:r2c0",
+                "body:t1:r0c0",
+                "body:t1:r1c0",
+            ] {
+                let plan = context
+                    .plans
+                    .iter()
+                    .find(|plan| plan.story_id == story)
+                    .unwrap();
+                assert_eq!(plan.units.len(), 1);
+                let unit = &plan.units[0];
+                assert_eq!(unit.pm_size, 1);
+                assert!(unit.attrs.is_empty());
+                assert!(unit.marks.is_empty());
+                let UnitContent::Embed { kind, payload } = &unit.content else {
+                    panic!("an empty cell must contain a pilcrow");
+                };
+                assert_eq!(kind, "pilcrow");
+                assert_eq!(payload["paraId"], json!(format!("{story}:p0")));
+                assert!(payload.get(SOURCE_PARA_ID).is_none());
+                assert!(payload.get(PARA_ORIGIN).is_none());
+            }
+            let batches = |context: LoweringContext| {
+                context
+                    .plans
+                    .into_iter()
+                    .map(|plan| seed_plan(plan, None).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let expected = batches(context);
+            for _ in 0..2 {
+                assert_eq!(
+                    batches(lower_package(&package, BTreeMap::new()).0),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn table_cell_paragraph_styles_preserve_body_and_nested_table_formatting() {
+        let runs: String = (0..32)
+            .map(|index| {
+                format!(
+                    r#"<w:r><w:rPr><w:b w:val="{}"/></w:rPr><w:t>Same{index}😀</w:t></w:r>"#,
+                    u8::from(index % 2 == 0)
+                )
+            })
+            .collect();
         let paragraph = |id| {
             fixture::para(
                 id,
-                &format!(
-                    r#"<w:pPr><w:pStyle w:val="Shared"/></w:pPr>{}"#,
-                    fixture::run("Same")
-                ),
+                &format!(r#"<w:pPr><w:pStyle w:val="Shared"/></w:pPr>{runs}"#),
             )
         };
         let nested = format!(
@@ -7405,10 +7802,12 @@ mod tests {
             paragraph("10000004")
         );
         let table = format!(
-            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Cells"/><w:tblLook w:val="0780"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}{}{nested}{}</w:tc><w:tc>{}{}</w:tc></w:tr></w:tbl>"#,
+            r#"<w:tbl><w:tblPr><w:tblStyle w:val="Cells"/><w:tblLook w:val="0780"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}{}{nested}{}</w:tc><w:tc>{}</w:tc><w:tc>{}</w:tc><w:tc>{}{}</w:tc></w:tr></w:tbl>"#,
             paragraph("10000002"),
             paragraph("10000003"),
             paragraph("10000005"),
+            paragraph("10000009"),
+            paragraph("1000000A"),
             paragraph("10000006"),
             paragraph("10000007")
         );
@@ -7419,6 +7818,43 @@ mod tests {
         let body = format!("{}{table}{}", paragraph("10000001"), paragraph("10000008"));
         let bytes = fixture::Package::new(&body).styles(&styles).bytes();
         let lowered = lower_docx(parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        assert_eq!(
+            lowered
+                .context
+                .plans
+                .iter()
+                .map(|plan| plan.story_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "body",
+                "body:t0:r0c0",
+                "body:t0:r0c0:t0:r0c0",
+                "body:t0:r0c1",
+                "body:t0:r0c2",
+                "body:t0:r0c3",
+            ]
+        );
+        for plan in &lowered.context.plans {
+            for (index, unit) in plan
+                .units
+                .iter()
+                .filter(|unit| matches!(&unit.content, UnitContent::Text(_)))
+                .enumerate()
+            {
+                let index = index % 32;
+                let UnitContent::Text(text) = &unit.content else {
+                    unreachable!();
+                };
+                assert_eq!(text, &format!("Same{index}😀"));
+                assert_eq!(unit.pm_size, utf16_len(text));
+                let mut expected =
+                    JsonObject::from([("fontSize".to_owned(), json!({ "size": 22.0 }))]);
+                if index % 2 == 0 {
+                    expected.insert("bold".to_owned(), Value::Bool(true));
+                }
+                assert_eq!(unit.attrs, expected);
+            }
+        }
         let actual: BTreeMap<_, Vec<_>> = lowered
             .context
             .plans
@@ -7449,10 +7885,15 @@ mod tests {
                 "defaultTextFormatting": { "fontSize": 22.0, "bold": true, "italic": true },
                 "pStyle": "Shared",
                 "_originalFormatting": { "styleId": "Shared" },
-                "_originalRunBoundaries": [{
-                    "text": "Same",
-                    "marksKey": r#"bold:{}|fontSize:{"size":22,"sizeCs":null}"#
-                }]
+                "_originalRunBoundaries": (0..32).map(|index| json!({
+                    "text": format!("Same{index}😀"),
+                    "formatting": { "bold": index % 2 == 0 },
+                    "marksKey": if index % 2 == 0 {
+                        r#"bold:{}|fontSize:{"size":22,"sizeCs":null}"#
+                    } else {
+                        r#"fontSize:{"size":22,"sizeCs":null}"#
+                    }
+                })).collect::<Vec<_>>()
             })
         };
         assert_eq!(
@@ -7479,6 +7920,14 @@ mod tests {
                 ),
                 (
                     "body:t0:r0c1".to_owned(),
+                    vec![expected("left", 10.0, 240.0, "10000009")],
+                ),
+                (
+                    "body:t0:r0c2".to_owned(),
+                    vec![expected("left", 10.0, 240.0, "1000000A")],
+                ),
+                (
+                    "body:t0:r0c3".to_owned(),
                     vec![
                         expected("right", 400.0, 240.0, "10000006"),
                         expected("right", 400.0, 240.0, "10000007"),
@@ -7486,6 +7935,20 @@ mod tests {
                 ),
             ])
         );
+        let expected = EditingDoc::new(74105);
+        seed_parsed_docx_with(&expected, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+        for _ in 0..3 {
+            let actual = EditingDoc::new(74105);
+            seed_parsed_docx_with(&actual, parse_docx_for_edit(&bytes).unwrap(), None).unwrap();
+            assert_eq!(
+                actual.encode_state_as_update_v1(),
+                expected.encode_state_as_update_v1()
+            );
+            assert_eq!(
+                actual.encode_state_vector_v1(),
+                expected.encode_state_vector_v1()
+            );
+        }
     }
 
     #[test]
