@@ -33,6 +33,7 @@ import { markSupersededLayout } from '../internals/layoutProvenance';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { deferWorkerOpenReplica, holdWorkerOpenDocument } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
+import { SupersededPreviewError } from '../internals/supersededPreview';
 import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
@@ -2530,10 +2531,10 @@ test.each(['ok', 'stale'] as const)('an unknown meta version requests JSON and h
       id: worker.requestAt(2).id, ok: true, layoutJsonStatus: status,
       ...(status === 'ok' ? { layoutJson } : {}),
     });
-    const adopted = await act(() => pass);
     if (status === 'stale') {
-      expect(adopted).toBeNull();
+      await expect(act(() => pass)).rejects.toBeInstanceOf(SupersededPreviewError);
     } else {
+      const adopted = await act(() => pass);
       expect(adopted!.layout.summaryOnly).toBeUndefined();
       expect(adopted!.layout).toEqual(JSON.parse(layoutJson).layout);
       expect(adopted!.layout.pages[0]!.fragments.length).toBeGreaterThan(0);
