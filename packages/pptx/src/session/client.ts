@@ -2,6 +2,7 @@ import {
   createSessionClient,
   createWorkerTransport,
   type Promisified,
+  type SessionClient,
   type SessionFailure,
   type SessionTransport,
 } from '../../../../shared/office-session';
@@ -18,13 +19,19 @@ import {
 
 type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] };
 
-/** Options for opening a presentation in a dedicated worker. */
+/**
+ * Options for opening a presentation in a dedicated worker.
+ * @experimental
+ */
 export interface OpenPresentationSessionOptions extends OpenPresentationOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
 }
 
-/** Async presentation access and its current local projection. */
+/**
+ * Async presentation access and its current local projection.
+ * @experimental
+ */
 export interface PresentationSession {
   readonly state: PresentationSessionState;
   readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose'>>;
@@ -75,7 +82,10 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationS
   return { document, input, transfer };
 }
 
-/** Opens a worker session, transferring copies so caller buffers stay usable. */
+/**
+ * Opens a worker session, transferring copies so caller buffers stay usable.
+ * @experimental
+ */
 export async function openPresentationSession(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenPresentationSessionOptions = {}
@@ -96,15 +106,16 @@ export async function createPresentationSession(
   let document: ArrayBuffer;
   let input: PresentationSessionOpenOptions;
   let transfer: Transferable[];
+  let client: SessionClient<PresentationSessionMethods, Events>;
   try {
     ({ document, input, transfer } = prepareOpen(bytes, options));
+    client = createSessionClient<PresentationSessionMethods, Events>(transport, {
+      methods: PRESENTATION_SESSION_METHODS,
+    });
   } catch (error) {
     try { transport.close(); } catch {}
     throw error;
   }
-  const client = createSessionClient<PresentationSessionMethods, Events>(transport, {
-    methods: PRESENTATION_SESSION_METHODS,
-  });
   let state: PresentationSessionState;
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });

@@ -10,7 +10,10 @@ import type {
 } from '../edits';
 import type { OpenPresentationOptions } from '../wasm/loader';
 
-/** A transferable font face. */
+/**
+ * A transferable font face.
+ * @experimental
+ */
 export interface PresentationSessionFont {
   family: string;
   bytes: ArrayBuffer;
@@ -18,7 +21,10 @@ export interface PresentationSessionFont {
   italic?: boolean;
 }
 
-/** Structured-cloneable presentation open options. */
+/**
+ * Structured-cloneable presentation open options.
+ * @experimental
+ */
 export interface PresentationSessionOpenOptions
   extends Omit<OpenPresentationOptions, 'fonts' | 'fallbackFonts'> {
   fonts?: readonly PresentationSessionFont[];
@@ -26,7 +32,10 @@ export interface PresentationSessionOpenOptions
   wasm?: ArrayBuffer | WebAssembly.Module;
 }
 
-/** Slide metadata without layout; indices are zero-based. */
+/**
+ * Slide metadata without layout; indices are zero-based.
+ * @experimental
+ */
 export interface PresentationSlideSummary {
   id: string;
   index: number;
@@ -34,7 +43,10 @@ export interface PresentationSlideSummary {
   layoutPartPath: string | null;
 }
 
-/** Presentation projection; version counts applied batches and size is in EMU. */
+/**
+ * Presentation projection; version counts applied batches and size is in EMU.
+ * @experimental
+ */
 export type PresentationSessionState = Omit<SessionState, 'stage'> & {
   format: 'pptx';
   stage: 'preview' | 'ready' | 'failed';
@@ -42,12 +54,18 @@ export type PresentationSessionState = Omit<SessionState, 'stage'> & {
   size: { width: number; height: number };
 };
 
-/** Presentation change notifications after applied batches. */
+/**
+ * Presentation change notifications after applied batches.
+ * @experimental
+ */
 export interface PresentationSessionEvents {
   changed: { version: number; dirty: boolean };
 }
 
-/** Presentation RPC methods; engine version tokens remain strings. */
+/**
+ * Presentation RPC methods; engine version tokens remain strings.
+ * @experimental
+ */
 export type PresentationSessionMethods = {
   open(bytes: ArrayBuffer, options?: PresentationSessionOpenOptions): PresentationSessionState;
   version(): string;
