@@ -53,12 +53,20 @@ async function saveWorkerArm(arms: Arms, oracle: () => Promise<Uint8Array>) {
     }
     return { actual, expected };
   });
-  arms.log.push('worker save stories=resident');
-  const actual = await arms.client.save({
-    comments: hostComments(arms.workerHost),
-    host: hostSaveMetadata(arms.workerHost),
-  });
-  return { actual, expected: await oracle() };
+  const peerlessSave = async (_stories: string[]) => {
+    arms.log.push('worker save stories=resident');
+    if (arms.replica) {
+      expect(arms.replica.hasStory('body')).toBe(false);
+      expect(arms.worker.requests.some((type) => type === 'encodeState' || type === 'applyUpdate')).toBe(false);
+    }
+    const actual = await arms.client.save({
+      comments: hostComments(arms.workerHost),
+      host: hostSaveMetadata(arms.workerHost),
+    });
+    if (actual.updates.length !== 0) throw new Error('Peerless save returned peer updates');
+    return { actual, expected: await oracle() };
+  };
+  return arms.workerSaves!(peerlessSave);
 }
 
 const DATE = '2026-10-02T12:00:00Z';
@@ -68,13 +76,16 @@ const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/mai
   'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
 const STORIES = ['body', 'hf:rIdH1', 'fn:1'] as const;
 type Story = (typeof STORIES)[number];
-type Topology = 'A/editor' | 'B/viewer';
+type Topology = 'A/editor' | 'B/viewer' | 'C/hydrate';
+type HydrationMode = 'viewer' | 'unloaded' | 'loading';
 type Action =
   | 'insert' | 'split' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
-  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save' | 'overlapSave';
+  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save' | 'overlapSave'
+  | 'hydrate' | 'hydrateSave' | 'hostChange';
 interface Operation {
   action: Action;
   story: Story;
+  autoSave?: false;
 }
 
 const SEEDS = integerEnv('BO_DIFF_SEEDS', 200);
@@ -256,6 +267,8 @@ interface Arms {
   editorStories: EditorDirtyStories;
   workerSaves?: ReturnType<typeof serialWorkerSaves>;
   peer?: YrsSession;
+  replica?: YrsSession;
+  hydration?: Promise<void>;
   unsubscribe?: () => void;
   adoptingWorkerSaveUpdates: boolean;
   handbackRemoteUpdates: number;
@@ -273,14 +286,16 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
   const worker = startWorker(clientId);
   const client = new ResidentEngineWorkerClient(worker);
   let session: YrsSession | undefined;
+  let replica: YrsSession | undefined;
   try {
     const { hostJson } = await client.open(source, { generation });
     session = await createYrsSession({ clientId: clientId + (topology === 'A/editor' ? 1 : 0) });
-    const { document: host } = session.openDocx(source.slice(), topology === 'B/viewer', { generation });
+    const { document: host } = session.openDocx(source.slice(), topology !== 'A/editor', { generation });
     if (topology === 'A/editor') {
       session.loadState(await client.encodeState());
       session.beginUndoCapture();
     }
+    if (topology === 'C/hydrate') replica = await createYrsSession({ clientId: clientId + 1 });
     session.setSelection({ story: 'body', paraId: '0000B002', offset: 0 });
     if (session.listComments().some(({ id }) => id === '1')) {
       throw new Error('The zero-length source comment unexpectedly has seeded anchors');
@@ -299,28 +314,103 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
       main: new MainArm(session, host, topology === 'A/editor'
         ? (story) => editorStories.add(story) : undefined),
       editorStories,
+      replica,
+      workerSaves: serialWorkerSaves(editorStories),
       adoptingWorkerSaveUpdates: false, handbackRemoteUpdates: 0, otherRemoteUpdates: 0,
-      ...(topology === 'A/editor' ? { peer: session, workerSaves: serialWorkerSaves(editorStories) } : {}),
+      ...(topology === 'A/editor' ? { peer: session } : {}),
       commentStories: new Map<number, Story>([[1, 'body'], [2, 'hf:rIdH1']]),
       nextComment: 3, nextProposal: 1,
     };
-    if (topology === 'A/editor') {
-      const session = arms.main.session;
-      // PagedEditor remote listener -> publishDirectInput(undefined).
-      arms.unsubscribe = session.onUpdate((_update, origin) => {
-        if (origin !== 'remote') return;
-        if (arms.adoptingWorkerSaveUpdates) arms.handbackRemoteUpdates += 1;
-        else arms.otherRemoteUpdates += 1;
-        if (!session.hasStory('body')) return;
-        editorStories.add(dirtyProjectionStory(session.selection()?.head.story ?? 'body'));
-      });
-    }
+    if (arms.peer) listenToPeer(arms);
     return arms;
   } catch (error) {
     client.destroy();
+    replica?.destroy();
     session?.destroy();
     throw error;
   }
+}
+
+function listenToPeer(arms: Arms): void {
+  const session = arms.peer!;
+  // PagedEditor remote listener -> publishDirectInput(undefined).
+  arms.unsubscribe = session.onUpdate((_update, origin) => {
+    if (origin !== 'remote') return;
+    if (arms.adoptingWorkerSaveUpdates) arms.handbackRemoteUpdates += 1;
+    else arms.otherRemoteUpdates += 1;
+    if (!session.hasStory('body')) return;
+    arms.editorStories.add(dirtyProjectionStory(session.selection()?.head.story ?? 'body'));
+  });
+}
+
+function hydrateArms(arms: Arms): Promise<void> {
+  if (arms.hydration) return arms.hydration;
+  const replica = arms.replica;
+  if (!replica || arms.peer) throw new Error('Hydration requires an unloaded editing copy');
+  arms.log.push('start editing copy hydration');
+  const state = arms.mirror
+    ? arms.client.handOver()
+    : arms.client.encodeState().then((state) => ({ state }));
+  arms.hydration = state.then((handover) => {
+    replica.openDocx(source.slice(), false);
+    replica.loadState(handover.state);
+    if ('proposals' in handover) {
+      replica.mirrorWorkerDocument({ version: handover.version, proposals: handover.proposals });
+      replica.mirrorWorkerDocument(null);
+    }
+    for (const story of STORIES) {
+      expect(replica.paragraphs(story)).toEqual(arms.main.session.paragraphs(story));
+      expect(replica.storyChecksum(story)).toBe(arms.main.session.storyChecksum(story));
+      for (const view of ['accepted', 'original'] as const) {
+        const actual = replica.readParagraphs({ story, view });
+        const expected = arms.main.session.readParagraphs({ story, view });
+        if (!actual.ok || !expected.ok) throw new Error('Cannot read the hydrated story');
+        expect(actual.paragraphs).toEqual(expected.paragraphs);
+      }
+    }
+    expect(replica.listComments()).toEqual(arms.main.session.listComments());
+    for (const { id } of replica.listComments()) {
+      expect(replica.resolveComment(id)).toEqual(arms.main.session.resolveComment(id));
+    }
+    expect(replica.getProposals().proposals).toEqual(arms.main.session.getProposals().proposals);
+    expect(replica.getProposals().previewVersion).toBe(arms.main.session.getProposals().previewVersion);
+    expect(hostComments(arms.workerHost)).toEqual(hostComments(arms.main.host));
+    const selection = arms.main.session.selection();
+    if (selection) replica.setSelection(selection.anchor, selection.head);
+    arms.peer = replica;
+    listenToPeer(arms);
+    replica.beginUndoCapture();
+    arms.log.push(`editing copy hydrated clientId=${replica.clientId}`);
+  });
+  return arms.hydration;
+}
+
+function editPeer<T>(arms: Arms, edit: (session: YrsSession) => T): T {
+  const peer = arms.peer!;
+  const updates: Uint8Array[] = [];
+  const unsubscribe = peer !== arms.main.session
+    ? peer.onUpdate((update, origin) => {
+        if (origin === 'local') updates.push(update);
+      })
+    : undefined;
+  try {
+    const result = edit(peer);
+    for (const update of updates) arms.main.session.applyLocalUpdate(update);
+    return result;
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+function publishPeerInput(arms: Arms, stories?: readonly string[]): void {
+  if (arms.peer && arms.peer !== arms.main.session) {
+    const selection = arms.peer.selection();
+    if (selection) arms.main.session.setSelection(selection.anchor, selection.head);
+    for (const story of stories ?? [selection?.head.story ?? 'body']) {
+      arms.editorStories.add(dirtyProjectionStory(story));
+    }
+  }
+  arms.main.publishDirectInput(stories);
 }
 
 async function bootstrap(arms: Arms): Promise<void> {
@@ -365,12 +455,15 @@ async function workerMutation(
       if (stories.size > 0) arms.main.publishDirectInput([...stories]);
     }
   }
+  if (!arms.peer) {
+    for (const story of reply.projectionStories ?? []) arms.editorStories.add(story);
+  }
   arms.mirror = reply.mirror;
   return reply;
 }
 
 function target(arms: Arms, story: Story, random: Random) {
-  const paragraphs = arms.main.session.paragraphs(story);
+  const paragraphs = (arms.peer ?? arms.main.session).paragraphs(story);
   const editable = story === 'body' ? paragraphs.filter(({ paraId }) => paraId !== '0000B004') : paragraphs;
   const paragraph = random.pick(editable);
   const offset = random.int(paragraph.text.length + 1);
@@ -381,6 +474,7 @@ function target(arms: Arms, story: Story, random: Random) {
 function focus(arms: Arms, story: Story, random: Random) {
   const chosen = target(arms, story, random);
   arms.main.session.setSelection(chosen.at);
+  if (arms.peer && arms.peer !== arms.main.session) arms.peer.setSelection(chosen.at);
   return chosen;
 }
 
@@ -408,11 +502,11 @@ function addComment(arms: Arms, story: Story, random: Random): number {
   if (arms.peer) {
     const span = arms.peer.locateParagraph(story, at.paraId);
     const start = span.start + Math.min(at.offset, Math.max(0, paragraph.text.length - 1));
-    arms.peer.applyRawOps(story, [{
+    editPeer(arms, (session) => session.applyRawOps(story, [{
       op: 'setComment', id: String(comment.id), ranges: [[start, start + 1]],
       author: comment.author, date: comment.date, body: comment.content,
-    }]);
-    arms.main.publishDirectInput();
+    }]));
+    publishPeerInput(arms);
   }
   changeComments(arms, (comments) => [...comments, structuredClone(comment)]);
   arms.commentStories.set(comment.id, story);
@@ -475,7 +569,8 @@ async function decideOrWithdraw(arms: Arms, random: Random, withdraw: boolean): 
   arms.mirror = snapshot.mirror;
   const entries = snapshot.mirror.proposals.entries;
   if (entries.length === 0) {
-    await textProposal(arms, random.pick(STORIES), random, ' proposed');
+    const stories = arms.replica && !arms.peer ? ['hf:rIdH1', 'fn:1'] as const : STORIES;
+    await textProposal(arms, random.pick(stories), random, ' proposed');
     return;
   }
   const id = random.pick(entries).record.id;
@@ -497,7 +592,7 @@ async function decideOrWithdraw(arms: Arms, random: Random, withdraw: boolean): 
 
 async function applyOperation(arms: Arms, operation: Operation, random: Random): Promise<void> {
   const { action, story } = operation;
-  const session = arms.main.session;
+  const session = arms.peer ?? arms.main.session;
   switch (action) {
     case 'split': {
       if (!arms.peer) {
@@ -505,12 +600,14 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
         return;
       }
       const { at, paragraph } = focus(arms, story, random);
-      session.addUndoBoundary();
       const offset = random.int(paragraph.text.length + 1);
       arms.log.push(`peer split ${story}/${at.paraId}:${offset}`);
-      const receipt = session.splitParagraph({ ...at, offset });
-      if (receipt.secondParaId) session.setSelection({ story, paraId: receipt.secondParaId, offset: 0 });
-      arms.main.publishDirectInput();
+      editPeer(arms, (session) => {
+        session.addUndoBoundary();
+        const receipt = session.splitParagraph({ ...at, offset });
+        if (receipt.secondParaId) session.setSelection({ story, paraId: receipt.secondParaId, offset: 0 });
+      });
+      publishPeerInput(arms);
       return;
     }
     case 'insert':
@@ -521,25 +618,27 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
         return;
       }
       const { at, paragraph } = focus(arms, story, random);
-      session.addUndoBoundary();
-      if (action === 'delete' && paragraph.text.length > 0) {
-        const start = Math.min(at.offset, paragraph.text.length - 1);
-        const end = Math.min(paragraph.text.length, start + 1 + random.int(3));
-        arms.log.push(`peer delete ${story}/${at.paraId} [${start},${end})`);
-        const receipt = session.deleteRange({
-          story,
-          start: { paraId: at.paraId, offset: start },
-          end: { paraId: at.paraId, offset: end },
-        });
-        session.setSelection(receipt.range ? { story, ...receipt.range.start } : { ...at, offset: start });
-      } else {
-        arms.log.push(`peer insert ${story}/${at.paraId}:${at.offset} ${JSON.stringify(text)}`);
-        const receipt = session.insertText(at, text);
-        session.setSelection(
-          receipt.range ? { story, ...receipt.range.end } : { ...at, offset: at.offset + text.length }
-        );
-      }
-      arms.main.publishDirectInput();
+      editPeer(arms, (session) => {
+        session.addUndoBoundary();
+        if (action === 'delete' && paragraph.text.length > 0) {
+          const start = Math.min(at.offset, paragraph.text.length - 1);
+          const end = Math.min(paragraph.text.length, start + 1 + random.int(3));
+          arms.log.push(`peer delete ${story}/${at.paraId} [${start},${end})`);
+          const receipt = session.deleteRange({
+            story,
+            start: { paraId: at.paraId, offset: start },
+            end: { paraId: at.paraId, offset: end },
+          });
+          session.setSelection(receipt.range ? { story, ...receipt.range.start } : { ...at, offset: start });
+        } else {
+          arms.log.push(`peer insert ${story}/${at.paraId}:${at.offset} ${JSON.stringify(text)}`);
+          const receipt = session.insertText(at, text);
+          session.setSelection(
+            receipt.range ? { story, ...receipt.range.end } : { ...at, offset: at.offset + text.length }
+          );
+        }
+      });
+      publishPeerInput(arms);
       return;
     }
     case 'addComment':
@@ -570,9 +669,14 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
         await flushPeer(arms);
         await workerMutation(arms, { kind: 'removeComment', id: String(id) });
       }
-      if (!arms.peer || action === 'deleteComment') {
+      if (arms.peer && action === 'deleteComment') {
         try {
-          session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+          editPeer(arms, (session) => session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]));
+          publishPeerInput(arms);
+        } catch {}
+      } else if (!arms.peer) {
+        try {
+          arms.main.session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
           arms.main.publishDirectInput();
         } catch {}
       }
@@ -596,18 +700,46 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
       return;
     case 'undo':
     case 'redo': {
-      const changed = action === 'undo' ? session.undo() : session.redo();
+      const changed = editPeer(arms, (session) => action === 'undo' ? session.undo() : session.redo());
       const stories = changed ? session.historyStories() : [];
       arms.log.push(`${action} ${changed} ${JSON.stringify(stories)}`);
-      if (changed) arms.main.publishDirectInput(stories);
+      if (changed) publishPeerInput(arms, stories);
+      return;
+    }
+    case 'hostChange': {
+      for (const host of [arms.main.host, arms.workerHost]) {
+        const body = host.package.document;
+        const properties = body.finalSectionProperties;
+        body.finalSectionProperties = {
+          ...properties, marginTop: (properties?.marginTop ?? 1440) + 120,
+        };
+      }
+      arms.log.push('host margin change (no story marks)');
       return;
     }
   }
 }
 
-function operations(topology: Topology, random: Random): Operation[] {
+function operations(topology: Topology, random: Random, hydrationMode?: HydrationMode): Operation[] {
   const group = (story: Story, actions: Action[]): Operation[] =>
     actions.map((action) => ({ action, story }));
+  if (topology === 'C/hydrate') {
+    const peerless = random.shuffle([
+      group('hf:rIdH1', hydrationMode === 'viewer'
+        ? ['insert', 'delete', 'addComment'] : ['insert', 'delete']),
+      group('fn:1', ['proposal', 'decide', 'withdraw']),
+    ]).flat();
+    const transition = [
+      ...group('hf:rIdH1', ['proposal', 'save']),
+      ...group('body', hydrationMode === 'loading'
+        ? ['hydrateSave', 'save'] : ['hydrate', 'hostChange', 'save', 'save']),
+    ];
+    const workerOnly: Action[] = ['proposal', 'decide', 'withdraw', 'workerDeleteComment'];
+    return [
+      ...[...peerless, ...transition].map((operation) => ({ ...operation, autoSave: false as const })),
+      ...operations('A/editor', random).filter(({ action }) => !workerOnly.includes(action)),
+    ];
+  }
   const groups = [
     ...STORIES.map((story) => group(story, ['insert', 'delete', 'proposal'])),
     ...(['body', 'hf:rIdH1'] as const).map((story) => group(story, ['addComment', 'reply', 'deleteComment'])),
@@ -751,13 +883,22 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   let handbackRemoteUpdates = 0;
   let otherRemoteUpdates = 0;
   let editorSeeds = 0;
+  const hydrationSeeds: Record<HydrationMode, number> = { viewer: 0, unloaded: 0, loading: 0 };
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const random = new Random(seed);
-    const topology: Topology = random.int(2) === 0 ? 'A/editor' : 'B/viewer';
+    const topology: Topology = seed % 3 === 0 ? 'C/hydrate'
+      : seed % 3 === 1 ? 'A/editor' : 'B/viewer';
+    const hydrationMode = topology === 'C/hydrate'
+      ? (['viewer', 'unloaded', 'loading'] as const)[(seed / 3 - 1) % 3]!
+      : undefined;
     const log: string[] = [`open seed=${seed} topology=${topology}`];
     let arms: Arms | undefined;
     seedsRun += 1;
     if (topology === 'A/editor') editorSeeds += 1;
+    if (hydrationMode) {
+      hydrationSeeds[hydrationMode] += 1;
+      log.push(`peerless ${hydrationMode === 'viewer' ? 'viewer session' : 'editable session, copy unloaded'}`);
+    }
     try {
       arms = await openArms(seed, topology, log);
       const current = arms;
@@ -786,22 +927,47 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         }
       };
       const compareSave = async () => {
+        if (!current.peer && current.hydration) {
+          log.push('editor save requested during hydration; wait for editing copy');
+          await current.hydration;
+        }
         await flushPeer(current);
         const dirty = JSON.stringify([...current.main.dirtyStories].sort());
         const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
         log.push(`save ${++saveNumber} dirty=${dirty} comments=${comments}`);
         compareSaved(await saveWorkerArm(current, () => current.main.save()));
       };
-      await compareSave();
-      await compareSave();
+      if (topology !== 'C/hydrate') {
+        await compareSave();
+        await compareSave();
+      }
       await bootstrap(current);
-      const planned = operations(topology, random);
-      const forcedSave = random.int(planned.length);
+      const planned = operations(topology, random, hydrationMode);
+      const automatic = planned.map((operation, index) => operation.autoSave === false ? -1 : index)
+        .filter((index) => index >= 0);
+      const forcedSave = random.pick(automatic);
       for (let index = 0; index < planned.length; index += 1) {
         log.push(`op ${index + 1}/${planned.length}: ${JSON.stringify(planned[index])}`);
         const operation = planned[index]!;
-        if (operation.action === 'save' || operation.action === 'overlapSave') {
-          focus(current, operation.story, random);
+        if (operation.action === 'hydrate') {
+          log.push(`${hydrationMode === 'viewer' ? 'switch viewer to editing' : 'load editable copy'} (same session)`);
+          await hydrateArms(current);
+        } else if (operation.action === 'hydrateSave') {
+          const posted = current.worker.requests.length;
+          current.worker.hold();
+          const ready = hydrateArms(current);
+          await applyOperation(current, { action: 'hostChange', story: 'body' }, random);
+          const saving = compareSave();
+          try {
+            await Promise.resolve();
+            expect(current.peer).toBeUndefined();
+            expect(current.worker.requests.slice(posted)).toEqual(['encodeState']);
+          } finally {
+            current.worker.release();
+            await Promise.all([ready, saving]);
+          }
+        } else if (operation.action === 'save' || operation.action === 'overlapSave') {
+          if (current.peer || topology !== 'C/hydrate') focus(current, operation.story, random);
           if (operation.action === 'overlapSave' && current.peer) {
             await flushPeer(current);
             const dirty = JSON.stringify([...current.main.dirtyStories].sort());
@@ -820,7 +986,7 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
           await applyOperation(current, operation, random);
         }
         if (current.peer && random.int(4) === 0) await flushPeer(current);
-        if (index === forcedSave || random.int(6) === 0) {
+        if (operation.autoSave !== false && (index === forcedSave || random.int(6) === 0)) {
           await compareSave();
           if (random.int(4) === 0) await compareSave();
         }
@@ -831,6 +997,9 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         (type) => type === 'applyUpdate' || type === 'encodeState'
       )) {
         throw new Error('The viewer arm received peer state');
+      }
+      if (topology === 'C/hydrate' && (!current.peer || !current.hydration)) {
+        throw new Error('The hydration arm never loaded its editing copy');
       }
     } catch (error) {
       erroredSeeds += 1;
@@ -843,6 +1012,7 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       handbackRemoteUpdates += arms?.handbackRemoteUpdates ?? 0;
       otherRemoteUpdates += arms?.otherRemoteUpdates ?? 0;
       arms?.client.destroy();
+      arms?.replica?.destroy();
       arms?.main.session.destroy();
     }
   }
@@ -852,6 +1022,10 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
     `stale main-thread comment markers: ${staleMainSaves} saves in ${staleMainSeeds.size} seeds ` +
     `[${[...staleMainSeeds].join(',')}], ` +
     `handback remote updates=${handbackRemoteUpdates}, other remote updates=${otherRemoteUpdates}`
+  );
+  console.log(
+    `resident save hydration: seeds run=${hydrationSeeds.viewer + hydrationSeeds.unloaded + hydrationSeeds.loading}, ` +
+    `viewer=${hydrationSeeds.viewer}, unloaded=${hydrationSeeds.unloaded}, loading=${hydrationSeeds.loading}`
   );
   if (failures.length > 0) console.error(failures.join('\n\n'));
   expect(failures.length).toBe(0);
