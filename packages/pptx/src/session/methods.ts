@@ -34,9 +34,10 @@ export interface PresentationSlideSummary {
   layoutPartPath: string | null;
 }
 
-/** Ready presentation projection; version counts applied batches and size is in EMU. */
-export type PresentationSessionState = SessionState & {
+/** Presentation projection; version counts applied batches and size is in EMU. */
+export type PresentationSessionState = Omit<SessionState, 'stage'> & {
   format: 'pptx';
+  stage: 'preview' | 'ready' | 'failed';
   slides: PresentationSlideSummary[];
   size: { width: number; height: number };
 };

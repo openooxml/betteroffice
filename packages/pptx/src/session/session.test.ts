@@ -1,11 +1,14 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createSessionClient, type SessionTransport } from '../../../../shared/office-session';
+import { runInNewContext } from 'node:vm';
+import {
+  createSessionClient, createSessionHost, SessionFailure, type SessionTransport,
+} from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import type { PptxEditRequest, PptxReadResult } from '../edits';
 import { initWasm, openPresentation } from '../wasm/loader';
-import { openPresentationSession, type PresentationSession } from './client';
+import { createPresentationSession, type PresentationSession } from './client';
 import { createPresentationSessionHost } from './host';
 import {
   PRESENTATION_SESSION_METHODS,
@@ -42,10 +45,10 @@ function content(result: PptxReadResult): Omit<Extract<PptxReadResult, { ok: tru
 async function session(clientId: number): Promise<PresentationSession> {
   const pair = createInProcessPair();
   createPresentationSessionHost(pair.host);
-  return openPresentationSession(fixture, {
-    clientId, transport: pair.client,
+  return createPresentationSession(fixture, {
+    clientId,
     fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
-  });
+  }, pair.client);
 }
 
 describe('presentation sessions', () => {
@@ -240,8 +243,12 @@ describe('presentation sessions', () => {
     const source = openPresentation(fixture, { clientId: 9705 });
     try {
       source.setSlideNotes(source.snapshot().slides[0].id, 'Restored notes');
-      const initialUpdate = source.encodeStateAsUpdate();
+      const update = source.encodeStateAsUpdate();
+      const updateBuffer = new Uint8Array(update.byteLength + 16);
+      updateBuffer.set(update, 8);
+      const initialUpdate = updateBuffer.subarray(8, updateBuffer.byteLength - 8);
       const retainedUpdate = initialUpdate.slice();
+      const retainedUpdateBuffer = updateBuffer.slice();
       const faces = [{ family: 'Liberation Sans', bytes: fontBytes }];
       const main = openPresentation(fixture, {
         clientId: 9706, initialUpdate, fonts: faces, fallbackFonts: faces,
@@ -255,12 +262,13 @@ describe('presentation sessions', () => {
           transferred.push(...(transfer ?? []) as ArrayBuffer[]);
           pair.client.post(message, transfer);
         } };
-        worker = await openPresentationSession(fixture, {
-          clientId: 9706, initialUpdate, fonts: faces, fallbackFonts: faces, transport,
-        });
+        worker = await createPresentationSession(fixture, {
+          clientId: 9706, initialUpdate, fonts: faces, fallbackFonts: faces,
+        }, transport);
         expect(transferred).toHaveLength(4);
         expect(transferred.every((buffer) => buffer.byteLength === 0)).toBe(true);
         expect(initialUpdate).toEqual(retainedUpdate);
+        expect(updateBuffer).toEqual(retainedUpdateBuffer);
         expect(faces[0].bytes).toBe(fontBytes);
         expect(fontBytes.byteLength).toBeGreaterThan(0);
         expect(content(await worker.call.readContent())).toEqual(content(main.readContent()));
@@ -273,13 +281,19 @@ describe('presentation sessions', () => {
     } finally { source.dispose(); }
   });
 
-  test('transfers owned copies of document and font buffers, including subviews', async () => {
+  test('transfers owned copies of document and font buffers, including subviews and other realms', async () => {
     const main = openPresentation(fixture, { clientId: 9704 });
     let saved: Uint8Array;
     try { saved = main.save(); } finally { main.dispose(); }
-    for (const asView of [false, true]) {
-      const source = new Uint8Array(fixture.byteLength + (asView ? 16 : 0));
+    for (const kind of ['buffer', 'view', 'foreign'] as const) {
+      const asView = kind === 'view';
+      const buffer: ArrayBuffer = kind === 'foreign'
+        ? runInNewContext('new ArrayBuffer(size)', { size: fixture.byteLength })
+        : new ArrayBuffer(fixture.byteLength + (asView ? 16 : 0));
+      if (kind === 'foreign') expect(buffer instanceof ArrayBuffer).toBe(false);
+      const source = new Uint8Array(buffer);
       source.set(fixture, asView ? 8 : 0);
+      const retainedSource = source.slice();
       const document = asView ? source.subarray(8, source.byteLength - 8) : source.buffer;
       const font = new Uint8Array(fontBytes.byteLength + 16);
       font.set(fontBytes, 8);
@@ -291,16 +305,54 @@ describe('presentation sessions', () => {
         transferred.push(...(transfer ?? []) as ArrayBuffer[]);
         pair.client.post(message, transfer);
       } };
-      const worker = await openPresentationSession(document, {
-        clientId: 9704, transport, fonts: [{ family: 'Liberation Sans', bytes: face }],
-      });
+      const worker = await createPresentationSession(document, {
+        clientId: 9704, fonts: [{ family: 'Liberation Sans', bytes: face }],
+      }, transport);
       try {
         expect(transferred).toHaveLength(2);
         expect(transferred.every((buffer) => buffer.byteLength === 0)).toBe(true);
         expect(source.byteLength).toBe(fixture.byteLength + (asView ? 16 : 0));
+        expect(source).toEqual(retainedSource);
         expect<Uint8Array>(new Uint8Array(document)).toEqual(fixture);
         expect<Uint8Array>(face).toEqual(fontBytes);
         expect(await worker.save()).toEqual(saved);
+      } finally { await worker.dispose(); }
+    }
+  });
+
+  test('sets the failed stage before notifying listeners of traps and crashes', async () => {
+    for (const failure of [
+      new WebAssembly.RuntimeError('unreachable'), new SessionFailure('crash', 'Host crashed'),
+    ]) {
+      const pair = createInProcessPair();
+      createSessionHost<Pick<PresentationSessionMethods, 'open' | 'version' | 'dispose'>, {}, null>(
+        pair.host, {
+          context: null,
+          policies: {
+            open: PRESENTATION_SESSION_POLICIES.open,
+            version: PRESENTATION_SESSION_POLICIES.version,
+            dispose: PRESENTATION_SESSION_POLICIES.dispose,
+          },
+          handlers: {
+            open: () => ({
+              format: 'pptx', stage: 'ready', version: 0, dirty: false,
+              slides: [], size: { width: 0, height: 0 },
+            }),
+            version: () => { throw failure; },
+            dispose: () => {},
+          },
+        }
+      );
+      const worker = await createPresentationSession(new Uint8Array(), {}, pair.client);
+      const stages: PresentationSession['state']['stage'][] = [];
+      worker.onFailure(() => { stages.push(worker.state.stage); });
+      try {
+        expect(worker.state.stage).toBe('ready');
+        await expect(worker.call.version()).rejects.toMatchObject({
+          code: failure instanceof SessionFailure ? 'crash' : 'trap',
+        });
+        expect(stages).toEqual(['failed']);
+        expect(worker.state.stage).toBe('failed');
       } finally { await worker.dispose(); }
     }
   });

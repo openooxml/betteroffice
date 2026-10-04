@@ -22,8 +22,6 @@ type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvent
 export interface OpenPresentationSessionOptions extends OpenPresentationOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
-  /** @internal */
-  transport?: SessionTransport;
 }
 
 /** Async presentation access and its current local projection. */
@@ -39,11 +37,17 @@ export interface PresentationSession {
   dispose(): Promise<void>;
 }
 
+function copyBytes(bytes: Uint8Array | ArrayBuffer): Uint8Array<ArrayBuffer> {
+  return ArrayBuffer.isView(bytes)
+    ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice()
+    : new Uint8Array(bytes).slice();
+}
+
 function copyFonts(
   faces: readonly PptxFontFace[] | undefined, transfer: Transferable[]
 ): PresentationSessionFont[] | undefined {
   return faces?.map((face) => {
-    const bytes = new Uint8Array(face.bytes).buffer;
+    const bytes = copyBytes(face.bytes).buffer;
     transfer.push(bytes);
     return { family: face.family, bytes, bold: face.bold, italic: face.italic };
   });
@@ -54,7 +58,20 @@ export async function openPresentationSession(
   bytes: Uint8Array | ArrayBuffer,
   options: OpenPresentationSessionOptions = {}
 ): Promise<PresentationSession> {
-  const document = bytes instanceof ArrayBuffer ? bytes.slice(0) : new Uint8Array(bytes).buffer;
+  const transport = createWorkerTransport(
+    options.worker ? options.worker() :
+      new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })
+  );
+  return createPresentationSession(bytes, options, transport);
+}
+
+/** Creates a presentation session over an internal transport. */
+export async function createPresentationSession(
+  bytes: Uint8Array | ArrayBuffer,
+  options: OpenPresentationSessionOptions,
+  transport: SessionTransport
+): Promise<PresentationSession> {
+  const document = copyBytes(bytes).buffer;
   const transfer: Transferable[] = [document];
   const input: PresentationSessionOpenOptions = {
     clientId: options.clientId,
@@ -62,7 +79,7 @@ export async function openPresentationSession(
     fallbackFonts: copyFonts(options.fallbackFonts, transfer),
   };
   if (options.initialUpdate !== undefined) {
-    const update = new Uint8Array(options.initialUpdate);
+    const update = copyBytes(options.initialUpdate);
     input.initialUpdate = update;
     transfer.push(update.buffer);
   }
@@ -71,15 +88,12 @@ export async function openPresentationSession(
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
 
-  const transport = options.transport ?? createWorkerTransport(
-    options.worker ? options.worker() :
-      new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })
-  );
   const client = createSessionClient<PresentationSessionMethods, Events>(transport, {
     methods: PRESENTATION_SESSION_METHODS,
   });
   let state: PresentationSessionState;
   client.on('changed', (change) => { state = { ...state, ...change }; });
+  client.onFailure(() => { state = { ...state, stage: 'failed' }; });
   try {
     state = await client.callWithTransfer('open', [document, input], transfer);
   } catch (error) {
