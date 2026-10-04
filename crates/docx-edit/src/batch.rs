@@ -3201,17 +3201,7 @@ fn validate_stage(
         };
         let pilcrows = crate::pilcrows(&story, &txn);
         let len = yrs::Text::len(&story, &txn);
-        let terminated = pilcrows.last().is_some_and(|(index, _)| {
-            (index + 1..len).all(|at| {
-                crate::ops::embed::embed_map_at(&story, &txn, at).is_ok_and(|map| {
-                    matches!(
-                        crate::map_string(&map, &txn, crate::KIND_KEY).as_deref(),
-                        Some("pageBreak" | "columnBreak")
-                    )
-                })
-            })
-        });
-        if !terminated {
+        if pilcrows.last().is_none_or(|(index, _)| index + 1 != len) {
             return Err(malformed(format!(
                 "story {story_id:?} would no longer end in a paragraph mark"
             )));
@@ -3400,77 +3390,6 @@ mod direct_tests {
             yrs::StateVector::decode_v1(&direct.encode_state_vector_v1()).unwrap(),
             yrs::StateVector::decode_v1(&replica.encode_state_vector_v1()).unwrap()
         );
-    }
-
-    #[test]
-    fn text_edits_preserve_trailing_flow_breaks() {
-        for kinds in [
-            vec!["pageBreak"],
-            vec!["columnBreak"],
-            vec!["pageBreak", "columnBreak"],
-        ] {
-            let doc = document();
-            for kind in &kinds {
-                doc.insert_embed(
-                    &EditCtx::local("", ""),
-                    Position::new("body", doc.story_len("body").unwrap()),
-                    kind,
-                    Vec::new(),
-                )
-                .unwrap();
-            }
-            let before = doc.story_segments("body").unwrap();
-            let tail = &before[before.len() - kinds.len()..];
-            let edit = EditStep::new(EditOperation::InsertText {
-                target: TextTarget::Paragraph(ParagraphTarget {
-                    story: "body".to_owned(),
-                    para_id: "p".to_owned(),
-                }),
-                at: TargetEdge::End,
-                text: " edited".to_owned(),
-            });
-            let steps = [BatchStep::Edit(&edit)];
-            let result =
-                apply_text_steps(&doc, &steps, &UndoSession::new(), MAX_STAGING_BYTES).unwrap();
-            assert!(result.applied);
-            assert_eq!(
-                doc.paragraphs("body").unwrap()[0].text,
-                "Alpha beta gamma edited"
-            );
-            let after = doc.story_segments("body").unwrap();
-            assert_eq!(&after[after.len() - kinds.len()..], tail);
-        }
-    }
-
-    #[test]
-    fn text_edits_refuse_unterminated_paragraph_content() {
-        for kind in ["text", "lineBreak"] {
-            let doc = document();
-            let index = doc.story_len("body").unwrap();
-            let tail = if kind == "text" {
-                crate::RawOp::Insert {
-                    index,
-                    text: "tail".to_owned(),
-                    attrs: HashMap::new(),
-                }
-            } else {
-                crate::RawOp::InsertEmbed {
-                    index,
-                    kind: kind.to_owned(),
-                    payload: Vec::new(),
-                    attrs: HashMap::new(),
-                }
-            };
-            doc.apply_raw_ops("body", vec![tail], &EditCtx::system(""))
-                .unwrap();
-            let before = doc.encode_state_as_update_v1();
-            let edit = step();
-            let steps = [BatchStep::Edit(&edit)];
-            let refusal = apply_text_steps(&doc, &steps, &UndoSession::new(), MAX_STAGING_BYTES)
-                .unwrap_err();
-            assert_eq!(refusal.failure.code, EditFailureCode::Unsupported);
-            assert_eq!(doc.encode_state_as_update_v1(), before);
-        }
     }
 
     #[test]

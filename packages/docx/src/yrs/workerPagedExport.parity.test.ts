@@ -347,7 +347,7 @@ function synthetic(sourceBreaks = false): Uint8Array {
   const revisions = `<w:ins w:id="10" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Inserted </w:t></w:r></w:ins><w:del w:id="11" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>Deleted </w:delText></w:r></w:del>`;
   const image = '<w:r><w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/><wp:docPr id="1" name="Pixel"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Pixel"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="image"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
   const table = `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>${paragraph('Merged cell')}</w:tc></w:tr><w:tr><w:tc>${paragraph('Left cell')}</w:tc><w:tc>${paragraph('Right cell')}</w:tc></w:tr></w:tbl>`;
-  const breaks = sourceBreaks ? '<w:p><w:r><w:t>Before source break</w:t><w:br w:type="page"/><w:t>After source break</w:t></w:r></w:p>' : '';
+  const breaks = sourceBreaks ? `<w:p><w:r><w:t>Before source break</w:t><w:br w:type="page"/><w:t>After source break</w:t></w:r></w:p>${paragraph('Closing paragraph')}` : '';
   xml('word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${paragraph('First paragraph')}<w:p>${comments}${revisions}${image}</w:p>${table}<w:p><w:pPr><w:sectPr>${section(1)}</w:sectPr></w:pPr><w:r><w:t>Section boundary</w:t></w:r></w:p>${paragraph('Second section')}${breaks}<w:sectPr>${section(2)}</w:sectPr></w:body></w:document>`);
   parts.set('word/media/pixel.png', new Uint8Array(Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=',
@@ -374,7 +374,6 @@ test('editor-style worker export after hydration and peer edits strictly preserv
     expect(compare(resident, peer, request, true)).toBeGreaterThan(0);
     const first = peer.paragraphs('body')[0]!;
     expect(first.text).toBe('First paragraph');
-    expect(peer.storySegments('body').at(-1)).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
     const edited = peer.applyEdits({ expectVersion: peer.version(), steps: [{
       op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: first.paraId }, at: 'end', text: ' Peer edit',
     }] });
