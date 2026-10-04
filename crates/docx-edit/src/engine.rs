@@ -2611,11 +2611,19 @@ impl RegionPlacementState {
         }
     }
 
-    fn restore_fragments(&mut self, retained: &Layout) -> Result<(), docx_layout::LayoutError> {
+    fn restore_fragments(
+        &mut self,
+        retained: &Layout,
+    ) -> Result<Vec<Option<Rc<Vec<Fragment>>>>, docx_layout::LayoutError> {
         for (page, fragments) in self.layout.pages.iter_mut().zip(&mut self.fragment_pages) {
-            if let Some(fragments) = fragments.take() {
-                page.fragments = Rc::try_unwrap(fragments)
-                    .unwrap_or_else(|fragments| fragments.as_ref().clone());
+            if let Some(source) = fragments.take() {
+                match Rc::try_unwrap(source) {
+                    Ok(fragments) => page.fragments = fragments,
+                    Err(source) => {
+                        page.fragments = source.as_ref().clone();
+                        *fragments = Some(source);
+                    }
+                }
             }
         }
         for index in self.shared_fragment_pages.drain(..) {
@@ -2628,7 +2636,7 @@ impl RegionPlacementState {
                 .fragments
                 .clone();
         }
-        Ok(())
+        Ok(std::mem::take(&mut self.fragment_pages))
     }
 }
 
@@ -2656,14 +2664,20 @@ fn compact_region_placements(primary: &mut PaginationState) -> Result<(), String
         .iter()
         .enumerate()
     {
-        let fragments = serde_json::to_vec(&base.fragments).map_err(|error| error.to_string())?;
+        let mut fragments = None;
         for pass in passes.iter_mut() {
-            let Some(page) = pass.fragment_pages.get_mut(index).and_then(Option::as_mut) else {
+            let Some(page) = pass.fragment_pages.get(index).and_then(Option::as_ref) else {
                 continue;
             };
-            if region_shape_offsets_match(page, &base.fragments)
-                && serde_json::to_vec(page.as_ref()).map_err(|error| error.to_string())?
-                    == fragments
+            if !region_shape_offsets_match(page, &base.fragments) {
+                continue;
+            }
+            if fragments.is_none() {
+                fragments =
+                    Some(serde_json::to_vec(&base.fragments).map_err(|error| error.to_string())?);
+            }
+            if serde_json::to_vec(page.as_ref()).map_err(|error| error.to_string())?
+                == *fragments.as_ref().expect("encoded region page")
             {
                 pass.fragment_pages[index] = None;
                 pass.shared_fragment_pages.push(index);
@@ -2820,6 +2834,8 @@ fn place_region_pass(
         retained.restore_metadata(previous);
     }
     let mut incremental = false;
+    let mut restored_fragment_pages = Vec::new();
+    let mut unchanged_page_end = 0;
     let run = if let Some(mut retained) = retained.filter(|pass| {
         passes.eligible
             && !pass.checkpoints.is_empty()
@@ -2838,9 +2854,10 @@ fn place_region_pass(
             .zip(fingerprints)
             .position(|(previous, next)| previous != next);
         if let Some(dirty) = dirty {
-            retained.restore_fragments(previous.layout.as_ref().ok_or_else(|| {
-                docx_layout::LayoutError::Invalid("missing retained region layout".to_owned())
-            })?)?;
+            restored_fragment_pages =
+                retained.restore_fragments(previous.layout.as_ref().ok_or_else(|| {
+                    docx_layout::LayoutError::Invalid("missing retained region layout".to_owned())
+                })?)?;
             let dirty = section_start_of_first_changed_break(
                 &input.measured,
                 &retained.fingerprints,
@@ -2866,6 +2883,7 @@ fn place_region_pass(
             match run {
                 Ok(run) => {
                     incremental = true;
+                    unchanged_page_end = run.checkpointed.rebuilt_page_start;
                     run
                 }
                 Err(docx_layout::LayoutError::Unsupported(_)) => {
@@ -2874,10 +2892,12 @@ fn place_region_pass(
                 Err(error) => return Err(error),
             }
         } else if from_current.is_some() {
-            retained.restore_fragments(previous.layout.as_ref().ok_or_else(|| {
-                docx_layout::LayoutError::Invalid("missing retained region layout".to_owned())
-            })?)?;
+            restored_fragment_pages =
+                retained.restore_fragments(previous.layout.as_ref().ok_or_else(|| {
+                    docx_layout::LayoutError::Invalid("missing retained region layout".to_owned())
+                })?)?;
             incremental = retained.incremental;
+            unchanged_page_end = retained.layout.pages.len();
             docx_layout::place::IncrementalLayout {
                 checkpointed: docx_layout::place::CheckpointedLayout {
                     layout: retained.layout,
@@ -2904,20 +2924,35 @@ fn place_region_pass(
     let mut retained_layout = layout.clone();
     let mut fragment_pages = Vec::with_capacity(pages.len());
     for (index, page) in pages.iter_mut().enumerate() {
-        let encoded = serde_json::to_vec(&page.fragments)
-            .map_err(|error| docx_layout::LayoutError::Invalid(error.to_string()))?;
-        let mut shared = None;
-        for pass in &passes.next {
-            let Some(Some(fragments)) = pass.fragment_pages.get(index) else {
-                continue;
-            };
-            if region_shape_offsets_match(fragments, &page.fragments)
-                && serde_json::to_vec(fragments.as_ref())
+        let mut shared = if index < unchanged_page_end {
+            restored_fragment_pages
+                .get_mut(index)
+                .and_then(Option::take)
+        } else {
+            None
+        };
+        if shared.is_none() {
+            let mut encoded = None;
+            for pass in &passes.next {
+                let Some(Some(fragments)) = pass.fragment_pages.get(index) else {
+                    continue;
+                };
+                if !region_shape_offsets_match(fragments, &page.fragments) {
+                    continue;
+                }
+                if encoded.is_none() {
+                    encoded =
+                        Some(serde_json::to_vec(&page.fragments).map_err(|error| {
+                            docx_layout::LayoutError::Invalid(error.to_string())
+                        })?);
+                }
+                if serde_json::to_vec(fragments.as_ref())
                     .map_err(|error| docx_layout::LayoutError::Invalid(error.to_string()))?
-                    == encoded
-            {
-                shared = Some(Rc::clone(fragments));
-                break;
+                    == *encoded.as_ref().expect("encoded region page")
+                {
+                    shared = Some(Rc::clone(fragments));
+                    break;
+                }
             }
         }
         let fragments = std::mem::take(&mut page.fragments);
