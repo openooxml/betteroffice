@@ -2734,7 +2734,12 @@ impl EngineSession {
         read: impl FnOnce(&[LayoutBlock]) -> T,
     ) -> Result<T, BridgeError> {
         self.with_resident_story(story, env, |blocks| {
-            read(&blocks.iter().map(|block| block.as_ref().clone()).collect::<Vec<_>>())
+            read(
+                &blocks
+                    .iter()
+                    .map(|block| block.as_ref().clone())
+                    .collect::<Vec<_>>(),
+            )
         })
     }
 
@@ -4407,16 +4412,12 @@ impl EngineSession {
                 docx_layout::footnotes::NoteKind::Endnote => "en",
             };
             let mut blocks = self
-                .with_resident_story(
-                    &format!("{prefix}:{}", content.id),
-                    render_env,
-                    |blocks| {
-                        blocks
-                            .iter()
-                            .map(|block| block.as_ref().clone())
-                            .collect::<Vec<_>>()
-                    },
-                )
+                .with_resident_story(&format!("{prefix}:{}", content.id), render_env, |blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| block.as_ref().clone())
+                        .collect::<Vec<_>>()
+                })
                 .map_err(|error| error.to_string())?;
             for block in &mut blocks {
                 resolve_line_unit_spacing(
