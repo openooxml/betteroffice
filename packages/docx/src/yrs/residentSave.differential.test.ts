@@ -803,6 +803,10 @@ function liveCommentIds(parts: Record<string, Uint8Array>): ReadonlySet<string> 
   );
 }
 
+function liveSaveCommentIds(commentsXmlIds: ReadonlySet<string>, saveCommentIds: readonly string[]): ReadonlySet<string> {
+  return new Set(saveCommentIds.filter((id) => commentsXmlIds.has(id)));
+}
+
 function danglingRangeMarkers(xml: string, liveIds: ReadonlySet<string>): string[] {
   return [...xml.matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
     .map((match) => match[1]!)
@@ -820,7 +824,7 @@ function withoutStaleCommentMarkers(xml: string, ids: ReadonlySet<string>): stri
 }
 
 function mergedTextRuns(xml: string): string {
-  const pattern = /^<w:r>(<w:rPr>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:t(?: xml:space="preserve")?>([^<]*)<\/w:t><\/w:r>$/;
+  const pattern = /^<w:r>(<w:rPr>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:t( xml:space="preserve")?>([^<]*)<\/w:t><\/w:r>$/;
   let result = '';
   let offset = 0;
   let runStart = 0;
@@ -846,15 +850,15 @@ function mergedTextRuns(xml: string): string {
     const start = runStart;
     const end = tag.index! + tag[0].length;
     const match = xml.slice(start, end).match(pattern);
-    if (!match) continue;
+    if (!match || (!match[2] && /^\s|\s$/.test(match[3]!))) continue;
     const properties = match[1] ?? '';
     if (previous && previous.end === start && previous.properties === properties) {
       previous.end = end;
-      previous.text += match[2]!;
+      previous.text += match[3]!;
       previous.count += 1;
     } else {
       flush();
-      previous = { start, end, properties, text: match[2]!, count: 1 };
+      previous = { start, end, properties, text: match[3]!, count: 1 };
     }
   }
   flush();
@@ -867,22 +871,19 @@ function staleMainPartExempt(workerXml: string, mainXml: string, liveIds: Readon
     mergedTextRuns(withoutStaleCommentMarkers(mainXml, ids)) === mergedTextRuns(workerXml);
 }
 
-// Deferred: after a host projection, the main-thread save keeps the range markers of a comment
-// deleted outside the selection's story; the worker writes the story as it is.
+// Deferred: main-thread saves can retain deleted comment range markers.
 function staleMainCommentMarkers(
-  worker: Uint8Array, main: Uint8Array, parts: readonly string[], log: string[]
+  worker: Uint8Array, main: Uint8Array, parts: readonly string[], saveCommentIds: readonly string[], log: string[]
 ): boolean {
   const actual = unzipContainer(worker);
   const expected = unzipContainer(main);
-  const liveIds = liveCommentIds(expected);
-  const workerLiveIds = liveCommentIds(actual);
+  const liveIds = liveSaveCommentIds(liveCommentIds(expected), saveCommentIds);
   const matches = parts.length > 0 && parts.every((part) => {
     if (!/^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) ||
       actual[part] === undefined || expected[part] === undefined) return false;
     const workerXml = new TextDecoder().decode(actual[part]);
     const mainXml = new TextDecoder().decode(expected[part]);
-    return danglingRangeMarkers(workerXml, workerLiveIds).length === 0 &&
-      staleMainPartExempt(workerXml, mainXml, liveIds);
+    return staleMainPartExempt(workerXml, mainXml, liveIds);
   });
   if (matches) {
     for (const part of parts) {
@@ -891,11 +892,19 @@ function staleMainCommentMarkers(
       const ids = new Set(danglingRangeMarkers(xml, liveIds));
       const strippedMain = withoutStaleCommentMarkers(xml, ids);
       const merged = mergedTextRuns(strippedMain) !== strippedMain || mergedTextRuns(workerXml) !== workerXml;
-      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...ids])} merged runs=${merged}`);
+      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...ids])} ` +
+        `comments=${JSON.stringify(saveCommentIds)} merged runs=${merged}`);
     }
   }
   return matches;
 }
+
+test('live save comment ids intersect comments XML with the save list', () => {
+  const commentsXmlIds = new Set(['1', '5']);
+  expect(liveSaveCommentIds(commentsXmlIds, [])).toEqual(new Set<string>());
+  expect(liveSaveCommentIds(commentsXmlIds, ['5'])).toEqual(new Set(['5']));
+  expect(liveSaveCommentIds(new Set(['1']), ['1', '9'])).toEqual(new Set(['1']));
+});
 
 test('the stale comment marker exemption removes only dangling markers', () => {
   const worker = '<w:p><w:r><w:t>text</w:t></w:r></w:p>';
@@ -938,11 +947,17 @@ test('the stale comment marker exemption merges cached text runs without hiding 
     '<w:r><w:t>Y</w:t></w:r><w:commentRangeEnd w:id="5"/>' +
     '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="5"/></w:r>' +
     `<w:r><w:t xml:space="preserve"> gamma.</w:t></w:r>${reference}</w:p>`;
-  const liveIds = new Set<string>();
+  const commentsXmlIds = liveCommentIds({
+    'word/comments.xml': toBytes('<w:comments><w:comment w:id="1"/><w:comment w:id="5"/></w:comments>'),
+  });
+  const liveIds = liveSaveCommentIds(commentsXmlIds, []);
   expect(staleMainPartExempt(worker, main, liveIds)).toBe(true);
   const splitWorker = worker.replace('<w:r><w:t>Alpa betaY gamma.</w:t></w:r>',
     '<w:r><w:t xml:space="preserve">Alpa </w:t></w:r><w:r><w:t>betaY gamma.</w:t></w:r>');
   expect(staleMainPartExempt(splitWorker, main, liveIds)).toBe(true);
+  const unpreservedWorker = splitWorker.replace(' xml:space="preserve"', '');
+  expect(staleMainPartExempt(unpreservedWorker, main, liveIds)).toBe(false);
+  expect(mergedTextRuns(unpreservedWorker)).toBe(unpreservedWorker);
   expect(staleMainPartExempt(worker, main.replace('gamma', 'gamma!'), liveIds)).toBe(false);
   const formatted = main.replace('<w:r><w:t>Y</w:t></w:r>',
     '<w:r><w:rPr><w:b/></w:rPr><w:t>Y</w:t></w:r>');
@@ -951,7 +966,7 @@ test('the stale comment marker exemption merges cached text runs without hiding 
   expect(staleMainPartExempt(worker, main.replace('</w:p>', `${extraReference}</w:p>`), liveIds)).toBe(false);
   expect(staleMainPartExempt(worker, main.replace('</w:p>', '<w:r><w:tab/></w:r></w:p>'), liveIds)).toBe(false);
   expect(staleMainPartExempt(worker.replace(reference, ''), main, liveIds)).toBe(false);
-  expect(staleMainPartExempt(worker, main, new Set(['5']))).toBe(false);
+  expect(staleMainPartExempt(worker, main, liveSaveCommentIds(commentsXmlIds, ['5']))).toBe(false);
 });
 
 test('text run merging preserves formatting, whitespace and other children', () => {
@@ -975,6 +990,9 @@ test('text run merging preserves formatting, whitespace and other children', () 
     expect(mergedTextRuns(xml)).toBe(xml);
   }
   for (const run of [
+    '<w:r><w:t> keep</w:t></w:r>',
+    '<w:r><w:t>keep </w:t></w:r>',
+    '<w:r><w:t> keep </w:t></w:r>',
     '<w:r><w:tab/></w:r>',
     '<w:r><w:t>keep</w:t><w:tab/></w:r>',
     '<w:r><w:t>keep</w:t><w:br/></w:r>',
@@ -1024,13 +1042,15 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       arms = await openArms(seed, topology, log);
       const current = arms;
       let saveNumber = 0;
-      const compareSaved = ({ actual, expected }: Awaited<ReturnType<typeof saveWorkerArm>>) => {
+      const compareSaved = (
+        { actual, expected }: Awaited<ReturnType<typeof saveWorkerArm>>, saveCommentIds: readonly string[]
+      ) => {
         savesCompared += 1;
         const differences = partDifferences(new Uint8Array(actual.bytes), expected);
         if (differences.length > 0) {
           const parts = differences.map(({ part }) => part);
           const exemptions: string[] = [];
-          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, exemptions)) {
+          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, saveCommentIds, exemptions)) {
             staleMainSeeds.add(seed);
             staleMainSaves += 1;
             log.push(...exemptions);
@@ -1054,9 +1074,9 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         }
         await flushPeer(current);
         const dirty = JSON.stringify([...current.main.dirtyStories].sort());
-        const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
-        log.push(`save ${++saveNumber} dirty=${dirty} comments=${comments}`);
-        compareSaved(await saveWorkerArm(current, () => current.main.save()));
+        const comments = hostComments(current.main.host).map(({ id }) => id);
+        log.push(`save ${++saveNumber} dirty=${dirty} comments=${JSON.stringify(comments)}`);
+        compareSaved(await saveWorkerArm(current, () => current.main.save()), comments.map(String));
       };
       if (topology !== 'C/hydrate') {
         await compareSave();
@@ -1092,13 +1112,13 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
           if (operation.action === 'overlapSave' && current.peer) {
             await flushPeer(current);
             const dirty = JSON.stringify([...current.main.dirtyStories].sort());
-            const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
-            log.push(`overlap save dirty=${dirty} comments=${comments}`);
+            const comments = hostComments(current.main.host).map(({ id }) => id);
+            log.push(`overlap save dirty=${dirty} comments=${JSON.stringify(comments)}`);
             const oracle = () => current.main.save();
             const saves = await Promise.all([saveWorkerArm(current, oracle), saveWorkerArm(current, oracle)]);
             for (const [part, saved] of saves.entries()) {
               log.push(`overlap save ${++saveNumber} (${part + 1}/2)`);
-              compareSaved(saved);
+              compareSaved(saved, comments.map(String));
             }
           } else {
             await compareSave();
