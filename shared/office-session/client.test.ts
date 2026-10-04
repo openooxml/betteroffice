@@ -3,7 +3,7 @@ import { createSessionClient, type SessionClientOptions } from './client';
 import { SessionFailure } from './types';
 import type { SessionTransport } from './transport';
 
-function harness() {
+function harness(onWasmModule?: (url: string, module: WebAssembly.Module) => void) {
   let now = 0;
   let next = 0;
   const timers = new Map<number, { at: number; callback: () => void }>();
@@ -18,7 +18,7 @@ function harness() {
     close: () => { closes += 1; },
   };
   const client = createSessionClient<{ echo(value: string): string }, { tick: number }>(transport, {
-    methods: { echo: true }, silenceMs: 100, now: () => now,
+    methods: { echo: true }, silenceMs: 100, now: () => now, onWasmModule,
     timer: (callback, ms) => {
       const id = next++;
       timers.set(id, { at: now + ms, callback });
@@ -43,6 +43,33 @@ function harness() {
 }
 
 describe('session client', () => {
+  it('receives compiled modules independently of pending replies', async () => {
+    const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+    const modules: Array<{ url: string; module: WebAssembly.Module }> = [];
+    const h = harness((url, module) => { modules.push({ url, module }); });
+    const reply = h.client.call.echo('pending');
+    h.advance(80);
+    h.receive({ protocol: 1, kind: 'wasm-module', url: 'https://example.test/module.wasm', module });
+    h.advance(80);
+    expect(h.client.failure).toBeUndefined();
+    expect(modules).toEqual([{ url: 'https://example.test/module.wasm', module }]);
+    expect(h.timerCount).toBe(1);
+    h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'pending' });
+    expect(await reply).toBe('pending');
+    expect(h.timerCount).toBe(0);
+    await h.client.dispose();
+    h.receive({ protocol: 1, kind: 'wasm-module', url: 'https://example.test/late.wasm', module });
+    expect(modules).toHaveLength(1);
+  });
+
+  it('ignores valid compiled modules when no cache listener is installed', async () => {
+    const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+    const h = harness();
+    h.receive({ protocol: 1, kind: 'wasm-module', url: 'https://example.test/module.wasm', module });
+    expect(h.client.failure).toBeUndefined();
+    await h.client.dispose();
+  });
+
   it('requires every method in the method record', () => {
     type Methods = { echo(value: string): string; add(a: number, b: number): number };
     // @ts-expect-error
@@ -155,6 +182,7 @@ describe('session client', () => {
 
   it('makes malformed inbound messages terminal', async () => {
     for (const message of [null, { kind: 'event', name: 'tick', payload: 1 },
+      { protocol: 1, kind: 'wasm-compile' },
       { protocol: 1, kind: 'reply', id: 1, ok: true },
       { protocol: 1, kind: 'reply', id: 1, ok: false, error: {} }]) {
       const h = harness();
