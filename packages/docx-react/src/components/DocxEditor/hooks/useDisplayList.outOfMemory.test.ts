@@ -516,12 +516,89 @@ test.each(['editor', 'viewer'])('%s open leaves unavailable worker handling to i
   }
 });
 
-test('viewer previews are refused without creating a main preview or a worker replica', async () => {
-  const source = viewerFixture();
+test('a viewer preview opens in the worker without a main preview or a replica', async () => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
   const hook = viewerDisplay(source);
   try {
-    expect(await hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8)).toBeNull();
-    expect(FakeWorker.spawned).toHaveLength(0);
+    const pending = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const worker = FakeWorker.spawned[0]!;
+    expect(worker.last()).toMatchObject({ type: 'open', previewBlocks: 8 });
+    await act(async () => { replyOpened(worker); await pending; });
+    const opened = await pending;
+    expect(opened).not.toBeNull();
+    expect(hook.result.current.layoutInWorker.isViewerSession!(source.engine)).toBe(true);
+    act(() => opened!.release());
+    expect(worker.terminated).toBe(false);
+    expect(workerOpenReplicaPending(source.engine)).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['refused', 'throw', 'crash'] as const)('a viewer preview %s before it is shown returns null without a main build or terminal error', async (failureKind) => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  try {
+    const pending = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => {
+      if (failureKind === 'crash') worker.onerror?.({ message: 'preview crashed' } as ErrorEvent);
+      else if (failureKind === 'throw') worker.trapped();
+      else worker.onmessage?.({ data: {
+        id: worker.last().id, ok: true, previewRefused: true,
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      await pending;
+    });
+    const opened = await pending;
+    expect(opened).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    expect(workerOpenReplicaPending(source.engine)).toBe(false);
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a shown viewer preview crash spends the full open retry before the full open is queued', async () => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  try {
+    const preview = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const first = FakeWorker.spawned[0]!;
+    await act(async () => { replyOpened(first); await preview; });
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(source.frame(1), 1); });
+    await waitFor(() => expect(hook.result.current.presentedEngine).toBe(source.engine));
+    const shown = hook.result.current.displayList;
+    await act(async () => {
+      first.onerror?.({ message: 'preview crashed' } as ErrorEvent);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.displayList).toBe(shown);
+    const full = { ...source.engine, isDisplayOnly: () => false } as YrsSession;
+    const pending = hook.result.current.openInWorker(full, Uint8Array.of(2))
+      .catch((error: unknown) => error);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'open', bytes: Uint8Array.of(2).buffer });
+    let failure: unknown;
+    await act(async () => { second.trapped(); failure = await pending; });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('open');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(FakeWorker.spawned).toHaveLength(2);
     expectWorkerOnly(source);
   } finally {
     hook.unmount();

@@ -383,6 +383,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       pendingLayoutOriginRef.current = null;
       markLayoutQueued(owner, false);
     }
+    if (viewer && failure instanceof SupersededPreviewError) return failure;
     onErrorRef.current?.(failure, owner);
     return failure;
   }, [isViewerSession]);
@@ -471,7 +472,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                 // A superseded preflight drops its pass; the pass that superseded it lays out.
                 if (!(error instanceof SupersededPreviewError)) {
                   reportLayoutError(session, error);
-                } else if (isViewerSession(session)) {
+                } else if (isViewerSession(session) && !session.isDisplayOnly?.()) {
                   queueWorkerPass(session);
                   requestPass();
                 }
@@ -761,6 +762,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                   if (!isViewerSession(session) || pass !== passRef.current ||
                     sessionRef.current !== session || error instanceof ResidentWorkerOutOfMemoryError) return;
                   if (error instanceof SupersededPreviewError) {
+                    if (session.isDisplayOnly?.()) return;
                     queueWorkerPass(session);
                     requestPass();
                     return;
@@ -775,7 +777,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
               if (!isViewerSession(session) && workerProposalFailure(session) === error) return;
               if (error instanceof SupersededPreviewError) {
-                if (isViewerSession(session)) queueWorkerPass(session);
+                if (isViewerSession(session) && !session.isDisplayOnly?.()) queueWorkerPass(session);
                 return;
               }
               console.error('[PagedEditor] Layout pipeline error:', error);

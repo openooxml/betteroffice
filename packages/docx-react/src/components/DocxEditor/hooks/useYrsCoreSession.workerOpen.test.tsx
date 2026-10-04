@@ -1464,6 +1464,70 @@ test.each([false, true])('a worker preview lays out before the full worker open 
   }
 });
 
+test.each([false, true])('a shown viewer preview crash retries only the queued full document with terminal=%s', async (terminal) => {
+  const fullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  const options: Parameters<typeof installWorker>[0] = { holdReply: fullOpen, holdRetryOpen: true };
+  const { workers, posted } = installWorker(options);
+  const frames = holdFrames();
+  const main = trackMainLoads();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, previewFirstPage: true, workerPreview: true, source: longBytes, viewer: true,
+    },
+  });
+  try {
+    await waitFor(() => expect(result.current.core.previewing).toBe(true));
+    const preview = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(preview));
+    await waitFor(() => expect(posted.filter(fullOpen)).toHaveLength(1));
+    const shown = result.current.renderer.displayList;
+    expect(shown?.pages.length).toBeGreaterThan(0);
+    options.holdReply = () => false;
+    await act(async () => {
+      workers[0].onerror?.({ message: 'preview worker crashed' } as ErrorEvent);
+    });
+    await waitFor(() => expect(posted.filter(fullOpen)).toHaveLength(2));
+    expect(result.current.renderer.displayList).toBe(shown);
+    act(() => result.current.presentFrame());
+    act(() => frames.run());
+    act(() => frames.run());
+    if (terminal) {
+      await act(async () => {
+        workers[1].onerror?.({ message: 'full open retry crashed' } as ErrorEvent);
+      });
+      await waitFor(() => expect(result.current.errors).toHaveLength(1));
+      const failure = result.current.errors[0];
+      expect(failure).toBeInstanceOf(DocxWorkerError);
+      expect((failure as DocxWorkerError).stage).toBe('open');
+      expect(result.current.renderer.error).toBe(failure!);
+      expect(result.current.core.session).toBeNull();
+      for (let frame = 0; frame < 5; frame += 1) await act(async () => frames.run());
+      expect(result.current.errors).toEqual([failure!]);
+    } else {
+      await act(async () => workers[1].release());
+      await waitFor(() => expect(result.current.core.previewing).toBe(false));
+      const full = result.current.core.session!;
+      expect(workerOpenDocumentHeld(full)).toBe(true);
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+      expect(result.current.renderer.displayList?.pages.length).toBeGreaterThan(0);
+      expect(result.current.errors).toEqual([]);
+    }
+    expect(workers).toHaveLength(2);
+    expect(posted.filter(fullOpen)).toHaveLength(2);
+    expect(posted.filter((request) => request.type === 'open' && request.previewBlocks !== undefined)).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    for (const load of main.loads) expect(load.mock.calls).toHaveLength(0);
+  } finally {
+    unmount();
+    main.restore();
+    frames.restore();
+  }
+});
+
 test('a preview font preflight answered after the full open took its worker over reports no error', async () => {
   const fullOpen = (request: ResidentEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
