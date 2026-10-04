@@ -2295,6 +2295,10 @@ impl Workbook {
     /// the update, so they see the recalculated state it produced.
     fn publish(&mut self, update: Option<Vec<u8>>) {
         self.committed_changes += 1;
+        self.geometry_cache
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         if let Some(update) = update {
             self.emit_update(UpdateEvent {
                 update,
