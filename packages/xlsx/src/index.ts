@@ -5,6 +5,19 @@
  * (lint-enforced).
  */
 
+/** @experimental */
+export { openWorkbookSession } from './session/client';
+/** @experimental */
+export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
+/** @experimental */
+export type {
+  WorkbookSessionEvents,
+  WorkbookSessionMethods,
+  WorkbookSessionOpenOptions,
+  WorkbookSessionState,
+  WorkbookSheetSummary,
+} from './session/methods';
+
 export type {
   Rect,
   TextAlign,

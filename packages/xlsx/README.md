@@ -34,6 +34,7 @@ const bytes = workbook.save();
 
 `initWasm()` fetches the packaged wasm asset once in browsers; other runtimes
 pass wasm bytes or a precompiled `WebAssembly.Module`.
+`openWorkbookSession` is an experimental, opt-in worker session for async reads, edits, sheet metadata, and saving.
 
 Around the handle, the package exports the helpers a custom grid needs:
 `cellAtPoint` / `cellRect` / `rangeRect` (hit-testing), the viewport math,
