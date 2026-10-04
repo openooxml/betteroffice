@@ -1643,7 +1643,8 @@ fn paragraph_positions_changed(previous: &LayoutBlock, next: &LayoutBlock) -> bo
                         || previous.fmt.modern_effects != next.fmt.modern_effects
                 }
                 (Run::Tab(previous), Run::Tab(next)) => {
-                    previous.fmt.modern_effects != next.fmt.modern_effects
+                    previous.leader_glyphs != next.leader_glyphs
+                        || previous.fmt.modern_effects != next.fmt.modern_effects
                 }
                 (Run::Field(previous), Run::Field(next)) => {
                     previous.fmt.modern_effects != next.fmt.modern_effects
@@ -7822,6 +7823,108 @@ mod tests {
                 serde_json::to_vec(&warm).unwrap(),
                 serde_json::to_vec(&cold_pages).unwrap()
             );
+        }
+    }
+
+    #[test]
+    fn pending_prefix_lines_materialize_before_leader_glyph_position_changes() {
+        for take in [false, true] {
+            let engine = EngineSession::new(9668);
+            let mut input: serde_json::Value =
+                serde_json::from_str(&paragraph_pagination_input("x", false)).unwrap();
+            input["measured"][5]["block"]["runs"] = json!([{
+                "kind": "tab", "width": 10, "pmStart": 11, "pmEnd": 12,
+                "leaderGlyphs": {"pmStart": 11}
+            }]);
+            let mut input: LayoutInput = serde_json::from_value(input).unwrap();
+            engine.layout_document_value(input.clone()).unwrap();
+            let LayoutBlock::Paragraph(dirty) = &mut input.measured[0].block else {
+                panic!("paragraph expected");
+            };
+            let Run::Text(run) = &mut dirty.runs[0] else {
+                panic!("text expected");
+            };
+            run.text = "y".to_owned();
+            let fingerprints = measured_fingerprints(&input).unwrap();
+            engine
+                .layout_document_value_with_fingerprints(input, fingerprints, None, false, true)
+                .unwrap();
+            assert!(engine.pagination.borrow().last_incremental);
+            let (mut input, fingerprints) = {
+                let pagination = engine.pagination.borrow();
+                (
+                    pagination.input.as_ref().unwrap().clone(),
+                    pagination.block_fingerprints.clone(),
+                )
+            };
+            let prefix_id = input.measured[5].block.block_id().unwrap();
+            let changed_fragments = engine
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pages
+                .iter()
+                .flat_map(|page| &page.fragments)
+                .filter(|fragment| {
+                    matches!(fragment, Fragment::Paragraph(fragment)
+                        if fragment.resolved_lines_pending && &fragment.block_id == prefix_id)
+                })
+                .count();
+            assert!(changed_fragments > 0);
+            let extents: Vec<_> = input
+                .measured
+                .iter()
+                .map(|entry| entry.measure.clone())
+                .collect();
+            let LayoutBlock::Paragraph(prefix) = &mut input.measured[5].block else {
+                panic!("paragraph expected");
+            };
+            let Run::Tab(tab) = &mut prefix.runs[0] else {
+                panic!("tab expected");
+            };
+            tab.leader_glyphs.as_mut().unwrap()["pmStart"] = json!(12);
+            let LayoutBlock::Paragraph(dirty) = &mut input.measured[10].block else {
+                panic!("paragraph expected");
+            };
+            let Run::Text(run) = &mut dirty.runs[0] else {
+                panic!("text expected");
+            };
+            run.text = "y".to_owned();
+            let blocks: Vec<_> = input.measured.into_iter().map(|entry| entry.block).collect();
+            let resident = engine
+                .resident_layout_input_from_blocks(
+                    &blocks,
+                    true,
+                    take,
+                    &mut |index, _, _, _| Ok(extents[index].clone()),
+                )
+                .unwrap();
+            assert_eq!(resident.block_fingerprints[..10], fingerprints[..10]);
+            assert_ne!(resident.block_fingerprints[10], fingerprints[10]);
+            let cold = EngineSession::new(9669);
+            cold.layout_document_value(resident.input.clone()).unwrap();
+            let before = engine.stats();
+            assert_eq!(before.pagination_resolved_fragments_materialized, 0);
+            engine
+                .layout_document_value_with_fingerprints(
+                    resident.input,
+                    resident.block_fingerprints,
+                    None,
+                    false,
+                    true,
+                )
+                .unwrap();
+            let after = engine.stats();
+            assert_eq!(
+                after.pagination_resolved_fragments_materialized
+                    - before.pagination_resolved_fragments_materialized,
+                changed_fragments as u64
+            );
+            assert!(after.pagination_resolved_prefix_checked > 0);
+            engine.pagination.borrow_mut().materialize_resolved_lines();
+            assert_eq!(retained_pages(&engine), retained_pages(&cold));
         }
     }
 
