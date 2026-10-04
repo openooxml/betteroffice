@@ -37,6 +37,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const openWorkbook = (bytes) => testHarness.open(bytes);
               export const decodeTiffImage = () => { throw new Error('decodeTiffImage is not stubbed'); };
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
+              export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
             `,
             loader: 'js',
@@ -125,6 +126,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
           open(bytes: Uint8Array) {
             return {
               snapshot: () => ({ slides: [], widthEmu: 0, heightEmu: 0 }),
+              version: () => '0',
               sheetInfo: () => ({ sheetIds: [], sheetNames: [], activeSheet: 0 }),
               save: () => bytes.slice(),
               dispose() {},
