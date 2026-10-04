@@ -18,6 +18,8 @@ import type {
 } from './residentEngineWorkerProtocol';
 import type { DocxProposalRegistryState } from './proposals';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import { editWasmModule } from './wasm/index';
 
 /** @internal */
@@ -202,7 +204,11 @@ export class ResidentEngineWorkerClient {
           this.appliedFontsRevision = null;
           this.lastFailedFontsSnapshotId = this.nextId - 1;
         }
-        pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+        pending.reject(
+          response.code === 'save-unavailable'
+            ? new ResidentWorkerSaveUnavailableError(response.error)
+            : residentWorkerError(response.error, response.residentUnavailable)
+        );
       }
     };
     this.worker.onerror = (event) => {
@@ -470,6 +476,40 @@ export class ResidentEngineWorkerClient {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
     }
     return new Uint8Array(response.state);
+  }
+
+  /**
+   * @internal Saves the opened document in the worker. With the editor copy's
+   * `stateVector`, `updates` carry what the worker holds beyond it (the
+   * paragraph IDs the save wrote among them) for that copy to integrate;
+   * `version` is the document version after the save.
+   */
+  async save(request: {
+    comments: Comment[];
+    host?: Document;
+    stateVector?: Uint8Array;
+    /** @internal */
+    stories?: readonly string[];
+  }): Promise<{ bytes: ArrayBuffer; updates: Uint8Array[]; version: string }> {
+    const response = await this.request({
+      type: 'save',
+      comments: request.comments,
+      ...(request.host === undefined ? {} : { host: request.host }),
+      ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
+      ...(request.stories === undefined ? {} : { stories: [...request.stories] }),
+    });
+    if (
+      !(response.saved instanceof ArrayBuffer) ||
+      !Array.isArray(response.updates) ||
+      typeof response.version !== 'string'
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the saved document');
+    }
+    return {
+      bytes: response.saved,
+      updates: response.updates.map((update) => new Uint8Array(update)),
+      version: response.version,
+    };
   }
 
   async revisionCount(): Promise<number> {
@@ -855,6 +895,9 @@ class ResidentWorkerUnavailableError extends Error {}
 
 /** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
 export class ResidentWorkerFailureError extends Error {}
+
+/** The worker has no whole opened package to save. @internal */
+export class ResidentWorkerSaveUnavailableError extends ResidentWorkerFailureError {}
 
 /** The worker trapped because its wasm memory could not grow any further. */
 export class ResidentWorkerOutOfMemoryError extends ResidentWorkerUnavailableError {

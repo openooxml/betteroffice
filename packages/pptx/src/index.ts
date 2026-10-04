@@ -5,6 +5,7 @@ export { openPresentationSession } from './session/client';
 export type { OpenPresentationSessionOptions, PresentationSession } from './session/client';
 /** @experimental */
 export type {
+  PresentationFrame,
   PresentationSessionEvents,
   PresentationSessionFont,
   PresentationSessionMethods,

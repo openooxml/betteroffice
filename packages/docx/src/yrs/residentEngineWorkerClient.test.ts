@@ -5,6 +5,7 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
@@ -141,6 +142,87 @@ function setup() {
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
 }
+
+test('save posts comments and optional host metadata and returns the saved buffer and its updates', async () => {
+  const { worker, client } = setup();
+  const host = { package: { document: { content: [] } } };
+  const pending = client.save({ comments: [], host });
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'save', comments: [], host });
+  expect(worker.transfers[0]).toEqual([]);
+  const saved = new ArrayBuffer(4);
+  const stateVector = new Uint8Array([3, 1]).buffer;
+  worker.reply({
+    id: worker.lastId(), ok: true, saved, updates: [new Uint8Array([9]).buffer], stateVector,
+    version: 'saved',
+  });
+  const result = await pending;
+  expect(result.bytes).toBe(saved);
+  expect(result.updates.map((update) => [...update])).toEqual([[9]]);
+  expect(result.version).toBe('saved');
+  expect([...client.remoteStateVector()!]).toEqual([3, 1]);
+  const withoutHost = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutHost;
+  client.destroy();
+});
+
+test('save copies peer stories and state vector and omits them when absent', async () => {
+  const { worker, client } = setup();
+  const stateVector = new Uint8Array([1, 2, 3]);
+  const stories = ['hf:rIdH1'];
+  const pending = client.save({ comments: [], stateVector, stories });
+  const request = worker.requestAt(0);
+  expect(request).toEqual({ id: worker.lastId(), type: 'save', comments: [], stateVector, stories });
+  if (request.type !== 'save') throw new Error('Expected a save request');
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(request.stateVector!.buffer).not.toBe(stateVector.buffer);
+  expect(request.stories).not.toBe(stories);
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await pending;
+  const withoutVector = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutVector;
+  const empty = client.save({ comments: [], stories: [] });
+  expect(worker.requestAt(2)).toEqual({ id: worker.lastId(), type: 'save', comments: [], stories: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await empty;
+  client.destroy();
+});
+
+test('save rejects a missing or malformed saved buffer', async () => {
+  const { worker, client } = setup();
+  for (const reply of [
+    { updates: [], version: 'v' },
+    { saved: new Uint8Array(4), updates: [], version: 'v' },
+    { saved: new ArrayBuffer(4), version: 'v' },
+    { saved: new ArrayBuffer(4), updates: [] },
+  ]) {
+    const pending = client.save({ comments: [] });
+    worker.reply({ id: worker.lastId(), ok: true, ...reply } as ResidentEngineWorkerResponse);
+    await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  }
+  client.destroy();
+});
+
+test('an unavailable save is a recoverable save failure', async () => {
+  const { worker, client } = setup();
+  const pending = client.save({ comments: [] });
+  worker.reply({
+    id: worker.lastId(), ok: false,
+    error: 'Resident engine worker is still opening', code: 'save-unavailable',
+  });
+  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  expect(client.hasFailed()).toBe(false);
+  const retry = client.save({ comments: [] });
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'v' });
+  expect((await retry).bytes).toBe(saved);
+  client.destroy();
+});
 
 test('a font base mismatch forgets optimistic revisions, including queued snapshots', async () => {
   const { worker, client } = setup();

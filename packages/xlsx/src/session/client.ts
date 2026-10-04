@@ -4,13 +4,16 @@ import {
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
-import type { OpenWorkbookOptions } from '../wasm/loader';
+import type { OpenWorkbookOptions, Viewport } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
+  type WorkbookFrame,
+  type WorkbookFrameOptions,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
   type WorkbookSessionOpenOptions,
   type WorkbookSessionState,
+  type WorkbookWireFrame,
 } from './methods';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
@@ -31,7 +34,13 @@ export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
  */
 export interface WorkbookSession {
   readonly state: WorkbookSessionState;
-  readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'dispose'>>;
+  readonly call: Promisified<Omit<WorkbookSessionMethods, 'open' | 'dispose' | 'frame'>> & {
+    /**
+     * @experimental A newer `frame` call replaces a queued one, which rejects with an error
+     * named `SessionSuperseded`.
+     */
+    frame(viewport: Viewport, options?: WorkbookFrameOptions): Promise<WorkbookFrame>;
+  };
   save(): Promise<Uint8Array>;
   on<K extends keyof WorkbookSessionEvents>(
     name: K, listener: (payload: WorkbookSessionEvents[K]) => void
@@ -45,6 +54,13 @@ function copyBytes(bytes: Uint8Array | ArrayBuffer): Uint8Array<ArrayBuffer> {
   return ArrayBuffer.isView(bytes)
     ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice()
     : new Uint8Array(bytes).slice();
+}
+
+function decodeFrame(frame: WorkbookWireFrame): WorkbookFrame {
+  return {
+    ...frame,
+    displayList: JSON.parse(new TextDecoder().decode(frame.displayList)) as WorkbookFrame['displayList'],
+  };
 }
 
 function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessionOptions): {
@@ -114,10 +130,15 @@ export async function createWorkbookSession(
     throw error;
   }
 
-  const { version, readCells, findText, validateEdits, applyEdits, sheets, calculationStatus, save } = client.call;
+  const {
+    version, readCells, findText, validateEdits, applyEdits, frame, sheets, calculationStatus, save,
+  } = client.call;
   return {
     get state() { return state; },
-    call: { version, readCells, findText, validateEdits, applyEdits, sheets, calculationStatus, save },
+    call: {
+      version, readCells, findText, validateEdits, applyEdits, sheets, calculationStatus, save,
+      frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),
+    },
     save: async () => new Uint8Array(await save()),
     on: (name, listener) => client.on(name, listener),
     onFailure: (listener) => client.onFailure(listener),
