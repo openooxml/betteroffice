@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Unbounded};
+use std::sync::Arc;
 
 use xlsx_parse::{SharedStringCells, SheetAxes};
 
@@ -305,9 +306,7 @@ impl PreservedSnapshotBuilder {
             ORIGIN => self.state.origins.push(r.option(Reader::var_usize)?),
             STRINGS => {
                 let count = r.var_usize()?;
-                self.state
-                    .shared_string_cells
-                    .push(SharedStringCells::new());
+                Arc::make_mut(&mut self.state.shared_string_cells).push(SharedStringCells::new());
                 if count != 0 {
                     self.runs.push_front((STRING_CELL, count));
                 }
@@ -315,9 +314,7 @@ impl PreservedSnapshotBuilder {
             STRING_CELL => {
                 let key = (r.var_u32()?, r.var_u32()?);
                 let index = r.var_usize()?;
-                let cells = self
-                    .state
-                    .shared_string_cells
+                let cells = Arc::make_mut(&mut self.state.shared_string_cells)
                     .last_mut()
                     .ok_or_else(|| SnapshotError::new("snapshot SST cell has no sheet"))?;
                 if cells
@@ -370,12 +367,12 @@ mod tests {
     fn preservation_roundtrip_keeps_duplicate_sst_indices_and_axis_presence() {
         let state = PreservedSheetState {
             origins: vec![None, Some(0), Some(usize::MAX)],
-            shared_string_cells: vec![
+            shared_string_cells: Arc::new(vec![
                 [((0, 0), 0), ((0, 1), 7), ((0, 2), 3), ((5, 0), 7)]
                     .into_iter()
                     .collect(),
                 SharedStringCells::new(),
-            ],
+            ]),
             axes: vec![None, Some(SheetAxes::default()), Some(SheetAxes::default())],
             created: vec![false, true, false, true],
         };
@@ -410,7 +407,7 @@ mod tests {
         axes.rows.insert(1, 1);
         let state = PreservedSheetState {
             origins: vec![Some(0)],
-            shared_string_cells: vec![SharedStringCells::new()],
+            shared_string_cells: Arc::new(vec![SharedStringCells::new()]),
             axes: vec![Some(axes)],
             created: vec![false],
         };
@@ -426,7 +423,7 @@ mod tests {
         let chunks = encode(
             &PreservedSheetState {
                 origins: vec![None, Some(0)],
-                shared_string_cells: Vec::new(),
+                shared_string_cells: Arc::default(),
                 axes: vec![None],
                 created: vec![true],
             },
@@ -449,7 +446,7 @@ mod tests {
     fn preservation_byte_budget_errors_leave_the_cursor_retryable() {
         let state = PreservedSheetState {
             origins: vec![Some(usize::MAX)],
-            shared_string_cells: Vec::new(),
+            shared_string_cells: Arc::default(),
             axes: Vec::new(),
             created: Vec::new(),
         };

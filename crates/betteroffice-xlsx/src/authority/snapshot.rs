@@ -641,6 +641,7 @@ impl AuthoritySnapshotEncoder {
     pub(crate) fn new(a: &WorkbookAuthority, budget: SnapshotBudget) -> SnapshotResult<Self> {
         let WorkbookAuthority {
             doc,
+            projection_valid: _,
             base,
             history: _,
             next_sheet_id: _,
@@ -705,6 +706,7 @@ impl WorkbookAuthority {
     pub(crate) fn snapshot_identity(&self) -> (u64, String, u64) {
         let Self {
             doc,
+            projection_valid: _,
             base: _,
             history: _,
             next_sheet_id,
@@ -944,14 +946,7 @@ impl AuthorityHydrator {
             ));
         }
         let base = self.base.finish()?;
-        let authority = WorkbookAuthority {
-            doc: self.doc,
-            base: Arc::new(base),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: self.next_sheet_id,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        };
+        let authority = WorkbookAuthority::hydrated(self.doc, Arc::new(base), self.next_sheet_id);
         if authority.encode_state_vector_v1() != self.state_vector {
             return Err(SnapshotError::new(
                 "authority snapshot state vector differs",

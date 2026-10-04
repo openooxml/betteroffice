@@ -192,6 +192,77 @@ test('save copies peer stories and state vector and omits them when absent', asy
   client.destroy();
 });
 
+test('syncUpdate copies and acknowledges the peer diff, vector and worker repairs', async () => {
+  const { worker, client } = setup();
+  const update = new Uint8Array([7, 8]);
+  const stateVector = new Uint8Array([1, 2]);
+  client.invalidate(new Uint8Array([6]), null);
+  const pending = client.syncUpdate(update, stateVector);
+  client.invalidate(new Uint8Array([9]), null);
+  const request = worker.requestAt(1);
+  expect(worker.posted.map((message) => message.type)).toEqual(['applyUpdate', 'syncUpdate', 'applyUpdate']);
+  expect(request).toMatchObject({ type: 'syncUpdate', update, stateVector });
+  if (request.type !== 'syncUpdate') throw new Error('Expected syncUpdate');
+  expect(request.update).not.toBe(update);
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(worker.transfers[1]).toEqual([request.update.buffer, request.stateVector.buffer]);
+  worker.reply({ id: request.id, ok: true, version: 'worker-v', stateVector: new Uint8Array([3]).buffer, repair: new Uint8Array([4]).buffer });
+  expect(await pending).toEqual({ version: 'worker-v', stateVector: new Uint8Array([3]), repair: new Uint8Array([4]) });
+  expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+  client.destroy();
+});
+
+test('syncUpdate sends an empty update even when the peer state vector is unchanged', async () => {
+  const { worker, client } = setup();
+  const vector = new Uint8Array([1, 2]);
+  for (let i = 0; i < 2; i += 1) {
+    const pending = client.syncUpdate(new Uint8Array(), vector);
+    expect(worker.requestAt(i)).toMatchObject({ type: 'syncUpdate', update: new Uint8Array(), stateVector: vector });
+    worker.reply({ id: worker.lastId(), ok: true, version: `v${i}`, stateVector: vector.slice().buffer, repair: null });
+    expect((await pending).repair).toBeNull();
+  }
+  client.destroy();
+});
+
+test('syncUpdate rejects incomplete acknowledgments', async () => {
+  const { worker, client } = setup();
+  for (const fields of [
+    { stateVector: new ArrayBuffer(0), repair: null },
+    { version: 'v', repair: null },
+    { version: 'v', stateVector: new ArrayBuffer(0) },
+  ]) {
+    const pending = client.syncUpdate(new Uint8Array(), new Uint8Array());
+    worker.reply({ id: worker.lastId(), ok: true, ...fields });
+    await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  }
+  client.destroy();
+});
+
+test('an empty syncUpdate preserves readiness of the retained worker frame', async () => {
+  const { worker, client } = setup();
+  const bootstrapped = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrapped;
+  expect(client.isReady()).toBe(true);
+  const acknowledged = client.syncUpdate(new Uint8Array([0, 0]), new Uint8Array([0]));
+  worker.reply({ id: worker.lastId(), ok: true, version: 'v', stateVector: new Uint8Array([0]).buffer, repair: null });
+  await acknowledged;
+  expect(client.isReady()).toBe(true);
+  client.destroy();
+});
+
+test('syncUpdate rejects worker crashes and out-of-memory traps', async () => {
+  const first = setup();
+  const crashed = first.client.syncUpdate(new Uint8Array(), new Uint8Array());
+  first.worker.onerror?.({ message: 'crash' } as ErrorEvent);
+  await expect(crashed).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  expect(first.worker.terminated).toBe(true);
+  const second = setup();
+  const trapped = second.client.syncUpdate(new Uint8Array(), new Uint8Array());
+  second.worker.reply({ id: second.worker.lastId(), ok: false, error: 'out of memory', terminal: true, outOfMemory: true });
+  await expect(trapped).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+});
+
 test('save rejects a missing or malformed saved buffer', async () => {
   const { worker, client } = setup();
   for (const reply of [
