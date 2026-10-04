@@ -693,9 +693,9 @@ fn wraps_by_page_side(shape: &docx_layout::types::ShapeBlock) -> bool {
         ))
 }
 
-fn has_wrap_stabilized_shapes(blocks: &[LayoutBlock]) -> bool {
+fn has_wrap_stabilized_shapes<'a>(blocks: impl IntoIterator<Item = &'a LayoutBlock>) -> bool {
     blocks
-        .iter()
+        .into_iter()
         .any(|block| matches!(block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape)))
 }
 
@@ -3274,6 +3274,7 @@ impl EngineSession {
             && !provisional
             && !self.partial_document.get()
             && !has_floats
+            && !has_wrap_stabilized_shapes(input.measured.iter().map(|measured| &measured.block))
             && !refs.is_empty()
         {
             parsed_render_env
@@ -3441,11 +3442,11 @@ impl EngineSession {
             // Placement only zeroes contextual spacing, which every pass applies
             // again, so the note passes replay the body arena in place. Page-side
             // wrapping rewrites shapes per pass, so it replays a copy instead.
-            let mut base_input = (!refs.is_empty()
+        let mut base_input = (!refs.is_empty()
                 && resident_body
-                && input.measured.iter().any(|measured| {
-                    matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
-                }))
+                && has_wrap_stabilized_shapes(
+                    input.measured.iter().map(|measured| &measured.block),
+                ))
             .then(|| input.clone());
             let (mut initial_layout, mut arena) = if refs.is_empty() {
                 self.layout_document_value_with_fingerprints(
@@ -8943,6 +8944,90 @@ mod tests {
     }
 
     #[test]
+    fn footnote_page_side_shape_uses_full_layout() {
+        use super::lowering_fixture::{Package, para, run};
+
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let shape = concat!(
+            r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" "#,
+            r#"simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" "#,
+            r#"allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="page">"#,
+            r#"<wp:align>inside</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph">"#,
+            r#"<wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="190500" cy="381000"/>"#,
+            r#"<wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="Inside shape"/>"#,
+            r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">"#,
+            r#"<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/>"#,
+            r#"<a:ext cx="190500" cy="381000"/></a:xfrm><a:prstGeom prst="rect">"#,
+            r#"<a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp>"#,
+            r#"</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+        );
+        let body = para(
+            "60000001",
+            &format!(
+                r#"{shape}{}<w:r><w:footnoteReference w:id="1"/></w:r>"#,
+                run("A short line"),
+            ),
+        );
+        let engine = EngineSession::new(9622);
+        crate::seed::seed_from_docx(engine.doc(), &Package::new(&body).bytes()).unwrap();
+        engine
+            .doc()
+            .create_story("fn:1", "A note with several words.", "Normal", "left")
+            .unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "renderEnv": {},
+            "regions": {"sections": [{
+                "sectionId": "main", "pageSize": {"w": 200, "h": 240},
+                "margins": {"top": 10, "right": 10, "bottom": 10, "left": 40}
+            }]},
+            "notes": {"contents": [{"id": 1, "height": 0}]},
+            "measurement": {
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+        });
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains: serde_json::Map<String, serde_json::Value> = requirements
+            .iter()
+            .map(|requirement| {
+                (requirement["key"].as_str().unwrap().to_owned(), json!([font]))
+            })
+            .collect();
+        request["measurement"]["fontChains"] = json!(chains);
+        let request = request.to_string();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        assert!(!engine.pagination.borrow().measured_with_floats);
+        assert!(has_wrap_stabilized_shapes(
+            engine
+                .pagination
+                .borrow()
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .map(|measured| &measured.block)
+        ));
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(0);
+        let index = engine.doc().paragraph_index("body").unwrap();
+        let (start, _) = index.para_span(&paragraph.para_id).unwrap();
+        local_patch_step(&engine, &request, "body", (start + 8, start + 8, Some("x")), false);
+        assert_eq!(engine.pagination.borrow().note_shortcut_taken, 0);
+        assert!(engine.regions.borrow().as_ref().unwrap().note_reuse.is_none());
+        assert_region_state_matches_cold(&engine, &request, "page-side shape with footnotes");
+    }
+
+    #[test]
     fn footnote_line_wrap_uses_full_layout() {
         let prefix = note_boundary_prefix("", NoteTypingChange::LineWrap);
         let (engine, request) = note_typing_fixture(&prefix, "");
@@ -9089,6 +9174,8 @@ mod tests {
 
     fn footnote_stream_fixture() -> (EngineSession, String) {
         use super::lowering_fixture::{Package, para, run};
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         let section = r#"<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="3000" w:h="2700"/><w:pgMar w:top="150" w:right="150" w:bottom="150" w:left="150"/></w:sectPr>"#;
         let mut body = format!(
             r#"<w:p w14:paraId="30000000"><w:pPr><w:spacing w:after="1650"/></w:pPr>{}</w:p>{}"#,
@@ -9101,12 +9188,13 @@ mod tests {
         for index in 2..=17 {
             let properties = if index == 9 { section } else { "" };
             body.push_str(&format!(
-                r#"<w:p w14:paraId="{:08X}"><w:pPr><w:pageBreakBefore/>{properties}</w:pPr><w:r><w:footnoteReference w:id="{index}"/></w:r>{}</w:p>{}"#,
+                r#"<w:p w14:paraId="{:08X}"><w:pPr><w:pageBreakBefore/>{properties}</w:pPr>{}<w:r><w:footnoteReference w:id="{index}"/></w:r>{}</w:p>{}"#,
                 0x30000000 + index,
                 run(&"word ".repeat(10 + index as usize % 4)),
+                run(&note_words(37)),
                 para(
                     &format!("{:08X}", 0x40000000 + index),
-                    &run("A short line with room for typing."),
+                    &run("A short line."),
                 ),
             ));
         }
@@ -9134,7 +9222,7 @@ mod tests {
             .unwrap();
         let mut contents: Vec<_> = (1..=17).map(|id| json!({"id": id, "height": 0})).collect();
         contents.push(json!({"id": 1, "noteKind": "endnote", "height": 0}));
-        let request = json!({
+        let mut request = json!({
             "bodyStory": "body",
             "renderEnv": {},
             "regions": {"sections": [
@@ -9144,12 +9232,39 @@ mod tests {
                  "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
             ]},
             "notes": {"contents": contents},
-            "measurement": {"defaults": {"fontSize": 11, "fontFamily": "Calibri"}, "authoritativeShaping": false},
-        })
-        .to_string();
+            "measurement": {
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+        });
+        let requirements: Vec<serde_json::Value> = serde_json::from_str(
+            &engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains: serde_json::Map<String, serde_json::Value> = requirements
+            .iter()
+            .map(|requirement| {
+                (requirement["key"].as_str().unwrap().to_owned(), json!([font]))
+            })
+            .collect();
+        request["measurement"]["fontChains"] = json!(chains);
+        let request = request.to_string();
         engine
             .layout_document_with_regions_retained_json(&request)
             .unwrap();
+        assert!(!docx_layout::measure_blocks::measured_synthetically(
+            engine
+                .pagination
+                .borrow()
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .map(|measured| &measured.measure)
+        ));
         engine.build_display_list_frame("{}", 0).unwrap();
         (engine, request)
     }
@@ -9162,6 +9277,106 @@ mod tests {
             result.push(offset);
         }
         result
+    }
+
+    fn footnote_stream_probe(
+        engine: &EngineSession,
+        request: &str,
+        operation: Option<(u32, u32, Option<&str>)>,
+    ) -> (LayoutInput, NoteReuseIdentity) {
+        let probe = EngineSession::new(9623);
+        probe
+            .doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        if let Some((start, end, text)) = operation {
+            let ctx = crate::EditCtx::local("", "");
+            let receipt = match text {
+                Some(text) => probe.doc().insert_text(
+                    &ctx,
+                    crate::Position::new("body", start),
+                    text,
+                    crate::FormatPolicy::Inherit,
+                ),
+                None => probe.doc().delete_range(&ctx, crate::StoryRange::new("body", start, end)),
+            }
+            .unwrap();
+            assert!(receipt.new_para_ids.is_empty());
+            let range = receipt.range.as_ref().unwrap();
+            assert_eq!(range.start.para, range.end.para);
+        }
+        let mut prepared = probe.prepare_region_layout(request, None).unwrap();
+        prepared.measure(usize::MAX).unwrap();
+        assert!(prepared.measurement.authoritative_shaping);
+        assert!(prepared.resident_body && prepared.main_body);
+        assert!(!prepared.provisional && !engine.partial_document.get() && !prepared.has_floats);
+        assert!(!has_wrap_stabilized_shapes(
+            prepared.input.measured.iter().map(|measured| &measured.block)
+        ));
+        assert!(prepared.input.measured.iter().any(|measured| {
+            !collect_note_refs(std::slice::from_ref(&measured.block)).is_empty()
+        }));
+        assert!(!docx_layout::measure_blocks::measured_synthetically(
+            prepared.input.measured.iter().map(|measured| &measured.measure)
+        ));
+        let identity = probe
+            .note_reuse_identity(
+                request,
+                &prepared.input,
+                &prepared.regions,
+                &prepared.notes,
+                &prepared.measurement,
+                prepared.measurement_fingerprint,
+                prepared.fonts,
+                prepared.parsed_render_env.as_ref().unwrap(),
+            )
+            .unwrap();
+        (prepared.input, identity)
+    }
+
+    fn footnote_stream_signature(input: &LayoutInput, paragraph: &str) -> serde_json::Value {
+        let measured = input
+            .measured
+            .iter()
+            .find(|measured| {
+                matches!(&measured.block, LayoutBlock::Paragraph(block)
+                    if block_key(&block.id).as_ref() == paragraph)
+            })
+            .unwrap();
+        pagination_signature(measured).unwrap()
+    }
+
+    fn footnote_stream_boundary(
+        engine: &EngineSession,
+        request: &str,
+        paragraph: &str,
+        change: NoteTypingChange,
+    ) -> u32 {
+        let index = engine.doc().paragraph_index("body").unwrap();
+        let (start, _) = index.para_span(paragraph).unwrap();
+        let (input, _) = footnote_stream_probe(engine, request, None);
+        let before = footnote_stream_signature(&input, paragraph);
+        for count in 1..=128 {
+            let text = "x".repeat(count as usize);
+            let (input, _) =
+                footnote_stream_probe(engine, request, Some((start + 8, start + 8, Some(&text))));
+            let after = footnote_stream_signature(&input, paragraph);
+            let matches = match change {
+                NoteTypingChange::LineWrap => {
+                    after["lines"].as_array().unwrap().len()
+                        > before["lines"].as_array().unwrap().len()
+                }
+                NoteTypingChange::ReferenceLineMove => {
+                    after["references"][0][1].as_u64().unwrap()
+                        > before["references"][0][1].as_u64().unwrap()
+                }
+                _ => unreachable!(),
+            };
+            if matches {
+                return count;
+            }
+        }
+        panic!("seeded stream boundary must exist for {change:?}");
     }
 
     #[test]
@@ -9202,14 +9417,35 @@ mod tests {
                 random ^= random << 17;
                 random
             };
-            let mut hits = 0;
-            for step in 0..25 {
+            let paragraphs = engine.doc().paragraphs("body").unwrap();
+            let short: Vec<_> = paragraphs
+                .iter()
+                .filter(|paragraph| paragraph.text.starts_with("A short line"))
+                .collect();
+            let wrap_paragraph = short[next() as usize % short.len()].para_id.clone();
+            let references: Vec<_> = paragraphs
+                .iter()
+                .filter(|paragraph| paragraph.text.starts_with("word "))
+                .collect();
+            let reference_paragraph = references[next() as usize % references.len()].para_id.clone();
+            let mut reference_letters = 0;
+            let mut eligible_steps = 0;
+            let mut ineligible_steps = 0;
+            let mut wraps = 0;
+            let mut unwraps = 0;
+            let mut reference_moves = 0;
+            for step in 0..31 {
                 let paragraphs = engine.doc().paragraphs("body").unwrap();
-                let candidates: Vec<_> = paragraphs
-                    .iter()
-                    .filter(|paragraph| step != 0 || paragraph.text.starts_with("A short line"))
-                    .collect();
-                let paragraph = candidates[next() as usize % candidates.len()];
+                let paragraph = match step {
+                    0..=3 => paragraphs
+                        .iter()
+                        .find(|paragraph| paragraph.para_id == wrap_paragraph),
+                    4..=5 => paragraphs
+                        .iter()
+                        .find(|paragraph| paragraph.para_id == reference_paragraph),
+                    _ => Some(&paragraphs[next() as usize % paragraphs.len()]),
+                }
+                .unwrap();
                 let index = engine.doc().paragraph_index("body").unwrap();
                 let (start, _) = index.para_span(&paragraph.para_id).unwrap();
                 let text = engine
@@ -9217,36 +9453,105 @@ mod tests {
                     .para_text(&paragraph.para_id, crate::TextView::Raw)
                     .unwrap();
                 let boundaries = scalar_utf16_boundaries(&text);
-                let slot = if step == 0 {
+                let slot = if step < 6 {
                     8
                 } else {
                     next() as usize % boundaries.len()
                 };
                 let offset = boundaries[slot];
-                let before = engine.pagination.borrow().note_shortcut_taken;
-                let operation = if step == 0 || next() % 3 != 0 || slot + 1 == boundaries.len() {
-                    let inserted = if step == 0 {
-                        "x"
-                    } else {
-                        ["x", " ", "😀"][next() as usize % 3]
-                    };
-                    (start + offset, start + offset, Some(inserted))
-                } else {
-                    let limit = 1 + next() as u32 % 3;
-                    let end = boundaries[slot + 1..]
-                        .iter()
-                        .copied()
-                        .take_while(|end| *end - offset <= limit)
-                        .last()
-                        .unwrap_or(boundaries[slot + 1]);
-                    (start + offset, start + end, None)
+                let inserted;
+                let operation = match step {
+                    0 | 2 => (start + offset, start + offset, Some("x")),
+                    1 => {
+                        let count = footnote_stream_boundary(
+                            &engine,
+                            &request,
+                            &paragraph.para_id,
+                            NoteTypingChange::LineWrap,
+                        );
+                        assert!(count > 1);
+                        inserted = "x".repeat(count as usize - 1);
+                        (start + offset, start + offset, Some(inserted.as_str()))
+                    }
+                    3 => (start + offset, start + offset + 1, None),
+                    4 => {
+                        reference_letters = footnote_stream_boundary(
+                            &engine,
+                            &request,
+                            &paragraph.para_id,
+                            NoteTypingChange::ReferenceLineMove,
+                        );
+                        inserted = "x".repeat(reference_letters as usize);
+                        (start + offset, start + offset, Some(inserted.as_str()))
+                    }
+                    5 => (start + offset, start + offset + reference_letters, None),
+                    _ if next() % 3 != 0 || slot + 1 == boundaries.len() => {
+                        let inserted = ["x", " ", "😀"][next() as usize % 3];
+                        (start + offset, start + offset, Some(inserted))
+                    }
+                    _ => {
+                        let limit = 1 + next() as u32 % 3;
+                        let end = boundaries[slot + 1..]
+                            .iter()
+                            .copied()
+                            .take_while(|end| *end - offset <= limit)
+                            .last()
+                            .unwrap_or(boundaries[slot + 1]);
+                        (start + offset, start + end, None)
+                    }
                 };
+                let (before_input, before_identity) = footnote_stream_probe(&engine, &request, None);
+                let (after_input, after_identity) =
+                    footnote_stream_probe(&engine, &request, Some(operation));
+                assert_eq!(before_identity, after_identity, "seed {seed}, step {step}");
+                let before_fingerprints = measured_fingerprints(&before_input).unwrap();
+                let after_fingerprints = measured_fingerprints(&after_input).unwrap();
+                assert_eq!(before_fingerprints.len(), after_fingerprints.len());
+                let changed: Vec<_> = before_fingerprints
+                    .iter()
+                    .zip(&after_fingerprints)
+                    .enumerate()
+                    .filter_map(|(index, (before, after))| (before != after).then_some(index))
+                    .collect();
+                assert_eq!(changed.len(), 1, "seed {seed}, step {step}");
+                assert!(matches!(
+                    &after_input.measured[changed[0]].block,
+                    LayoutBlock::Paragraph(block)
+                        if block_key(&block.id).as_ref() == paragraph.para_id.as_str()
+                ));
+                let before_signature = footnote_stream_signature(&before_input, &paragraph.para_id);
+                let after_signature = footnote_stream_signature(&after_input, &paragraph.para_id);
+                let eligible = before_signature == after_signature;
+                let before_lines = before_signature["lines"].as_array().unwrap().len();
+                let after_lines = after_signature["lines"].as_array().unwrap().len();
+                wraps += usize::from(after_lines > before_lines);
+                unwraps += usize::from(after_lines < before_lines);
+                if before_signature["references"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .zip(after_signature["references"].as_array().unwrap())
+                    .any(|(before, after)| before[0] == after[0] && before[1] != after[1])
+                {
+                    reference_moves += 1;
+                }
+                match step {
+                    0 => assert!(eligible),
+                    2 => assert!(after_lines > before_lines),
+                    3 => assert!(after_lines < before_lines),
+                    4 => assert_ne!(before_signature["references"], after_signature["references"]),
+                    _ => {}
+                }
+                let before_taken = engine.pagination.borrow().note_shortcut_taken;
                 local_patch_step(&engine, &request, "body", operation, false);
-                let taken = engine.pagination.borrow().note_shortcut_taken - before;
-                assert!(taken <= 1, "seed {seed}, step {step}");
-                hits += taken;
+                let taken = engine.pagination.borrow().note_shortcut_taken - before_taken;
+                assert_eq!(taken, u64::from(eligible), "seed {seed}, step {step}, {operation:?}");
+                eligible_steps += usize::from(eligible);
+                ineligible_steps += usize::from(!eligible);
             }
-            assert!(hits > 0, "seed {seed} must take a cold-equal shortcut");
+            assert!(eligible_steps > 1, "seed {seed} must exercise eligible typing");
+            assert!(ineligible_steps > 1, "seed {seed} must exercise full layout");
+            assert!(wraps > 0 && unwraps > 0 && reference_moves > 0, "seed {seed}");
         }
     }
 
