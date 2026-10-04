@@ -5,7 +5,7 @@ import { SessionFailure, type Promisified, type SessionEvents, type SessionMetho
 export const OFFICE_SESSION_SILENCE_MS = 60_000;
 
 export interface SessionClientOptions<M extends SessionMethods> {
-  methods: readonly (keyof M & string)[];
+  methods: { readonly [K in keyof M]-?: true };
   silenceMs?: number;
   now?(): number;
   timer?(callback: () => void, ms: number): () => void;
@@ -29,7 +29,7 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: unknown): void }>();
   const events = new Map<string, Set<(payload: unknown) => void>>();
   const failures = new Set<(failure: SessionFailure) => void>();
-  const methods = new Set<string>(options.methods);
+  const methods = new Set<string>(Object.keys(options.methods));
   const now = options.now ?? Date.now;
   const timer = options.timer ?? ((callback: () => void, ms: number) => {
     const id = setTimeout(callback, ms);
@@ -47,8 +47,9 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     cancelWatchdog?.();
     cancelWatchdog = undefined;
   }
-  function notify<T>(listeners: Iterable<(value: T) => void>, value: T): void {
+  function notify<T>(listeners: Set<(value: T) => void>, value: T, event = false): void {
     for (const listener of [...listeners]) {
+      if (!listeners.has(listener) || (event && failure)) continue;
       try { listener(value); } catch {}
     }
   }
@@ -102,7 +103,8 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
     } else if (message.kind === 'event') {
-      notify(events.get(message.name) ?? [], message.payload);
+      const listeners = events.get(message.name);
+      if (listeners) notify(listeners, message.payload, true);
     } else {
       const request = pending.get(message.id);
       if (!request) return;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { createScopeTransport, createWorkerTransport, type SessionScope } from './transport';
+import { createInProcessPair } from './testing/inProcessTransport';
 import { SessionFailure } from './types';
 
 function scope() {
@@ -25,6 +26,30 @@ function scope() {
 }
 
 describe('session transports', () => {
+  it('stops delivery when an endpoint closes during dispatch', async () => {
+    for (const side of ['client', 'host'] as const) {
+      const pair = createInProcessPair();
+      const messages: unknown[] = [];
+      pair.host.listen(() => { pair[side].close(); });
+      pair.host.listen((message) => { messages.push(message); });
+      pair.client.post('value');
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(messages).toEqual([]);
+    }
+  });
+
+  it('skips listeners removed during in-process dispatch', async () => {
+    const pair = createInProcessPair();
+    const messages: unknown[] = [];
+    let off = () => {};
+    pair.host.listen(() => { off(); });
+    off = pair.host.listen((message) => { messages.push(message); });
+    pair.client.post('value');
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(messages).toEqual([]);
+    pair.client.close();
+  });
+
   it('forwards messages and transfers, unsubscribes, and closes a scope once', () => {
     const s = scope();
     const transport = createScopeTransport(s.port);

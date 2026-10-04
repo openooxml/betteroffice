@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { createSessionClient } from './client';
+import { createSessionClient, type SessionClientOptions } from './client';
 import { SessionFailure } from './types';
 import type { SessionTransport } from './transport';
 
@@ -18,7 +18,7 @@ function harness() {
     close: () => { closes += 1; },
   };
   const client = createSessionClient<{ echo(value: string): string }, { tick: number }>(transport, {
-    methods: ['echo'], silenceMs: 100, now: () => now,
+    methods: { echo: true }, silenceMs: 100, now: () => now,
     timer: (callback, ms) => {
       const id = next++;
       timers.set(id, { at: now + ms, callback });
@@ -43,6 +43,44 @@ function harness() {
 }
 
 describe('session client', () => {
+  it('requires every method in the method record', () => {
+    type Methods = { echo(value: string): string; add(a: number, b: number): number };
+    // @ts-expect-error
+    const methods: SessionClientOptions<Methods>['methods'] = { echo: true };
+    expect(methods.echo).toBe(true);
+  });
+
+  it('skips event listeners removed during notification', async () => {
+    const h = harness();
+    const ticks: number[] = [];
+    let off = () => {};
+    h.client.on('tick', () => { off(); });
+    off = h.client.on('tick', (value) => { ticks.push(value); });
+    h.receive({ protocol: 1, kind: 'event', name: 'tick', payload: 1 });
+    expect(ticks).toEqual([]);
+    await h.client.dispose();
+  });
+
+  it('stops event notification when a listener disposes the client', async () => {
+    const h = harness();
+    const ticks: number[] = [];
+    h.client.on('tick', () => { void h.client.dispose(); });
+    h.client.on('tick', (value) => { ticks.push(value); });
+    h.receive({ protocol: 1, kind: 'event', name: 'tick', payload: 1 });
+    expect(ticks).toEqual([]);
+    await h.client.dispose();
+  });
+
+  it('skips failure listeners removed during notification', () => {
+    const h = harness();
+    const failures: SessionFailure[] = [];
+    let off = () => {};
+    h.client.onFailure(() => { off(); });
+    off = h.client.onFailure((error) => { failures.push(error); });
+    h.error(new SessionFailure('crash', 'failed'));
+    expect(failures).toEqual([]);
+  });
+
   it('arms only for pending calls and rejects every call on silence', async () => {
     const h = harness();
     h.advance(1000);

@@ -17,6 +17,21 @@ export type HostMessage =
   | { protocol: 1; kind: 'failure'; code: SessionFailureCode; message: string; diagnostics?: string };
 
 const TRANSFER = Symbol('session-transfer');
+const DEFERRED = Symbol('session-deferred');
+
+export interface DeferredReply<T> {
+  readonly [DEFERRED]: true;
+  readonly promise: Promise<T | TransferResult<T>>;
+}
+
+/** Releases the foreground lane while a reply is pending. */
+export function deferReply<T>(promise: Promise<T | TransferResult<T>>): DeferredReply<T> {
+  return { [DEFERRED]: true, promise };
+}
+
+export function isDeferredReply(value: unknown): value is DeferredReply<unknown> {
+  return record(value) && value[DEFERRED] === true;
+}
 
 export interface TransferResult<T> {
   readonly [TRANSFER]: true;
