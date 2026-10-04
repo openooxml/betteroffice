@@ -132,21 +132,63 @@ impl WorkbookBase {
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, String> {
-        let (fingerprint, bootstrap_client_id) = fingerprint_model(model)?;
+        let mut builder = FingerprintBuilder::new(model, legacy_dimensions);
+        let styles = FingerprintStyles::new(&model.styles);
+        let (fingerprint, bootstrap_client_id) =
+            builder.fingerprint(styles, SCHEMA_VERSION, true, true, false)?;
+        let fingerprints = builder.accepted_fingerprints(styles, legacy_styles)?;
+        Ok(Self {
+            bootstrap_client_id,
+            date_system: model.date_system,
+            defined_names: model.defined_names.clone(),
+            fingerprint,
+            fingerprints,
+            freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
+            formats: model.sheets.iter().map(|sheet| sheet.format).collect(),
+            col_styles: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.col_styles.clone())
+                .collect(),
+            hyperlinks: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.hyperlinks.clone())
+                .collect(),
+            charts: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.charts.clone())
+                .collect(),
+            hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
+            shared_strings: model.shared_strings.clone(),
+            styles: model.styles.clone(),
+            tables: model.tables.clone(),
+        })
+    }
+
+    #[cfg(test)]
+    fn from_model_with_legacy_dimensions_oracle(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+    ) -> Result<Self, String> {
+        let (fingerprint, bootstrap_client_id) =
+            fingerprint_model_for_schema_oracle(model, SCHEMA_VERSION)?;
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            let (version_fingerprint, _) = fingerprint_model_for_schema(model, version)?;
+            let (version_fingerprint, _) = fingerprint_model_for_schema_oracle(model, version)?;
             fingerprints.insert(version, vec![version_fingerprint]);
         }
         if let Some(version_3) = fingerprints.get_mut(&3) {
-            let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true, true)?;
+            let (defined_names_v3, _) = fingerprint_model_with_schema_oracle(model, 3, true, true)?;
             if !version_3.contains(&defined_names_v3) {
                 version_3.push(defined_names_v3);
             }
         }
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
             let (without_col_styles, _) =
-                fingerprint_model_with_schema(model, version, version >= 4, false)?;
+                fingerprint_model_with_schema_oracle(model, version, version >= 4, false)?;
             let accepted = fingerprints.entry(version).or_default();
             if !accepted.contains(&without_col_styles) {
                 accepted.push(without_col_styles);
@@ -154,9 +196,10 @@ impl WorkbookBase {
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
             for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
-                let (legacy_fingerprint, _) = fingerprint_model_for_schema(&legacy, version)?;
+                let (legacy_fingerprint, _) =
+                    fingerprint_model_for_schema_oracle(&legacy, version)?;
                 let (without_col_styles, _) =
-                    fingerprint_model_with_schema(&legacy, version, version >= 4, false)?;
+                    fingerprint_model_with_schema_oracle(&legacy, version, version >= 4, false)?;
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in [legacy_fingerprint, without_col_styles] {
                     if !accepted.contains(&fingerprint) {
@@ -165,7 +208,8 @@ impl WorkbookBase {
                 }
             }
             if let Some(version_3) = fingerprints.get_mut(&3) {
-                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true, true)?;
+                let (defined_names_v3, _) =
+                    fingerprint_model_with_schema_oracle(&legacy, 3, true, true)?;
                 if !version_3.contains(&defined_names_v3) {
                     version_3.push(defined_names_v3);
                 }
@@ -174,8 +218,11 @@ impl WorkbookBase {
         if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
             let mut legacy_model = model.clone();
             legacy_model.styles = styles.clone();
-            let legacy_base =
-                Self::from_model_with_legacy_dimensions(&legacy_model, legacy_dimensions, None)?;
+            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
+                &legacy_model,
+                legacy_dimensions,
+                None,
+            )?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {
@@ -188,7 +235,7 @@ impl WorkbookBase {
         if !model.styles.indexed_colors.is_empty() {
             let mut legacy_model = model.clone();
             legacy_model.styles.indexed_colors.clear();
-            let legacy_base = Self::from_model_with_legacy_dimensions(
+            let legacy_base = Self::from_model_with_legacy_dimensions_oracle(
                 &legacy_model,
                 legacy_dimensions,
                 legacy_styles,
@@ -430,7 +477,7 @@ pub(crate) struct WorkbookAuthority {
 impl WorkbookAuthority {
     #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, None, &[], None)
+        Self::from_source(model, None, &[], None)
     }
 
     #[cfg(test)]
@@ -438,24 +485,26 @@ impl WorkbookAuthority {
         model: &WorkbookModel,
         client_id: u64,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, Some(client_id), &[], None)
+        Self::from_source(model, Some(client_id), &[], None)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn from_source(
         model: &WorkbookModel,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, client_id, legacy_dimensions, legacy_styles)
+        Self::from_source_with_projection(model, client_id, legacy_dimensions, legacy_styles)
+            .map(|(authority, _, _)| authority)
     }
 
-    fn from_model_internal(
+    pub(crate) fn from_source_with_projection(
         model: &WorkbookModel,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
         legacy_styles: Option<&Stylesheet>,
-    ) -> Result<Self, AuthorityError> {
+    ) -> Result<(Self, WorkbookModel, WorkbookStructure), AuthorityError> {
         let base = WorkbookBase::from_model_with_legacy_dimensions(
             model,
             legacy_dimensions,
@@ -475,6 +524,8 @@ impl WorkbookAuthority {
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
 
+        drop(bootstrap);
+
         let doc = match client_id {
             Some(client_id) => Doc::with_client_id(client_id),
             None => loop {
@@ -485,6 +536,7 @@ impl WorkbookAuthority {
             },
         };
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
+        drop(bootstrap_update);
         let authority = Self {
             doc,
             base: Arc::new(base),
@@ -493,10 +545,10 @@ impl WorkbookAuthority {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
-        authority
+        let (model, structure) = authority
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
-        Ok(authority)
+        Ok((authority, model, structure))
     }
 
     pub(crate) fn client_id(&self) -> u64 {
@@ -2997,9 +3049,7 @@ fn materialize_sheet<T: ReadTxn>(
             .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
         cells.entry((at.row, at.col)).or_default().style = *style;
     }
-    for ((row, col), cell) in cells {
-        sheet.set_cell(CellRef::new(row, col), cell);
-    }
+    sheet.adopt_cells(cells);
     sheet.col_widths = materialize_numbers(
         &nested_map(sheet_map, txn, COL_WIDTHS)?,
         txn,
@@ -3573,6 +3623,7 @@ fn hidden_dimensions(
 
 /// The same workbook as an earlier release would have modelled it, or `None`
 /// when no sheet's dimensions changed meaning and the two agree already.
+#[cfg(test)]
 fn model_with_legacy_dimensions(
     model: &WorkbookModel,
     legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
@@ -3595,10 +3646,12 @@ fn model_with_legacy_dimensions(
     Some(legacy_model)
 }
 
+#[cfg(test)]
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     fingerprint_model_for_schema(model, SCHEMA_VERSION)
 }
 
+#[cfg(test)]
 fn fingerprint_model_for_schema(
     model: &WorkbookModel,
     schema_version: i64,
@@ -3606,7 +3659,704 @@ fn fingerprint_model_for_schema(
     fingerprint_model_with_schema(model, schema_version, schema_version >= 4, true)
 }
 
+#[cfg(test)]
 fn fingerprint_model_with_schema(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+    include_col_styles: bool,
+) -> Result<(String, u64), String> {
+    fingerprint_model_with_schema_oracle(
+        model,
+        schema_version,
+        include_defined_names,
+        include_col_styles,
+    )
+}
+
+#[derive(Clone, Copy)]
+struct FingerprintStyles<'a> {
+    styles: &'a Stylesheet,
+    indexed_colors: &'a [String],
+}
+
+impl<'a> FingerprintStyles<'a> {
+    fn new(styles: &'a Stylesheet) -> Self {
+        Self {
+            styles,
+            indexed_colors: &styles.indexed_colors,
+        }
+    }
+
+    fn without_indexed_colors(self) -> Self {
+        Self {
+            indexed_colors: &[],
+            ..self
+        }
+    }
+}
+
+impl PartialEq for FingerprintStyles<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.styles.fonts == other.styles.fonts
+            && self.styles.fills == other.styles.fills
+            && self.styles.borders == other.styles.borders
+            && self.styles.cell_xfs == other.styles.cell_xfs
+            && self.styles.num_fmts == other.styles.num_fmts
+            && self.styles.theme == other.styles.theme
+            && self.indexed_colors == other.indexed_colors
+    }
+}
+
+impl serde::Serialize for FingerprintStyles<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct(
+            "Stylesheet",
+            if self.indexed_colors.is_empty() { 6 } else { 7 },
+        )?;
+        state.serialize_field("fonts", &self.styles.fonts)?;
+        state.serialize_field("fills", &self.styles.fills)?;
+        state.serialize_field("borders", &self.styles.borders)?;
+        state.serialize_field("cell_xfs", &self.styles.cell_xfs)?;
+        state.serialize_field("num_fmts", &self.styles.num_fmts)?;
+        state.serialize_field("theme", &self.styles.theme)?;
+        if !self.indexed_colors.is_empty() {
+            state.serialize_field("indexed_colors", self.indexed_colors)?;
+        }
+        state.end()
+    }
+}
+
+type FingerprintKey = (usize, i64, bool, bool, bool);
+
+struct FingerprintBuilder<'a> {
+    model: &'a WorkbookModel,
+    legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
+    has_col_styles: bool,
+    styles: Vec<(FingerprintStyles<'a>, usize)>,
+    style_bytes: Vec<Vec<u8>>,
+    hashes: BTreeMap<FingerprintKey, (String, u64)>,
+}
+
+impl<'a> FingerprintBuilder<'a> {
+    fn new(
+        model: &'a WorkbookModel,
+        legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
+    ) -> Self {
+        let differs = model
+            .sheets
+            .iter()
+            .zip(legacy_dimensions)
+            .any(|(sheet, legacy)| {
+                sheet.col_widths != legacy.col_widths || sheet.row_heights != legacy.row_heights
+            });
+        Self {
+            model,
+            legacy_dimensions: if differs { legacy_dimensions } else { &[] },
+            has_col_styles: model
+                .sheets
+                .iter()
+                .any(|sheet| !sheet.col_styles.is_empty()),
+            styles: Vec::new(),
+            style_bytes: Vec::new(),
+            hashes: BTreeMap::new(),
+        }
+    }
+
+    fn fingerprint(
+        &mut self,
+        styles: FingerprintStyles<'a>,
+        version: i64,
+        include_defined_names: bool,
+        include_col_styles: bool,
+        legacy_dimensions: bool,
+    ) -> Result<(String, u64), String> {
+        let style_index = match self.styles.iter().find(|(known, _)| {
+            std::ptr::eq(known.styles, styles.styles)
+                && std::ptr::eq(known.indexed_colors, styles.indexed_colors)
+        }) {
+            Some((_, index)) => *index,
+            None => {
+                let bytes = serde_json::to_vec(&styles)
+                    .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
+                let index = match self.style_bytes.iter().position(|known| *known == bytes) {
+                    Some(index) => index,
+                    None => {
+                        self.style_bytes.push(bytes);
+                        self.style_bytes.len() - 1
+                    }
+                };
+                self.styles.push((styles, index));
+                index
+            }
+        };
+        let include_col_styles =
+            include_col_styles && version >= CHARTS_SCHEMA_VERSION && self.has_col_styles;
+        let legacy_dimensions = legacy_dimensions && !self.legacy_dimensions.is_empty();
+        let key = (
+            style_index,
+            version,
+            include_defined_names,
+            include_col_styles,
+            legacy_dimensions,
+        );
+        if let Some(hash) = self.hashes.get(&key) {
+            return Ok(hash.clone());
+        }
+        let hash = fingerprint_model_with_overrides(
+            self.model,
+            version,
+            include_defined_names,
+            include_col_styles,
+            if legacy_dimensions {
+                self.legacy_dimensions
+            } else {
+                &[]
+            },
+            styles,
+        )?;
+        self.hashes.insert(key, hash.clone());
+        Ok(hash)
+    }
+
+    fn accepted_fingerprints(
+        &mut self,
+        styles: FingerprintStyles<'a>,
+        legacy_styles: Option<&'a Stylesheet>,
+    ) -> Result<BTreeMap<i64, Vec<String>>, String> {
+        let mut fingerprints = BTreeMap::new();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (fingerprint, _) = self.fingerprint(styles, version, version >= 4, true, false)?;
+            fingerprints.insert(version, vec![fingerprint]);
+        }
+        let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, false)?;
+        append_fingerprint(&mut fingerprints, 3, defined_names_v3);
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (without_col_styles, _) =
+                self.fingerprint(styles, version, version >= 4, false, false)?;
+            append_fingerprint(&mut fingerprints, version, without_col_styles);
+        }
+        if !self.legacy_dimensions.is_empty() {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+                let (legacy_fingerprint, _) =
+                    self.fingerprint(styles, version, version >= 4, true, true)?;
+                let (without_col_styles, _) =
+                    self.fingerprint(styles, version, version >= 4, false, true)?;
+                for fingerprint in [legacy_fingerprint, without_col_styles] {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+            let (defined_names_v3, _) = self.fingerprint(styles, 3, true, true, true)?;
+            append_fingerprint(&mut fingerprints, 3, defined_names_v3);
+        }
+        if let Some(legacy) = legacy_styles
+            .map(FingerprintStyles::new)
+            .filter(|legacy| *legacy != styles)
+        {
+            let legacy_fingerprints = self.accepted_fingerprints(legacy, None)?;
+            for (version, accepted) in legacy_fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+        }
+        if !styles.indexed_colors.is_empty() {
+            let legacy_fingerprints =
+                self.accepted_fingerprints(styles.without_indexed_colors(), legacy_styles)?;
+            for (version, accepted) in legacy_fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+        }
+        Ok(fingerprints)
+    }
+}
+
+fn append_fingerprint(fingerprints: &mut BTreeMap<i64, Vec<String>>, version: i64, hash: String) {
+    let accepted = fingerprints.entry(version).or_default();
+    if !accepted.contains(&hash) {
+        accepted.push(hash);
+    }
+}
+
+fn fingerprint_model_with_overrides(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+    include_col_styles: bool,
+    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    styles: FingerprintStyles<'_>,
+) -> Result<(String, u64), String> {
+    validate_schema_version(schema_version)?;
+    let mut hasher = Sha256::new();
+    let domain = match schema_version {
+        3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
+        4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
+        5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
+    };
+    hasher.update(domain);
+    let base = if include_defined_names {
+        serde_json::to_vec(&(
+            model.date_system,
+            &model.defined_names,
+            &model.shared_strings,
+            &styles,
+        ))
+    } else {
+        serde_json::to_vec(&(model.date_system, &model.shared_strings, &styles))
+    }
+    .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
+    hash_bytes(&mut hasher, &base);
+    hash_u64(&mut hasher, model.sheets.len() as u64);
+    let hash_col_styles = include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.col_styles.is_empty());
+    for (index, sheet) in model.sheets.iter().enumerate() {
+        let (col_widths, row_heights) = match legacy_dimensions.get(index) {
+            Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
+            None => (&sheet.col_widths, &sheet.row_heights),
+        };
+        hash_bytes(&mut hasher, sheet.name.as_bytes());
+        hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
+        for (at, cell) in sheet.iter_cells() {
+            hash_u32(&mut hasher, at.row);
+            hash_u32(&mut hasher, at.col);
+            hash_cell_value(&mut hasher, &cell.value);
+            match &cell.formula {
+                Some(formula) => {
+                    hasher.update([1]);
+                    hash_bytes(&mut hasher, formula.as_bytes());
+                }
+                None => hasher.update([0]),
+            }
+            match cell.style {
+                Some(style) => {
+                    hasher.update([1]);
+                    hash_u32(&mut hasher, style);
+                }
+                None => hasher.update([0]),
+            }
+        }
+        hash_u64(&mut hasher, sheet.merges.len() as u64);
+        for range in &sheet.merges {
+            hash_cell_ref(&mut hasher, range.start);
+            hash_cell_ref(&mut hasher, range.end);
+        }
+        hash_u64(&mut hasher, col_widths.len() as u64);
+        for (&column, &width) in col_widths {
+            hash_u32(&mut hasher, column);
+            hash_u64(&mut hasher, width.to_bits());
+        }
+        hash_u64(&mut hasher, row_heights.len() as u64);
+        for (&row, &height) in row_heights {
+            hash_u32(&mut hasher, row);
+            hash_u64(&mut hasher, height.to_bits());
+        }
+        if schema_version >= FREEZE_PANE_SCHEMA_VERSION {
+            match sheet.freeze_pane {
+                Some(pane) => {
+                    hasher.update([1]);
+                    hash_u32(&mut hasher, pane.rows);
+                    hash_u32(&mut hasher, pane.cols);
+                    hash_cell_ref(&mut hasher, pane.top_left);
+                }
+                None => hasher.update([0]),
+            }
+        }
+        if schema_version >= HYPERLINK_SCHEMA_VERSION {
+            let hyperlinks = serde_json::to_vec(&sheet.hyperlinks)
+                .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
+            hash_bytes(&mut hasher, &hyperlinks);
+        }
+        if schema_version >= CHARTS_SCHEMA_VERSION {
+            let charts = serde_json::to_vec(&sheet.charts)
+                .map_err(|error| format!("cannot fingerprint sheet charts: {error}"))?;
+            hash_bytes(&mut hasher, &charts);
+        }
+        if hash_col_styles {
+            let col_styles = serde_json::to_vec(&sheet.col_styles)
+                .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
+            hash_bytes(&mut hasher, &col_styles);
+        }
+    }
+    let digest = hasher.finalize();
+    let fingerprint = format!("{digest:x}");
+    let mut client_bytes = [0_u8; 8];
+    client_bytes.copy_from_slice(&digest[..8]);
+    let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
+    if bootstrap_client_id == 0 {
+        bootstrap_client_id = 1;
+    }
+    Ok((fingerprint, bootstrap_client_id))
+}
+
+fn hash_cell_value(hasher: &mut Sha256, value: &CellValue) {
+    match value {
+        CellValue::Empty => hasher.update([0]),
+        CellValue::Number { value } => {
+            hasher.update([1]);
+            hash_u64(hasher, value.to_bits());
+        }
+        CellValue::Text { value } => {
+            hasher.update([2]);
+            hash_bytes(hasher, value.as_bytes());
+        }
+        CellValue::Bool { value } => hasher.update([3, u8::from(*value)]),
+        CellValue::Error { value } => {
+            hasher.update([4]);
+            hash_bytes(hasher, value.as_str().as_bytes());
+        }
+    }
+}
+
+fn hash_cell_ref(hasher: &mut Sha256, cell: CellRef) {
+    hash_u32(hasher, cell.row);
+    hash_u32(hasher, cell.col);
+    hasher.update([u8::from(cell.abs_row), u8::from(cell.abs_col)]);
+}
+
+fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hash_u64(hasher, bytes.len() as u64);
+    hasher.update(bytes);
+}
+
+fn hash_u32(hasher: &mut Sha256, value: u32) {
+    hasher.update(value.to_le_bytes());
+}
+
+fn hash_u64(hasher: &mut Sha256, value: u64) {
+    hasher.update(value.to_le_bytes());
+}
+
+#[cfg(test)]
+impl WorkbookAuthority {
+    pub(crate) fn from_source_oracle(
+        model: &WorkbookModel,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+    ) -> Result<Self, AuthorityError> {
+        let base = WorkbookBase::from_model_with_legacy_dimensions_oracle(
+            model,
+            legacy_dimensions,
+            legacy_styles,
+        )
+        .map_err(AuthorityError::InvalidState)?;
+        if client_id == Some(base.bootstrap_client_id) {
+            return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
+        }
+
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        seed(&bootstrap, &base, model, &keys).map_err(AuthorityError::InvalidState)?;
+        let bootstrap_update = bootstrap
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+
+        let doc = match client_id {
+            Some(client_id) => Doc::with_client_id(client_id),
+            None => loop {
+                let candidate = Doc::new();
+                if candidate.client_id().get() != base.bootstrap_client_id {
+                    break candidate;
+                }
+            },
+        };
+        hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
+        let authority = Self {
+            doc,
+            base: Arc::new(base),
+            history: SheetOrderHistory::default(),
+            next_sheet_id: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        };
+        authority
+            .materialize_internal_oracle(true)
+            .map_err(AuthorityError::InvalidState)?;
+        Ok(authority)
+    }
+
+    pub(crate) fn materialize_oracle(&self) -> Result<WorkbookModel, AuthorityError> {
+        self.materialize_internal_oracle(false)
+            .map(|(model, _)| model)
+            .map_err(AuthorityError::InvalidState)
+    }
+
+    pub(crate) fn structure_oracle(&self) -> Result<WorkbookStructure, AuthorityError> {
+        self.materialize_internal_oracle(false)
+            .map(|(_, structure)| structure)
+            .map_err(AuthorityError::InvalidState)
+    }
+
+    fn materialize_internal_oracle(
+        &self,
+        strict: bool,
+    ) -> Result<(WorkbookModel, WorkbookStructure), String> {
+        let txn = self.doc.transact();
+        if strict {
+            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
+        }
+        let meta = txn
+            .get_map(META)
+            .ok_or_else(|| "missing workbook metadata".to_string())?;
+        if strict {
+            require_map_keys(
+                &meta,
+                &txn,
+                &[BASE_FINGERPRINT, "schemaVersion", STRUCTURE_GENERATION],
+                "workbook metadata",
+            )?;
+        }
+        let version = meta
+            .get(&txn, "schemaVersion")
+            .and_then(|value| value.cast::<i64>().ok())
+            .ok_or_else(|| "missing schema version".to_string())?;
+        validate_schema_version(version)?;
+        let fingerprint = meta
+            .get(&txn, BASE_FINGERPRINT)
+            .and_then(|value| value.cast::<String>().ok())
+            .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
+        if !self.base.accepts_fingerprint(version, &fingerprint) {
+            return Err("workbook base fingerprint does not match shared state".to_string());
+        }
+        let generation = structure_generation(&meta, &txn)?;
+        let cell_formats = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let (styles, style_indices) =
+            materialize_cell_formats(&cell_formats, &txn, &self.base.styles)?;
+
+        let order = txn
+            .get_array(SHEET_ORDER)
+            .ok_or_else(|| "missing sheet order".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let keys = sheet_keys(&order, &txn)?;
+        let mut seen = HashSet::with_capacity(keys.len());
+        let mut model = self.base.workbook();
+        model.styles = styles;
+        let expected_sheet_keys = sheet_schema_keys(version);
+        let optional_sheet_keys = sheet_schema_optional_keys(version);
+        for key in keys.iter() {
+            if !seen.insert(key.clone()) {
+                return Err(format!("duplicate sheet key {key}"));
+            }
+            let sheet_map = sheets
+                .get(&txn, key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("missing sheet {key}"))?;
+            if strict {
+                require_map_keys_with_optional(
+                    &sheet_map,
+                    &txn,
+                    expected_sheet_keys,
+                    optional_sheet_keys,
+                    &format!("sheet {key}"),
+                )?;
+            }
+            let base_sheet = base_sheet_index(key);
+            let freeze_pane = base_sheet
+                .and_then(|base| self.base.freeze_panes.get(base))
+                .copied()
+                .flatten();
+            let format = base_sheet
+                .and_then(|base| self.base.formats.get(base))
+                .copied()
+                .unwrap_or_default();
+            let col_styles = base_sheet
+                .and_then(|base| self.base.col_styles.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let hyperlinks = base_sheet
+                .and_then(|base| self.base.hyperlinks.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let charts = base_sheet
+                .and_then(|base| self.base.charts.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let hidden_dimensions = base_sheet
+                .and_then(|base| self.base.hidden_dimensions.get(base))
+                .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
+            model.sheets.push(materialize_sheet_oracle(
+                &sheet_map,
+                &txn,
+                &style_indices,
+                version,
+                SheetFallbacks {
+                    freeze_pane,
+                    format,
+                    col_styles,
+                    hyperlinks,
+                    charts,
+                    hidden_dimensions,
+                },
+            )?);
+        }
+        project_shared_frame_anchors(&mut model.sheets);
+        let active = keys.iter().cloned().collect::<BTreeSet<_>>();
+        let all_keys = sheets
+            .keys(&txn)
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        let mut shared_types = BTreeMap::new();
+        for key in all_keys {
+            let sheet_map = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("sheet {key} is not a map"))?;
+            if strict && !active.contains(&key) {
+                require_map_keys_with_optional(
+                    &sheet_map,
+                    &txn,
+                    expected_sheet_keys,
+                    optional_sheet_keys,
+                    &format!("inactive sheet {key}"),
+                )?;
+                materialize_sheet_oracle(
+                    &sheet_map,
+                    &txn,
+                    &style_indices,
+                    version,
+                    SheetFallbacks::default(),
+                )?;
+            }
+            shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
+        }
+        let structure = WorkbookStructure {
+            generation,
+            sheet_keys: keys,
+            sheet_names: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect(),
+            freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
+            hyperlinks: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.hyperlinks.clone())
+                .collect(),
+            charts: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.charts.iter().map(ChartIdentity::of).collect())
+                .collect(),
+            merges: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.merges.clone())
+                .collect(),
+            shared_types,
+        };
+        Ok((model, structure))
+    }
+}
+
+#[cfg(test)]
+fn materialize_sheet_oracle<T: ReadTxn>(
+    sheet_map: &MapRef,
+    txn: &T,
+    style_indices: &BTreeMap<String, Option<u32>>,
+    version: i64,
+    fallbacks: SheetFallbacks<'_>,
+) -> Result<Sheet, String> {
+    let name = sheet_map
+        .get(txn, NAME)
+        .and_then(|value| value.cast::<String>().ok())
+        .ok_or_else(|| "sheet is missing its name".to_string())?;
+    let mut sheet = Sheet::new(name);
+    let mut cells = BTreeMap::<(u32, u32), Cell>::new();
+    let contents = nested_map(sheet_map, txn, CONTENTS)?;
+    for (key, value) in contents.iter(txn) {
+        let at = parse_cell_key(key)?;
+        let Out::Any(value) = value else {
+            return Err(format!("cell content {key} is not an atomic value"));
+        };
+        cells.insert((at.row, at.col), content_from_any(&value)?);
+    }
+    let styles = nested_map(sheet_map, txn, STYLES)?;
+    for (key, value) in styles.iter(txn) {
+        let at = parse_cell_key(key)?;
+        let style_key = value
+            .cast::<String>()
+            .map_err(|_| format!("cell style {key} is not a string"))?;
+        let style = style_indices
+            .get(&style_key)
+            .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
+        cells.entry((at.row, at.col)).or_default().style = *style;
+    }
+    for ((row, col), cell) in cells {
+        sheet.set_cell(CellRef::new(row, col), cell);
+    }
+    sheet.col_widths = materialize_numbers(
+        &nested_map(sheet_map, txn, COL_WIDTHS)?,
+        txn,
+        MAX_COLS,
+        "column width",
+    )?;
+    sheet.row_heights = materialize_numbers(
+        &nested_map(sheet_map, txn, ROW_HEIGHTS)?,
+        txn,
+        MAX_ROWS,
+        "row height",
+    )?;
+    if version < SCHEMA_VERSION {
+        for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
+            sheet.col_widths.entry(at).or_insert(size);
+        }
+        for (&at, &size) in &fallbacks.hidden_dimensions.row_heights {
+            sheet.row_heights.entry(at).or_insert(size);
+        }
+    }
+    sheet.format = fallbacks.format;
+    sheet.col_styles = fallbacks.col_styles.to_vec();
+    sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
+        (FREEZE_PANE_SCHEMA_VERSION.., _) => {
+            return Err("sheet is missing freeze pane".to_string());
+        }
+        _ => fallbacks.freeze_pane,
+    };
+    sheet.hyperlinks = match (version, sheet_map.get(txn, HYPERLINKS)) {
+        (HYPERLINK_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => {
+            decode_hyperlinks(&json)?
+        }
+        (HYPERLINK_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet hyperlinks are not a string".to_string());
+        }
+        (HYPERLINK_SCHEMA_VERSION.., None) => {
+            return Err("sheet is missing hyperlinks".to_string());
+        }
+        _ => fallbacks.hyperlinks.to_vec(),
+    };
+    sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
+        (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
+        (CHARTS_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet charts are not a string".to_string());
+        }
+        _ => fallbacks.charts.to_vec(),
+    };
+    sheet.merges = match sheet_map.get(txn, MERGES) {
+        Some(Out::Any(value)) => merges_from_any(&value)?,
+        _ => return Err("sheet is missing merges".to_string()),
+    };
+    Ok(sheet)
+}
+
+#[cfg(test)]
+fn fingerprint_model_with_schema_oracle(
     model: &WorkbookModel,
     schema_version: i64,
     include_defined_names: bool,
@@ -3718,48 +4468,322 @@ fn fingerprint_model_with_schema(
     Ok((fingerprint, bootstrap_client_id))
 }
 
-fn hash_cell_value(hasher: &mut Sha256, value: &CellValue) {
-    match value {
-        CellValue::Empty => hasher.update([0]),
-        CellValue::Number { value } => {
-            hasher.update([1]);
-            hash_u64(hasher, value.to_bits());
-        }
-        CellValue::Text { value } => {
-            hasher.update([2]);
-            hash_bytes(hasher, value.as_bytes());
-        }
-        CellValue::Bool { value } => hasher.update([3, u8::from(*value)]),
-        CellValue::Error { value } => {
-            hasher.update([4]);
-            hash_bytes(hasher, value.as_str().as_bytes());
-        }
+#[cfg(test)]
+fn fingerprint_model_for_schema_oracle(
+    model: &WorkbookModel,
+    schema_version: i64,
+) -> Result<(String, u64), String> {
+    fingerprint_model_with_schema_oracle(model, schema_version, schema_version >= 4, true)
+}
+
+#[cfg(test)]
+pub(crate) mod open_test_cases {
+    use super::*;
+    use xlsx_model::{AnchorCell, Border, ChartRefKind, Color, Fill, Font, Xf};
+
+    pub(crate) struct OpenCase {
+        pub(crate) label: String,
+        pub(crate) model: WorkbookModel,
+        pub(crate) legacy_dimensions: Vec<xlsx_parse::LegacySheetDimensions>,
+        pub(crate) legacy_styles: Option<Stylesheet>,
     }
-}
 
-fn hash_cell_ref(hasher: &mut Sha256, cell: CellRef) {
-    hash_u32(hasher, cell.row);
-    hash_u32(hasher, cell.col);
-    hasher.update([u8::from(cell.abs_row), u8::from(cell.abs_col)]);
-}
+    pub(crate) fn matrix() -> Vec<OpenCase> {
+        let mut cases = Vec::new();
+        for sheet_count in [1, 3] {
+            for dimensions in 0..3 {
+                for legacy_style in 0..4 {
+                    for indexed_colors in [false, true] {
+                        for col_styles in [false, true] {
+                            for features in [false, true] {
+                                let mut model = model(sheet_count, features, col_styles);
+                                if indexed_colors {
+                                    model.styles.indexed_colors =
+                                        vec!["#123456".into(), String::new(), "#abcdef".into()];
+                                }
+                                let legacy_dimensions = match dimensions {
+                                    0 => Vec::new(),
+                                    1 => model
+                                        .sheets
+                                        .iter()
+                                        .map(|sheet| xlsx_parse::LegacySheetDimensions {
+                                            col_widths: sheet.col_widths.clone(),
+                                            row_heights: sheet.row_heights.clone(),
+                                        })
+                                        .collect(),
+                                    _ => vec![xlsx_parse::LegacySheetDimensions {
+                                        col_widths: BTreeMap::from([(1, 12.0)]),
+                                        row_heights: BTreeMap::from([(2, 15.0)]),
+                                    }],
+                                };
+                                let legacy_styles = match legacy_style {
+                                    0 => None,
+                                    1 => Some(model.styles.clone()),
+                                    _ => {
+                                        let mut styles = model.styles.clone();
+                                        styles.indexed_colors = if indexed_colors {
+                                            Vec::new()
+                                        } else {
+                                            vec!["#654321".into()]
+                                        };
+                                        if legacy_style == 2 {
+                                            styles.fonts[0].bold = !styles.fonts[0].bold;
+                                            styles.cell_xfs[1].num_fmt_id = None;
+                                        }
+                                        Some(styles)
+                                    }
+                                };
+                                cases.push(OpenCase {
+                                    label: format!(
+                                        "sheets={sheet_count} dimensions={dimensions} legacy_style={legacy_style} indexed={indexed_colors} columns={col_styles} features={features}"
+                                    ),
+                                    model,
+                                    legacy_dimensions,
+                                    legacy_styles,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cases
+    }
 
-fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
-    hash_u64(hasher, bytes.len() as u64);
-    hasher.update(bytes);
-}
-
-fn hash_u32(hasher: &mut Sha256, value: u32) {
-    hasher.update(value.to_le_bytes());
-}
-
-fn hash_u64(hasher: &mut Sha256, value: u64) {
-    hasher.update(value.to_le_bytes());
+    fn model(sheet_count: usize, features: bool, col_styles: bool) -> WorkbookModel {
+        let mut model = WorkbookModel {
+            date_system: if features {
+                DateSystem::V1904
+            } else {
+                DateSystem::V1900
+            },
+            shared_strings: vec!["header".into()],
+            ..WorkbookModel::default()
+        };
+        model.styles.fonts.push(Font {
+            name: Some("Calibri".into()),
+            color: Some(Color::Indexed(0)),
+            ..Font::default()
+        });
+        model.styles.fills = vec![Fill::None, Fill::Solid(Color::Rgb("#abcdef".into()))];
+        model.styles.borders.push(Border::default());
+        model.styles.num_fmts.push((164, "0.000".into()));
+        model.styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                font: Some(0),
+                fill: Some(1),
+                border: Some(0),
+                num_fmt_id: Some(164),
+                ..Xf::default()
+            },
+        ];
+        for index in 0..sheet_count {
+            let mut sheet = Sheet::new(format!("Sheet{}", index + 1));
+            for (row, col, value, formula, style) in [
+                (0, 0, CellValue::Number { value: 2.0 }, None, Some(0)),
+                (1, 0, CellValue::Number { value: 3.0 }, Some("A1+1"), None),
+                (0, 3, CellValue::Number { value: 3.0 }, Some("A1+1"), None),
+                (1, 3, CellValue::Number { value: 4.0 }, Some("A2+1"), None),
+                (
+                    2,
+                    1,
+                    CellValue::Number { value: 1.0 },
+                    Some("ROW(A1:A2)"),
+                    None,
+                ),
+                (3, 1, CellValue::Number { value: 2.0 }, None, None),
+                (4, 0, CellValue::Empty, None, Some(1)),
+                (4, 1, CellValue::Empty, None, Some(0)),
+                (
+                    5,
+                    0,
+                    CellValue::Text {
+                        value: "header".into(),
+                    },
+                    None,
+                    None,
+                ),
+                (5, 1, CellValue::Bool { value: false }, None, None),
+                (
+                    5,
+                    2,
+                    CellValue::Error {
+                        value: ErrorValue::Div0,
+                    },
+                    None,
+                    None,
+                ),
+            ] {
+                sheet.set_cell(
+                    CellRef::new(row, col),
+                    Cell {
+                        value,
+                        formula: formula.map(str::to_string),
+                        style,
+                    },
+                );
+            }
+            sheet.set_array_formula(
+                CellRef::new(2, 1),
+                CellRange::new(CellRef::new(2, 1), CellRef::new(3, 1)),
+            );
+            sheet.col_widths = BTreeMap::from([(1, 0.0), (5, 18.25)]);
+            sheet.row_heights = BTreeMap::from([(2, 0.0), (5, 20.5)]);
+            sheet.format = SheetFormat {
+                default_row_height_pt: Some(16.0),
+                custom_height: true,
+                zero_height: false,
+            };
+            if col_styles {
+                sheet.col_styles.push(ColStyle {
+                    first: 0,
+                    last: 2,
+                    xf: 1,
+                });
+            }
+            if features {
+                sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(2, 2)));
+                sheet
+                    .merges
+                    .push(CellRange::new(CellRef::new(7, 0), CellRef::new(7, 2)));
+                sheet.hyperlinks.push(Hyperlink {
+                    range: CellRange::new(CellRef::new(5, 0), CellRef::new(5, 0)),
+                    external_target: Some("https://example.com".into()),
+                    location: None,
+                    tooltip: Some("Example".into()),
+                    display: None,
+                });
+            }
+            model.sheets.push(sheet);
+        }
+        if features {
+            model.defined_names.push(DefinedName {
+                name: "Answer".into(),
+                formula: "Sheet1!$A$1".into(),
+                local_sheet: None,
+                hidden: false,
+            });
+            model.defined_names.push(DefinedName {
+                name: "Local".into(),
+                formula: "Sheet1!$B$3".into(),
+                local_sheet: Some(SheetId(0)),
+                hidden: true,
+            });
+            model.tables.push(Table {
+                name: "Data".into(),
+                sheet: SheetId(0),
+                range: CellRange::new(CellRef::new(5, 0), CellRef::new(6, 1)),
+                header_rows: 1,
+                totals_rows: 0,
+                columns: vec!["First".into(), "Second".into()],
+            });
+            model.sheets[0].charts.push(SheetChart {
+                part: "xl/charts/chart1.xml".into(),
+                drawing: "xl/drawings/drawing1.xml".into(),
+                anchor_index: 0,
+                anchor: ChartAnchor::OneCell {
+                    from: AnchorCell::default(),
+                    extent: AnchorExtent {
+                        cx: 100_000,
+                        cy: 200_000,
+                    },
+                },
+                refs: vec![ChartRef {
+                    kind: ChartRefKind::Values,
+                    formula: "Sheet1!$A$1:$A$2".into(),
+                }],
+            });
+        }
+        model
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use xlsx_model::Xf;
+
+    #[test]
+    fn fingerprint_data_matches_clone_oracle_matrix() {
+        for case in open_test_cases::matrix() {
+            let actual = WorkbookBase::from_model_with_legacy_dimensions(
+                &case.model,
+                &case.legacy_dimensions,
+                case.legacy_styles.as_ref(),
+            )
+            .unwrap();
+            let expected = WorkbookBase::from_model_with_legacy_dimensions_oracle(
+                &case.model,
+                &case.legacy_dimensions,
+                case.legacy_styles.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(actual.fingerprints, expected.fingerprints, "{}", case.label);
+            assert_eq!(actual.fingerprint, expected.fingerprint, "{}", case.label);
+            assert_eq!(
+                actual.bootstrap_client_id, expected.bootstrap_client_id,
+                "{}",
+                case.label
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_style_overrides_preserve_signed_zero() {
+        let mut case = open_test_cases::matrix().remove(0);
+        case.model.styles.fonts[0].size_pt = Some(-0.0);
+        case.model.styles.indexed_colors = vec!["#123456".into()];
+        let mut legacy_styles = case.model.styles.clone();
+        legacy_styles.fonts[0].size_pt = Some(0.0);
+        legacy_styles.indexed_colors = vec!["#abcdef".into()];
+        let actual =
+            WorkbookBase::from_model_with_legacy_dimensions(&case.model, &[], Some(&legacy_styles))
+                .unwrap();
+        let expected = WorkbookBase::from_model_with_legacy_dimensions_oracle(
+            &case.model,
+            &[],
+            Some(&legacy_styles),
+        )
+        .unwrap();
+        assert_eq!(actual.fingerprints, expected.fingerprints);
+        assert_eq!(actual.fingerprint, expected.fingerprint);
+        assert_eq!(actual.bootstrap_client_id, expected.bootstrap_client_id);
+    }
+
+    #[test]
+    fn single_projection_matches_double_projection_matrix() {
+        for case in open_test_cases::matrix() {
+            let (actual, model, structure) = WorkbookAuthority::from_source_with_projection(
+                &case.model,
+                Some(11),
+                &case.legacy_dimensions,
+                case.legacy_styles.as_ref(),
+            )
+            .unwrap();
+            let expected = WorkbookAuthority::from_source_oracle(
+                &case.model,
+                Some(11),
+                &case.legacy_dimensions,
+                case.legacy_styles.as_ref(),
+            )
+            .unwrap();
+            let projection = expected.materialize_internal_oracle(false).unwrap();
+            assert_eq!((model, structure), projection, "{}", case.label);
+            assert_eq!(
+                actual.encode_state_vector_v1(),
+                expected.encode_state_vector_v1(),
+                "{}",
+                case.label
+            );
+            assert_eq!(
+                actual.encode_state_as_update_v1(),
+                expected.encode_state_as_update_v1(),
+                "{}",
+                case.label
+            );
+        }
+    }
 
     fn rich_model() -> WorkbookModel {
         let mut first = Sheet::new("Data");
