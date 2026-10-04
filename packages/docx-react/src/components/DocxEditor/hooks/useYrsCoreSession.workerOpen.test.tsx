@@ -1162,6 +1162,114 @@ test('two bursts typed milliseconds apart around first paint both land, in order
   }
 });
 
+async function boundedReplay<T>(promise: Promise<T>): Promise<T> {
+  let timer!: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Worker replay did not settle')), 5_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function openingReplayEditor() {
+  const previousWorker = globalThis.Worker;
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const restore = registerRestore(() => {
+    globalThis.Worker = previousWorker;
+    if (fonts) Object.defineProperty(document, 'fonts', fonts);
+    else Reflect.deleteProperty(document, 'fonts');
+  });
+  try {
+    const opened = await openingEditor(true, false, { residentInput: true });
+    return {
+      ...opened,
+      get harness() { return opened.harness; },
+      close() {
+        try {
+          opened.close();
+        } finally {
+          opened.frames.restore();
+          restore();
+        }
+      },
+    };
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}
+
+async function settledReplayLayout(opened: Awaited<ReturnType<typeof openingReplayEditor>>, session: YrsSession) {
+  await waitFor(() => {
+    act(() => opened.frames.run());
+    expect(opened.harness.errors).toEqual([]);
+    expect(opened.harness.renderer.queries?.isReady()).toBe(true);
+    expect(sourceVersionOf(opened.harness.renderer.queries)).toBe(session.version());
+  }, { timeout: 5_000 });
+  for (let turn = 0; turn < 4; turn += 1) {
+    await act(async () => {
+      opened.frames.run();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+  }
+}
+
+test('held text runs separated by a click replay with one worker layout request and match ready typing', async () => {
+  let replayedText!: string[];
+  let replayedOffset!: number;
+  const held = await openingReplayEditor();
+  try {
+    held.click(6);
+    held.type('AB');
+    held.click(2);
+    held.type('CD');
+    const full = await boundedReplay(held.switchToFull());
+    await boundedReplay(held.presentFull(full));
+    const start = held.posted.length;
+    await boundedReplay(held.loadPeer(full));
+    await settledReplayLayout(held, full);
+    const requests = held.posted.slice(start);
+    expect(requests.filter((request) =>
+      request.type === 'sync' || request.type === 'bootstrap' ||
+      request.type === 'applyInput' || request.type === 'applyDelete'
+    ).map((request) => request.type)).toEqual(['sync']);
+    expect(requests.filter((request) => request.type === 'applyUpdate')).toHaveLength(4);
+    expect(full.paragraphs('body')[0]!.text).toBe('FCDirstAB paragraph');
+    expect(held.editor.current!.hasPendingInput()).toBe(false);
+    replayedText = full.paragraphs('body').map((paragraph) => paragraph.text);
+    replayedOffset = full.selection()!.head.offset;
+    held.type('E');
+    await boundedReplay(held.editor.current!.flushPendingInput());
+    expect(held.posted.slice(start).filter((request) => request.type === 'applyInput'))
+      .toMatchObject([{ text: 'E' }]);
+  } finally {
+    held.close();
+  }
+  const ready = await openingReplayEditor();
+  try {
+    const full = await boundedReplay(ready.switchToFull());
+    await boundedReplay(ready.presentFull(full));
+    await boundedReplay(ready.loadPeer(full));
+    ready.click(6);
+    ready.type('AB');
+    await boundedReplay(ready.editor.current!.flushPendingInput());
+    await settledReplayLayout(ready, full);
+    ready.click(2);
+    ready.type('CD');
+    await boundedReplay(ready.editor.current!.flushPendingInput());
+    expect(full.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(replayedText);
+    expect(full.selection()!.head.offset).toBe(replayedOffset);
+    expect(ready.harness.errors).toEqual([]);
+  } finally {
+    ready.close();
+  }
+}, 30_000);
+
 test('clicks interleaved with held and hydrating input keep their original positions', async () => {
   const opened = await openingEditor();
   try {

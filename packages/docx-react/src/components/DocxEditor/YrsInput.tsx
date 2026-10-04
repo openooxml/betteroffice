@@ -140,7 +140,9 @@ export interface YrsInputProps {
     selection: YrsDisplaySelection,
     docChanged: boolean,
     residentLayoutReady?: boolean,
-    residentCaretReady?: boolean
+    residentCaretReady?: boolean,
+    updateOrigin?: LayoutUpdateOrigin,
+    inWorker?: boolean
   ): void;
   onDirectInput(stories?: string | readonly string[]): void;
   /** One-owner body text path; false until the resident frame is initialized. */
@@ -183,18 +185,29 @@ interface HeldSelection {
   kind: 'selection';
   prepare: () => Promise<() => void>;
   apply?: () => void;
+  inputTime?: number;
 }
 
 type NavigationDirection = 'left' | 'right' | 'up' | 'down' | 'home' | 'end';
 
-type HeldInput =
+const UNDO_CAPTURE_TIMEOUT_MS = 500;
+
+type HeldInput = (
   | HeldSelection
   | { kind: 'navigation'; direction: NavigationDirection; extend: boolean; wholeDocument: boolean; byWord: boolean }
-  | { kind: 'text'; text: string }
+  | { kind: 'text' | 'composition'; text: string }
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
   | { kind: 'delete-selection' }
-  | { kind: 'select-all' };
+  | { kind: 'select-all' }
+  | { kind: 'undo-boundary' }
+) & { inputTime?: number };
+
+interface HeldReplayBatch {
+  operations: Promise<void>[];
+  mutated: boolean;
+  selectionChanged: boolean;
+}
 
 function previousCodePointOffset(text: string, offset: number): number {
   if (offset <= 0) return 0;
@@ -325,6 +338,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (entry: HeldInput): boolean => {
       if (!holdInput) return false;
       if (!readOnly) {
+        entry.inputTime ??= performance.now();
         heldInputRef.current.entries.push(entry);
         onPendingInputChangeRef.current?.(true);
       }
@@ -354,6 +368,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     count: number;
   } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
+  const heldReplayBatchRef = useRef<HeldReplayBatch | null>(null);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
@@ -433,6 +448,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onDropped?: () => void
     ): void => {
       sealInputBatches();
+      const replay = heldReplayBatchRef.current;
+      if (replay) {
+        try {
+          replay.operations.push(Promise.resolve(operation(false)));
+        } catch (error) {
+          replay.operations.push(Promise.reject(error));
+        }
+        return;
+      }
       const admitted = session;
       const queue = inputOperationQueueRef.current;
       const replica =
@@ -552,11 +576,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, holdInput, locToDisplayPosition, readSelection, seedSelection]);
 
   const emitSelection = useCallback(
-    (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false): void => {
+    (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false, inWorker = false): void => {
+      if (heldReplayBatchRef.current) {
+        heldReplayBatchRef.current.selectionChanged = true;
+        return;
+      }
       const selection = displaySelection();
       if (!selection) return;
       setSelectionEpoch((epoch) => epoch + 1);
-      onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
+      if (inWorker) onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady, 'local', true);
+      else onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
     [displaySelection, onStateChange]
   );
@@ -581,6 +610,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ): void => {
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
+      if (heldReplayBatchRef.current) {
+        onDirectInput(dirtyStories);
+        heldReplayBatchRef.current.mutated = true;
+        return;
+      }
       onCaretInput?.();
       onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
@@ -601,6 +635,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Body-story only: painted-caret coverage for other stories is unproven, and
   // an unhonored dispatch hold would blank the caret per keystroke there.
   const dispatchCaretInput = useCallback((): void => {
+    if (heldReplayBatchRef.current) return;
     if (!session || readOnly || replicaReadyRef?.current === false) return;
     if (session.selection()?.head.story !== 'body') return;
     onCaretInputDispatched?.();
@@ -690,10 +725,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, inputPositionMap, session, suggestingAuthor]);
 
   const insertText = useCallback(
-    (text: string): void => {
+    (text: string, inputTime?: number, composition = false): void => {
       verticalCaretGoalRef.current.reset();
       if (!session || readOnly || text.length === 0) return;
-      if (holdOperation({ kind: 'text', text })) return;
+      if (holdOperation({ kind: composition ? 'composition' : 'text', text, inputTime })) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -763,6 +798,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           finishMutation();
         };
         if (
+          !heldReplayBatchRef.current &&
           !hasSelection &&
           isBodyFlowStory(current.head.story) &&
           !isSuggesting &&
@@ -781,7 +817,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         commitCompatibilityInput();
       };
 
+      if (composition && replicaReadyRef) {
+        enqueueInputOperation(async () => {
+          session.addUndoBoundary();
+          try {
+            await applyText(text);
+          } finally {
+            if (isCurrentInput(session)) session.addUndoBoundary();
+          }
+        }, 'mutation');
+        return;
+      }
+
       const canBatchResidentText =
+        !heldReplayBatchRef.current &&
         !isSuggesting &&
         Boolean(applyResidentInput) &&
         /^[\x20-\x7e]+$/u.test(text) &&
@@ -817,6 +866,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       isCurrentInput,
       isSuggesting,
       readOnly,
+      replicaReadyRef,
       session,
       suggestingAuthor,
     ]
@@ -844,7 +894,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             ? caret.offset > 0 || mapIndex > 0
             : caret.offset < map.paragraphs[mapIndex].length ||
               mapIndex + 1 < map.paragraphs.length);
-        if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
+        if (!heldReplayBatchRef.current && hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
           if (!isCurrentInput(session)) return;
           if (applied) {
@@ -931,6 +981,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (holdOperation({ kind: 'delete', direction })) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
+      if (heldReplayBatchRef.current) {
+        enqueueInputOperation(() => deleteUnits(direction, 1), 'mutation');
+        return;
+      }
       const pending = pendingResidentDeleteRef.current;
       if (pending?.direction === direction) {
         pending.count += 1;
@@ -1186,7 +1240,55 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection });
   inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection };
+  const replayHeldEntry = useCallback((entry: HeldInput): void => {
+    const handlers = inputHandlersRef.current;
+    if (entry.kind === 'selection') handlers.replaySelection(entry);
+    else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
+    else if (entry.kind === 'text' || entry.kind === 'composition') handlers.insertText(entry.text);
+    else if (entry.kind === 'split') handlers.splitParagraph();
+    else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
+    else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
+    else if (entry.kind === 'select-all') handlers.selectAll();
+  }, []);
+  const replayHeldBatch = useCallback((entries: HeldInput[]): void => {
+    enqueueInputOperation(async () => {
+      if (!session || readOnly) return;
+      const batch: HeldReplayBatch = { operations: [], mutated: false, selectionChanged: false };
+      const captureMode = session.undoCaptureMode();
+      session.beginUndoCapture();
+      session.setUndoCaptureMode('manual');
+      heldReplayBatchRef.current = batch;
+      let previousTime: number | undefined;
+      let previousStory = session.selection()?.head.story;
+      try {
+        for (const entry of entries) {
+          const activeStory = ensureSelection()?.head.story;
+          if (
+            (previousTime !== undefined && entry.inputTime! - previousTime >= UNDO_CAPTURE_TIMEOUT_MS) ||
+            activeStory !== previousStory || entry.kind === 'selection' ||
+            entry.kind === 'navigation' || entry.kind === 'select-all' ||
+            entry.kind === 'composition' || entry.kind === 'undo-boundary'
+          ) session.addUndoBoundary();
+          replayHeldEntry(entry);
+          if (entry.kind === 'composition') session.addUndoBoundary();
+          previousTime = entry.inputTime;
+          previousStory = activeStory;
+        }
+      } finally {
+        heldReplayBatchRef.current = null;
+        session.setUndoCaptureMode(captureMode);
+        if (batch.mutated) {
+          onCaretInput?.();
+          emitSelection(true, false, false, true);
+        } else if (batch.selectionChanged) emitSelection(false);
+      }
+      await Promise.all(batch.operations);
+    }, 'mutation');
+  }, [emitSelection, enqueueInputOperation, ensureSelection, onCaretInput, readOnly, replayHeldEntry, replicaReadyRef, session]);
+  const heldReplayHandlersRef = useRef({ replayHeldBatch, replayHeldEntry, enqueueInputOperation });
+  heldReplayHandlersRef.current = { replayHeldBatch, replayHeldEntry, enqueueInputOperation };
   useLayoutEffect(() => {
+    const { replayHeldBatch, replayHeldEntry, enqueueInputOperation } = heldReplayHandlersRef.current;
     if ((readOnly || !enabled || (!holdInput && !session)) &&
       (heldInputRef.current.entries.length > 0 || pendingSelectionsRef.current.length > 0 || compositionHeldRef.current)) {
       heldInputRef.current = { scope: inputScope, entries: [] };
@@ -1205,16 +1307,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     } else if (!holdInput && !readOnly && enabled && session) {
       const entries = heldInputRef.current.entries;
       heldInputRef.current.entries = [];
+      let batch: HeldInput[] = [];
       for (const entry of entries) {
-        const handlers = inputHandlersRef.current;
-        if (entry.kind === 'selection') handlers.replaySelection(entry);
-        else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
-        else if (entry.kind === 'text') handlers.insertText(entry.text);
-        else if (entry.kind === 'split') handlers.splitParagraph();
-        else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
-        else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
-        else handlers.selectAll();
+        if (!replicaReadyRef) {
+          replayHeldEntry(entry);
+        } else if (entry.kind === 'navigation' && (entry.direction === 'up' || entry.direction === 'down')) {
+          if (batch.length) replayHeldBatch(batch);
+          batch = [];
+          enqueueInputOperation(() => session.addUndoBoundary(), 'mutation');
+          replayHeldEntry(entry);
+        } else batch.push(entry);
       }
+      if (batch.length) replayHeldBatch(batch);
     }
     for (const notify of heldInputWaitersRef.current) notify();
   }, [enabled, holdInput, inputScope, readOnly, session]);
@@ -1413,10 +1517,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionPendingRef.current = false;
       compositionCommitRef.current = '';
       event.currentTarget.value = '';
+      if (replicaReadyRef) holdOperation({ kind: 'undo-boundary' });
       onCaretInterrupt?.();
       onPendingInputChangeRef.current?.(true);
     },
-    [holdInput, onCaretInterrupt]
+    [holdInput, holdOperation, onCaretInterrupt, replicaReadyRef]
   );
 
   const handleCompositionUpdate = useCallback(
@@ -1439,6 +1544,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         event.currentTarget.value || event.data || compositionCommitRef.current;
       const scope = heldInputRef.current;
       const heldComposition = compositionHeldRef.current;
+      const inputTime = heldComposition ? performance.now() : undefined;
       queueMicrotask(() => {
         const lifetime = inputLifetimeRef.current;
         if (
@@ -1454,7 +1560,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         compositionPendingRef.current = false;
         compositionCommitRef.current = '';
         compositionHeldRef.current = false;
-        if (heldComposition) inputHandlersRef.current.insertText(text);
+        if (heldComposition) inputHandlersRef.current.insertText(text, inputTime, true);
         else insertText(text);
         for (const resolve of compositionWaitersRef.current) resolve();
         compositionWaitersRef.current.clear();
