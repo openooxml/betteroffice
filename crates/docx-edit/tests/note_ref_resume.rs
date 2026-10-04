@@ -290,6 +290,97 @@ fn lengthening_a_paragraph_moves_a_footnote_forward_and_resumes() {
 }
 
 #[test]
+fn moving_a_footnote_reuses_the_unchanged_tail_for_layout_and_display() {
+    let tail: String = (0..20)
+        .map(|id| {
+            paragraph(
+                &format!("{:08X}", 0x7100_0200 + id),
+                20,
+                if id == 0 { "<w:pageBreakBefore/>" } else { "" },
+                &fixture::r("Tail"),
+            )
+        })
+        .collect();
+    let body = format!(
+        "{}{}{tail}<w:sectPr/>",
+        moving_body(false, ""),
+        paragraph(FOLLOWER_ID, 40, "", &fixture::r("Follower")),
+    );
+    let bytes = fixture::with_body_and_note(&body, &note());
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let engine = EngineSession::new(75403);
+    seed_from_docx(engine.doc(), &bytes).unwrap();
+    let mut request = fixture::region_request(&engine, &bytes, font);
+    request["regions"]["sections"] = small_sections();
+    request["notes"]["contents"] = json!([
+        {"id": 1, "noteKind": "footnote", "height": 0},
+        {"id": 2, "noteKind": "footnote", "height": 0},
+    ]);
+    let extras = json!({"fontChains": request["measurement"]["fontChains"]}).to_string();
+    let request = request.to_string();
+    let original = engine
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    let original = snapshot(&engine, &original);
+    engine.build_display_list_frame(&extras, 0).unwrap();
+    let before = engine.stats();
+
+    grow(&engine);
+    let output = engine
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    let edited = snapshot(&engine, &output);
+    engine
+        .build_display_list_frame(&extras, before.frame_epoch)
+        .unwrap();
+    let after = engine.stats();
+    assert_note_on_page(&original, 1, 2);
+    assert_note_on_page(&edited, 1, 3);
+    assert_eq!(block_page(&original, &json!(FOLLOWER_ID)), 3);
+    assert_eq!(block_page(&edited, &json!(FOLLOWER_ID)), 3);
+    assert_eq!(pages(&edited).len(), pages(&original).len());
+    assert!(pages(&edited).len() > 5);
+    for id in 0..20 {
+        let block_id = json!(format!("{:08X}", 0x7100_0200 + id));
+        assert_eq!(block_page(&original, &block_id), 4 + id / 5);
+        assert_eq!(block_page(&edited, &block_id), 4 + id / 5);
+    }
+    assert_eq!(after.pagination_calls, before.pagination_calls + 1);
+    assert_eq!(
+        after.incremental_pagination_calls,
+        before.incremental_pagination_calls + 1,
+    );
+    assert_eq!(after.rebuilt_pages, 3);
+    assert_eq!(
+        after.incremental_display_builds,
+        before.incremental_display_builds + 1,
+    );
+    assert_eq!(after.rebuilt_display_pages - before.rebuilt_display_pages, 3);
+
+    let fresh = EngineSession::new(75404);
+    fresh
+        .doc()
+        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    fresh
+        .doc()
+        .set_note_separator_state(engine.doc().note_separator_state().unwrap());
+    let expected = fresh
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    assert_eq!(output.as_bytes(), expected.as_bytes());
+    assert_eq!(engine.retained_layout_json().unwrap(), expected);
+    fresh.build_display_list_frame(&extras, 0).unwrap();
+    let display_pages = |engine: &EngineSession| {
+        engine
+            .with_display_list(|list| serde_json::to_vec(&list.pages).unwrap())
+            .unwrap()
+    };
+    assert_eq!(display_pages(&engine), display_pages(&fresh));
+}
+
+#[test]
 fn shortening_a_paragraph_moves_a_footnote_back_and_resumes() {
     let body = format!("{}{}<w:sectPr/>", moving_body(true, ""), tail());
     let bytes = fixture::with_body_and_note(&body, &note());

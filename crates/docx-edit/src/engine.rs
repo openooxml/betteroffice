@@ -723,12 +723,17 @@ fn wraps_by_page_side(shape: &docx_layout::types::ShapeBlock) -> bool {
 }
 
 /// What each page's note areas show, which an edit elsewhere can change.
-fn note_page_keys(layout: Option<&Layout>) -> Vec<Option<Vec<NoteAreaContract>>> {
+fn note_page_keys(layout: Option<&Layout>) -> Vec<(f64, Option<Vec<NoteAreaContract>>)> {
     layout.map_or_else(Vec::new, |layout| {
         layout
             .pages
             .iter()
-            .map(|page| page.note_areas.clone())
+            .map(|page| {
+                (
+                    page.footnote_reserved_height.unwrap_or(0.0),
+                    page.note_areas.clone(),
+                )
+            })
             .collect()
     })
 }
