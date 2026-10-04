@@ -15,6 +15,7 @@ export interface ResidentSaveRecord extends EditorSaveRecord {
   base?: Document;
   /** Story revision `base` reflects; stories changed since are projected again. */
   revision?: number;
+  commentIds?: Set<string>;
 }
 
 /**
@@ -22,7 +23,7 @@ export interface ResidentSaveRecord extends EditorSaveRecord {
  * changed since the last save projected over that save's projection (every
  * story when none changed), with `host`'s metadata (the open's when omitted),
  * and `record` updated. Revisions come from `storiesChangedSince`, the resident
- * session's story stream. @internal
+ * session's story stream, with comment ID changes also projecting the body. @internal
  */
 export async function saveResidentDocument(
   raw: EditSession,
@@ -42,6 +43,15 @@ export async function saveResidentDocument(
       ? []
       : storiesChangedSince(record.revision).stories.map(dirtyProjectionStory)
   );
+  const commentIds = new Set(comments.map((comment) => String(comment.id)));
+  const previousCommentIds = record.commentIds;
+  if (record.revision !== undefined && (
+    !previousCommentIds ||
+    commentIds.size !== previousCommentIds.size ||
+    [...commentIds].some((id) => !previousCommentIds.has(id))
+  )) {
+    storyIds.add(dirtyProjectionStory('body'));
+  }
   const projected = yrsToDocument(
     opened.session,
     mergeDocxHostMetadata(base, host ?? opened.host.document),
@@ -51,5 +61,6 @@ export async function saveResidentDocument(
   projected.originalBuffer = buffer;
   record.base = projected;
   record.revision = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+  record.commentIds = commentIds;
   return buffer;
 }

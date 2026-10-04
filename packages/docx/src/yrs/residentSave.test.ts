@@ -191,6 +191,13 @@ async function compareSave(
   return saved;
 }
 
+function commentMarkers(bytes: Uint8Array, id: number): string[] {
+  const body = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+  return [...body.matchAll(new RegExp(
+    `<w:comment(RangeStart|RangeEnd|Reference)\\b[^>]*\\bw:id="${id}"`, 'g'
+  ))].map((match) => match[1]!);
+}
+
 async function bootstrap(opened: Opened): Promise<void> {
   const main = opened.replica.session;
   main.registerFont(new Uint8Array(readFileSync(FONT)));
@@ -507,12 +514,9 @@ describe('worker save', () => {
     const deleted = comments.filter((comment) => comment.parentId === undefined).at(-1);
     if (!deleted) throw new Error('the fixture has no body comment');
     const id = deleted.id;
-    const markers = ['commentRangeStart', 'commentRangeEnd', 'commentReference'].map((tag) =>
-      new RegExp(`<w:${tag}\\b[^>]*\\bw:id="${id}"`)
-    );
     const first = await compareSave(opened);
-    const firstBody = new TextDecoder().decode(unzipContainer(first)['word/document.xml']);
-    for (const marker of markers) expect(firstBody).toMatch(marker);
+    expect(commentMarkers(first, id)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    const since = opened.resident.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
     const header = session.storyIds().find((story) =>
       story.startsWith('hf:') && opened.host.package.headers?.has(story.slice(3))
     );
@@ -531,13 +535,75 @@ describe('worker save', () => {
       }).ok).toBe(true);
     }
     opened.resident.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+    expect(opened.resident.storiesChangedSince(since).stories).toEqual(['body', header]);
     session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
     opened.replica.dirtyStories.add('body');
     const remaining = comments.filter((comment) => comment.id !== id && comment.parentId !== id);
     const second = await compareSave(opened, remaining);
-    const body = new TextDecoder().decode(unzipContainer(second)['word/document.xml']);
-    for (const marker of markers) expect(body).not.toMatch(marker);
+    expect(commentMarkers(second, id)).toEqual(['Reference']);
   }, TIMEOUT);
+
+  for (const operation of ['add', 'delete'] as const) {
+    it(`projects the body after a peer comment ${operation} when another story changed`, async () => {
+      const opened = await open(synthetic());
+      const body = opened.host.package.document;
+      body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+      const peer = await createYrsSession({ clientId: CLIENT_ID + 1 });
+      owned.push(peer);
+      peer.openDocx(opened.bytes.slice(), false);
+      peer.loadState(await opened.client.encodeState());
+      opened.replica = new Replica(peer, opened.host);
+      const comment: Comment = {
+        id: 1,
+        author: 'Peer',
+        date: SUGGEST.date,
+        content: [{
+          type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Peer comment' }] }],
+        }],
+      };
+      const addComment = () => {
+        peer.applyRawOps('body', [{
+          op: 'setComment', id: String(comment.id), ranges: [[0, 5]],
+          author: comment.author, date: comment.date, body: comment.content,
+        }]);
+        opened.host.package.document.comments = [comment];
+        opened.replica.dirtyStories.add('body');
+      };
+      if (operation === 'delete') {
+        addComment();
+        opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+      }
+      const first = await compareSave(opened);
+      expect(commentMarkers(first, comment.id)).toEqual(
+        operation === 'delete' ? ['RangeStart', 'RangeEnd', 'Reference'] : []
+      );
+      const header = 'hf:rIdH1';
+      expect(peer.applyEdits({
+        expectVersion: peer.version(),
+        steps: [{
+          op: 'insertText', target: { kind: 'paragraph', story: header, paraId: '0000A001' },
+          at: 'end', text: ' edited',
+        }],
+      }).ok).toBe(true);
+      if (operation === 'add') {
+        addComment();
+      } else {
+        peer.applyRawOps('body', [{ op: 'removeComment', id: String(comment.id) }]);
+        opened.host.package.document.comments = [];
+        opened.replica.dirtyStories.add('body');
+      }
+      const update = peer.encodeStateAsUpdate(opened.client.remoteStateVector()!);
+      opened.client.invalidate(update, null);
+      await opened.client.encodeState();
+      const second = await compareSave(opened);
+      expect(commentMarkers(second, comment.id)).toEqual(
+        operation === 'delete' ? [] : ['RangeStart', 'RangeEnd', 'Reference']
+      );
+      opened.client.invalidate(update, null);
+      await opened.client.encodeState();
+      expect(await compareSave(opened)).toEqual(second);
+    }, TIMEOUT);
+  }
 
   it('writes a host comment reply range once across two saves', async () => {
     const opened = await open(new Uint8Array(readFileSync(join(
