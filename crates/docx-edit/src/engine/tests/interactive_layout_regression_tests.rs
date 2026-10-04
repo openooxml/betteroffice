@@ -392,13 +392,13 @@ fn interactive_page_build_before_undo_matches_main_frame_bytes() {
     reference_display.frame_epoch = epochs.frame_epoch;
     reference_display.binary_frame_epoch = epochs.frame_epoch;
     assert!(undo.undo());
-    engine
-        .layout_document_with_regions_retained(&request)
-        .unwrap();
     assert_eq!(
         engine.region_relayout_trigger(&request).unwrap(),
         RelayoutTrigger::Interactive
     );
+    engine
+        .layout_document_with_regions_retained(&request)
+        .unwrap();
     assert!(engine.pagination.borrow().display_rebuilt_pages.is_empty());
     let (expected_bytes, expected_list, _) =
         main_frame_oracle(&engine, &extras, reference_display);
