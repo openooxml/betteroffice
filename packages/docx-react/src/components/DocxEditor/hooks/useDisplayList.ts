@@ -846,7 +846,7 @@ export function useRustDisplayList(
     const hostEngine = residentEngineRef.current;
     return workerOpenEnabledRef.current &&
       hostEngine !== null && !isViewerSession(hostEngine) &&
-      hostEngine?.setDisplayWindow &&
+      typeof hostEngine.setDisplayWindow === 'function' &&
       mainFrameRef.current?.engine === hostEngine &&
       mainFrameRef.current.contentEpoch === contentEpochRef.current &&
       frameEngineRef.current === hostEngine &&

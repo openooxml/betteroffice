@@ -27,30 +27,30 @@ test('a document opened read-only in the worker is a viewer session', () => {
 
 test('a session opened for editing keeps the editing input when switched to viewing', () => {
   const { result, rerender } = session(false);
-  rerender({ workerOpen: true, workerProposals: true, generation: 1 });
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: false });
   expect(result.current).toBe(false);
 });
 
 test('a viewer session switched to editing keeps the editing input when switched back', () => {
   const { result, rerender } = session(true);
-  rerender({ workerOpen: true, workerProposals: false, generation: 1 });
+  rerender({ workerOpen: true, workerProposals: false, generation: 1, mediaTokens: false });
   expect(result.current).toBe(false);
-  rerender({ workerOpen: true, workerProposals: true, generation: 1 });
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: false });
   expect(result.current).toBe(false);
 });
 
 test('a viewer session leaves the viewer input when worker-open is turned off', () => {
   const { result, rerender } = session(true);
-  rerender({ workerOpen: false, workerProposals: true, generation: 1 });
+  rerender({ workerOpen: false, workerProposals: true, generation: 1, mediaTokens: false });
   expect(result.current).toBe(false);
-  rerender({ workerOpen: true, workerProposals: true, generation: 1 });
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: false });
   expect(result.current).toBe(false);
 });
 
 test('the next document opened while viewing is a viewer session again', () => {
   const { result, rerender } = session(false);
-  rerender({ workerOpen: true, workerProposals: true, generation: 1 });
-  rerender({ workerOpen: true, workerProposals: true, generation: 2 });
+  rerender({ workerOpen: true, workerProposals: true, generation: 1, mediaTokens: false });
+  rerender({ workerOpen: true, workerProposals: true, generation: 2, mediaTokens: false });
   expect(result.current).toBe(true);
 });
 

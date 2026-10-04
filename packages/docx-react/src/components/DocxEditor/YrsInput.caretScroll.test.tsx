@@ -224,9 +224,9 @@ async function mountOnDemand() {
     },
     () => {
       replicaReadyRef.current = true;
-    },
-    { active: () => true, request: () => replica.start() }
+    }
   );
+  replica.start();
   const finish = async (loaded: boolean) => {
     await act(async () => {
       settle(loaded);

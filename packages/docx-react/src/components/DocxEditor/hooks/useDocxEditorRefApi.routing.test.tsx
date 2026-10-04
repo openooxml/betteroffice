@@ -627,7 +627,7 @@ for (const [member, twin, args] of NAVIGATION) {
 }
 
 const PASS_THROUGH = [
-  'getPositionAtPoint', 'getSelectionInfo', 'proposeChange', 'highlightRange',
+  'getPositionAtPoint', 'proposeChange', 'highlightRange',
   'getComments', 'readParagraphs', 'onDocumentChange',
 ] as const;
 for (const member of PASS_THROUGH) {
@@ -650,6 +650,7 @@ for (const member of PASS_THROUGH) {
 
 const REFUSALS = [
   ['getEditorRef', [], null, true],
+  ['getSelectionInfo', [], null, true],
   ['setParagraphStyle', [{ paraId: 'p', styleId: 'Normal' }], false, true],
   ['applyFormatting', [{ paraId: 'p', search: 'hello', marks: { bold: true } }], false, true],
   ['insertBreak', [{ paraId: 'p', type: 'page' }], false, true],
@@ -719,7 +720,7 @@ test('viewer ref refusals remain active after worker read routing ends', async (
 test('editor refusal members preserve synchronous edits and comment state', () => {
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const host = apiFor();
-  expect(host.api.getEditorRef()).toBe(host.editor);
+  expect(host.api.getEditorRef()).toBe(host.pagedEditorRef.current);
   expect(host.api.setParagraphStyle({ paraId: 'p', styleId: 'Normal' })).toBe(true);
   expect(host.api.applyFormatting({ paraId: 'p', search: 'hello', marks: { bold: true } })).toBe(true);
   expect(host.api.insertBreak({ paraId: 'p', type: 'page' })).toBe(true);

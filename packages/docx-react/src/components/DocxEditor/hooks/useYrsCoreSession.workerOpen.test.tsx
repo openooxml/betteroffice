@@ -52,6 +52,7 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
+const originalCreateYrsSession = yrsFacade.createYrsSession;
 const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
@@ -567,45 +568,54 @@ test('eager worker open preserves input and command order after first paint unti
   insert.mockRestore();
 });
 
-test('a read-only editor supersedes pending select-all when admitting a command', async () => {
-  const { workers, posted } = installWorker({ holdState: true });
+test('a viewer command preserves select-all while its worker read is pending', async () => {
+  const { posted, replies, reply } = installWorker({
+    holdReply: (request) => request.type === 'documentRead' && request.read.kind === 'selectionUnit',
+  });
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
     value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
   });
   const source = await longFixture(2);
   const editor = createRef<PagedEditorRef>();
   const bridge = { current: null as PagedEditorCommandBridge | null };
-  const canvasHost = createRef<HTMLDivElement>();
   let harness!: ReturnType<typeof useHarness>;
   function ReadOnly() {
-    harness = useHarness({ ...initialProps, source, readOnly: true });
-    return <>
-      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
-      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core} readOnly
-        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
-        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
-        layoutInWorker={harness.renderer.layoutInWorker}
-        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
-        commandBridgeRef={bridge} />
-    </>;
+    harness = useHarness({ ...initialProps, source, readOnly: true, viewer: true });
+    return <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core} readOnly
+      viewerDocumentRead={harness.renderer.readWorkerDocument}
+      measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+      fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+      layoutInWorker={harness.renderer.layoutInWorker}
+      displayListQueries={harness.renderer.queries}
+      commandBridgeRef={bridge} />;
   }
   const view = render(<ReadOnly />);
-  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
-  act(() => harness.presentFrame());
-  const session = harness.core.session!;
-  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
-  expect(textarea.readOnly).toBe(true);
-  expect(harness.core.replicaReady).toBe(false);
-  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
-  await waitFor(() => expect(posted.some((r) => r.type === 'encodeState')).toBe(true));
-  const command = bridge.current!.runAfterPendingInput(() => session.selection());
-  let selected!: ReturnType<YrsSession['selection']>;
-  await act(async () => { workers[0].release(); selected = await command; });
-  const paragraphs = session.paragraphs('body');
-  expect(selected).not.toEqual({
-    anchor: { story: 'body', paraId: paragraphs[0].paraId, offset: 0 },
-    head: { story: 'body', paraId: paragraphs.at(-1)!.paraId, offset: paragraphs.at(-1)!.text.length },
-  });
+  try {
+    await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+    act(() => harness.presentFrame());
+    const session = harness.core.session!;
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(true);
+    fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+    let unit!: ResidentEngineWorkerRequest;
+    await waitFor(() => {
+      unit = posted.find((request) => request.type === 'documentRead' && request.read.kind === 'selectionUnit')!;
+      expect(unit && replies.has(unit.id)).toBe(true);
+    });
+    const operation = mock(() => editor.current!.readSelectedText());
+    const command = bridge.current!.runAfterPendingInput(operation);
+    await waitFor(() => expect(operation).toHaveBeenCalledTimes(1));
+    let selected!: string | null;
+    await act(async () => { reply(unit); selected = await command; });
+    expect(selected).toBe('First paragraph\nTail paragraph');
+    expect(workerOpenDocumentHeld(session)).toBe(true);
+    expect(harness.core.replicaReady).toBe(false);
+    expect(harness.mainOpens).toEqual([]);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(harness.errors).toEqual([]);
+  } finally {
+    view.unmount();
+  }
 });
 
 test('eager worker-open hydration failure rejects flush, command and save during composition', async () => {
@@ -732,21 +742,19 @@ function holdReplicaTimers() {
   const pending = new Map<ReturnType<typeof setTimeout>, { at: number; run: () => void }>();
   let now = 0;
   let nextId = 0;
-  const timers = spyOn(globalThis, 'setTimeout').mockImplementation(
-    ((...input: Parameters<typeof setTimeout>) => {
-      const [callback, delay, ...args] = input;
-      if ((delay === 1000 || delay === 5000) && typeof callback === 'function') {
-        const id = --nextId as unknown as ReturnType<typeof setTimeout>;
-        pending.set(id, { at: now + delay, run: () => callback(...args) });
-        return id;
-      }
-      return schedule(callback, delay, ...args);
-    }) as typeof setTimeout
-  );
-  const cancellations = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
+  globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
+    const [callback, delay, ...args] = input;
+    if ((delay === 1000 || delay === 5000) && typeof callback === 'function') {
+      const id = --nextId as unknown as ReturnType<typeof setTimeout>;
+      pending.set(id, { at: now + delay, run: () => callback(...args) });
+      return id;
+    }
+    return schedule(callback, delay, ...args);
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id: Parameters<typeof clearTimeout>[0]) => {
     if (id !== undefined && pending.delete(id as ReturnType<typeof setTimeout>)) return;
     cancel(id);
-  });
+  }) as typeof clearTimeout;
   return {
     pending,
     advance(milliseconds: number) {
@@ -758,17 +766,16 @@ function holdReplicaTimers() {
       }
     },
     restore() {
-      cancellations.mockRestore();
-      timers.mockRestore();
+      globalThis.clearTimeout = cancel;
+      globalThis.setTimeout = schedule;
     },
   };
 }
 
 function trackMainLoads() {
-  const create = yrsFacade.createYrsSession;
   const loads: Array<{ mock: { calls: readonly unknown[] }; mockRestore(): void }> = [];
   const factory = spyOn(yrsFacade, 'createYrsSession').mockImplementation(async (options) => {
-    const session = await create(options);
+    const session = await originalCreateYrsSession(options);
     for (const method of ['openDocx', 'openDocxPreview', 'loadState', 'applyUpdate'] as const) {
       loads.push(spyOn(session, method));
     }
@@ -793,6 +800,7 @@ test('textarea focus leaves an eager editor replica waiting for its frame', asyn
     const view = render(
       <YrsInput
         enabled
+        readOnly={false}
         session={core.session}
         replicaReadyRef={core.replicaReadyRef}
         inputPositionMap={core.inputPositionMap}
@@ -2736,7 +2744,11 @@ test.each(['unavailable', 'no adoption', 'no snapshot'])('a holding session with
       await act(async () => { frames.run(); });
       await waitFor(() => expect(result.current.renderer.error).not.toBeNull());
       const failure = result.current.renderer.error;
-      expect(failure?.message).toBe('The resident worker holding proposals cannot lay out the document');
+      expect(failure).toBeInstanceOf(DocxWorkerError);
+      expect((failure as DocxWorkerError).stage).toBe('layout');
+      expect(failure?.cause).toEqual(new Error(path === 'no snapshot'
+        ? 'Resident worker snapshot was not available'
+        : 'The document worker cannot lay out this viewer document'));
       expect(result.current.errors).toEqual([failure!]);
       const requests = posted.length;
       const frameRequests = requestFrame.mock.calls.length;

@@ -1,5 +1,83 @@
 import { expect, test, type Page } from 'playwright/test';
-import type { ViewerSidebarsProbe } from './docx-viewer-sidebars-harness';
+
+interface PersistedParagraph {
+  kind: 'persisted';
+  story: string;
+  paraId: string;
+}
+
+interface ParagraphIdentity {
+  session?: { story: string };
+  persisted?: PersistedParagraph;
+}
+
+interface ProposalSnapshot {
+  version: string;
+  previewVersion: number;
+}
+
+type ProposalResult =
+  | { ok: true; snapshot: ProposalSnapshot }
+  | { ok: false; failure: { message: string } };
+
+interface ViewerEditor {
+  whenLayoutComplete(): Promise<number>;
+  flushPendingInput(): Promise<void>;
+  exportStructuredWithPages(options: { revisionView: 'markup'; stories: string[] }): Promise<
+    { ok: true; content: { layout: { pages: unknown[] } } } | { ok: false }
+  >;
+  readSelectionInfo(): Promise<{ selectedText: string } | null>;
+  listContentControls(): Promise<{ ok: boolean }>;
+  commands: { execute(command: string, payload: unknown): unknown };
+  getDocument(): unknown;
+  getEditorRef(): unknown;
+  setParagraphStyle(options: { paraId: string; styleId: string }): boolean;
+  getParagraphIdentities(): Promise<{ paragraphs: ParagraphIdentity[] }>;
+  resolveParagraphAnchors(anchors: PersistedParagraph[]): Promise<{ version: string }>;
+  proposeChanges(request: {
+    expectVersion: string;
+    proposals: Array<{
+      id: string;
+      paragraph: PersistedParagraph;
+      suggest: { author: string; date: string };
+    } & (
+      { op: 'replaceText'; search: string; replaceWith: string }
+      | { op: 'insertText'; at: 'end'; text: string }
+    )>;
+  }): Promise<ProposalResult>;
+  setProposalStates(request: {
+    expectVersion: string;
+    expectPreviewVersion: number;
+    changes: Array<{ id: string; state: 'accepted' | 'rejected' }>;
+  }): Promise<ProposalResult>;
+  getProposals(): Promise<{ proposals: Array<{ id: string; state: string }> }>;
+}
+
+interface DocumentLoads {
+  sessionsCaptured: number;
+  total: number;
+  sessions: Record<string, number>[];
+  events: Array<{ session: number; method: string; at: number }>;
+}
+
+interface ViewerSidebarsProbe {
+  editor: ViewerEditor | null;
+  copies: string[];
+  errors: string[];
+  reportedErrors: Error[];
+  sidebarOpen: boolean;
+  mainDocumentLoads(): DocumentLoads;
+  workersOpened(): number;
+  crashResidentWorker(): void;
+  saveForTest(): Promise<{
+    before: DocumentLoads;
+    after: DocumentLoads;
+    saveStarted: number;
+    byteLength: number;
+    signature: number[];
+    validDocument: boolean;
+  }>;
+}
 
 interface ViewerWindow {
   __viewerSidebarsProbe: ViewerSidebarsProbe;
