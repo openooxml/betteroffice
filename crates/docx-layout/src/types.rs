@@ -2051,26 +2051,64 @@ use crate::resolve_lines::ResolvedLine;
 /// One page's slice of a paragraph: the measured line window
 /// `[from_line, to_line)`, its own document range, and the run slices those
 /// lines resolve to. `carried_from_prev` / `carried_to_next` mark a split.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct ParagraphFragment {
     pub block_id: BlockId,
     pub x: f64,
     pub y: f64,
     pub width: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_end: Option<f64>,
     pub from_line: usize,
     pub to_line: usize,
     pub height: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub carried_from_prev: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub carried_to_next: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_lines: Option<Vec<ResolvedLine>>,
+    pub resolved_lines_pending: bool,
+}
+
+impl Serialize for ParagraphFragment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+
+        let display = crate::transcode::is_display_serialization();
+        debug_assert!(
+            display || !self.resolved_lines_pending,
+            "pending paragraph lines require materialization"
+        );
+        let mut fields = serializer.serialize_struct(
+            "ParagraphFragment",
+            7 + usize::from(self.pm_start.is_some())
+                + usize::from(self.pm_end.is_some())
+                + usize::from(self.carried_from_prev.is_some())
+                + usize::from(self.carried_to_next.is_some())
+                + usize::from(!display && self.resolved_lines.is_some()),
+        )?;
+        fields.serialize_field("blockId", &self.block_id)?;
+        fields.serialize_field("x", &self.x)?;
+        fields.serialize_field("y", &self.y)?;
+        fields.serialize_field("width", &self.width)?;
+        if let Some(value) = self.pm_start {
+            fields.serialize_field("pmStart", &value)?;
+        }
+        if let Some(value) = self.pm_end {
+            fields.serialize_field("pmEnd", &value)?;
+        }
+        fields.serialize_field("fromLine", &self.from_line)?;
+        fields.serialize_field("toLine", &self.to_line)?;
+        fields.serialize_field("height", &self.height)?;
+        if let Some(value) = self.carried_from_prev {
+            fields.serialize_field("carriedFromPrev", &value)?;
+        }
+        if let Some(value) = self.carried_to_next {
+            fields.serialize_field("carriedToNext", &value)?;
+        }
+        if !display && let Some(value) = &self.resolved_lines {
+            fields.serialize_field("resolvedLines", value)?;
+        }
+        fields.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

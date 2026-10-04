@@ -83,9 +83,15 @@ pub struct CheckpointedLayout {
 #[derive(Debug)]
 pub struct IncrementalLayout {
     pub checkpointed: CheckpointedLayout,
+    pub resolved_fragments_deferred: usize,
     /// Ascending within `rebuilt_page_start..rebuilt_page_end`; the pages between
     /// them are retained.
     pub rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct IncrementalPlacementOptions {
+    pub defer_resolved_lines: bool,
 }
 
 struct ConvergenceInput<'a, F: PartialEq> {
@@ -490,6 +496,26 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
     next_fingerprints: &[F],
     dirty_index: usize,
 ) -> Result<IncrementalLayout, LayoutError> {
+    layout_document_incremental_ranges_with_options(
+        input,
+        previous_layout,
+        previous_checkpoints,
+        previous_fingerprints,
+        next_fingerprints,
+        dirty_index,
+        IncrementalPlacementOptions::default(),
+    )
+}
+
+pub fn layout_document_incremental_ranges_with_options<F: PartialEq>(
+    input: &mut Input,
+    previous_layout: &mut Layout,
+    previous_checkpoints: &[LayoutCheckpoint],
+    previous_fingerprints: &[F],
+    next_fingerprints: &[F],
+    dirty_index: usize,
+    placement_options: IncrementalPlacementOptions,
+) -> Result<IncrementalLayout, LayoutError> {
     let options = &input.options;
     let page_size = options.page_size.clone().unwrap_or(DEFAULT_PAGE_SIZE);
     let margins = resolve_page_margins(options.margins.as_ref());
@@ -715,9 +741,15 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
         }
         reused_ranges.push(reused_start..pages.len());
     }
-    refresh_reused_page_ranges(&mut pages, &reused_ranges, &input.measured);
+    let resolved_fragments_deferred = refresh_reused_page_ranges(
+        &mut pages,
+        &reused_ranges,
+        &input.measured,
+        placement_options.defer_resolved_lines,
+    );
 
     Ok(IncrementalLayout {
+        resolved_fragments_deferred,
         checkpointed: CheckpointedLayout {
             layout: Layout {
                 page_size,
@@ -1089,18 +1121,10 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
     serde_json::to_string(id).expect("block ids always serialize")
 }
 
-/// Retained suffix pages keep their geometry but absolute document positions move
-/// after an earlier edit. Refresh fragment ranges and resolved run slices from
-/// the new measured arena before the display list consumes them.
-fn refresh_reused_page_ranges(
-    pages: &mut [crate::types::Page],
-    ranges: &[std::ops::Range<usize>],
+fn measured_blocks_by_id(
     measured: &[MeasuredBlock],
-) {
-    if ranges.iter().all(std::ops::Range::is_empty) {
-        return;
-    }
-    let blocks: std::collections::HashMap<_, _> = measured
+) -> std::collections::HashMap<String, &MeasuredBlock> {
+    measured
         .iter()
         .filter_map(|measured| {
             measured
@@ -1108,16 +1132,36 @@ fn refresh_reused_page_ranges(
                 .block_id()
                 .map(|id| (block_id_key(id), measured))
         })
-        .collect();
-    for range in ranges {
-        refresh_reused_pages(&mut pages[range.clone()], &blocks);
+        .collect()
+}
+
+/// Retained suffix pages keep their geometry but absolute document positions move
+/// after an earlier edit. Refresh fragment ranges and resolved run slices from
+/// the new measured arena before the display list consumes them.
+fn refresh_reused_page_ranges(
+    pages: &mut [crate::types::Page],
+    ranges: &[std::ops::Range<usize>],
+    measured: &[MeasuredBlock],
+    defer_resolved_lines: bool,
+) -> usize {
+    if ranges.iter().all(std::ops::Range::is_empty) {
+        return 0;
     }
+    let blocks = measured_blocks_by_id(measured);
+    ranges
+        .iter()
+        .map(|range| {
+            refresh_reused_pages(&mut pages[range.clone()], &blocks, defer_resolved_lines)
+        })
+        .sum()
 }
 
 fn refresh_reused_pages(
     pages: &mut [crate::types::Page],
     blocks: &std::collections::HashMap<String, &MeasuredBlock>,
-) {
+    defer_resolved_lines: bool,
+) -> usize {
+    let mut deferred = 0;
     for page in pages {
         for fragment in &mut page.fragments {
             let key = match fragment {
@@ -1143,12 +1187,18 @@ fn refresh_reused_pages(
                         fragment.from_line,
                         fragment.to_line,
                     );
-                    fragment.resolved_lines = Some(build_resolved_lines(
-                        block,
-                        extent,
-                        fragment.from_line,
-                        fragment.to_line,
-                    ));
+                    fragment.resolved_lines_pending = defer_resolved_lines;
+                    fragment.resolved_lines = if defer_resolved_lines {
+                        deferred += 1;
+                        None
+                    } else {
+                        Some(build_resolved_lines(
+                            block,
+                            extent,
+                            fragment.from_line,
+                            fragment.to_line,
+                        ))
+                    };
                 }
                 (Fragment::Table(fragment), LayoutBlock::Table(block), _) => {
                     fragment.pm_start = block.pm_start;
@@ -1178,6 +1228,54 @@ fn refresh_reused_pages(
             }
         }
     }
+    deferred
+}
+
+pub fn materialize_resolved_lines(layout: &mut Layout, measured: &[MeasuredBlock]) -> usize {
+    materialize_resolved_lines_matching(layout, measured, |_, _| true)
+}
+
+pub fn materialize_resolved_lines_matching(
+    layout: &mut Layout,
+    measured: &[MeasuredBlock],
+    mut matches: impl FnMut(usize, &crate::types::ParagraphFragment) -> bool,
+) -> usize {
+    if !layout.pages.iter().any(|page| {
+        page.fragments.iter().any(|fragment| {
+            matches!(
+                fragment,
+                Fragment::Paragraph(fragment) if fragment.resolved_lines_pending
+            )
+        })
+    }) {
+        return 0;
+    }
+    let blocks = measured_blocks_by_id(measured);
+    let mut materialized = 0;
+    for (page_index, page) in layout.pages.iter_mut().enumerate() {
+        for fragment in &mut page.fragments {
+            let Fragment::Paragraph(fragment) = fragment else {
+                continue;
+            };
+            if !fragment.resolved_lines_pending || !matches(page_index, fragment) {
+                continue;
+            }
+            if let Some(measured) = blocks.get(&block_id_key(&fragment.block_id))
+                && let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(extent)) =
+                    (&measured.block, &measured.measure)
+            {
+                fragment.resolved_lines = Some(build_resolved_lines(
+                    block,
+                    extent,
+                    fragment.from_line,
+                    fragment.to_line,
+                ));
+                fragment.resolved_lines_pending = false;
+                materialized += 1;
+            }
+        }
+    }
+    materialized
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,6 +1358,7 @@ fn layout_paragraph(
             carried_from_prev: None,
             carried_to_next: None,
             resolved_lines: Some(Vec::new()),
+            resolved_lines_pending: false,
         });
 
         paginator.add_fragment(fragment, 0.0, space_before, space_after);
@@ -1418,6 +1517,7 @@ fn layout_paragraph(
                 current_line_index,
                 current_line_index + fitting_lines,
             )),
+            resolved_lines_pending: false,
         });
 
         paginator.add_fragment(
@@ -2439,6 +2539,192 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn deferred_resolved_lines_match_eager_serialized_pages() {
+        let mut measured: Vec<_> = (0..15)
+            .map(|id| paragraph(id, 1, 20.0, json!({})))
+            .collect();
+        let mut split = paragraph(100, 12, 20.0, json!({ "widowControl": false }));
+        split["block"]["runs"] = json!([
+            {"kind": "text", "text": "a😀bc", "pmStart": 101, "pmEnd": 106},
+            {"kind": "tab", "width": 12, "pmStart": 106, "pmEnd": 107},
+            {"kind": "text", "text": "Dé𐐷fg", "bold": true, "pmStart": 107, "pmEnd": 113}
+        ]);
+        split["measure"]["lines"] = json!(
+            (0..12)
+                .map(|index| {
+                    let (head_run, head_char, tail_run, tail_char) = match index % 3 {
+                        0 => (0, 0, 0, 3),
+                        1 => (0, 3, 2, 2),
+                        _ => (2, 2, 2, 6),
+                    };
+                    json!({
+                        "headRun": head_run, "headChar": head_char,
+                        "tailRun": tail_run, "tailChar": tail_char,
+                        "width": 80, "ascent": 15, "descent": 5, "lineHeight": 20
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+        measured.push(split);
+        measured.push(paragraph(101, 0, 20.0, json!({})));
+        measured.push(json!({
+            "block": {
+                "kind": "table", "id": 200, "pmStart": 200, "pmEnd": 210,
+                "columnWidths": [100],
+                "rows": [{"id": 201, "cells": [{"id": 202,
+                    "blocks": [paragraph(203, 1, 20.0, json!({}))["block"]]}]}]
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [100], "totalWidth": 100,
+                "totalHeight": 20, "rows": [{"height": 20,
+                    "cells": [{"width": 100, "height": 20,
+                        "blocks": [paragraph(203, 1, 20.0, json!({}))["measure"]]}]}]
+            }
+        }));
+        measured.extend((102..117).map(|id| paragraph(id, 1, 20.0, json!({}))));
+        let mut duplicate = paragraph(116, 1, 20.0, json!({}));
+        duplicate["block"]["runs"][0]["text"] = json!("z");
+        measured.push(duplicate);
+        let mut previous_input = input(measured.clone());
+        let mut previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        let mut missing = previous.layout.pages.last().unwrap().fragments[0].clone();
+        let Fragment::Paragraph(fragment) = &mut missing else {
+            panic!("paragraph expected");
+        };
+        fragment.block_id = crate::types::BlockId::Str("missing".to_owned());
+        previous
+            .layout
+            .pages
+            .last_mut()
+            .unwrap()
+            .fragments
+            .push(missing.clone());
+        let Fragment::Paragraph(fragment) = &mut missing else {
+            panic!("paragraph expected");
+        };
+        fragment.block_id = crate::types::BlockId::Num(200.0);
+        previous
+            .layout
+            .pages
+            .last_mut()
+            .unwrap()
+            .fragments
+            .push(missing);
+        let previous_fingerprints = vec![1_u64; measured.len()];
+        let mut next_fingerprints = previous_fingerprints.clone();
+        next_fingerprints[0] = 2;
+        measured[0]["block"]["runs"][0]["text"] = json!("y");
+        let mut next = input(measured);
+        for measured in &mut next.measured {
+            if let LayoutBlock::Paragraph(block) = &mut measured.block {
+                block.pm_start = Some(500.0);
+                block.pm_end = Some(520.0);
+                for run in &mut block.runs {
+                    match run {
+                        Run::Text(run) => {
+                            run.pm_start = run.pm_start.map(|start| start + 7.0);
+                            run.pm_end = run.pm_end.map(|end| end + 7.0);
+                        }
+                        Run::Tab(run) => {
+                            run.pm_start = run.pm_start.map(|start| start + 7.0);
+                            run.pm_end = run.pm_end.map(|end| end + 7.0);
+                        }
+                        _ => {}
+                    }
+                }
+            } else if let LayoutBlock::Table(block) = &mut measured.block {
+                block.pm_start = Some(207.0);
+                block.pm_end = Some(217.0);
+            }
+        }
+        let eager = layout_document_incremental_ranges(
+            &mut next.clone(),
+            &mut previous.layout.clone(),
+            &previous.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            0,
+        )
+        .unwrap();
+        let mut deferred = layout_document_incremental_ranges_with_options(
+            &mut next,
+            &mut previous.layout,
+            &previous.checkpoints,
+            &previous_fingerprints,
+            &next_fingerprints,
+            0,
+            IncrementalPlacementOptions {
+                defer_resolved_lines: true,
+            },
+        )
+        .unwrap();
+        assert!(deferred.resolved_fragments_deferred > 0);
+        let pending: Vec<_> = deferred
+            .checkpointed
+            .layout
+            .pages
+            .iter()
+            .flat_map(|page| &page.fragments)
+            .filter_map(|fragment| match fragment {
+                Fragment::Paragraph(fragment) if fragment.resolved_lines_pending => {
+                    Some(fragment)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(pending.len(), deferred.resolved_fragments_deferred);
+        assert!(
+            pending
+                .iter()
+                .all(|fragment| fragment.resolved_lines.is_none())
+        );
+        assert!(pending.iter().any(|fragment| fragment.from_line > 0));
+        assert!(
+            pending
+                .iter()
+                .any(|fragment| fragment.from_line == fragment.to_line)
+        );
+        assert_eq!(
+            materialize_resolved_lines(&mut deferred.checkpointed.layout, &next.measured),
+            deferred.resolved_fragments_deferred
+        );
+        assert_eq!(
+            serde_json::to_vec(&deferred.checkpointed.layout.pages).unwrap(),
+            serde_json::to_vec(&eager.checkpointed.layout.pages).unwrap()
+        );
+        assert_eq!(
+            materialize_resolved_lines(&mut deferred.checkpointed.layout, &next.measured),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn pending_fragments_cannot_be_serialized_outside_display_transcoding() {
+        let mut value = input(vec![paragraph(0, 1, 20.0, json!({}))]);
+        let mut layout = layout_document(&mut value).unwrap();
+        let Fragment::Paragraph(fragment) = &mut layout.pages[0].fragments[0] else {
+            panic!("paragraph expected");
+        };
+        fragment.resolved_lines = None;
+        fragment.resolved_lines_pending = true;
+        assert!(std::panic::catch_unwind(|| serde_json::to_vec(&layout)).is_err());
+        assert!(std::panic::catch_unwind(|| serde_json::to_vec(&layout.pages[0])).is_err());
+        assert!(
+            std::panic::catch_unwind(|| serde_json::to_vec(&layout.pages[0].fragments[0])).is_err()
+        );
+        let display: serde_json::Value = crate::transcode::transcode(&layout).unwrap();
+        assert!(
+            display["pages"][0]["fragments"][0]
+                .get("resolvedLines")
+                .is_none()
+        );
+        assert!(std::panic::catch_unwind(|| serde_json::to_vec(&layout)).is_err());
+        assert_eq!(materialize_resolved_lines(&mut layout, &value.measured), 1);
+        serde_json::to_vec(&layout).unwrap();
+    }
+
+    #[test]
     fn incremental_layout_skips_the_clean_pages_between_changes() {
         let keep_next = 41;
         let measured = |lines: &[usize]| -> Vec<serde_json::Value> {
@@ -2503,6 +2789,7 @@ mod pagination_rule_tests {
         let IncrementalLayout {
             checkpointed: incremental,
             rebuilt_page_ranges,
+            ..
         } = layout_document_incremental_ranges(
             &mut input(measured(&base)),
             &mut previous_layout,

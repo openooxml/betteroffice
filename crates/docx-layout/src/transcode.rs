@@ -21,6 +21,28 @@ use serde::de::value::StrDeserializer;
 use serde::de::{self, DeserializeOwned, DeserializeSeed, Visitor};
 use serde::ser::{self, Serialize};
 
+std::thread_local! {
+    static DISPLAY_SERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn is_display_serialization() -> bool {
+    DISPLAY_SERIALIZATION.with(std::cell::Cell::get)
+}
+
+struct DisplaySerialization(bool);
+
+impl DisplaySerialization {
+    fn enter() -> Self {
+        Self(DISPLAY_SERIALIZATION.with(|flag| flag.replace(true)))
+    }
+}
+
+impl Drop for DisplaySerialization {
+    fn drop(&mut self) {
+        DISPLAY_SERIALIZATION.with(|flag| flag.set(self.0));
+    }
+}
+
 /// Convert `value` into `U` as a JSON round trip would, without the JSON.
 pub(crate) fn transcode<T: Serialize + ?Sized, U: DeserializeOwned>(
     value: &T,
@@ -40,7 +62,10 @@ impl Transcoder {
         value: &T,
     ) -> Result<U, String> {
         self.tape.clear();
-        value.serialize(&mut self.tape).map_err(|error| error.0)?;
+        {
+            let _display_serialization = DisplaySerialization::enter();
+            value.serialize(&mut self.tape).map_err(|error| error.0)?;
+        }
         let mut reader = Reader {
             tape: &self.tape,
             pos: 0,

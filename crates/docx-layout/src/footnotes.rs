@@ -996,6 +996,7 @@ mod tests {
             carried_from_prev: None,
             carried_to_next: None,
             resolved_lines: None,
+            resolved_lines_pending: false,
         })
     }
 

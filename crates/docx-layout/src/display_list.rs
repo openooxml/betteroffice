@@ -12067,6 +12067,8 @@ mod tests {
         layout: &crate::types::Layout,
         extras: &str,
     ) -> BuildInput {
+        let mut layout = layout.clone();
+        crate::place::materialize_resolved_lines(&mut layout, &pagination.measured);
         let mut wire: serde_json::Map<String, Value> = serde_json::from_str(extras).unwrap();
         wire.insert(
             "measured".to_owned(),
@@ -12076,10 +12078,102 @@ mod tests {
             "options".to_owned(),
             serde_json::to_value(&pagination.options).unwrap(),
         );
-        wire.insert("layout".to_owned(), serde_json::to_value(layout).unwrap());
+        wire.insert("layout".to_owned(), serde_json::to_value(&layout).unwrap());
         let mut wire = Value::Object(wire);
         normalize_integral_json_numbers(&mut wire);
         serde_json::from_value(wire).unwrap()
+    }
+
+    #[test]
+    fn display_transcoding_omits_only_resolved_lines_and_preserves_its_input() {
+        let mut pagination: crate::types::Input = serde_json::from_str(include_str!(
+            "../tests/fixtures/keep-lines-paragraph.input.json"
+        ))
+        .unwrap();
+        let mut layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let original = serde_json::to_value(&layout).unwrap();
+        let mut without_lines = original.clone();
+        let mut removed = 0;
+        for page in without_lines["pages"].as_array_mut().unwrap() {
+            for fragment in page["fragments"].as_array_mut().unwrap() {
+                removed += usize::from(
+                    fragment
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("resolvedLines")
+                        .is_some(),
+                );
+            }
+        }
+        assert!(removed > 0);
+        normalize_integral_json_numbers(&mut without_lines);
+        let converted: Value = crate::transcode::transcode(&layout).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&converted).unwrap(),
+            serde_json::to_vec(&without_lines).unwrap()
+        );
+        let encode_fragments = |input: LayoutIn| {
+            input
+                .pages
+                .iter()
+                .map(|page| {
+                    page.fragments
+                        .iter()
+                        .map(|fragment| {
+                            let FragmentIn::Paragraph(fragment) = fragment else {
+                                panic!("paragraph expected");
+                            };
+                            serde_json::to_vec(&(
+                                &fragment.block_id,
+                                fragment.x,
+                                fragment.y,
+                                fragment.width,
+                                fragment.height,
+                                fragment.from_line,
+                                fragment.to_line,
+                                fragment.pm_start,
+                                fragment.pm_end,
+                                fragment.carried_from_prev,
+                                fragment.carried_to_next,
+                            ))
+                            .unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut original_input = original.clone();
+        normalize_integral_json_numbers(&mut original_input);
+        let expected = encode_fragments(serde_json::from_value(original_input).unwrap());
+        assert_eq!(
+            encode_fragments(crate::transcode::transcode(&layout).unwrap()),
+            expected
+        );
+        assert_eq!(
+            encode_fragments(crate::transcode::transcode(&without_lines).unwrap()),
+            expected
+        );
+        let fonts = ooxml_text::FontStore::default();
+        let eager = build_display_list(
+            &resident_build_input_via_json(&pagination, &layout, "{}"),
+            &fonts,
+        );
+        for page in &mut layout.pages {
+            for fragment in &mut page.fragments {
+                if let crate::types::Fragment::Paragraph(fragment) = fragment {
+                    fragment.resolved_lines = None;
+                    fragment.resolved_lines_pending = true;
+                }
+            }
+        }
+        let deferred = build_display_list(
+            &resident_build_input(&pagination, &layout, "{}").unwrap(),
+            &fonts,
+        );
+        assert_eq!(
+            serde_json::to_vec(&deferred).unwrap(),
+            serde_json::to_vec(&eager).unwrap()
+        );
     }
 
     #[test]

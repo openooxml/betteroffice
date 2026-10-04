@@ -665,6 +665,9 @@ export interface YrsEngineApplyProfile {
   displayFinalizeMs: number;
   displayMs: number;
   encodeMs: number;
+  resolvedDeferred: number;
+  resolvedMaterialized: number;
+  resolvedPrefixChecked: number;
 }
 
 /**

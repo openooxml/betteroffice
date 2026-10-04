@@ -93,6 +93,9 @@ struct ApplyInputProfile {
     display_finalize_ms: f64,
     display_ms: f64,
     encode_ms: f64,
+    resolved_deferred: u64,
+    resolved_materialized: u64,
+    resolved_prefix_checked: u64,
 }
 
 fn validate_frame_epoch(epoch: f64) -> Result<u64, JsValue> {
@@ -2081,6 +2084,9 @@ impl EditSession {
             display_finalize_ms: engine_profile.display_finalize_ms,
             display_ms: engine_profile.display_ms,
             encode_ms: engine_profile.encode_ms,
+            resolved_deferred: engine_profile.resolved_deferred,
+            resolved_materialized: engine_profile.resolved_materialized,
+            resolved_prefix_checked: engine_profile.resolved_prefix_checked,
         };
         *self.last_apply_profile_json.borrow_mut() =
             serde_json::to_string(&profile).map_err(js_err)?;
@@ -2171,6 +2177,9 @@ impl EditSession {
             display_finalize_ms: engine_profile.display_finalize_ms,
             display_ms: engine_profile.display_ms,
             encode_ms: engine_profile.encode_ms,
+            resolved_deferred: engine_profile.resolved_deferred,
+            resolved_materialized: engine_profile.resolved_materialized,
+            resolved_prefix_checked: engine_profile.resolved_prefix_checked,
         };
         *self.last_apply_profile_json.borrow_mut() =
             serde_json::to_string(&profile).map_err(js_err)?;
