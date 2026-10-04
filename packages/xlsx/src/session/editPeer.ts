@@ -62,12 +62,18 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   let tail = Promise.resolve();
   let offFailure = () => {};
   const pending: { resolved: boolean; envelope?: Omit<WorkbookReplayEnvelope, 'sequence'> }[] = [];
+  const drainWaiters: (() => void)[] = [];
   let dispatching = false;
+
+  function resolveDrains(): void {
+    for (const resolve of drainWaiters.splice(0)) resolve();
+  }
 
   function fail(cause: unknown, notify = true): void {
     if (error) return;
     error = cause instanceof Error ? cause : new Error(String(cause));
     pending.length = 0;
+    resolveDrains();
     offFailure();
     if (notify) {
       try { options.onError?.(error); } catch {}
@@ -109,6 +115,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
       }
     } finally {
       dispatching = false;
+      if (!pending.length) resolveDrains();
     }
   }
 
@@ -151,6 +158,10 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
 
   async function flush(): Promise<void> {
     assertReady();
+    if (pending.length) {
+      await new Promise<void>((resolve) => { drainWaiters.push(resolve); });
+      assertReady();
+    }
     await tail;
     assertReady();
   }

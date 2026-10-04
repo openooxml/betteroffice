@@ -337,6 +337,81 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('waits for nested listener edits in a listener-started flush', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    let nested = false;
+    let nestedApplied = false;
+    let pendingFlush: Promise<void> | undefined;
+    const offUpdate = peer.onUpdate(() => {
+      if (nested) return;
+      nested = true;
+      nestedApplied = edits.editCell(0, 0, 1, '2').applied;
+      pendingFlush = edits.flush();
+    });
+    try {
+      expect(edits.editCell(0, 0, 0, '1').applied).toBe(true);
+      expect(nestedApplied).toBe(true);
+      if (!pendingFlush) throw new Error('Missing listener flush');
+      await pendingFlush;
+      expect(edits.acknowledgedSequence).toBe(2);
+      expect(edits.sentSequence).toBe(2);
+      expect((await session.call.cellInputs(0, 'B1')).cells[0][0].input).toBe('2');
+      expect(await digest(await edits.save())).toBe(await digest(peer.save()));
+    } finally {
+      offUpdate();
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('rejects a listener-started flush when the worker refuses the nested edit', async () => {
+    const session = await createTestWorkbookSession(fixture, (transport) => {
+      const batched = batchRequests(transport);
+      return { ...batched, listen: (listener) => batched.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'replay') {
+          const envelope = message.args[0] as WorkbookReplayEnvelope;
+          if (envelope.op.method === 'applyEdits') {
+            const input = envelope.op.args[0];
+            envelope.op.args = [{ ...input, steps: [{
+              op: 'setCellInputs', target: { ...target('B1'), sheetId: 'missing-sheet' }, inputs: [['2']],
+            }] }];
+          }
+        }
+        listener(message);
+      }) };
+    }, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    let nested = false;
+    let nestedResult: ReturnType<WorkbookEditPeer['applyEdits']> | undefined;
+    let pendingFlush: Promise<void> | undefined;
+    const offUpdate = peer.onUpdate(() => {
+      if (nested) return;
+      nested = true;
+      nestedResult = edits.applyEdits(request(peer, 'B1', '2'));
+      pendingFlush = edits.flush();
+    });
+    try {
+      expect(edits.editCell(0, 0, 0, '1').applied).toBe(true);
+      expect(nestedResult).toMatchObject({ ok: true, applied: true });
+      if (!pendingFlush) throw new Error('Missing listener flush');
+      await expect(pendingFlush).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      expect(edits.sentSequence).toBe(2);
+      expect(edits.state).toBe('failed');
+      expect(edits.error).toBe(session.failure);
+      expect(session.failure?.diagnostics).toContain('sequence 2 (applyEdits)');
+      expect(session.failure?.diagnostics).toContain('missing-target');
+    } finally {
+      offUpdate();
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('omits nested peer refusals and throws without sequence gaps', async () => {
     const envelopes: WorkbookReplayEnvelope[] = [];
     const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), { calculation });
