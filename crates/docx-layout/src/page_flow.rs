@@ -71,6 +71,7 @@ pub struct PageFlowGeometry {
     /// before it differs in parity from its physical one.
     pub continued_parity_offset: bool,
     pub section_page_float_bands: SharedPageFloatBands,
+    pub footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     /// Whether this page opened a column region that placement balances.
     pub balanced_region: bool,
 }
@@ -149,7 +150,7 @@ pub struct Paginator {
     column_width: f64,
     column_region_top: f64,
     column_region_bottom: f64,
-    footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
+    footnote_reserved_heights: Option<Arc<std::collections::BTreeMap<String, f64>>>,
     start_page_number: u32,
     section_index: usize,
     section_page_margins: Vec<SectionPageMargins>,
@@ -207,7 +208,7 @@ impl Paginator {
             column_width,
             column_region_top,
             column_region_bottom: column_region_top,
-            footnote_reserved_heights,
+            footnote_reserved_heights: footnote_reserved_heights.map(Arc::new),
             start_page_number: 1,
             section_index: 0,
             section_page_margins: Vec::new(),
@@ -274,6 +275,11 @@ impl Paginator {
         section_index: usize,
         footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     ) -> Result<Self, LayoutError> {
+        if geometry.footnote_reserved_heights.as_deref() != footnote_reserved_heights.as_ref() {
+            return Err(LayoutError::Unsupported(
+                "checkpoint note reservations changed".into(),
+            ));
+        }
         let mut paginator = Self::new(
             geometry.page_size.clone(),
             geometry.margins.clone(),
@@ -365,6 +371,7 @@ impl Paginator {
                 self.continued_parity_offset
             },
             section_page_float_bands: self.section_page_float_bands.clone(),
+            footnote_reserved_heights: self.footnote_reserved_heights.clone(),
             balanced_region: self
                 .states
                 .last()

@@ -209,6 +209,8 @@ fn resumable(
                 before.size == page.size
                     && before.margins == page.margins
                     && before.columns == page.columns
+                    && before.float_bands == page.float_bands
+                    && before.footnote_reserved_height == page.footnote_reserved_height
             })
     });
     same_geometry
