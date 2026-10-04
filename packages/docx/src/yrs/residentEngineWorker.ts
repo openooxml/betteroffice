@@ -474,6 +474,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (!session || !openedSource) {
       throw new SaveUnavailableError('Resident engine worker has no opened document to save');
     }
+    const held = pendingUpdates;
     pendingUpdates = [];
     try {
       const saved = await session.save(
@@ -484,8 +485,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         editorSaves
       );
       const bytes = saved.slice(0);
-      // The save records the paragraph IDs it wrote; the editor's copy integrates them.
-      const updates = pendingUpdates.map(exactBuffer);
+      // What the editor copy lacks: the paragraph IDs this save recorded and repairs its updates caused.
+      const updates = request.stateVector
+        ? [exactBuffer(session.encodeStateAsUpdate(request.stateVector))]
+        : [];
       const stateVector = exactBuffer(session.encodeStateVector());
       reply(
         {
@@ -499,7 +502,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         [bytes, ...updates, stateVector]
       );
     } finally {
-      pendingUpdates = [];
+      pendingUpdates = held;
     }
     return;
   }

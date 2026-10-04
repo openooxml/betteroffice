@@ -50,6 +50,7 @@ export type ResidentEngineSession = Pick<
   | 'clearFonts'
   | 'destroy'
   | 'encodeSelection'
+  | 'encodeStateAsUpdate'
   | 'encodeStateVector'
   | 'findContentControls'
   | 'listContentControls'
@@ -329,6 +330,10 @@ export async function createResidentEngineSession(
           );
     },
     encodeState: () => session.encode_state(),
+    encodeStateAsUpdate: (remoteStateVector) =>
+      remoteStateVector === undefined
+        ? session.encode_state()
+        : session.encode_diff(remoteStateVector.slice()),
     save: async (source, hostJson, host, comments, record) => {
       const { saveResidentDocument } = await import('./residentSave');
       return saveResidentDocument(session, clientId, source, hostJson, host, comments, record);

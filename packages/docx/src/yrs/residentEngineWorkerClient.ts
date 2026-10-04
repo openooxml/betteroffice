@@ -476,18 +476,21 @@ export class ResidentEngineWorkerClient {
   }
 
   /**
-   * @internal Saves the opened document in the worker. `updates` are the
-   * worker's own changes from the save (the paragraph IDs it wrote), for the
-   * editor's copy to integrate; `version` is the document version after it.
+   * @internal Saves the opened document in the worker. With the editor copy's
+   * `stateVector`, `updates` carry what the worker holds beyond it (the
+   * paragraph IDs the save wrote among them) for that copy to integrate;
+   * `version` is the document version after the save.
    */
   async save(request: {
     comments: Comment[];
     host?: Document;
+    stateVector?: Uint8Array;
   }): Promise<{ bytes: ArrayBuffer; updates: Uint8Array[]; version: string }> {
     const response = await this.request({
       type: 'save',
       comments: request.comments,
       ...(request.host === undefined ? {} : { host: request.host }),
+      ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
     });
     if (
       !(response.saved instanceof ArrayBuffer) ||

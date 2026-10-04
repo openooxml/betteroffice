@@ -89,6 +89,7 @@ import {
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
 import { sameLayoutInput } from '../internals/layoutInput';
 import { SupersededPreviewError } from '../internals/supersededPreview';
+import { stateVectorAhead } from '../internals/stateVector';
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
@@ -1644,13 +1645,14 @@ export function useRustDisplayList(
             if (!owner || !isCurrentWorker(hostEngine, owner)) {
               return Promise.reject(new Error('No document worker'));
             }
-            if (peer) {
-              const update = peer.encodeStateAsUpdate(owner.client.remoteStateVector() ?? undefined);
-              if (update.length > 0 && !(update.length === 2 && update[0] === 0 && update[1] === 0)) {
-                owner.client.invalidate(update, null);
+            const stateVector = peer?.encodeStateVector();
+            if (peer && stateVector) {
+              const remote = owner.client.remoteStateVector();
+              if (stateVectorAhead(stateVector, remote)) {
+                owner.client.invalidate(peer.encodeStateAsUpdate(remote ?? undefined), null);
               }
             }
-            return owner.client.save(request).then((saved) => {
+            return owner.client.save(stateVector ? { ...request, stateVector } : request).then((saved) => {
               if (!isCurrentWorker(hostEngine, owner)) throw new Error('The document changed while saving');
               if (peer) {
                 suppressWorkerInvalidationRef.current += 1;

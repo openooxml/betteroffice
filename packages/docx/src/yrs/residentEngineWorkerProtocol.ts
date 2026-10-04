@@ -175,7 +175,7 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
-  | { id: number; type: 'save'; comments: Comment[]; host?: Document }
+  | { id: number; type: 'save'; comments: Comment[]; host?: Document; stateVector?: Uint8Array }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | {
