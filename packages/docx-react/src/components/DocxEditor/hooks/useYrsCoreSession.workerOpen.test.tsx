@@ -39,7 +39,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
-import { DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { flushEditorInput } from '../editorBatches';
@@ -3588,7 +3588,7 @@ test('a sync ref call during the first in-flight proposal keeps the worker\'s pr
       let proposal!: ResidentEngineWorkerRequest;
       await act(async () => { proposal = await received('proposal', snapshot.id); });
       expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
-      act(() => { expect(() => api().getDocument()).toThrow(DocxReplicaNotReadyError); });
+      act(() => { expect(api().getDocument()).toBeNull(); });
       await act(async () => {});
       expect(authority.holdsWorkerState()).toBe(true);
       expect(workerProposalAuthority(session)).toBe(authority);
@@ -3601,7 +3601,7 @@ test('a sync ref call during the first in-flight proposal keeps the worker\'s pr
       await act(async () => {
         reply(proposal);
         expect(await proposed).toMatchObject({ ok: true });
-        await awaitWorkerOpenReplica(session);
+        await requestWorkerOpenReplica(session);
       });
       await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
       expect(result.current.mainOpens).toEqual([false]);

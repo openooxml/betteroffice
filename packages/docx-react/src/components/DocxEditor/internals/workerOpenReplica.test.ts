@@ -133,7 +133,7 @@ test('a request after the replica was cancelled does not start it', async () => 
   expect(hydrate).not.toHaveBeenCalled();
 });
 
-test.each(['rejection', 'load', 'ensure'] as const)('a replica %s fallback defaults to failure', async (cause) => {
+test.each(['rejection', 'load', 'ensure'] as const)('a replica %s falls back once', async (cause) => {
   const session = fakeSession();
   const fallback = mock(() => {});
   deferWorkerOpenReplica(session, async () => {
@@ -143,6 +143,6 @@ test.each(['rejection', 'load', 'ensure'] as const)('a replica %s fallback defau
   if (cause === 'ensure') ensureWorkerOpenReplica(session);
   else await requestWorkerOpenReplica(session);
   expect(fallback).toHaveBeenCalledTimes(1);
-  expect(fallback).toHaveBeenCalledWith('failure');
+  expect(fallback).toHaveBeenCalledWith();
   expect(workerOpenReplicaPending(session)).toBe(false);
 });
