@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, type RefObject } from 'react';
 import { displayPageRevision, type DisplayPage } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
+import { scheduleIdleWork } from './hooks/pageBuildScheduler';
 
 type MakeChrome = (page: DisplayPage, t: TFunction) => HTMLElement;
 /** `chrome` is the page's current chrome, if built for this page, which it may take over. */
@@ -45,7 +46,7 @@ interface BuiltFor {
 }
 
 const IDLE_SLICE_MS = 8;
-const fallbackQueue: (() => void)[] = [];
+const fallbackQueue: { work: () => void; expiresAt: number; delay: number }[] = [];
 let cancelFallbackDrain: (() => void) | null = null;
 let drainingFallbacks = false;
 
@@ -56,32 +57,28 @@ function scheduleFallbackDrain(): void {
     cancelFallbackDrain = null;
     drainingFallbacks = true;
     try {
-      fallbackQueue.shift()?.();
+      fallbackQueue.shift()?.work();
       while (
-        deadline &&
-        !deadline.didTimeout &&
-        deadline.timeRemaining() > 1 &&
-        performance.now() - start < IDLE_SLICE_MS &&
-        fallbackQueue.length > 0
+        fallbackQueue.length > 0 &&
+        (performance.now() >= fallbackQueue[0]!.expiresAt ||
+          (deadline &&
+            !deadline.didTimeout &&
+            deadline.timeRemaining() > 1 &&
+            performance.now() - start < IDLE_SLICE_MS))
       ) {
-        fallbackQueue.shift()!();
+        fallbackQueue.shift()!.work();
       }
     } finally {
       drainingFallbacks = false;
       scheduleFallbackDrain();
     }
   };
-  if (typeof requestIdleCallback === 'function') {
-    const id = requestIdleCallback(drain, { timeout: 5000 });
-    cancelFallbackDrain = () => cancelIdleCallback(id);
-  } else {
-    const id = setTimeout(() => drain(), 50);
-    cancelFallbackDrain = () => clearTimeout(id);
-  }
+  const { expiresAt, delay } = fallbackQueue[0]!;
+  cancelFallbackDrain = scheduleIdleWork(drain, expiresAt, delay).cancel;
 }
 
-function enqueueFallback(work: () => void): () => void {
-  const queued = () => work();
+function enqueueFallback(work: () => void, timeout = 5000, delay = 50): () => void {
+  const queued = { work, expiresAt: performance.now() + timeout, delay };
   fallbackQueue.push(queued);
   scheduleFallbackDrain();
   return () => {
@@ -225,14 +222,6 @@ export function usePageChrome(
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const idle = (work: () => void): (() => void) => {
-      if (typeof requestIdleCallback === 'function') {
-        const id = requestIdleCallback(work, { timeout: 1500 });
-        return () => cancelIdleCallback(id);
-      }
-      const id = setTimeout(work, 150);
-      return () => clearTimeout(id);
-    };
     if (!active) {
       if (shows('fallback')) return;
       // Leaving the window frees the chrome at once; a first fallback waits.
@@ -252,7 +241,7 @@ export function usePageChrome(
       build();
       return;
     }
-    return idle(build);
+    return enqueueFallback(build, 1500, 150);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, t, revision, urgentRevision, active, defer, build, showFallback, fallback]);
 }

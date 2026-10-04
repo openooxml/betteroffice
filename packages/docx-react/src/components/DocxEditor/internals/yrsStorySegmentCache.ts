@@ -1,7 +1,9 @@
 import type { YrsStorySegmentSource } from '@betteroffice/docx/layout/render';
 import type { YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
+import { scheduleIdleWork } from '../hooks/pageBuildScheduler';
 
 const IDLE_SLICE_MS = 8;
+const DIGEST_FALLBACK_MS = 5000;
 
 interface CachedStory {
   /** Per-paragraph digests; null until known. */
@@ -24,6 +26,7 @@ export class YrsStorySegmentCache {
   private readonly units = new Map<string, { segments: YrsStorySegment[]; stories: number }>();
   private readonly undigested = new Set<string>();
   private cancelIdle: (() => void) | null = null;
+  private digestExpiresAt: number | null = null;
   private released = false;
 
   constructor(readonly session: YrsSession) {}
@@ -72,23 +75,23 @@ export class YrsStorySegmentCache {
 
   /** Fetches the digests of stories read whole once the main thread is idle. */
   scheduleDigests(): void {
-    if (this.cancelIdle || this.undigested.size === 0) return;
+    if (this.released || this.cancelIdle || this.undigested.size === 0) return;
+    this.digestExpiresAt ??= performance.now() + DIGEST_FALLBACK_MS;
     const run = (deadline?: IdleDeadline) => {
       this.cancelIdle = null;
       try {
-        this.completeDigests(deadline);
+        this.completeDigests(deadline ?? {
+          didTimeout: false,
+          timeRemaining: () => IDLE_SLICE_MS,
+        });
         if (this.undigested.size > 0) this.scheduleDigests();
+        else this.digestExpiresAt = null;
       } catch {
+        this.digestExpiresAt = null;
         // A session destroyed meanwhile has nothing left to digest.
       }
     };
-    if (typeof requestIdleCallback === 'function') {
-      const id = requestIdleCallback(run);
-      this.cancelIdle = () => cancelIdleCallback(id);
-    } else {
-      const id = setTimeout(run, 0);
-      this.cancelIdle = () => clearTimeout(id);
-    }
+    this.cancelIdle = scheduleIdleWork(run, this.digestExpiresAt).cancel;
   }
 
   /** Whether {@link YrsStorySegmentCache.dispose} ran; a disposed cache holds nothing. */
@@ -99,6 +102,7 @@ export class YrsStorySegmentCache {
   dispose(): void {
     this.cancelIdle?.();
     this.cancelIdle = null;
+    this.digestExpiresAt = null;
     this.released = true;
     this.stories.clear();
     this.stale.clear();
@@ -122,9 +126,11 @@ export class YrsStorySegmentCache {
         }
       }
       this.undigested.delete(story);
+      const now = performance.now();
       if (
         deadline &&
-        (performance.now() - start >= IDLE_SLICE_MS ||
+        (this.digestExpiresAt === null || now < this.digestExpiresAt) &&
+        (now - start >= IDLE_SLICE_MS ||
           (deadline.timeRemaining() <= 1 && !deadline.didTimeout))
       ) {
         break;
