@@ -21,11 +21,13 @@ export interface ResidentSaveRecord extends EditorSaveRecord {
  * Saves the worker's opened session as the editor saves its own: the stories
  * changed since the last save projected over that save's projection (every
  * story when none changed), with `host`'s metadata (the open's when omitted),
- * and `record` updated. @internal
+ * and `record` updated. Revisions come from `storiesChangedSince`, the resident
+ * session's story stream. @internal
  */
 export async function saveResidentDocument(
   raw: EditSession,
   clientId: number,
+  storiesChangedSince: (since: number) => { revision: number; stories: string[] },
   source: Uint8Array,
   hostJson: string,
   host: Document | undefined,
@@ -38,7 +40,7 @@ export async function saveResidentDocument(
   const storyIds = new Set(
     record.revision === undefined
       ? []
-      : opened.session.storiesChangedSince(record.revision).stories.map(dirtyProjectionStory)
+      : storiesChangedSince(record.revision).stories.map(dirtyProjectionStory)
   );
   const projected = yrsToDocument(
     opened.session,
@@ -48,6 +50,6 @@ export async function saveResidentDocument(
   const buffer = await saveEditorDocument(opened.session, projected, comments, record);
   projected.originalBuffer = buffer;
   record.base = projected;
-  record.revision = opened.session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+  record.revision = storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
   return buffer;
 }

@@ -204,6 +204,7 @@ async function bootstrap(opened: Opened): Promise<void> {
 
 class Replica {
   private revision: number;
+  readonly dirtyStories = new Set<string>();
 
   constructor(
     readonly session: YrsSession,
@@ -216,7 +217,10 @@ class Replica {
   async save(comments: Comment[]): Promise<Uint8Array<ArrayBuffer>> {
     const base = this.base ?? this.session.materializeDocx();
     if (!base) throw new Error('the replica has no package');
-    const storyIds = new Set(this.session.storiesChangedSince(this.revision).stories.map(dirtyProjectionStory));
+    const storyIds = new Set([
+      ...this.dirtyStories,
+      ...this.session.storiesChangedSince(this.revision).stories,
+    ].map(dirtyProjectionStory));
     const projected = yrsToDocument(
       this.session, mergeDocxHostMetadata(base, this.host),
       storyIds.size > 0 ? { storyIds } : undefined
@@ -225,6 +229,7 @@ class Replica {
     const buffer = await saveEditorDocument(this.session, projected, comments);
     projected.originalBuffer = buffer;
     this.revision = this.session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    this.dirtyStories.clear();
     return new Uint8Array(buffer);
   }
 }
@@ -491,6 +496,47 @@ describe('worker save', () => {
     } finally {
       save.mockRestore();
     }
+  }, TIMEOUT);
+
+  it('projects the body after a worker comment delete when another story changed', async () => {
+    const opened = await open(new Uint8Array(readFileSync(join(
+      ROOT, 'packages/docx/src/yrs/__fixtures__/comment-ranges/structure.docx'
+    ))));
+    const session = opened.replica.session;
+    const comments = hostComments(opened);
+    const deleted = comments.filter((comment) => comment.parentId === undefined).at(-1);
+    if (!deleted) throw new Error('the fixture has no body comment');
+    const id = deleted.id;
+    const markers = ['commentRangeStart', 'commentRangeEnd', 'commentReference'].map((tag) =>
+      new RegExp(`<w:${tag}\\b[^>]*\\bw:id="${id}"`)
+    );
+    const first = await compareSave(opened);
+    const firstBody = new TextDecoder().decode(unzipContainer(first)['word/document.xml']);
+    for (const marker of markers) expect(firstBody).toMatch(marker);
+    const header = session.storyIds().find((story) =>
+      story.startsWith('hf:') && opened.host.package.headers?.has(story.slice(3))
+    );
+    if (!header) throw new Error('the fixture has no header story');
+    const paraId = firstParagraph(
+      (story) => session.readParagraphs({ story, view: 'accepted' }), header
+    );
+    if (!paraId) throw new Error('the header has no paragraph');
+    const step: DocxEditRequest['steps'][number] = {
+      op: 'insertText', target: { kind: 'paragraph', story: header, paraId },
+      at: 'end', text: ' edited',
+    };
+    for (const engine of [opened.resident.proposalEngine, session]) {
+      expect(engine.applyEdits({
+        expectVersion: engine.version(), steps: [step],
+      }).ok).toBe(true);
+    }
+    opened.resident.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+    session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+    opened.replica.dirtyStories.add('body');
+    const remaining = comments.filter((comment) => comment.id !== id && comment.parentId !== id);
+    const second = await compareSave(opened, remaining);
+    const body = new TextDecoder().decode(unzipContainer(second)['word/document.xml']);
+    for (const marker of markers) expect(body).not.toMatch(marker);
   }, TIMEOUT);
 
   it('writes a host comment reply range once across two saves', async () => {

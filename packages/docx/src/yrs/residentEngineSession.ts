@@ -358,7 +358,9 @@ export async function createResidentEngineSession(
         : session.encode_diff(remoteStateVector.slice()),
     save: async (source, hostJson, host, comments, record) => {
       const { saveResidentDocument } = await import('./residentSave');
-      return saveResidentDocument(session, clientId, source, hostJson, host, comments, record);
+      return saveResidentDocument(
+        session, clientId, storiesChangedSince, source, hostJson, host, comments, record
+      );
     },
     revisionCount: (excluding) =>
       (JSON.parse(session.list_revisions()) as { revisionId: string }[]).filter(
