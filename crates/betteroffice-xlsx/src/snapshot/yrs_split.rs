@@ -724,8 +724,7 @@ mod tests {
     use yrs::updates::decoder::Decode;
     use yrs::updates::encoder::{Encoder, EncoderV1};
     use yrs::{
-        Any, Array, Doc, GetString, In, Map, MapPrelim, Out, ReadTxn, StateVector, Transact,
-        Update,
+        Any, Array, Doc, GetString, In, Map, MapPrelim, Out, ReadTxn, StateVector, Transact, Update,
     };
 
     const LIMITS: [usize; 5] = [1, 64, 4096, 65536, usize::MAX];
@@ -1497,12 +1496,7 @@ mod tests {
     fn empty_and_single_key_json_objects_are_exact() {
         let update = raw_update(8, |encoder| {
             for kind in [BLOCK_ITEM_EMBED_REF_NUMBER, BLOCK_ITEM_FORMAT_REF_NUMBER] {
-                for json in [
-                    "{}",
-                    r#"{"a":0}"#,
-                    r#"[{"a":0}]"#,
-                    r#"{"outer":[{"a":0}]}"#,
-                ] {
+                for json in ["{}", r#"{"a":0}"#, r#"[{"a":0}]"#, r#"{"outer":[{"a":0}]}"#] {
                     item(encoder, kind);
                     if kind == BLOCK_ITEM_FORMAT_REF_NUMBER {
                         encoder.write_key("format");
