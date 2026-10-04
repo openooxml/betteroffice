@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useCallback, useRef, useState } from 'react';
 import JSZip from 'jszip';
+import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '@betteroffice/docx/docx/rezip/parts';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
@@ -11,6 +12,7 @@ import * as yrs from '@betteroffice/docx/yrs';
 import {
   createYrsSession,
   ResidentEngineWorkerClient,
+  ResidentWorkerOutOfMemoryError,
   ResidentWorkerSaveUnavailableError,
   type YrsDocxHost,
   type YrsSession,
@@ -22,6 +24,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplica, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
+import { workerOpenExport } from '../internals/workerOpenExport';
 import { registerWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
 import { registeredWorkerProposalAuthority, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useCanvasRenderer, type OpenInWorker, type WorkerOpenedDocument } from './useDisplayList';
@@ -230,7 +233,7 @@ async function workerOpened(viewer = true, workerProposals = false, source: Uint
         onSearchChange: () => () => {},
       },
     });
-    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, setRenderedFrame, allowHostProposalsRef };
+    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, renderer, setRenderedFrame, allowHostProposalsRef };
   }, { initialProps: 1 });
   try {
     await waitFor(() => expect(hook.result.current.core.session).not.toBeNull());
@@ -602,6 +605,62 @@ test('a worker save retains peer edits marked while its response is pending', as
   } finally {
     opened.worker.release();
     save.mockRestore();
+  }
+});
+
+test('a hydrated editor exports through its peer after snapshot-only worker recovery', async () => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  const font = opened.session.registerFont(new Uint8Array(readFileSync(resolve(ROOT, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'))));
+  const inputs = buildResidentRegionLayoutRequest(opened.hook.result.current.host!.document, 24, {});
+  const requirements = JSON.parse(opened.session.layoutFontRequirementsJson(JSON.stringify(inputs))) as Array<{ key: string }>;
+  inputs.measurement = {
+    fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [font]])),
+    defaults: { fontSize: 11, fontFamily: 'Calibri' },
+    compat: { noLeading: false, doNotExpandShiftReturn: false },
+    authoritativeShaping: true,
+  };
+  const request = JSON.stringify(inputs);
+  const bindEditor = () => Object.assign(opened.hook.result.current.pagedEditorRef.current!, {
+    getLayoutRequest: () => request,
+    relayout: () => { opened.session.layoutDocumentWithRegionsRetainedJson(request); },
+  });
+  const peerExport = spyOn(opened.session, 'exportStructuredWithPagesFor');
+  const warnings = spyOn(console, 'warn').mockImplementation(() => {});
+  const failure = spyOn(opened.client, 'sync').mockRejectedValue(new ResidentWorkerOutOfMemoryError('out of memory', []));
+  try {
+    await act(async () => {
+      const layout = await opened.hook.result.current.renderer.layoutInWorker(opened.session, request);
+      expect(layout).not.toBeNull();
+      if (layout?.complete) expect(await layout.complete).not.toBeNull();
+    });
+    bindEditor();
+    expect(workerOpenExport(opened.session)).not.toBeNull();
+    const first = await opened.hook.result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' });
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(first.content.structured.diagnostics.some(({ code }) => code === 'provenance-unavailable')).toBe(false);
+    expect(opened.worker.requests).toContain('documentRead');
+    expect(peerExport).not.toHaveBeenCalled();
+    await act(async () => {
+      const layout = await opened.hook.result.current.renderer.layoutInWorker(opened.session, request);
+      expect(layout).not.toBeNull();
+      if (layout?.complete) expect(await layout.complete).not.toBeNull();
+    });
+    const replacement = workers.at(-1)!;
+    expect(replacement).not.toBe(opened.worker);
+    expect(replacement.requests).toContain('bootstrap');
+    expect(replacement.requests).not.toContain('open');
+    expect(workerOpenExport(opened.session)).toBeNull();
+    bindEditor();
+    const posted = replacement.requests.length;
+    expect((await opened.hook.result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' })).ok).toBe(true);
+    expect(peerExport).toHaveBeenCalledWith({ revisionView: 'markup' }, request);
+    expect(replacement.requests).toHaveLength(posted);
+    expect(opened.errors).toEqual([]);
+  } finally {
+    failure.mockRestore();
+    warnings.mockRestore();
+    peerExport.mockRestore();
   }
 });
 

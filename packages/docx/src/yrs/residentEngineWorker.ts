@@ -224,6 +224,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
     case 'applyDelete':
       return { lane: 'input', userInput: true, holdsIdleTasks: true, mutates: true, run };
     case 'applyUpdate':
+    case 'syncUpdate':
       return { lane: 'collab', userInput: true, mutates: true, run };
     case 'proposal':
       if (request.operation.kind === 'snapshot') return { lane: 'interactive', run };
@@ -968,11 +969,23 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
-  if (request.type === 'applyUpdate') {
+  if (request.type === 'applyUpdate' || request.type === 'syncUpdate') {
     noteDocumentChange();
     fontRequirements = null;
-    session.applyUpdate(request.update);
-    if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
+    if (request.update.length > 0 || request.type === 'applyUpdate') session.applyUpdate(request.update);
+    if (request.type === 'applyUpdate') {
+      if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
+    } else {
+      const repair = exactBuffer(session.encodeStateAsUpdate(request.stateVector));
+      const stateVector = exactBuffer(session.encodeStateVector());
+      reply({
+        id: request.id,
+        ok: true,
+        version: session.proposalEngine.version(),
+        stateVector,
+        repair,
+      }, [stateVector, repair]);
+    }
     return;
   }
   if (request.type === 'attachCanvases') {

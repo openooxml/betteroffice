@@ -3866,6 +3866,64 @@ describe('resident worker opening', () => {
     expect(encodeStateAsUpdate).not.toHaveBeenCalled();
   });
 
+  test('syncUpdate applies in mutation order and acknowledges its version, vector and repairs', async () => {
+    const { w } = openingWorker();
+    const calls: string[] = [];
+    let version = 'opened';
+    const vector = new Uint8Array([1, 2]);
+    const repair = new Uint8Array([3, 4]);
+    Object.assign(w.harness.session, {
+      applyUpdate: (update: Uint8Array) => { version = String(update[0]); calls.push(`apply:${version}`); },
+      encodeStateAsUpdate: (captured: Uint8Array) => {
+        expect(captured).toEqual(vector);
+        calls.push(`repair:${version}`);
+        return repair;
+      },
+      encodeStateVector: () => vector,
+      proposalEngine: { version: () => version },
+      save: async () => { calls.push(`save:${version}`); return new ArrayBuffer(0); },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    const acknowledged = w.send({ type: 'syncUpdate', update: new Uint8Array([2]), stateVector: vector });
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([3]), selection: null });
+    const saved = w.send({ type: 'save', comments: [] });
+    expect(await acknowledged).toMatchObject({ ok: true, version: '2', stateVector: vector.buffer, repair: repair.buffer });
+    expect((await saved).ok).toBe(true);
+    expect(calls).toEqual(['apply:1', 'apply:2', 'repair:2', 'apply:3', 'save:3']);
+  });
+
+  test('syncUpdate acknowledges an empty diff and a deletion with an unchanged state vector', async () => {
+    const { w } = openingWorker();
+    const vector = new Uint8Array([1, 2]);
+    let version = 'opened';
+    const applyUpdate = mock((update: Uint8Array) => { if (update.length > 0) version = 'deleted'; });
+    const encodeStateAsUpdate = mock(() => new Uint8Array([0, 0]));
+    Object.assign(w.harness.session, {
+      applyUpdate, encodeStateAsUpdate,
+      encodeStateVector: () => vector,
+      proposalEngine: { version: () => version },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array(), stateVector: vector })).toMatchObject({
+      ok: true, version: 'opened', stateVector: vector.buffer,
+    });
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([9]), stateVector: vector })).toMatchObject({
+      ok: true, version: 'deleted', stateVector: vector.buffer,
+    });
+    expect(applyUpdate).toHaveBeenCalledTimes(1);
+    expect(encodeStateAsUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  test('syncUpdate reports a worker trap as a terminal failure', async () => {
+    const { w } = openingWorker();
+    Object.assign(w.harness.session, { applyUpdate: () => { throw new WebAssembly.RuntimeError('unreachable'); } });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([1]), stateVector: new Uint8Array([0]) })).toMatchObject({
+      ok: false, terminal: true,
+    });
+  });
+
   test('save forwards the peer story set, including an empty set, without reading revisions', async () => {
     const { w } = openingWorker();
     const save = mock(async (..._args: Parameters<ResidentEngineSession['save']>) => new ArrayBuffer(4));

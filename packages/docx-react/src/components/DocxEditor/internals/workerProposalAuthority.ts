@@ -44,6 +44,7 @@ export interface WorkerProposalAuthority {
   readonly initialized: boolean;
   restart(): void;
   save<T>(task: () => Promise<T>): Promise<T>;
+  residentOperation<T>(task: () => Promise<T>): Promise<T>;
   /** Initializes once; rejects when the worker cannot answer. */
   initialize(): Promise<void>;
   /** Mirrored geometry until hand-over. */
@@ -282,6 +283,11 @@ export function registerWorkerProposalAuthority(
   };
   const authority: RegisteredAuthority = {
     get initialized() { return initialized; },
+    residentOperation: (task) => enqueue(async () => {
+      const result = await task();
+      assertCurrent();
+      return result;
+    }),
     restart() {
       if (!initialized || holdsState || failure || handingOver || !hooks.current()) return;
       initialized = false;
