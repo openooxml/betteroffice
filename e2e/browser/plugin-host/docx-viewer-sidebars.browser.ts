@@ -1,7 +1,24 @@
 import { expect, test, type Page } from 'playwright/test';
 
+interface CommentInsertion {
+  paraId: string;
+  search: string;
+  text: string;
+  author: string;
+}
+
 interface ViewerSidebarsProbe {
-  editor: { commands: { execute(command: string, payload: null): Promise<unknown> } } | null;
+  editor: {
+    commands: { execute(command: string, payload: null): Promise<unknown> };
+    getEditorRef(): unknown;
+    setParagraphStyle(options: { paraId: string; styleId: string }): boolean;
+    applyFormatting(options: { paraId: string; marks: { bold?: boolean } }): boolean;
+    insertBreak(options: { paraId: string; type: 'page' }): boolean;
+    addComment(options: CommentInsertion): number | null;
+    replyToComment(commentId: number, text: string, author: string): number | null;
+    insertComment(options: CommentInsertion): Promise<number | null>;
+    insertCommentReply(commentId: number, text: string, author: string): Promise<number | null>;
+  } | null;
   sessions: unknown[];
   errors: string[];
   sidebarOpen: boolean;
@@ -109,5 +126,24 @@ test('expanding a viewer comment highlights it without session reads', async ({ 
   await openSidebar(page, firstCanvasAt);
   await page.locator('.docx-comment-card').click();
   await expect(page.locator('.docx-canvas-brighten-comment').first()).toBeVisible();
+  await expectUnchanged(page, before);
+});
+
+test('viewer ref mutations refuse without loading a main-thread document', async ({ page }) => {
+  const { before } = await open(page);
+  const refused = await page.evaluate(async () => {
+    const editor = (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!;
+    return {
+      editorRef: editor.getEditorRef(),
+      paragraphStyle: editor.setParagraphStyle({ paraId: '00000002', styleId: 'Heading1' }),
+      formatting: editor.applyFormatting({ paraId: '00000002', marks: { bold: true } }),
+      break: editor.insertBreak({ paraId: '00000002', type: 'page' }),
+      comment: editor.addComment({ paraId: '00000002', search: 'Commented', text: 'Comment', author: 'Author' }),
+      reply: editor.replyToComment(7, 'Reply', 'Author'),
+      insertedComment: await editor.insertComment({ paraId: '00000002', search: 'Commented', text: 'Comment', author: 'Author' }),
+      insertedReply: await editor.insertCommentReply(7, 'Reply', 'Author'),
+    };
+  });
+  expect(refused).toEqual({ editorRef: null, paragraphStyle: false, formatting: false, break: false, comment: null, reply: null, insertedComment: null, insertedReply: null });
   await expectUnchanged(page, before);
 });

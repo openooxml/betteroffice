@@ -53,13 +53,14 @@ const CONTROLS: DocxContentControlsResult = {
   content: { schemaVersion: 1, anchorScope: 'session', includedStories: ['body'], controls: [], complete: true, diagnostics: [] },
 };
 
-function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false) {
+function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false, viewerSession = false) {
   const events: string[] = [];
-  const document = {} as Document;
+  const document = { package: {} } as Document;
   const state = { viewer, version: 'v' };
-  const modeRef = { current: viewer ? 'viewing' : 'editing' } as { current: EditorMode };
+  const modeRef = { current: viewer || viewerSession ? 'viewing' : 'editing' } as { current: EditorMode };
   const allowHostProposalsRef = { current: true };
   const sidebar = mock(() => {});
+  const setComments = mock((..._args: Parameters<Parameters<typeof useDocxEditorRefApi>[0]['setComments']>) => {});
   const session = {
     version: () => state.version,
     storyIds: () => ['body'],
@@ -68,7 +69,10 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     locateParagraph: () => ({ start: 0, end: 5 }),
     selection: () => ({ anchor: { story: 'body', paraId: 'p', offset: 0 }, head: { story: 'body', paraId: 'p', offset: 5 } }),
     selectionText: () => { events.push('selection'); return INFO; },
-    commentTextTarget: () => ({ ok: true }),
+    commentTextTarget: mock(() => ({ ok: true })),
+    formatTextTarget: mock(() => ({ ok: true })),
+    applyParagraphStyle: mock(() => {}),
+    insertPageBreak: mock(() => {}),
     mirrorWorkerDocument: (mirror: { version: string } | null) => { if (mirror) state.version = mirror.version; },
     getProposals: () => ({ version: 'v', previewVersion: 0, proposals: [] }),
     applyEdits: mock(() => ({ ok: true, applied: true, changedStories: ['body'] })),
@@ -115,15 +119,15 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     const ref = useRef<DocxEditorRef>(null);
     const commands = useDocxCommandBinding({
       session: bindCommands ? session : null, pagedEditorRef, bridgeRef: { current: bridge },
-      document, readOnly: true, mode: 'viewing', experimentalWorkerOpen: pendingReplica,
+      document, readOnly: true, mode: 'viewing', experimentalWorkerOpen: pendingReplica, viewerSession,
     } as unknown as DocxCommandInputs);
     useDocxEditorRefApi({
       ref, document, documentFromYrs: () => document, historyStateRef: { current: document }, pagedEditorRef,
-      experimentalWorkerOpen: pendingReplica, settledDisplayList,
+      experimentalWorkerOpen: pendingReplica, settledDisplayList, viewerSession,
       handleSave: async () => null, zoom: 1, setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {}, loadBuffer: async () => {},
-      comments: [{ id: 1 } as never], setComments: () => {}, setShowCommentsSidebar: sidebar,
+      comments: [{ id: 1 } as never], setComments, setShowCommentsSidebar: sidebar,
       contentChangeSubscribersRef: { current: new Set() }, documentChangeSubscribersRef: { current: subscribers },
       selectionChangeSubscribersRef: { current: new Set() }, getCachedStyleResolver: createStyleResolver,
       commentIdAllocator: createCommentIdAllocator(), commands: bindCommands ? commands.controller.store : UNAVAILABLE_DOCX_COMMANDS,
@@ -136,7 +140,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     });
     return ref;
   });
-  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar, bridge };
+  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar, setComments, bridge };
 }
 
 const WORKER_IDENTITIES: DocxParagraphIdentitySnapshot = {
@@ -638,9 +642,8 @@ for (const [member, twin, args] of NAVIGATION) {
 }
 
 const PASS_THROUGH = [
-  'getPositionAtPoint', 'getSelectionInfo', 'getEditorRef', 'addComment', 'replyToComment',
-  'proposeChange', 'setParagraphStyle', 'applyFormatting', 'insertBreak', 'highlightRange',
-  'getComments', 'resolveComment', 'readParagraphs', 'onDocumentChange',
+  'getPositionAtPoint', 'getSelectionInfo', 'proposeChange', 'highlightRange',
+  'getComments', 'readParagraphs', 'onDocumentChange',
 ] as const;
 for (const member of PASS_THROUGH) {
   test(`${member} passes through the gated implementation in both session kinds`, () => {
@@ -659,6 +662,94 @@ for (const member of PASS_THROUGH) {
     expect(warning).toHaveBeenCalledTimes(deprecated ? 1 : 0);
   });
 }
+
+const REFUSALS = [
+  ['getEditorRef', [], null, true],
+  ['setParagraphStyle', [{ paraId: 'p', styleId: 'Normal' }], false, true],
+  ['applyFormatting', [{ paraId: 'p', search: 'hello', marks: { bold: true } }], false, true],
+  ['insertBreak', [{ paraId: 'p', type: 'page' }], false, true],
+  ['addComment', [{ paraId: 'p', search: 'hello', text: 'Comment', author: 'Author' }], null, true],
+  ['replyToComment', [1, 'Reply', 'Author'], null, true],
+  ['insertComment', [{ paraId: 'p', search: 'hello', text: 'Comment', author: 'Author' }], null, false],
+  ['insertCommentReply', [1, 'Reply', 'Author'], null, false],
+  ['resolveComment', [1], undefined, false],
+] as const;
+
+for (const [member, args, value, deprecated] of REFUSALS) {
+  test(`viewer ${member} refuses before the gated implementation and warns once per page`, async () => {
+    const warning = spyOn(console, 'warn').mockImplementation(() => {});
+    const gated = mock(() => 'editor-result');
+    let viewer = false;
+    const api = routeViewerRefAccess({ [member]: gated } as unknown as DocxEditorRef, () => viewer);
+    expect(Reflect.apply(api[member] as Function, api, args)).toBe('editor-result');
+    expect(gated).toHaveBeenCalledWith(...args);
+    expect(warning).not.toHaveBeenCalled();
+    viewer = true;
+    const second = routeViewerRefAccess({ [member]: gated } as unknown as DocxEditorRef, () => true);
+    for (const ref of [api, api, second]) {
+      const result = Reflect.apply(ref[member] as Function, ref, args);
+      if (member === 'insertComment' || member === 'insertCommentReply') expect(result).toBeInstanceOf(Promise);
+      else expect(result).toBe(value);
+      expect(await result).toBe(value);
+    }
+    expect(gated).toHaveBeenCalledTimes(1);
+    expect(warning).toHaveBeenCalledTimes(deprecated ? 1 : 0);
+    if (deprecated) {
+      expect(warning.mock.calls[0]![0]).toContain(`[DocxEditor] ${member} is deprecated; returns ${String(value)} in viewer sessions.`);
+    }
+    if (member === 'getEditorRef') {
+      for (const twin of ['getParagraphIdentities', 'resolveParagraphAnchors', 'readParagraphs', 'readSelectionInfo', 'findParagraphs', 'exportStructuredWithPages', 'proposeChanges']) {
+        expect(warning.mock.calls[0]![0]).toContain(twin);
+      }
+    }
+  });
+
+  test(`viewer ${member} never hydrates or mutates the main-thread document`, async () => {
+    spyOn(console, 'warn').mockImplementation(() => {});
+    const host = apiFor(true, true);
+    const result = Reflect.apply(host.api[member] as Function, host.api, args);
+    if (member !== 'insertComment' && member !== 'insertCommentReply') expect(result).toBe(value);
+    expect(await result).toBe(value);
+    expect(host.setComments).not.toHaveBeenCalled();
+    expect(host.sidebar).not.toHaveBeenCalled();
+    for (const mutation of ['commentTextTarget', 'formatTextTarget', 'applyParagraphStyle', 'insertPageBreak'] as const) {
+      expect(host.session[mutation]).not.toHaveBeenCalled();
+    }
+    expect(host.events).toEqual([]);
+    expectNoReplica(host);
+  });
+}
+
+test('viewer ref refusals remain active after worker read routing ends', async () => {
+  spyOn(console, 'warn').mockImplementation(() => {});
+  const host = apiFor(false, true, undefined, false, true);
+  for (const [member, args, value] of REFUSALS) {
+    expect(await Reflect.apply(host.api[member] as Function, host.api, args)).toBe(value);
+  }
+  expect(host.setComments).not.toHaveBeenCalled();
+  expect(host.events).toEqual([]);
+  expectNoReplica(host);
+});
+
+test('editor refusal members preserve synchronous edits and comment state', () => {
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const host = apiFor();
+  expect(host.api.getEditorRef() as unknown).toBe(host.editor);
+  expect(host.api.setParagraphStyle({ paraId: 'p', styleId: 'Normal' })).toBe(true);
+  expect(host.api.applyFormatting({ paraId: 'p', search: 'hello', marks: { bold: true } })).toBe(true);
+  expect(host.api.insertBreak({ paraId: 'p', type: 'page' })).toBe(true);
+  expect(host.api.addComment({ paraId: 'p', search: 'hello', text: 'Comment', author: 'Author' })).toBeNumber();
+  expect(host.api.replyToComment(1, 'Reply', 'Author')).toBeNumber();
+  host.api.resolveComment(1);
+  expect(host.session.applyParagraphStyle).toHaveBeenCalledTimes(1);
+  expect(host.session.formatTextTarget).toHaveBeenCalledTimes(1);
+  expect(host.session.insertPageBreak).toHaveBeenCalledTimes(1);
+  expect(host.session.commentTextTarget).toHaveBeenCalledTimes(1);
+  expect(host.setComments).toHaveBeenCalledTimes(3);
+  const resolve = host.setComments.mock.calls[2]![0] as unknown as (comments: Array<{ id: number }>) => unknown;
+  expect(resolve([{ id: 1 }, { id: 2 }])).toEqual([{ id: 1, done: true }, { id: 2 }]);
+  expect(warning).not.toHaveBeenCalled();
+});
 
 test('editor twins flush before reading or navigating and preserve synchronous results', async () => {
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
@@ -735,7 +826,8 @@ test('worker twins read through PagedEditor and authority without requesting a r
     [{ kind: 'commentTarget', commentId: '1' }],
     [{ kind: 'revisionTarget', revisionId: '2' }],
   ]);
-  expect(await host.api.insertCommentReply(1, 'Reply', 'Author')).toBeNumber();
+  expect(await host.api.insertCommentReply(1, 'Reply', 'Author')).toBeNull();
+  expect(host.setComments).not.toHaveBeenCalled();
   expect(host.events).toEqual([]);
   expect(host.request).not.toHaveBeenCalled();
   expect(host.replica!.started).toBe(false);
