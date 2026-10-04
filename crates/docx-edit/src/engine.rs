@@ -24,8 +24,8 @@ use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
-    DocumentRegions, RegionLayoutInput, apply_document_regions_tracked, apply_section_geometry,
-    apply_section_geometry_to_blocks, effective_header_footer_refs,
+    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_document_regions_tracked,
+    apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Fragment, Input as LayoutInput, Layout, LayoutBlock,
@@ -2327,6 +2327,9 @@ enum RegionPlacementPhase {
     Shape(usize),
 }
 
+const MAX_RETAINED_REGION_UNSHARED_PAGES: usize = 16;
+const MAX_RETAINED_REGION_PLACEMENTS: usize = 8;
+
 struct RegionPlacementPasses {
     previous: Vec<RegionPlacementState>,
     next: Vec<RegionPlacementState>,
@@ -2385,7 +2388,7 @@ fn region_shape_offsets_match(left: &[Fragment], right: &[Fragment]) -> bool {
 }
 
 fn compact_region_placements(
-    passes: &mut [RegionPlacementState],
+    passes: &mut Vec<RegionPlacementState>,
     retained: &Layout,
 ) -> Result<(), String> {
     if passes.is_empty() {
@@ -2405,6 +2408,16 @@ fn compact_region_placements(
                 pass.shared_fragment_pages.push(index);
             }
         }
+    }
+    passes.retain(|pass| {
+        pass.fragment_pages
+            .iter()
+            .filter(|page| page.is_some())
+            .count()
+            <= MAX_RETAINED_REGION_UNSHARED_PAGES
+    });
+    if passes.len() > MAX_RETAINED_REGION_PLACEMENTS {
+        drop(passes.drain(..passes.len() - MAX_RETAINED_REGION_PLACEMENTS));
     }
     Ok(())
 }
@@ -3995,7 +4008,6 @@ impl EngineSession {
                 matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
             }))
         .then(|| input.clone());
-        let mut restamped_pages = Vec::new();
         let (mut initial_layout, mut arena) = if refs.is_empty() {
             self.layout_document_value_with_fingerprints(
                 input,
@@ -4021,7 +4033,7 @@ impl EngineSession {
             .map_err(layout_error_message)?;
             (layout, Some(input))
         };
-        apply_document_regions_tracked(&mut initial_layout, &regions, &mut restamped_pages);
+        apply_document_regions(&mut initial_layout, &regions);
         let presentations = build_note_presentations(&refs, &initial_layout.pages, &regions);
         assign_note_presentations(&mut notes.contents, &presentations);
         if resident_body {
@@ -4084,7 +4096,7 @@ impl EngineSession {
                     &mut placement_passes,
                     self.pagination.borrow().layout.as_ref(),
                 )?;
-                apply_document_regions_tracked(&mut layout, &regions, &mut restamped_pages);
+                apply_document_regions(&mut layout, &regions);
                 if copy.is_some() {
                     final_arena = copy;
                 }
@@ -4164,7 +4176,22 @@ impl EngineSession {
         }
         layout.partial = provisional || self.partial_document.get();
         layout.cached_page_totals = cached_page_totals;
-        apply_document_regions_tracked(layout, &regions, &mut restamped_pages);
+        apply_document_regions(layout, &regions);
+        let restamped_pages = self
+            .display
+            .borrow()
+            .list
+            .as_ref()
+            .map(|list| {
+                list.pages
+                    .iter()
+                    .zip(&layout.pages)
+                    .enumerate()
+                    .filter(|(_, (shown, page))| !page_stamps_match(shown, page))
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default();
         let page_note_map = map_notes_to_pages(&layout.pages, &refs, &regions);
         stamp_note_pages(layout, &page_note_map, &regions);
         attach_note_areas(
@@ -4220,7 +4247,7 @@ impl EngineSession {
         }
         pagination.note_changed_pages = note_changed_pages;
         if let Some(pages) = &mut pagination.restamped_pages {
-            pages.extend(restamped_pages);
+            *pages = restamped_pages;
         }
         let serial = pagination.layout_epoch;
         let headers_footers = measured_value.or_else(|| regions.headers_footers.clone());
@@ -7562,6 +7589,86 @@ mod tests {
         let settled = pagination.region_placements.last().unwrap();
         assert_eq!(settled.shared_fragment_pages, [0]);
         assert!(settled.layout.pages[0].fragments.is_empty());
+    }
+
+    #[test]
+    fn an_early_footnote_bounds_retained_probe_payload_and_matches_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let body: String = (0..240)
+            .map(|index| {
+                let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                if index == 0 {
+                    content.push_str(r#"<w:r><w:footnoteReference w:id="5"/></w:r>"#);
+                }
+                preview_pagination_paragraph(index, &content)
+            })
+            .collect();
+        let bytes = preview_fixture::document(&body);
+        let mut request = preview_pagination_request(font);
+        request["notes"] = json!({"contents": [{"id": 5, "noteKind": "footnote", "height": 0}]});
+        let engine = preview_pagination_engine(&bytes, &request);
+        let request = request.to_string();
+        for edited in [false, true] {
+            if edited {
+                engine
+                    .doc()
+                    .insert_text(
+                        &crate::EditCtx::local("", ""),
+                        crate::Position::new("body", 3),
+                        "x",
+                        crate::FormatPolicy::Inherit,
+                    )
+                    .unwrap();
+            }
+            let output = engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            {
+                let pagination = engine.pagination.borrow();
+                let layout = pagination.layout.as_ref().unwrap();
+                assert!(layout.pages.len() > MAX_RETAINED_REGION_UNSHARED_PAGES + 8);
+                assert_eq!(layout.pages[0].footnote_ids, Some(vec![5.0]));
+                let mut probe = pagination.input.as_ref().unwrap().clone();
+                probe.options.footnote_reserved_heights = None;
+                let probe = docx_layout::place::layout_document(&mut probe).unwrap();
+                assert!(probe.pages.len() > MAX_RETAINED_REGION_UNSHARED_PAGES);
+                assert!(
+                    probe
+                        .pages
+                        .iter()
+                        .zip(&layout.pages)
+                        .all(|(probe, final_page)| {
+                            serde_json::to_vec(&probe.fragments).unwrap()
+                                != serde_json::to_vec(&final_page.fragments).unwrap()
+                        })
+                );
+                assert!(pagination.region_placements.len() <= MAX_RETAINED_REGION_PLACEMENTS);
+                for pass in &pagination.region_placements {
+                    assert!(
+                        pass.fragment_pages
+                            .iter()
+                            .filter(|page| page.is_some())
+                            .count()
+                            <= MAX_RETAINED_REGION_UNSHARED_PAGES
+                    );
+                    assert!(!pass.options["footnoteReservedHeights"].is_null());
+                }
+            }
+            let fresh = EngineSession::new(75231);
+            fresh
+                .doc()
+                .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+                .unwrap();
+            fresh
+                .doc()
+                .set_note_separator_state(engine.doc().note_separator_state().unwrap());
+            let expected = fresh
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            assert_eq!(output.as_bytes(), expected.as_bytes());
+        }
+        docx_layout::clear_measure_fonts();
     }
 
     /// A laid-out note is reachable through the resident hit test: the point
@@ -15923,6 +16030,104 @@ mod tests {
         assert_eq!(
             engine.with_display_list(Clone::clone).unwrap().pages,
             full_display_build(&engine, &extras).pages
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn a_body_edit_with_footnotes_rebuilds_only_paginated_pages_across_sections() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let body: String = (0..64)
+            .map(|index| {
+                let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                if index == 0 || index == 32 {
+                    let id = if index == 0 { 5 } else { 6 };
+                    content.push_str(&format!(
+                        r#"<w:r><w:footnoteReference w:id="{id}"/></w:r>"#
+                    ));
+                }
+                let paragraph = preview_pagination_paragraph(index, &content);
+                if index == 31 {
+                    paragraph.replace(
+                        "</w:pPr>",
+                        r#"<w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr>"#,
+                    )
+                } else {
+                    paragraph
+                }
+            })
+            .collect();
+        let bytes = preview_fixture::document(&body);
+        let mut request = preview_pagination_request(font);
+        let mut second = request["regions"]["sections"][0].clone();
+        second["sectionId"] = json!("second");
+        second["pageNumbering"] = json!({"format": "lowerRoman", "start": 7});
+        request["regions"]["sections"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        request["notes"] = json!({"contents": [
+            {"id": 5, "noteKind": "footnote", "height": 0},
+            {"id": 6, "noteKind": "footnote", "height": 0}
+        ]});
+        let engine = preview_pagination_engine(&bytes, &request);
+        let pages = preview_pagination_prime(&engine, &request);
+        assert!(pages >= 8);
+        let initial = engine.with_display_list(Clone::clone).unwrap();
+        assert!(
+            initial
+                .pages
+                .iter()
+                .any(|page| page.section_id.as_deref() == Some("second"))
+        );
+        let paragraph = engine.doc().paragraphs("body").unwrap().pop().unwrap();
+        let position = engine
+            .doc()
+            .paragraph_mark_position(&paragraph.para_id)
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                position,
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let before = engine.stats();
+        let meta = engine
+            .layout_document_with_regions_retained_meta(&request.to_string())
+            .unwrap();
+        assert_eq!(meta.page_count, pages);
+        let rebuilt = {
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.last_incremental);
+            assert_eq!(pagination.restamped_pages, Some(BTreeSet::new()));
+            assert!(pagination.note_changed_pages.is_empty());
+            assert!(
+                initial
+                    .pages
+                    .iter()
+                    .zip(&pagination.layout.as_ref().unwrap().pages)
+                    .all(|(shown, page)| page_stamps_match(shown, page))
+            );
+            pagination
+                .rebuilt_page_ranges
+                .iter()
+                .flat_map(Clone::clone)
+                .collect::<BTreeSet<_>>()
+        };
+        assert!(!rebuilt.is_empty() && rebuilt.len() < pages);
+        preview_pagination_display(&engine, &request);
+        let after = engine.stats();
+        assert_eq!(
+            after.incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            after.rebuilt_display_pages - before.rebuilt_display_pages,
+            rebuilt.len() as u64
         );
         docx_layout::clear_measure_fonts();
     }
