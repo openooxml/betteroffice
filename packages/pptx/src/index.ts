@@ -1,4 +1,17 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
+/** @experimental */
+export { openPresentationSession } from './session/client';
+/** @experimental */
+export type { OpenPresentationSessionOptions, PresentationSession } from './session/client';
+/** @experimental */
+export type {
+  PresentationSessionEvents,
+  PresentationSessionFont,
+  PresentationSessionMethods,
+  PresentationSessionOpenOptions,
+  PresentationSessionState,
+  PresentationSlideSummary,
+} from './session/methods';
 export { decodePresentationImage, needsElementDecode, presentationImageBlob } from './render/image';
 export { StaleProposalError } from './proposals';
 export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
