@@ -1,6 +1,8 @@
 import type { YrsStorySegmentSource } from '@betteroffice/docx/layout/render';
 import type { YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
 
+const IDLE_SLICE_MS = 8;
+
 interface CachedStory {
   /** Per-paragraph digests; null until known. */
   digests: string[] | null;
@@ -71,10 +73,11 @@ export class YrsStorySegmentCache {
   /** Fetches the digests of stories read whole once the main thread is idle. */
   scheduleDigests(): void {
     if (this.cancelIdle || this.undigested.size === 0) return;
-    const run = () => {
+    const run = (deadline?: IdleDeadline) => {
       this.cancelIdle = null;
       try {
-        this.completeDigests();
+        this.completeDigests(deadline);
+        if (this.undigested.size > 0) this.scheduleDigests();
       } catch {
         // A session destroyed meanwhile has nothing left to digest.
       }
@@ -104,19 +107,29 @@ export class YrsStorySegmentCache {
   }
 
   /** Reads the digests of stories read whole that have not changed since. */
-  completeDigests(): void {
+  completeDigests(deadline?: IdleDeadline): void {
+    const start = performance.now();
     const { stories: changed } = this.session.storiesChangedSince(this.revision);
     const changedSince = new Set(changed);
     for (const story of this.undigested) {
       const cached = this.stories.get(story);
-      if (!cached || cached.digests || changedSince.has(story)) continue;
-      const digests = this.session.storySegmentUnitDigests(story);
-      const units = splitUnits(cached.segments);
-      if (digests.length !== units.length) continue;
-      this.stories.delete(story);
-      this.store(story, digests, units);
+      if (cached && !cached.digests && !changedSince.has(story)) {
+        const digests = this.session.storySegmentUnitDigests(story);
+        const units = splitUnits(cached.segments);
+        if (digests.length === units.length) {
+          this.stories.delete(story);
+          this.store(story, digests, units);
+        }
+      }
+      this.undigested.delete(story);
+      if (
+        deadline &&
+        (performance.now() - start >= IDLE_SLICE_MS ||
+          (deadline.timeRemaining() <= 1 && !deadline.didTimeout))
+      ) {
+        break;
+      }
     }
-    this.undigested.clear();
   }
 
   private store(

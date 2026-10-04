@@ -44,6 +44,7 @@ interface BuiltFor {
   t: TFunction;
 }
 
+const IDLE_SLICE_MS = 8;
 const fallbackQueue: (() => void)[] = [];
 let cancelFallbackDrain: (() => void) | null = null;
 let drainingFallbacks = false;
@@ -51,6 +52,7 @@ let drainingFallbacks = false;
 function scheduleFallbackDrain(): void {
   if (cancelFallbackDrain || drainingFallbacks || fallbackQueue.length === 0) return;
   const drain = (deadline?: IdleDeadline): void => {
+    const start = performance.now();
     cancelFallbackDrain = null;
     drainingFallbacks = true;
     try {
@@ -59,6 +61,7 @@ function scheduleFallbackDrain(): void {
         deadline &&
         !deadline.didTimeout &&
         deadline.timeRemaining() > 1 &&
+        performance.now() - start < IDLE_SLICE_MS &&
         fallbackQueue.length > 0
       ) {
         fallbackQueue.shift()!();

@@ -1,4 +1,4 @@
-import { beforeAll, expect, test } from 'bun:test';
+import { beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
@@ -181,6 +181,78 @@ test('a sidebar projection read through the cache re-reads only the edited parag
     session.destroy();
   }
 });
+
+for (const editBetweenSlices of [false, true]) {
+  const name = editBetweenSlices
+    ? 'idle digest slices skip a story edited since its read just like synchronous completion'
+    : 'idle digest slices preserve story order and match synchronous completion';
+  test(name, async () => {
+    const session = await createYrsSession({ clientId: 77005 });
+    const originalIdle = globalThis.requestIdleCallback;
+    const originalCancelIdle = globalThis.cancelIdleCallback;
+    const callbacks = new Map<number, IdleRequestCallback>();
+    let nextIdle = 1;
+    globalThis.requestIdleCallback = (run) => {
+      const id = nextIdle++;
+      callbacks.set(id, run);
+      return id;
+    };
+    globalThis.cancelIdleCallback = (id) => { callbacks.delete(id); };
+    let now = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(() => now += 4);
+    const cache = new YrsStorySegmentCache(session);
+    const synchronous = new YrsStorySegmentCache(session);
+    try {
+      session.seedFromDocx(docx());
+      const { reads, clear, storySegments } = counted(session);
+      expectSameProjection(session, cache, storySegments);
+      const stories = [...reads.whole];
+      for (const story of stories.slice(1)) {
+        const [paragraph] = session.paragraphs(story);
+        session.splitParagraph({ story, paraId: paragraph!.paraId, offset: 0 });
+      }
+      cache.refresh();
+      synchronous.refresh();
+      for (const story of stories) {
+        cache.segments(story);
+        synchronous.segments(story);
+      }
+      clear();
+      const flush = () => {
+        expect(callbacks.size).toBe(1);
+        const [id, run] = callbacks.entries().next().value!;
+        callbacks.delete(id);
+        run({ didTimeout: false, timeRemaining: () => 40 });
+      };
+      cache.scheduleDigests();
+      flush();
+      expect(reads.digests).toEqual(stories.slice(0, 2));
+      const completed = [...reads.digests];
+      if (editBetweenSlices) {
+        const story = stories[2]!;
+        const [paragraph] = session.paragraphs(story);
+        session.insertText({ story, paraId: paragraph!.paraId, offset: 0 }, 'xyz');
+      }
+      clear();
+      synchronous.completeDigests();
+      const expected = [...reads.digests];
+      expect(expected).toEqual(stories.filter((_, index) => !editBetweenSlices || index !== 2));
+      clear();
+      flush();
+      flush();
+      expect([...completed, ...reads.digests]).toEqual(expected);
+      expect(callbacks.size).toBe(0);
+      expect(cache).toEqual(synchronous);
+    } finally {
+      cache.dispose();
+      synchronous.dispose();
+      clock.mockRestore();
+      globalThis.requestIdleCallback = originalIdle;
+      globalThis.cancelIdleCallback = originalCancelIdle;
+      session.destroy();
+    }
+  });
+}
 
 test('a source whose cache was disposed reads the session directly and holds no segments', async () => {
   const session = await createYrsSession({ clientId: 77004 });

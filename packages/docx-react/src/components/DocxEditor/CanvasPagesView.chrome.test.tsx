@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -707,6 +707,38 @@ test('first fallbacks share a FIFO and honor idle deadlines and timeouts', async
   await idle();
   expect(text()).toEqual(['Page 0', 'Page 1', 'Page 2', 'Page 3']);
   expect(idleWork.size).toBe(0);
+});
+
+test('first fallbacks cap each idle slice at eight milliseconds and keep FIFO order', () => {
+  const pages = blankPages(8);
+  const { container } = render(
+    <>{pages.map((page) => (
+      <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
+    ))}</>
+  );
+  const hosts = Array.from(container.querySelectorAll('.canvas-page-mirror'));
+  const clock = spyOn(performance, 'now').mockImplementation(
+    () => hosts.filter((host) => host.firstChild !== null).length * 3
+  );
+  const observer = new MutationObserver(() => {});
+  observer.observe(container, { childList: true, subtree: true });
+  const completed: number[] = [];
+  try {
+    for (const count of [3, 6, 8]) {
+      expect(idleWork.size).toBe(1);
+      act(() => {
+        flushIdle({ didTimeout: false, timeRemaining: () => 40 });
+        completed.push(
+          ...observer.takeRecords().map(({ target }) => hosts.indexOf(target as Element))
+        );
+      });
+      expect(completed).toEqual(pages.slice(0, count).map((page) => page.pageIndex));
+    }
+    expect(idleWork.size).toBe(0);
+  } finally {
+    observer.disconnect();
+    clock.mockRestore();
+  }
 });
 
 test('unmounting an inactive page cancels its queued first fallback', async () => {
