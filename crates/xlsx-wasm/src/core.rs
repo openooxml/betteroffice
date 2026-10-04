@@ -295,9 +295,8 @@ impl Session {
     }
 
     pub fn open_with_calculation_json(bytes: &[u8], context: &str) -> Result<Self, String> {
-        let context: WorkbookCalculationContext =
-            serde_json::from_str(context)
-                .map_err(|error| format!("bad calculation context: {error}"))?;
+        let context: WorkbookCalculationContext = serde_json::from_str(context)
+            .map_err(|error| format!("bad calculation context: {error}"))?;
         let rand_seed = context.rand_seed;
         let options = context.options()?;
         Workbook::open_recalculated_with_seed(bytes, options, Some(rand_seed))
@@ -309,14 +308,17 @@ impl Session {
     }
 
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), String> {
-        let context: Option<WorkbookCalculationContext> =
-            serde_json::from_str(context)
-                .map_err(|error| format!("bad calculation context: {error}"))?;
+        let context: Option<WorkbookCalculationContext> = serde_json::from_str(context)
+            .map_err(|error| format!("bad calculation context: {error}"))?;
         if context.is_some() && self.workbook.is_collaborative() {
-            return Err("calculation context is unavailable for collaborative workbooks".to_owned());
+            return Err(
+                "calculation context is unavailable for collaborative workbooks".to_owned(),
+            );
         }
         let rand_seed = context.as_ref().map(|context| context.rand_seed);
-        let options = context.map(WorkbookCalculationContext::options).transpose()?;
+        let options = context
+            .map(WorkbookCalculationContext::options)
+            .transpose()?;
         self.workbook.set_rand_seed(rand_seed);
         self.calculation_context = options;
         Ok(())
@@ -935,7 +937,9 @@ impl Session {
 
     pub fn apply_edits_json(&mut self, request: &str) -> Result<String, String> {
         match self.calculation_context {
-            Some(context) => self.workbook.apply_edits_json_with_calculation(request, context),
+            Some(context) => self
+                .workbook
+                .apply_edits_json_with_calculation(request, context),
             None => self.workbook.apply_edits_json(request),
         }
         .map_err(|error| error.to_string())
@@ -1197,7 +1201,8 @@ mod tests {
         for input in ["3", "4", "5"] {
             session
                 .edit_cell_json(
-                    &serde_json::json!({ "sheet": 0, "row": 39, "col": 25, "input": input }).to_string(),
+                    &serde_json::json!({ "sheet": 0, "row": 39, "col": 25, "input": input })
+                        .to_string(),
                     Some(46_000.25),
                 )
                 .unwrap();
@@ -1228,7 +1233,10 @@ mod tests {
             assert_eq!(result["ok"], true);
             assert_eq!(result["applied"], true);
             assert_eq!(session.workbook.rand_seed(), Some(42));
-            assert_eq!(session.calculation_options(None).now_serial, Some(45_000.75));
+            assert_eq!(
+                session.calculation_options(None).now_serial,
+                Some(45_000.75)
+            );
         }
         let values = |session: &Session| {
             [0, 1].map(|column| {

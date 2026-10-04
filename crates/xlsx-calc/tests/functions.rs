@@ -804,7 +804,11 @@ fn draws(src: &str, seed: Option<u64>, count: usize) -> Vec<f64> {
 #[test]
 fn randbetween_draws_use_the_shared_random_stream() {
     let values = draws("RANDBETWEEN(1,1000000)", Some(42), 8);
-    assert!(values.iter().all(|value| (1.0..=1_000_000.0).contains(value)));
+    assert!(
+        values
+            .iter()
+            .all(|value| (1.0..=1_000_000.0).contains(value))
+    );
     assert!(values.iter().all(|value| value.fract() == 0.0));
     assert!(values.windows(2).all(|pair| pair[0] != pair[1]));
     assert_eq!(values, draws("RANDBETWEEN(1,1000000)", Some(42), 8));

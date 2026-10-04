@@ -1586,7 +1586,8 @@ mod tests {
         wb.sheet_mut(sheet)
             .unwrap()
             .set_array_formula(a1("B1"), CellRange::parse_a1("B1:C2").unwrap());
-        let (mut graph, result) = rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(7));
+        let (mut graph, result) =
+            rebuild_and_recalc_all_with_seed(&mut wb, Some(45_000.5), Some(7));
         assert!(result.cycle_cells.is_empty());
         let addresses = ["A1", "A2", "B1", "B2", "C1", "C2"];
         let before = addresses.map(|address| value(&wb, sheet, address));

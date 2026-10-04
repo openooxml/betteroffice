@@ -55,8 +55,8 @@ fn values(workbook: &Workbook) -> Vec<CellValue> {
     (0..2)
         .flat_map(|sheet| {
             [
-                "A1", "A2", "A3", "A4", "A5", "B3", "C3", "C4", "D3", "D4", "B10", "B11",
-                "B12", "C10", "D10",
+                "A1", "A2", "A3", "A4", "A5", "B3", "C3", "C4", "D3", "D4", "B10", "B11", "B12",
+                "C10", "D10",
             ]
             .map(|address| value(workbook, sheet, address))
         })
@@ -132,10 +132,18 @@ fn replay(workbook: &mut Workbook, options: CalculationOptions) -> Vec<(Vec<Cell
 fn identical_context_and_calls_produce_identical_values_and_saved_bytes() {
     let bytes = fixture();
     let options = context();
-    let mut first = Workbook::open_recalculated_with_seed(&bytes, options, Some(0x1234_5678)).unwrap();
-    let mut second = Workbook::open_recalculated_with_seed(&bytes, options, Some(0x1234_5678)).unwrap();
-    assert_eq!(value(&first, 0, "A1"), CellValue::Number { value: 45_000.75 });
-    assert_eq!(value(&first, 0, "A2"), CellValue::Number { value: 45_000.0 });
+    let mut first =
+        Workbook::open_recalculated_with_seed(&bytes, options, Some(0x1234_5678)).unwrap();
+    let mut second =
+        Workbook::open_recalculated_with_seed(&bytes, options, Some(0x1234_5678)).unwrap();
+    assert_eq!(
+        value(&first, 0, "A1"),
+        CellValue::Number { value: 45_000.75 }
+    );
+    assert_eq!(
+        value(&first, 0, "A2"),
+        CellValue::Number { value: 45_000.0 }
+    );
     assert_ne!(value(&first, 0, "A3"), value(&first, 1, "A3"));
     assert_ne!(value(&first, 0, "A3"), value(&first, 0, "B3"));
     assert_eq!(replay(&mut first, options), replay(&mut second, options));
@@ -155,7 +163,8 @@ fn changing_only_the_seed_changes_random_values() {
 #[test]
 fn seeded_random_values_survive_full_and_incremental_recalculation() {
     let options = context();
-    let mut workbook = Workbook::open_recalculated_with_seed(&fixture(), options, Some(42)).unwrap();
+    let mut workbook =
+        Workbook::open_recalculated_with_seed(&fixture(), options, Some(42)).unwrap();
     let before = values(&workbook);
     assert!(workbook.recalculate_all(options).changed.is_empty());
     assert_eq!(values(&workbook), before);
@@ -179,7 +188,8 @@ fn seeded_random_values_survive_full_and_incremental_recalculation() {
 #[test]
 fn earlier_independent_random_cells_preserve_values_on_full_and_incremental_recalculation() {
     let options = context();
-    let mut workbook = Workbook::open_recalculated_with_seed(&fixture(), options, Some(42)).unwrap();
+    let mut workbook =
+        Workbook::open_recalculated_with_seed(&fixture(), options, Some(42)).unwrap();
     for sheet in 0..2 {
         for address in ["A3", "A4", "B3", "C3", "C4", "D3", "D4"] {
             assert!(
@@ -222,7 +232,10 @@ fn sharing_only_the_clock_keeps_random_draws_unpinned() {
         workbook
             .edit_cell(SheetId(0), cell("Z99"), input, context())
             .unwrap();
-        assert_eq!(value(&workbook, 0, "A1"), CellValue::Number { value: 45_000.75 });
+        assert_eq!(
+            value(&workbook, 0, "A1"),
+            CellValue::Number { value: 45_000.75 }
+        );
         draws.push(value(&workbook, 0, "A3"));
     }
     assert!(draws.iter().any(|draw| *draw != before));
@@ -260,9 +273,13 @@ fn batch_requests_override_only_the_clock_when_present() {
     let mut workbook =
         Workbook::open_recalculated_with_seed(&fixture(), context(), Some(42)).unwrap();
     let random = value(&workbook, 0, "A3");
-    for (index, calculation) in [None, Some(json!({})), Some(json!({ "nowSerial": 46_000.25 }))]
-        .into_iter()
-        .enumerate()
+    for (index, calculation) in [
+        None,
+        Some(json!({})),
+        Some(json!({ "nowSerial": 46_000.25 })),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let mut request = json!({
             "expectVersion": workbook.version(),
@@ -283,7 +300,10 @@ fn batch_requests_override_only_the_clock_when_present() {
         .unwrap();
         assert_eq!(result["ok"], true);
         let expected = if index < 2 { 45_000.75 } else { 46_000.25 };
-        assert_eq!(value(&workbook, 0, "A1"), CellValue::Number { value: expected });
+        assert_eq!(
+            value(&workbook, 0, "A1"),
+            CellValue::Number { value: expected }
+        );
         assert_eq!(value(&workbook, 0, "A3"), random);
         assert_eq!(workbook.rand_seed(), Some(42));
     }
@@ -314,7 +334,10 @@ fn clock_only_batch_overrides_preserve_seeded_values_and_saved_bytes() {
         assert_eq!(result["ok"], true);
         assert_eq!(result["applied"], true);
         assert_eq!(workbook.rand_seed(), Some(42));
-        assert_eq!(value(workbook, 0, "A1"), CellValue::Number { value: 46_000.25 });
+        assert_eq!(
+            value(workbook, 0, "A1"),
+            CellValue::Number { value: 46_000.25 }
+        );
         assert_eq!(value(workbook, 0, "A3"), random);
         assert!(
             matches!(value(workbook, 0, "B10"), CellValue::Number { value } if (1.0..=1_000_000.0).contains(&value))
