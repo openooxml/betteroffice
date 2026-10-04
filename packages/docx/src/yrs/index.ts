@@ -156,6 +156,7 @@ export {
   mergeDocxHostMetadata,
   proposalProjectionStories,
   saveEditorDocument,
+  serialWorkerSaves,
   type EditorSaveRecord,
 } from './editorSave';
 export { editorSaveKeys } from './editorSaveKeys';

@@ -16,6 +16,7 @@ export {
   dirtyProjectionStory,
   EditorDirtyStories,
   proposalProjectionStories,
+  serialWorkerSaves,
 } from './dirtyProjectionStories';
 
 /** What the editor's earlier saves of a session leave for its next save. @internal */

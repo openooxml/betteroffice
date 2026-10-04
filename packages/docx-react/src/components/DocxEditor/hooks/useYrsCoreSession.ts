@@ -8,7 +8,12 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { EditorDirtyStories, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import {
+  EditorDirtyStories,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  serialWorkerSaves,
+} from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -645,19 +650,20 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            const editorSave = serialWorkerSaves(dirtyStoriesRef.current);
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: async (comments, peer) => {
-                if (stale()) throw new Error('The document changed while saving');
-                const currentHost = documentRef.current ?? host?.document;
-                const dirty = peer ? dirtyStoriesRef.current.captureWorkerSave() : undefined;
-                const saved = await worker.save({
-                  comments,
-                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
-                  ...(dirty ? { stories: dirty.stories } : {}),
-                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
-                dirty?.clear();
-                return saved;
+              save: (comments, peer) => {
+                const save = async (stories?: string[]) => {
+                  if (stale()) throw new Error('The document changed while saving');
+                  const currentHost = documentRef.current ?? host?.document;
+                  return worker.save({
+                    comments,
+                    ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                    ...(stories ? { stories } : {}),
+                  }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+                };
+                return peer ? editorSave(save) : save();
               },
             });
             const gate = { reached: false, wanted: false };
