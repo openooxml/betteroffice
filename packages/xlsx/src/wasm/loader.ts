@@ -230,11 +230,17 @@ export interface HistoryState {
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
 
+export interface WorkbookCalculationContext {
+  nowSerial: number;
+  randSeed: number;
+}
+
 export interface OpenWorkbookOptions {
   /** Open a Yrs-backed replica that can accept peer updates. */
   collaborative?: boolean;
   /** Peer-unique positive safe integer. Generated securely when omitted. */
   clientId?: number;
+  calculation?: WorkbookCalculationContext;
 }
 
 /**
@@ -358,6 +364,7 @@ function staleErrorFrom(message: string): StaleProposalError | null {
  */
 export interface WorkbookHandle extends CollaborationReplica {
   readonly clientId: number;
+  setCalculationContext(context: WorkbookCalculationContext | null): void;
   /** Available in both modes; encodes this handle's current Yrs state vector. */
   encodeStateVector(): Uint8Array;
   /** Available in both modes; pass a peer vector to encode only the missing state. */
@@ -571,14 +578,25 @@ export function openWorkbook(
   bytes: Uint8Array,
   options: OpenWorkbookOptions = {}
 ): WorkbookHandle {
+  if (options.calculation !== undefined) {
+    validateCalculationContext(options.calculation);
+    if (options.collaborative === true) {
+      throw new TypeError('calculation context is unavailable for collaborative workbooks');
+    }
+  }
   requireInitialized();
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    doc =
-      collaborativeClientId === undefined
+    if (options.calculation !== undefined) {
+      doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
+        bytes, JSON.stringify(options.calculation)
+      );
+    } else {
+      doc = collaborativeClientId === undefined
         ? XlsxDocument.open(bytes)
         : XlsxDocument.openCollaborative(bytes, collaborativeClientId);
+    }
   } catch (e) {
     throw toError(e);
   }
@@ -587,6 +605,7 @@ export function openWorkbook(
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
   let nextListenerId = 0;
   let disposed = false;
+  let hasCalculationContext = options.calculation !== undefined;
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -692,6 +711,17 @@ export function openWorkbook(
   const handle: WorkbookHandle = {
     get clientId(): number {
       return wasmCall(() => doc.clientId);
+    },
+    setCalculationContext(context: WorkbookCalculationContext | null): void {
+      assertAlive();
+      if (context !== null) {
+        validateCalculationContext(context);
+        if (collaborativeClientId !== undefined) {
+          throw new TypeError('calculation context is unavailable for collaborative workbooks');
+        }
+      }
+      wasmCall(() => (doc as CalculationDocument).setCalculationContextJson(JSON.stringify(context)));
+      hasCalculationContext = context !== null;
     },
     encodeStateVector(): Uint8Array {
       return wasmCall(() => doc.encodeStateVector());
@@ -942,9 +972,15 @@ export function openWorkbook(
       return parseJson(() => doc.findTextJson(JSON.stringify(request)));
     },
     validateEdits(request: XlsxEditRequest): XlsxValidationResult {
+      if (hasCalculationContext && request.calculation !== undefined) {
+        validateCalculationOverride(request.calculation);
+      }
       return parseJson(() => doc.validateEditsJson(JSON.stringify(request)));
     },
     applyEdits(request: XlsxEditRequest): XlsxEditResult {
+      if (hasCalculationContext && request.calculation !== undefined) {
+        validateCalculationOverride(request.calculation);
+      }
       return parseJson(() => doc.applyEditsJson(JSON.stringify(request)), true);
     },
     exportStructured(options: XlsxExportOptions = {}): XlsxExportResult<XlsxStructuredContent> {
@@ -982,6 +1018,45 @@ export function openWorkbook(
   };
   displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
   return handle;
+}
+
+type CalculationDocument = XlsxDocument & {
+  setCalculationContextJson(context: string): void;
+};
+
+type CalculationDocumentConstructor = typeof XlsxDocument & {
+  openWithCalculationJson(bytes: Uint8Array, context: string): CalculationDocument;
+};
+
+function validateCalculationContext(context: unknown): void {
+  if (
+    typeof context !== 'object' || context === null || Array.isArray(context) ||
+    Object.keys(context).some((key) => key !== 'nowSerial' && key !== 'randSeed')
+  ) {
+    throw new TypeError('calculation must be an object with nowSerial and randSeed');
+  }
+  const { nowSerial, randSeed } = context as Partial<WorkbookCalculationContext>;
+  if (typeof nowSerial !== 'number' || !Number.isFinite(nowSerial)) {
+    throw new TypeError('nowSerial must be a finite number');
+  }
+  if (
+    typeof randSeed !== 'number' || !Number.isInteger(randSeed) || randSeed < 0 || randSeed > 0xffff_ffff
+  ) {
+    throw new TypeError('randSeed must be an integer from 0 to 4294967295');
+  }
+}
+
+function validateCalculationOverride(calculation: unknown): void {
+  if (
+    typeof calculation !== 'object' || calculation === null || Array.isArray(calculation) ||
+    Object.keys(calculation).some((key) => key !== 'nowSerial')
+  ) {
+    throw new TypeError('calculation must be an object with an optional nowSerial');
+  }
+  const { nowSerial } = calculation as { nowSerial?: number };
+  if (nowSerial !== undefined && (typeof nowSerial !== 'number' || !Number.isFinite(nowSerial))) {
+    throw new TypeError('nowSerial must be a finite number');
+  }
 }
 
 function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | undefined {

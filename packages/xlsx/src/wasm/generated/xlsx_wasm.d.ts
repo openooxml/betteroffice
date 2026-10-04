@@ -93,6 +93,7 @@ export class XlsxDocument {
      * Open a replica with a positive, safe-integer client ID.
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
+    static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
     patchRangeStyleJson(args: string): string;
     printDisplayListJson(args: string): string;
     /**
@@ -130,6 +131,7 @@ export class XlsxDocument {
      * switch the active sheet by index.
      */
     setActiveSheet(index: number): void;
+    setCalculationContextJson(context: string): void;
     setRangeNumberFormatJson(args: string): string;
     sheetCount(): number;
     sheetInfoForJson(sheet: number): string;
@@ -213,6 +215,7 @@ export interface InitOutput {
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
+    readonly xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -226,6 +229,7 @@ export interface InitOutput {
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
+    readonly xlsxdocument_setCalculationContextJson: (a: number, b: number, c: number) => [number, number];
     readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_sheetCount: (a: number) => number;
     readonly xlsxdocument_sheetInfoForJson: (a: number, b: number) => [number, number, number, number];

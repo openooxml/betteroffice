@@ -1,7 +1,7 @@
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
-import type { MethodHandlers } from '../../../../shared/office-session/types';
+import { SessionFailure, type MethodHandlers } from '../../../../shared/office-session/types';
 import {
   initWasm, openWorkbook, workbookDisplayListJson,
   type SheetInfo, type WorkbookHandle,
@@ -12,8 +12,16 @@ import {
   type WorkbookSessionMethods,
   type WorkbookSheetSummary,
 } from './methods';
+import {
+  applyWorkbookReplayOp,
+  validateWorkbookReplayEnvelope,
+  workbookReplayRefused,
+  WORKBOOK_INTERNAL_SESSION_POLICIES,
+  type WorkbookInternalSessionMethods,
+} from './replay';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
+type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
@@ -28,6 +36,8 @@ export function createWorkbookSessionHost(
   let version = 0;
   let dirty = false;
   let epoch = 0;
+  let sequence = 0;
+  let revision = 0;
   const encoder = new TextEncoder();
 
   function workbook(): WorkbookHandle {
@@ -49,6 +59,42 @@ export function createWorkbookSessionHost(
     }
   }
 
+  const internalHandlers: MethodHandlers<WorkbookInternalSessionMethods, null> = {
+    replay(_, envelope) {
+      validateWorkbookReplayEnvelope(envelope);
+      const opened = workbook();
+      if (envelope.sequence !== sequence + 1) {
+        const error = new Error(`Expected workbook replay sequence ${sequence + 1}, got ${envelope.sequence}`);
+        error.name = 'WorkbookReplayOrderError';
+        throw error;
+      }
+      const op = envelope.op;
+      try {
+        const before = opened.version();
+        opened.setCalculationContext(envelope.calculation);
+        const result = applyWorkbookReplayOp(opened, op.method === 'applyEdits' ? {
+          method: 'applyEdits', args: [{ ...op.args[0], expectVersion: before }],
+        } : op);
+        if (workbookReplayRefused(result)) throw new Error(`Engine refused replay: ${JSON.stringify(result)}`);
+        const changed = opened.version() !== before;
+        sequence = envelope.sequence;
+        if (changed) {
+          revision += 1;
+          version += 1;
+          dirty = true;
+          host.emit('changed', { version, dirty });
+        }
+        return { sequence, revision, version, result };
+      } catch (error) {
+        const message = `Workbook replay diverged at sequence ${envelope.sequence} (${op.method})`;
+        throw new SessionFailure(
+          error instanceof WebAssembly.RuntimeError ? 'trap' : 'crash', message,
+          `${message}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    },
+  };
+
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
@@ -58,6 +104,7 @@ export function createWorkbookSessionHost(
       const opened = openWorkbook(new Uint8Array(bytes), {
         collaborative: input.collaborative,
         clientId: input.clientId,
+        calculation: input.calculation,
       });
       try {
         const info = opened.sheetInfo();
@@ -92,7 +139,7 @@ export function createWorkbookSessionHost(
       const buffer = encoder.encode(json).buffer;
       epoch += 1;
       return transferable({
-        displayList: buffer, version: opened.version(), epoch, sheet, viewport, mergedRanges,
+        displayList: buffer, version: opened.version(), epoch, sequence, sheet, viewport, mergedRanges,
       }, [buffer]);
     },
     sheetView(_, sheet) {
@@ -135,8 +182,10 @@ export function createWorkbookSessionHost(
     },
   };
 
-  const host = createSessionHost<WorkbookSessionMethods, Events, null>(transport, {
-    handlers, policies: WORKBOOK_SESSION_POLICIES, context: null, onDispose: dispose,
+  const host = createSessionHost<Methods, Events, null>(transport, {
+    handlers: { ...handlers, ...internalHandlers },
+    policies: { ...WORKBOOK_SESSION_POLICIES, ...WORKBOOK_INTERNAL_SESSION_POLICIES },
+    context: null, onDispose: dispose,
   });
   return host;
 }

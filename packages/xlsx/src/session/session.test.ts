@@ -1,6 +1,4 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import {
   createSessionClient, createSessionHost, isHostMessage, SESSION_SUPERSEDED, SessionFailure,
@@ -19,6 +17,7 @@ import {
   type WorkbookSessionMethods,
   type WorkbookSheetView,
 } from './methods';
+import { batchRequests, createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
 let fixture: Uint8Array;
 let chartFixture: Uint8Array;
@@ -26,15 +25,7 @@ let wasmBytes: Uint8Array<ArrayBuffer>;
 const viewport: Viewport = { x: 0, y: 0, width: 800, height: 800 };
 
 beforeAll(async () => {
-  const [wasm, xlsx, charts] = await Promise.all([
-    readFile(resolve(import.meta.dir, '../wasm/generated/xlsx_wasm_bg.wasm')),
-    readFile(resolve(import.meta.dir, '../../test-fixtures/sample.xlsx')),
-    readFile(resolve(import.meta.dir, '../../test-fixtures/charts.xlsx')),
-  ]);
-  wasmBytes = new Uint8Array(wasm);
-  await initWasm(wasmBytes);
-  fixture = new Uint8Array(xlsx);
-  chartFixture = new Uint8Array(charts);
+  ({ fixture, chartFixture, wasmBytes } = await loadWorkbookSessionFixtures());
 });
 
 function target(a1: string, sheetId = 'sheet:0'): XlsxRangeTarget {
@@ -62,34 +53,10 @@ function editBatch(expectVersion: string): XlsxEditRequest {
   };
 }
 
-function batchRequests(transport: SessionTransport): SessionTransport {
-  return { ...transport, listen(listener) {
-    let messages: unknown[] = [];
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const off = transport.listen((message) => {
-      messages.push(message);
-      if (timer !== undefined) return;
-      timer = setTimeout(() => {
-        timer = undefined;
-        const batch = messages;
-        messages = [];
-        for (const queued of batch) listener(queued);
-      }, 0);
-    });
-    return () => {
-      off();
-      if (timer !== undefined) clearTimeout(timer);
-      messages = [];
-    };
-  } };
-}
-
 async function session(
   bytes = fixture, wrapHost?: (transport: SessionTransport) => SessionTransport
 ): Promise<WorkbookSession> {
-  const pair = createInProcessPair();
-  createWorkbookSessionHost(wrapHost ? wrapHost(pair.host) : pair.host);
-  return createWorkbookSession(bytes, {}, pair.client);
+  return createTestWorkbookSession(bytes, wrapHost);
 }
 
 async function matchingFrame(worker: WorkbookSession, main: WorkbookHandle): Promise<WorkbookFrame> {

@@ -12,7 +12,7 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, parse_formula, recalc_after};
+use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
 use xlsx_ops::{CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty};
 use xlsx_render::display_text;
@@ -24,7 +24,7 @@ use super::{
     current_cell_state, edit_cell_state, validate_cell_state, validate_model_sheets, validate_op,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
-use crate::{Error, Result};
+use crate::{CalculationOptions, Error, Result};
 
 const MAX_STEPS: usize = 128;
 /// Most target and guard cells one batch may address.
@@ -1032,11 +1032,12 @@ impl Workbook {
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
         let mut graph = DepGraph::build(&prepared.model);
-        let recalculated = recalc_after(
+        let recalculated = recalc_after_with_seed(
             &mut prepared.model,
             &mut graph,
             &seeds,
             request.calculation.now_serial,
+            self.rand_seed,
         );
         let changed_sheets = steps
             .iter()
@@ -1118,6 +1119,20 @@ impl Workbook {
             return Ok(refused);
         }
         let outcome = self.apply_edits(&decode::<EditRequest>(request)?)?;
+        encode(&outcome)
+    }
+
+    pub fn apply_edits_json_with_calculation(
+        &mut self,
+        request: &str,
+        calculation: CalculationOptions,
+    ) -> Result<String> {
+        if let Some(refused) = self.oversized_request(request) {
+            return Ok(refused);
+        }
+        let mut decoded = decode::<EditRequest>(request)?;
+        decoded.calculation.now_serial = decoded.calculation.now_serial.or(calculation.now_serial);
+        let outcome = self.apply_edits(&decoded)?;
         encode(&outcome)
     }
 

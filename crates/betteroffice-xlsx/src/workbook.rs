@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use ooxml_drawingml::chart::ChartSpace;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
+use xlsx_calc::{RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_seed};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
     FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
@@ -340,6 +340,7 @@ pub struct Workbook {
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
+    rand_seed: Option<u32>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
@@ -421,6 +422,25 @@ impl Workbook {
         let mut workbook = Self::open_internal(bytes, false, None)?;
         workbook.recalculate(options);
         Ok(workbook)
+    }
+
+    pub fn open_recalculated_with_seed(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        workbook.recalculate(options);
+        Ok(workbook)
+    }
+
+    pub fn set_rand_seed(&mut self, seed: Option<u32>) {
+        self.rand_seed = seed;
+    }
+
+    pub fn rand_seed(&self) -> Option<u32> {
+        self.rand_seed
     }
 
     /// Opens and recalculates a replica with a peer-unique client ID.
@@ -541,6 +561,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -660,7 +681,8 @@ impl Workbook {
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
-        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
@@ -817,7 +839,8 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
@@ -1376,11 +1399,12 @@ impl Workbook {
         );
         mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
@@ -1453,11 +1477,12 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
@@ -1770,7 +1795,7 @@ impl Workbook {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
         }
-        rebuild_and_recalc_all(&mut preview, options.now_serial);
+        rebuild_and_recalc_all_with_seed(&mut preview, options.now_serial, self.rand_seed);
 
         let mut edits = Vec::with_capacity(request.edits.len());
         for edit in request.edits {
@@ -1879,7 +1904,7 @@ impl Workbook {
         }
         if !force {
             let mut review = preview.clone();
-            rebuild_and_recalc_all(&mut review, options.now_serial);
+            rebuild_and_recalc_all_with_seed(&mut review, options.now_serial, self.rand_seed);
             let mut refreshed = proposal.clone();
             for edit in &mut refreshed.edits {
                 edit.new_text = display_text_at(
@@ -1926,11 +1951,12 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         let mutation = self.mutation_result(true, result, &seeds);
         self.proposals.remove(id);
@@ -2580,7 +2606,8 @@ impl Workbook {
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
-        let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
+        let (graph, result) =
+            rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
         self.graph = Some(graph);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
