@@ -8,6 +8,7 @@ import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   createYrsSession,
+  ResidentEngineWorkerClient,
   ResidentWorkerSaveUnavailableError,
   type YrsDocxHost,
   type YrsSession,
@@ -67,6 +68,14 @@ afterAll(async () => {
 });
 
 async function workerOpened(viewer = true) {
+  let client!: ResidentEngineWorkerClient;
+  const open = ResidentEngineWorkerClient.prototype.open;
+  const capture = spyOn(ResidentEngineWorkerClient.prototype, 'open').mockImplementation(function (
+    this: ResidentEngineWorkerClient, ...args: Parameters<ResidentEngineWorkerClient['open']>
+  ) {
+    client = this;
+    return open.apply(this, args);
+  });
   const saved: ArrayBuffer[] = [];
   const errors: Error[] = [];
   const opens: boolean[] = [];
@@ -189,9 +198,30 @@ async function workerOpened(viewer = true) {
     });
     return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument };
   }, { initialProps: 1 });
-  await waitFor(() => expect(hook.result.current.core.session).not.toBeNull());
+  try {
+    await waitFor(() => expect(hook.result.current.core.session).not.toBeNull());
+  } finally {
+    capture.mockRestore();
+  }
   const session = hook.result.current.core.session!;
-  return { hook, session, worker: workers.at(-1)!, saved, errors, opens, flush, project };
+  return { hook, session, client, worker: workers.at(-1)!, saved, errors, opens, flush, project };
+}
+
+async function layOut(opened: Awaited<ReturnType<typeof workerOpened>>) {
+  const metadata = await createYrsSession({});
+  sessions.push(metadata);
+  metadata.registerFont(new Uint8Array(readFileSync(resolve(ROOT, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'))));
+  metadata.adoptResidentWorkerLayout!(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Liberation Sans' } },
+    renderEnv: {},
+  }));
+  await opened.client.bootstrap(
+    { ...metadata.residentWorkerSnapshot()!, workerAuthoritative: true },
+    '{}',
+    { opened: true, layoutExtras: '{}' }
+  );
 }
 
 test.each(['save', 'download', 'ref'] as const)('viewer %s saves in the worker without starting its replica', async (kind) => {
@@ -230,6 +260,7 @@ test.each(['command', 'shortcut'] as const)('viewer %s saves through the worker 
 
 test('viewer save posts after a queued proposal call', async () => {
   const opened = await workerOpened();
+  await layOut(opened);
   const authority = registerWorkerProposalAuthority(opened.session, opened.hook.result.current.workerDocument.current!, {
     current: () => true,
     laidOut: async () => {},
@@ -280,6 +311,48 @@ test('an editor flushes its loaded peer and posts its diff immediately before sa
   expect(await zip.file('word/document.xml')!.async('string')).toContain('Peer edit ');
   expect(opened.flush).toHaveBeenCalledTimes(1);
   expect(opened.project).not.toHaveBeenCalled();
+  expect(opened.errors).toEqual([]);
+});
+
+test('an editor integrates saved paragraph ID claims before later worker proposals', async () => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  await layOut(opened);
+  let paraId!: string;
+  let beforeSave!: Uint8Array;
+  opened.flush.mockImplementation(async () => {
+    const first = opened.session.paragraphs('body')[0]!;
+    paraId = opened.session.splitParagraph({ story: 'body', paraId: first.paraId, offset: 0 }).secondParaId;
+    opened.session.insertText({ story: 'body', paraId, offset: 0 }, 'Peer claim ');
+    beforeSave = opened.session.encodeStateVector();
+  });
+  await act(async () => {
+    expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(opened.session.encodeStateVector()).not.toEqual(beforeSave);
+  expect(opened.session.encodeStateVector()).toEqual(opened.worker.sessions[0]!.encodeStateVector());
+  const paragraph = opened.session.paragraphIdentities().paragraphs
+    .find((identity) => identity.session?.paraId === paraId)!.persisted!;
+  const initial = await opened.client.proposal({ kind: 'snapshot' });
+  const proposed = await opened.client.proposal({
+    kind: 'propose',
+    request: {
+      expectVersion: initial.mirror.version,
+      proposals: [{
+        id: 'after-save', paragraph,
+        suggest: { author: 'Host', date: '2026-09-29T12:00:00Z' },
+        op: 'replaceText', search: 'Peer claim ', replaceWith: 'Worker proposal ',
+      }],
+    },
+  });
+  expect(proposed.result?.ok).toBe(true);
+  expect(proposed.updates.length).toBeGreaterThan(0);
+  await act(async () => {
+    for (const update of proposed.updates) opened.session.applyLocalUpdate(update);
+  });
+  expect(opened.session.encodeStateVector()).toEqual(opened.worker.sessions[0]!.encodeStateVector());
+  expect(opened.session.readParagraphs({ story: 'body', paraIds: [paraId], view: 'accepted' }))
+    .toMatchObject({ ok: true, paragraphs: [{ text: expect.stringContaining('Worker proposal ') }] });
   expect(opened.errors).toEqual([]);
 });
 

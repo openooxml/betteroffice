@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
@@ -3637,6 +3637,25 @@ describe('resident worker opening', () => {
     expect(await w.send({ type: 'save', host, comments: [] })).toMatchObject({
       ok: false, code: 'save-unavailable',
     });
+  });
+
+  test('save returns exactly the peer diff only when given a state vector', async () => {
+    const { w } = openingWorker();
+    const diff = new Uint8Array([7, 8, 9]);
+    const encodeStateAsUpdate = mock((_stateVector: Uint8Array) => diff);
+    Object.assign(w.harness.session, {
+      save: async () => new ArrayBuffer(4),
+      encodeStateAsUpdate,
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    const stateVector = new Uint8Array([1, 2, 3]);
+    const saved = await w.send({ type: 'save', comments: [], stateVector });
+    expect(saved.ok && saved.updates).toEqual([diff.buffer]);
+    expect(encodeStateAsUpdate).toHaveBeenCalledTimes(1);
+    expect(encodeStateAsUpdate).toHaveBeenCalledWith(stateVector);
+    encodeStateAsUpdate.mockClear();
+    expect(await w.send({ type: 'save', comments: [] })).toMatchObject({ ok: true, updates: [] });
+    expect(encodeStateAsUpdate).not.toHaveBeenCalled();
   });
 
   test('a preview rejects save as still opening', async () => {

@@ -1977,7 +1977,7 @@ test('opening the comments sidebar hydrates the pending replica and keeps worker
   }
 });
 
-test('a first-layout font setup failure starts the replica for pending reads, save and commands', async () => {
+test('a first-layout font setup failure starts the replica for pending reads and commands', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -1987,7 +1987,6 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
   try {
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-      result.current.ref.current!.save(),
       result.current.bridgeRef.current!.runAfterPendingInput(() => true),
     ]);
     const completed = { value: false };
@@ -2006,8 +2005,7 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     await waitFor(() => expect(completed.value).toBe(true));
     const settled = await calls;
     expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-    expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
-    expect(settled[2]).toEqual({ status: 'fulfilled', value: true });
+    expect(settled[1]).toEqual({ status: 'fulfilled', value: true });
     expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.core.replicaReady).toBe(true);
     expect(result.current.renderer.frame).toBeNull();
@@ -2050,9 +2048,11 @@ test('a worker open without a frame or error starts the replica after the bounde
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
+  expect(await result.current.ref.current!.save()).toBeNull();
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
   const calls = Promise.allSettled([
     result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-    result.current.ref.current!.save(),
   ]);
   const completed = { value: false };
   void calls.then(() => { completed.value = true; });
@@ -2066,7 +2066,6 @@ test('a worker open without a frame or error starts the replica after the bounde
   await waitFor(() => expect(completed.value).toBe(true));
   const settled = await calls;
   expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-  expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
   expect(result.current.mainOpens).toEqual([false]);
   expect(result.current.core.replicaReady).toBe(true);
 }, 15_000);
@@ -2129,14 +2128,13 @@ test('a replaced worker open never publishes its host or revives its replica', a
 });
 
 for (const stage of ['fontRequirements', 'bootstrap'] as const) {
-  test(`terminal OOM during ${stage} rejects pending reads, save and commands`, async () => {
+  test(`terminal OOM during ${stage} rejects pending reads and commands`, async () => {
     const { workers, posted } = installWorker({ oomStage: stage });
     const { result } = renderHook(useHarness, { initialProps });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-      result.current.ref.current!.save(),
       result.current.ref.current!.flushPendingInput(),
       result.current.bridgeRef.current!.runAfterPendingInput(() => true),
     ]);
@@ -2148,7 +2146,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
     const failure = result.current.renderer.error;
     expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     const settled: PromiseSettledResult<unknown>[] = await calls;
-    expect(settled).toEqual(Array.from({ length: 4 }, () => ({ status: 'rejected', reason: failure })));
+    expect(settled).toEqual(Array.from({ length: 3 }, () => ({ status: 'rejected', reason: failure })));
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.renderer.workerMemory()).toBeNull();
     expect(workers).toHaveLength(2);
@@ -2166,7 +2164,6 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       const session = result.current.core.session!;
       const pending = Promise.allSettled([
         result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-        result.current.ref.current!.save(),
         result.current.bridgeRef.current!.runAfterPendingInput(() => true),
       ]);
       const completed = { value: false };

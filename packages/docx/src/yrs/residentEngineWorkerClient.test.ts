@@ -167,6 +167,25 @@ test('save posts comments and optional host metadata and returns the saved buffe
   client.destroy();
 });
 
+test('save copies an optional peer state vector and omits it when absent', async () => {
+  const { worker, client } = setup();
+  const stateVector = new Uint8Array([1, 2, 3]);
+  const pending = client.save({ comments: [], stateVector });
+  const request = worker.requestAt(0);
+  expect(request).toEqual({ id: worker.lastId(), type: 'save', comments: [], stateVector });
+  if (request.type !== 'save') throw new Error('Expected a save request');
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(request.stateVector!.buffer).not.toBe(stateVector.buffer);
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await pending;
+  const withoutVector = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutVector;
+  client.destroy();
+});
+
 test('save rejects a missing or malformed saved buffer', async () => {
   const { worker, client } = setup();
   for (const reply of [

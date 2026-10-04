@@ -267,6 +267,148 @@ function replicaEdit(replica: Replica, host: Document): void {
 }
 
 describe('worker save', () => {
+  it('integrates saved paragraph ID claims before later worker proposals', async () => {
+    const opened = await open(synthetic());
+    await bootstrap(opened);
+    const peer = await createYrsSession({ clientId: CLIENT_ID + 1 });
+    owned.push(peer);
+    peer.openDocx(opened.bytes.slice(), false);
+    peer.loadState(await opened.client.encodeState());
+    peer.splitParagraph({ story: 'body', paraId: '0000B001', offset: 5 });
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    const unsynced = await createYrsSession({ clientId: CLIENT_ID + 2 });
+    owned.push(unsynced);
+    unsynced.openDocx(opened.bytes.slice(), false);
+    unsynced.loadState(peer.encodeState());
+
+    const saved = await opened.client.save({
+      comments: [], host: hostSaveMetadata(opened.host), stateVector: peer.encodeStateVector(),
+    });
+    expect(saved.updates.length).toBeGreaterThan(0);
+    for (const update of saved.updates) peer.applyLocalUpdate(update);
+    const initial = await opened.client.proposal({ kind: 'snapshot' });
+    const proposed = await opened.client.proposal({
+      kind: 'propose',
+      request: {
+        expectVersion: initial.mirror.version,
+        proposals: [{
+          id: 'after-save',
+          paragraph: {
+            kind: 'persisted',
+            story: { kind: 'body', partUri: '/word/document.xml' },
+            paraId: '0000B002',
+          },
+          suggest: SUGGEST,
+          op: 'replaceText',
+          search: 'epsilon',
+          replaceWith: 'EPSILON',
+        }],
+      },
+    });
+    expect(proposed.result?.ok).toBe(true);
+    expect(proposed.updates.length).toBeGreaterThan(0);
+    for (const update of proposed.updates) {
+      peer.applyLocalUpdate(update);
+      unsynced.applyLocalUpdate(update);
+    }
+    expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
+    expect(peer.readParagraphs({ story: 'body', paraIds: ['0000B002'], view: 'accepted' }))
+      .toMatchObject({ ok: true, paragraphs: [{ text: 'Delta EPSILON zeta.' }] });
+    expect(unsynced.encodeStateVector()).not.toEqual(opened.resident.encodeStateVector());
+    expect(unsynced.readParagraphs({ story: 'body', paraIds: ['0000B002'], view: 'accepted' }))
+      .toMatchObject({ ok: true, paragraphs: [{ text: 'Delta epsilon zeta.' }] });
+  }, TIMEOUT);
+
+  it('returns repairs the editor diff caused in the worker', async () => {
+    const opened = await open(synthetic());
+    await bootstrap(opened);
+    const peer = await createYrsSession({ clientId: CLIENT_ID + 1 });
+    owned.push(peer);
+    peer.openDocx(opened.bytes.slice(), false);
+    peer.loadState(await opened.client.encodeState());
+    const at = { story: 'body', paraId: '0000B002', offset: 0 };
+    const merged = await opened.client.applyDelete(
+      'backward', { anchor: at, head: at }, opened.resident.residentCaretSnapshot().frameEpoch
+    );
+    expect(merged.applied).toBe(true);
+    peer.splitParagraph({ story: 'body', paraId: '0000B001', offset: 5 });
+    const repairs: Uint8Array[] = [];
+    const unsubscribe = opened.resident.onUpdate((update, origin) => {
+      if (origin === 'local') repairs.push(update);
+    });
+    try {
+      opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+      await opened.client.revisionCount();
+      expect(repairs.length).toBeGreaterThan(0);
+      const identities = opened.resident.paragraphIdentities().paragraphs;
+      const keys = identities.flatMap((identity) => identity.session ? [identity.session.paraId] : []);
+      expect(new Set(keys).size).toBe(keys.length);
+      expect(identities.some((identity) => identity.idOrigin === 'repaired')).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+    const saved = await opened.client.save({ comments: [], stateVector: peer.encodeStateVector() });
+    expect(saved.updates.length).toBeGreaterThan(0);
+    for (const update of saved.updates) peer.applyLocalUpdate(update);
+    expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
+    const initial = await opened.client.proposal({ kind: 'snapshot' });
+    const proposed = await opened.client.proposal({
+      kind: 'propose',
+      request: {
+        expectVersion: initial.mirror.version,
+        proposals: [{
+          id: 'after-repair',
+          paragraph: {
+            kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '0000B003',
+          },
+          suggest: SUGGEST, op: 'replaceText', search: 'theta', replaceWith: 'THETA',
+        }],
+      },
+    });
+    expect(proposed.result?.ok).toBe(true);
+    expect(proposed.updates.length).toBeGreaterThan(0);
+    for (const update of proposed.updates) peer.applyLocalUpdate(update);
+    expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
+    expect(peer.readParagraphs({ story: 'body', paraIds: ['0000B003'], view: 'accepted' }))
+      .toMatchObject({ ok: true, paragraphs: [{ text: 'Eta THETA iota.' }] });
+  }, TIMEOUT);
+
+  it('returns the paragraph IDs a save before bootstrap records', async () => {
+    const opened = await open(synthetic());
+    const peer = await createYrsSession({ clientId: CLIENT_ID + 1 });
+    owned.push(peer);
+    peer.openDocx(opened.bytes.slice(), false);
+    peer.loadState(await opened.client.encodeState());
+    const { secondParaId } = peer.splitParagraph({ story: 'body', paraId: '0000B001', offset: 5 });
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    const beforeSave = peer.encodeStateVector();
+    const saved = await opened.client.save({ comments: [], stateVector: beforeSave });
+    expect(saved.updates.length).toBeGreaterThan(0);
+    for (const update of saved.updates) peer.applyLocalUpdate(update);
+    expect(peer.encodeStateVector()).not.toEqual(beforeSave);
+    expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
+    await bootstrap(opened);
+    const paragraph = peer.paragraphIdentities().paragraphs
+      .find((identity) => identity.session?.paraId === secondParaId)!.persisted!;
+    const initial = await opened.client.proposal({ kind: 'snapshot' });
+    const proposed = await opened.client.proposal({
+      kind: 'propose',
+      request: {
+        expectVersion: initial.mirror.version,
+        proposals: [{
+          id: 'after-bootstrap', paragraph,
+          suggest: SUGGEST, op: 'replaceText', search: 'beta', replaceWith: 'BETA',
+        }],
+      },
+    });
+    expect(proposed.result?.ok).toBe(true);
+    expect(proposed.updates.length).toBeGreaterThan(0);
+    for (const update of proposed.updates) peer.applyLocalUpdate(update);
+    expect(peer.encodeStateVector()).toEqual(opened.resident.encodeStateVector());
+    expect(peer.readParagraphs({ story: 'body', paraIds: [secondParaId], view: 'accepted' }))
+      .toMatchObject({ ok: true, paragraphs: [{ text: ' BETA gamma.' }] });
+  }, TIMEOUT);
+
   it('matches the editor with no edit, one edit and consecutive saves', async () => {
     const opened = await open(synthetic());
     expect(difference(await compareSave(opened), opened.bytes, CORE)).toBeNull();
