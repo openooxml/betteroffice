@@ -59,7 +59,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     input.wasm = copyBytes(options.wasm as ArrayBuffer).buffer;
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
-  else input.wasm = wasmModules.get(wasmAssetUrl().href);
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -73,11 +73,13 @@ export async function openWorkbookSession(
 ): Promise<WorkbookSession> {
   const transport = createWorkerTransport(
     options.worker ? options.worker() :
-      new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), {
-        type: 'module',
-        name: options.wasm !== undefined || wasmModules.has(wasmAssetUrl().href)
-          ? 'office-session-wasm-provided' : 'office-session-wasm-default',
-      })
+      options.wasm !== undefined || wasmModules.has(wasmAssetUrl().href)
+        ? new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), {
+          type: 'module', name: 'office-session-wasm-provided',
+        })
+        : new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), {
+          type: 'module', name: 'office-session-wasm-default',
+        })
   );
   return createWorkbookSession(bytes, options, transport);
 }
@@ -95,7 +97,7 @@ export async function createWorkbookSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<WorkbookSessionMethods, Events>(transport, {
       methods: WORKBOOK_SESSION_METHODS,
-      onWasmModule: options.wasm === undefined ? (url, module) => {
+      onWasmModule: options.wasm === undefined && !options.worker ? (url, module) => {
         if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
       } : undefined,
     });

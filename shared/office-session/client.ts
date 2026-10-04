@@ -100,11 +100,13 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     if (failure) return;
     arm();
     if (!isHostMessage(message)) {
+      if (message !== null && typeof message === 'object' &&
+        'kind' in message && message.kind === 'wasm-module') return;
       end(new SessionFailure('message', 'Session received a malformed host message'));
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
     } else if (message.kind === 'wasm-module') {
-      options.onWasmModule?.(message.url, message.module);
+      try { options.onWasmModule?.(message.url, message.module); } catch {}
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);

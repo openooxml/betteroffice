@@ -41,7 +41,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
         },
       }],
     });
-    if (!result.success) throw new AggregateError(result.logs, 'Session worker bundle failed');
+    if (!result.success) throw new Error(`Session worker bundle failed: ${result.logs.join('\n')}`);
     return (await result.outputs[0].text()).split('import.meta.url').join(
       JSON.stringify(pathToFileURL(entry).href)
     );

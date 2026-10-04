@@ -1,5 +1,10 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {
+  createSourceFile, forEachChild, isIdentifier, isNewExpression, isObjectLiteralExpression,
+  isPropertyAssignment, isStringLiteral, ScriptTarget, type Node,
+} from 'typescript';
 import { isClientMessage } from '../../../../shared/office-session/protocol';
 import {
   mainThreadWasmSpies, sessionWasmFactory, type WasmTestWorker,
@@ -23,6 +28,31 @@ function input(worker: WasmTestWorker): { wasm?: ArrayBuffer | WebAssembly.Modul
 }
 
 describe('presentation session wasm reuse', () => {
+  test('keeps worker URLs and options statically evaluable', () => {
+    const source = createSourceFile('client.ts',
+      readFileSync(resolve(import.meta.dir, 'client.ts'), 'utf8'), ScriptTarget.Latest);
+    const workers: Array<Record<string, string>> = [];
+    function visit(node: Node): void {
+      if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
+        expect(node.arguments?.[0]?.getText(source))
+          .toBe("new URL('./pptxSessionWorker.mjs', import.meta.url)");
+        const options = node.arguments?.[1];
+        if (!options || !isObjectLiteralExpression(options)) throw new Error('Non-literal worker options');
+        workers.push(Object.fromEntries(options.properties.map((property) => {
+          if (!isPropertyAssignment(property) || !isIdentifier(property.name) ||
+            !isStringLiteral(property.initializer)) throw new Error('Non-literal worker option');
+          return [property.name.text, property.initializer.text];
+        })));
+      }
+      forEachChild(node, visit);
+    }
+    visit(source);
+    expect(workers).toEqual([
+      { type: 'module', name: 'office-session-wasm-provided' },
+      { type: 'module', name: 'office-session-wasm-default' },
+    ]);
+  });
+
   test('starts before open delivery and reuses the first worker module after disposal', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();
@@ -102,17 +132,61 @@ describe('presentation session wasm reuse', () => {
     }
   });
 
-  test('reuses cached modules with a custom worker factory', async () => {
+  test('isolates custom worker factories from the default cache in both directions', async () => {
     const h = factory();
     const spies = mainThreadWasmSpies();
     try {
       const first = await h.client.openPresentationSession(new Uint8Array(), { worker: h.worker });
+      expect(input(h.workers[0]).wasm).toBeUndefined();
       expect(h.compiles).toBe(1);
       await first.dispose();
       const second = await h.client.openPresentationSession(new Uint8Array(), { worker: h.worker });
-      expect(input(h.workers[1]).wasm).toBe(h.workers[0].modules[0]);
-      expect(h.compiles).toBe(1);
+      expect(input(h.workers[1]).wasm).toBeUndefined();
+      expect(h.compiles).toBe(2);
       await second.dispose();
+
+      const warm = await h.client.openPresentationSession(new Uint8Array());
+      expect(input(h.workers[2]).wasm).toBeUndefined();
+      expect(h.compiles).toBe(3);
+      await warm.dispose();
+
+      const custom = await h.client.openPresentationSession(new Uint8Array(), { worker: h.worker });
+      expect(input(h.workers[3]).wasm).toBeUndefined();
+      expect(h.compiles).toBe(4);
+      await custom.dispose();
+
+      const cached = await h.client.openPresentationSession(new Uint8Array());
+      expect(input(h.workers[4]).wasm).toBe(h.workers[2].modules[0]);
+      expect(h.compiles).toBe(4);
+      await cached.dispose();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  test.each(['module', 'bytes'])('honours explicit %s with a custom worker factory', async (kind) => {
+    const h = factory();
+    const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
+    const wasm = kind === 'module' ? new WebAssembly.Module(bytes) : bytes.buffer;
+    const spies = mainThreadWasmSpies();
+    try {
+      const warm = await h.client.openPresentationSession(new Uint8Array());
+      await warm.dispose();
+
+      const custom = await h.client.openPresentationSession(new Uint8Array(), { worker: h.worker, wasm });
+      if (kind === 'bytes') {
+        expect(input(h.workers[1]).wasm).not.toBe(wasm);
+        expect(new Uint8Array(h.workers[1].sources[0] as ArrayBuffer)).toEqual(bytes);
+      } else expect(input(h.workers[1]).wasm).toBe(wasm);
+      expect(bytes.byteLength).toBe(8);
+      expect(h.compiles).toBe(1);
+      await custom.dispose();
+
+      const cached = await h.client.openPresentationSession(new Uint8Array());
+      expect(input(h.workers[2]).wasm).toBe(h.workers[0].modules[0]);
+      expect(h.compiles).toBe(1);
+      await cached.dispose();
       for (const spy of spies) expect(spy).not.toHaveBeenCalled();
     } finally {
       for (const spy of spies) spy.mockRestore();

@@ -76,7 +76,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationS
     input.wasm = options.wasm.slice(0);
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
-  else input.wasm = wasmModules.get(wasmAssetUrl().href);
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -90,11 +90,13 @@ export async function openPresentationSession(
 ): Promise<PresentationSession> {
   const transport = createWorkerTransport(
     options.worker ? options.worker() :
-      new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), {
-        type: 'module',
-        name: options.wasm !== undefined || wasmModules.has(wasmAssetUrl().href)
-          ? 'office-session-wasm-provided' : 'office-session-wasm-default',
-      })
+      options.wasm !== undefined || wasmModules.has(wasmAssetUrl().href)
+        ? new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), {
+          type: 'module', name: 'office-session-wasm-provided',
+        })
+        : new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), {
+          type: 'module', name: 'office-session-wasm-default',
+        })
   );
   return createPresentationSession(bytes, options, transport);
 }
@@ -113,7 +115,7 @@ export async function createPresentationSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<PresentationSessionMethods, Events>(transport, {
       methods: PRESENTATION_SESSION_METHODS,
-      onWasmModule: options.wasm === undefined ? (url, module) => {
+      onWasmModule: options.wasm === undefined && !options.worker ? (url, module) => {
         if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
       } : undefined,
     });

@@ -1,5 +1,7 @@
 import { describe, expect, it, mock, spyOn } from 'bun:test';
-import type { HostMessage } from './protocol';
+import { runInNewContext } from 'node:vm';
+import { createSessionClient } from './client';
+import { isHostMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { compileWasm, createWorkerWasmInitializer } from './wasm';
 
@@ -12,6 +14,79 @@ function transport(messages: HostMessage[]): SessionTransport {
     listen: () => () => {}, onError: () => () => {}, close() {},
   };
 }
+
+function cacheClient(onWasmModule: (url: string, module: WebAssembly.Module) => void) {
+  let receive = (_message: unknown) => {};
+  const client = createSessionClient<{ open(): string }, {}>({
+    post() {},
+    listen: (listener) => { receive = listener; return () => { receive = () => {}; }; },
+    onError: () => () => {}, close() {},
+  }, { methods: { open: true }, onWasmModule });
+  return { client, receive: (message: unknown) => receive(message) };
+}
+
+describe('worker wasm advertisements', () => {
+  it('accepts modules from another realm without interrupting open', async () => {
+    const module: WebAssembly.Module = runInNewContext('new WebAssembly.Module(bytes)', { bytes: WASM_BYTES });
+    expect(module instanceof WebAssembly.Module).toBe(false);
+    expect(Object.prototype.toString.call(module)).toBe('[object WebAssembly.Module]');
+    const onWasmModule = mock((_url: string, _module: WebAssembly.Module) => {});
+    const h = cacheClient(onWasmModule);
+    try {
+      const open = h.client.call.open();
+      const message = { protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module };
+      expect(isHostMessage(message)).toBe(true);
+      h.receive(message);
+      expect(onWasmModule).toHaveBeenCalledWith(URL_INPUT.href, module);
+      h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'opened' });
+      expect(await open).toBe('opened');
+      expect(h.client.failure).toBeUndefined();
+    } finally { await h.client.dispose(); }
+  });
+
+  it('ignores malformed cache advertisements while open is pending', async () => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const onWasmModule = mock((_url: string, _module: WebAssembly.Module) => {});
+    const h = cacheClient(onWasmModule);
+    try {
+      const open = h.client.call.open();
+      for (const message of [
+        { protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module: {} },
+        { protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module: null },
+        { protocol: 1, kind: 'wasm-module', url: URL_INPUT.href },
+        { protocol: 1, kind: 'wasm-module', module },
+        { protocol: 1, kind: 'wasm-module', url: 1, module },
+        { protocol: 2, kind: 'wasm-module', url: URL_INPUT.href, module },
+        { kind: 'wasm-module', url: URL_INPUT.href, module },
+        { protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module: {
+          get [Symbol.toStringTag]() { throw new Error('Unusable module'); },
+        } },
+      ]) {
+        expect(isHostMessage(message)).toBe(false);
+        expect(() => h.receive(message)).not.toThrow();
+        expect(h.client.failure).toBeUndefined();
+      }
+      expect(onWasmModule).not.toHaveBeenCalled();
+      h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'opened' });
+      expect(await open).toBe('opened');
+    } finally { await h.client.dispose(); }
+  });
+
+  it('isolates a throwing cache listener from open replies', async () => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const onWasmModule = mock(() => { throw new Error('Cache unavailable'); });
+    const h = cacheClient(onWasmModule);
+    try {
+      const open = h.client.call.open();
+      expect(() => h.receive({ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }))
+        .not.toThrow();
+      expect(onWasmModule).toHaveBeenCalledTimes(1);
+      h.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'opened' });
+      expect(await open).toBe('opened');
+      expect(h.client.failure).toBeUndefined();
+    } finally { await h.client.dispose(); }
+  });
+});
 
 describe('worker wasm initialization', () => {
   it('starts compilation eagerly and publishes the module before initialization', async () => {

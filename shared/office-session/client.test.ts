@@ -183,8 +183,6 @@ describe('session client', () => {
   it('makes malformed inbound messages terminal', async () => {
     for (const message of [null, { kind: 'event', name: 'tick', payload: 1 },
       { protocol: 1, kind: 'reply', id: 1, ok: true },
-      { protocol: 1, kind: 'wasm-module', url: 'https://example.test/module.wasm', module: {} },
-      { protocol: 1, kind: 'wasm-module', module: {} },
       { protocol: 1, kind: 'reply', id: 1, ok: false, error: {} }]) {
       const h = harness();
       const reply = h.client.call.echo('pending').catch((error) => error);

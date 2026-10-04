@@ -74,8 +74,10 @@ export function isHostMessage(value: unknown): value is HostMessage {
   if (!record(value) || value.protocol !== 1) return false;
   switch (value.kind) {
     case 'wasm-module':
-      return typeof value.url === 'string' && typeof WebAssembly !== 'undefined' &&
-        value.module instanceof WebAssembly.Module;
+      try {
+        return typeof value.url === 'string' &&
+          Object.prototype.toString.call(value.module) === '[object WebAssembly.Module]';
+      } catch { return false; }
     case 'reply':
       return requestId(value.id) && (
         (value.ok === true && hasOwn(value, 'value')) ||
