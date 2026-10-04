@@ -3545,7 +3545,7 @@ describe('resident worker opening', () => {
       const expected = await createResidentEngineSession();
       try {
         const hostJson = expected.openDocxPreview(bytes, 200, paragraphBudget);
-        expect(reply.ok && reply.hostJson).toBe(hostJson);
+        expect(reply.ok && reply.hostJson).toBe(hostJson ?? undefined);
         expect(engine.paragraphIdentities().paragraphs.length).toBe(
           expected.paragraphIdentities().paragraphs.length
         );
