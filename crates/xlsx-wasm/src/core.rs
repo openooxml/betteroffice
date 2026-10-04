@@ -323,11 +323,16 @@ impl Session {
     }
 
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, String> {
+        self.display_list_for_json(self.workbook.active_sheet().0, viewport_json)
+    }
+
+    /// @experimental
+    pub fn display_list_for_json(&self, sheet: u32, viewport_json: &str) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         let display_list = self
             .workbook
-            .display_list(&viewport)
+            .display_list_for(SheetId(sheet), &viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
