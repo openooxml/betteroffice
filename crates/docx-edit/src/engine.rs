@@ -737,11 +737,15 @@ fn floats_follow_the_text(blocks: &[LayoutBlock]) -> bool {
     })
 }
 
-fn stabilize_shape_wrapping(
+fn stabilize_shape_wrapping<F>(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
-) -> Result<bool, docx_layout::LayoutError> {
+    mut place: F,
+) -> Result<bool, docx_layout::LayoutError>
+where
+    F: FnMut(&mut LayoutInput, usize) -> Result<Layout, docx_layout::LayoutError>,
+{
     let shapes = input
         .measured
         .iter()
@@ -765,8 +769,8 @@ fn stabilize_shape_wrapping(
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
     let mut touched = false;
-    for _ in 0..shapes.len() + 2 {
-        let layout = docx_layout::place::layout_document(input)?;
+    for phase in 0..shapes.len() + 2 {
+        let layout = place(input, phase)?;
         let offsets = shapes
             .iter()
             .filter_map(|(index, id)| {
@@ -958,6 +962,7 @@ struct PaginationState {
     note_changed_pages: Vec<usize>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
+    region_placements: Vec<RegionPlacementState>,
     block_fingerprints: Vec<Fingerprint>,
     options_fingerprint: u64,
     revision_preview_key: u64,
@@ -1092,6 +1097,7 @@ pub struct EngineSession {
     render: RefCell<RenderState>,
     note_separators: RefCell<Option<LoweredNoteSeparators>>,
     preview_font_requirements: RefCell<Option<PreviewFontRequirements>>,
+    preview_locality: RefCell<Option<PreviewLocality>>,
     measurement: RefCell<MeasurementState>,
     regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
@@ -1141,7 +1147,10 @@ fn missing_font_chains<'a>(
 }
 
 /// Fingerprints global region layout configuration.
-fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
+fn layout_options_fingerprint(
+    mut request: serde_json::Value,
+    local_preview_ids: &BTreeSet<String>,
+) -> String {
     if let Some(fields) = request.as_object_mut() {
         fields.remove("measurement");
         fields.remove("measured");
@@ -1153,8 +1162,9 @@ fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
                 .get_mut("revisionPreview")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                preview.retain(|_, value| {
-                    !matches!(value.as_str(), Some("accepted" | "rejected"))
+                preview.retain(|id, value| {
+                    !local_preview_ids.contains(id)
+                        || !matches!(value.as_str(), Some("accepted" | "rejected"))
                 });
                 if preview.is_empty() {
                     env.remove("revisionPreview");
@@ -2046,12 +2056,16 @@ fn incremental_eligible(
     next: &LayoutInput,
     next_options_fingerprint: u64,
 ) -> bool {
+    previous.options_fingerprint == next_options_fingerprint
+        && incremental_structure_eligible(previous, next)
+}
+
+fn incremental_structure_eligible(previous: &PaginationState, next: &LayoutInput) -> bool {
     let Some(previous_input) = previous.input.as_ref() else {
         return false;
     };
     previous.layout.is_some()
         && !previous.checkpoints.is_empty()
-        && previous.options_fingerprint == next_options_fingerprint
         && previous_input.measured.len() == next.measured.len()
         && next
             .options
@@ -2065,35 +2079,170 @@ fn incremental_eligible(
             .all(|(previous, next)| resident_fragment_keys_match(&previous.block, &next.block))
 }
 
-fn preview_placement_is_coupled(input: &LayoutInput) -> bool {
-    fn anchored(block: &LayoutBlock) -> bool {
-        if anchors_objects(std::slice::from_ref(block)) {
-            return true;
-        }
-        match block {
-            LayoutBlock::Image(image) => image.anchor.is_some(),
-            LayoutBlock::Table(table) => table
-                .rows
-                .iter()
-                .flat_map(|row| &row.cells)
-                .flat_map(|cell| &cell.blocks)
-                .any(anchored),
-            _ => false,
-        }
+fn placement_block_is_coupled(block: &LayoutBlock) -> bool {
+    if anchors_objects(std::slice::from_ref(block))
+        || !collect_note_refs(std::slice::from_ref(block)).is_empty()
+    {
+        return true;
     }
-    input.measured.iter().any(|measured| {
-        anchored(&measured.block)
-            || !collect_note_refs(std::slice::from_ref(&measured.block)).is_empty()
-    }) || input
-        .options
-        .footnote_reserved_heights
-        .as_ref()
-        .is_some_and(|heights| !heights.is_empty())
-        || input
-            .options
-            .section_page_float_bands
-            .as_ref()
-            .is_some_and(|bands| !bands.is_empty())
+    match block {
+        LayoutBlock::Image(image) => image.anchor.is_some(),
+        LayoutBlock::Table(table) => table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .flat_map(|cell| &cell.blocks)
+            .any(placement_block_is_coupled),
+        _ => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RegionPlacementPhase {
+    Body,
+    Shape(usize),
+}
+
+struct RegionPlacementPasses {
+    previous: Vec<RegionPlacementState>,
+    next: Vec<RegionPlacementState>,
+    eligible: bool,
+    placed_blocks: usize,
+}
+
+#[derive(Debug)]
+struct RegionPlacementState {
+    phase: RegionPlacementPhase,
+    options: serde_json::Value,
+    layout: Layout,
+    checkpoints: Vec<LayoutCheckpoint>,
+    fingerprints: Vec<Fingerprint>,
+    coupled_blocks: Vec<bool>,
+    incremental: bool,
+}
+
+fn place_region_pass(
+    input: &mut LayoutInput,
+    fingerprints: &[Fingerprint],
+    phase: RegionPlacementPhase,
+    passes: &mut RegionPlacementPasses,
+) -> Result<Layout, docx_layout::LayoutError> {
+    let options = serde_json::to_value(&input.options)
+        .map_err(|error| docx_layout::LayoutError::Invalid(error.to_string()))?;
+    let coupled_blocks: Vec<_> = input
+        .measured
+        .iter()
+        .map(|measured| placement_block_is_coupled(&measured.block))
+        .collect();
+    let from_current = passes
+        .next
+        .iter()
+        .position(|pass| pass.phase == phase && pass.options == options);
+    let retained = from_current
+        .map(|index| passes.next.remove(index))
+        .or_else(|| {
+            passes
+                .previous
+                .iter()
+                .position(|pass| pass.phase == phase && pass.options == options)
+                .map(|index| passes.previous.remove(index))
+        });
+    let mut incremental = false;
+    let run = if let Some(mut retained) = retained.filter(|pass| {
+        passes.eligible
+            && !pass.checkpoints.is_empty()
+            && pass.fingerprints.len() == fingerprints.len()
+            && pass.fingerprints.iter().zip(fingerprints).enumerate().all(
+                |(index, (previous, next))| {
+                    previous == next || !(pass.coupled_blocks[index] || coupled_blocks[index])
+                },
+            )
+    }) {
+        let dirty = retained
+            .fingerprints
+            .iter()
+            .zip(fingerprints)
+            .position(|(previous, next)| previous != next);
+        if let Some(dirty) = dirty {
+            let dirty = section_start_of_first_changed_break(
+                &input.measured,
+                &retained.fingerprints,
+                fingerprints,
+                dirty,
+            );
+            match docx_layout::place::layout_document_incremental(
+                input,
+                &mut retained.layout,
+                &retained.checkpoints,
+                &retained.fingerprints,
+                fingerprints,
+                dirty,
+            ) {
+                Ok(run) => {
+                    incremental = true;
+                    run
+                }
+                Err(docx_layout::LayoutError::Unsupported(_)) => {
+                    docx_layout::place::layout_document_checkpointed(input)?
+                }
+                Err(error) => return Err(error),
+            }
+        } else if from_current.is_some() {
+            incremental = retained.incremental;
+            docx_layout::place::CheckpointedLayout {
+                layout: retained.layout,
+                checkpoints: retained.checkpoints,
+                placed_blocks: 0,
+                rebuilt_page_start: 0,
+                rebuilt_page_end: 0,
+            }
+        } else {
+            docx_layout::place::layout_document_checkpointed(input)?
+        }
+    } else {
+        docx_layout::place::layout_document_checkpointed(input)?
+    };
+    passes.placed_blocks += run.placed_blocks;
+    let layout = run.layout;
+    passes.next.push(RegionPlacementState {
+        phase,
+        options,
+        layout: layout.clone(),
+        checkpoints: run.checkpoints,
+        fingerprints: fingerprints.to_vec(),
+        coupled_blocks,
+        incremental,
+    });
+    Ok(layout)
+}
+
+fn embedded_revision_ids(value: &yrs::Any, ids: &mut BTreeSet<String>) {
+    match value {
+        yrs::Any::Map(fields) => {
+            if fields
+                .keys()
+                .any(|key| matches!(key.as_str(), "info" | "revisionId" | "author" | "date"))
+                && let Some((id, ..)) = crate::queries::revision_parts(value)
+            {
+                ids.insert(id);
+            }
+            for value in fields.values() {
+                embedded_revision_ids(value, ids);
+            }
+        }
+        yrs::Any::Array(values) => {
+            for value in values.iter() {
+                embedded_revision_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Default)]
+struct PreviewLocality {
+    doc_epoch: u64,
+    local_ids: BTreeSet<String>,
 }
 
 impl EngineSession {
@@ -2116,6 +2265,7 @@ impl EngineSession {
             render: RefCell::new(RenderState::default()),
             note_separators: RefCell::new(None),
             preview_font_requirements: RefCell::new(None),
+            preview_locality: RefCell::new(None),
             measurement: RefCell::new(MeasurementState::default()),
             regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
@@ -3011,6 +3161,69 @@ impl EngineSession {
         self.finish_region_layout(prepared)
     }
 
+    fn region_layout_fingerprint(&self, request: serde_json::Value) -> String {
+        use yrs::{Map, ReadTxn};
+        let mut locality = self.preview_locality.borrow_mut();
+        if locality
+            .as_ref()
+            .is_none_or(|locality| locality.doc_epoch != self.doc_epoch())
+        {
+            let mut local_ids = BTreeSet::new();
+            let mut global_ids = BTreeSet::new();
+            let txn = self.doc.yrs_doc().transact();
+            if let Some(stories) = txn.get_map(crate::STORIES) {
+                for (id, value) in stories.iter(&txn) {
+                    let Ok(story) = value.cast::<yrs::TextRef>() else {
+                        continue;
+                    };
+                    let target = if id == "body" || id.starts_with("body:t") {
+                        &mut local_ids
+                    } else {
+                        &mut global_ids
+                    };
+                    target.extend(
+                        self.doc
+                            .story_raw_changes(id, &story, &txn)
+                            .into_iter()
+                            .map(|change| change.id),
+                    );
+                    for chunk in self.doc.chunk_snapshot(id, &story, &txn).iter() {
+                        if let crate::ops::ChunkKind::Embed(Some(map)) = &chunk.kind
+                            && !matches!(
+                                crate::map_string(map, &txn, crate::KIND_KEY).as_deref(),
+                                Some("table" | "sdt")
+                            )
+                        {
+                            for (key, value) in map.iter(&txn) {
+                                if let yrs::Out::Any(value) = value {
+                                    if matches!(key, "shapeJson" | "chartJson" | "fieldData")
+                                        && let yrs::Any::String(json) = &value
+                                        && let Ok(parsed) = yrs::Any::from_json(json)
+                                    {
+                                        embedded_revision_ids(&parsed, &mut global_ids);
+                                    }
+                                    embedded_revision_ids(&value, &mut global_ids);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            local_ids.retain(|id| !global_ids.contains(id));
+            *locality = Some(PreviewLocality {
+                doc_epoch: self.doc_epoch(),
+                local_ids,
+            });
+        }
+        let empty_ids = BTreeSet::new();
+        let local_ids = if request["bodyStory"] == "body" {
+            &locality.as_ref().expect("locality populated").local_ids
+        } else {
+            &empty_ids
+        };
+        layout_options_fingerprint(request, local_ids)
+    }
+
     /// A region layout pass through lowering the body; its measurement is left
     /// to [`PreparedRegionLayout::measure`] when the body is measured afresh.
     fn prepare_region_layout(
@@ -3018,7 +3231,7 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<PreparedRegionLayout, String> {
-        let request_fingerprint = layout_options_fingerprint(
+        let request_fingerprint = self.region_layout_fingerprint(
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?,
         );
         // Reused pages keep the section stamps and page labels of the regions
@@ -3029,7 +3242,9 @@ impl EngineSession {
             .as_ref()
             .is_none_or(|state| state.request_fingerprint != request_fingerprint)
         {
-            self.pagination.borrow_mut().checkpoints.clear();
+            let mut pagination = self.pagination.borrow_mut();
+            pagination.checkpoints.clear();
+            pagination.region_placements.clear();
         }
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
@@ -3243,6 +3458,33 @@ impl EngineSession {
         })
     }
 
+    fn stabilize_region_shapes(
+        &self,
+        input: &mut LayoutInput,
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        revision_preview: (u64, &BTreeMap<String, RevisionPreview>, bool),
+        passes: &mut RegionPlacementPasses,
+    ) -> Result<bool, docx_layout::LayoutError> {
+        stabilize_shape_wrapping(input, regions, measurement, |input, phase| {
+            let mut fingerprints =
+                measured_fingerprints(input).map_err(docx_layout::LayoutError::Invalid)?;
+            self.prepare_placement_fingerprints(
+                &self.pagination.borrow(),
+                input,
+                &mut fingerprints,
+                Some(revision_preview),
+            )
+            .map_err(docx_layout::LayoutError::Invalid)?;
+            place_region_pass(
+                input,
+                &fingerprints,
+                RegionPlacementPhase::Shape(phase),
+                passes,
+            )
+        })
+    }
+
     /// Everything a region layout pass does after body measurement: header and
     /// footer measurement, pagination and notes, and the retained state.
     fn finish_region_layout(&self, prepared: PreparedRegionLayout) -> Result<RegionPass, String> {
@@ -3289,13 +3531,35 @@ impl EngineSession {
         } else {
             None
         };
+        let refs = input
+            .measured
+            .iter()
+            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
+            .collect::<Vec<_>>();
+        let passes_eligible = (!refs.is_empty()
+            || input.measured.iter().any(|measured| {
+                matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
+            })) && incremental_structure_eligible(&self.pagination.borrow(), &input);
+        let mut placement_passes = RegionPlacementPasses {
+            eligible: passes_eligible,
+            previous: std::mem::take(&mut self.pagination.borrow_mut().region_placements),
+            next: Vec::new(),
+            placed_blocks: 0,
+        };
         if resident_body
-            && stabilize_shape_wrapping(&mut input, &regions, &measurement)
+            && self
+                .stabilize_region_shapes(
+                    &mut input,
+                    &regions,
+                    &measurement,
+                    (revision_preview_key, &revision_preview, main_body),
+                    &mut placement_passes,
+                )
                 .map_err(layout_error_message)?
         {
             block_fingerprints = None;
         }
-        let block_fingerprints = match block_fingerprints {
+        let mut block_fingerprints = match block_fingerprints {
             // Header and footer extents widen the section breaks' margins after the
             // reuse walk: fingerprint them as a full pass does, as paginated.
             Some(mut fingerprints) => {
@@ -3308,25 +3572,13 @@ impl EngineSession {
             }
             None => measured_fingerprints(&input)?,
         };
-        let refs = input
-            .measured
-            .iter()
-            .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
-            .collect::<Vec<_>>();
-        {
-            let mut pagination = self.pagination.borrow_mut();
-            if revision_preview != pagination.revision_preview
-                && (has_floats
-                    || pagination.measured_with_floats
-                    || !notes.contents.is_empty()
-                    || preview_placement_is_coupled(&input)
-                    || pagination
-                        .input
-                        .as_ref()
-                        .is_some_and(preview_placement_is_coupled))
-            {
-                pagination.checkpoints.clear();
-            }
+        if !refs.is_empty() {
+            self.prepare_placement_fingerprints(
+                &self.pagination.borrow(),
+                &input,
+                &mut block_fingerprints,
+                Some((revision_preview_key, &revision_preview, main_body)),
+            )?;
         }
         let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
         // The note fixpoint replays `base_input`. Without notes `input` is the
@@ -3363,8 +3615,13 @@ impl EngineSession {
                 .expect("layout retained after successful pagination");
             (layout, None)
         } else {
-            let layout =
-                docx_layout::place::layout_document(&mut input).map_err(layout_error_message)?;
+            let layout = place_region_pass(
+                &mut input,
+                &block_fingerprints,
+                RegionPlacementPhase::Body,
+                &mut placement_passes,
+            )
+            .map_err(layout_error_message)?;
             (layout, Some(input))
         };
         apply_document_regions_tracked(&mut initial_layout, &regions, &mut restamped_pages);
@@ -3409,10 +3666,34 @@ impl EngineSession {
                     }
                 };
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
-                if resident_body {
-                    stabilize_shape_wrapping(pass, &regions, &measurement)?;
-                }
-                let mut layout = docx_layout::place::layout_document(pass)?;
+                let reshaped = resident_body
+                    && self.stabilize_region_shapes(
+                        pass,
+                        &regions,
+                        &measurement,
+                        (revision_preview_key, &revision_preview, main_body),
+                        &mut placement_passes,
+                    )?;
+                let fingerprints = if reshaped {
+                    let mut fingerprints =
+                        measured_fingerprints(pass).map_err(docx_layout::LayoutError::Invalid)?;
+                    self.prepare_placement_fingerprints(
+                        &self.pagination.borrow(),
+                        pass,
+                        &mut fingerprints,
+                        Some((revision_preview_key, &revision_preview, main_body)),
+                    )
+                    .map_err(docx_layout::LayoutError::Invalid)?;
+                    fingerprints
+                } else {
+                    block_fingerprints.clone()
+                };
+                let mut layout = place_region_pass(
+                    pass,
+                    &fingerprints,
+                    RegionPlacementPhase::Body,
+                    &mut placement_passes,
+                )?;
                 apply_document_regions_tracked(&mut layout, &regions, &mut restamped_pages);
                 Ok(layout)
             },
@@ -3428,7 +3709,14 @@ impl EngineSession {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             let reshaped = resident_body
-                && stabilize_shape_wrapping(&mut final_input, &regions, &measurement)
+                && self
+                    .stabilize_region_shapes(
+                        &mut final_input,
+                        &regions,
+                        &measurement,
+                        (revision_preview_key, &revision_preview, main_body),
+                        &mut placement_passes,
+                    )
                     .map_err(layout_error_message)?;
             let fingerprints = if reshaped {
                 measured_fingerprints(&final_input)?
@@ -3446,6 +3734,21 @@ impl EngineSession {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
+        pagination.pagination_calls = pagination
+            .pagination_calls
+            .wrapping_add(placement_passes.next.len() as u64);
+        pagination.incremental_pagination_calls =
+            pagination.incremental_pagination_calls.wrapping_add(
+                placement_passes
+                    .next
+                    .iter()
+                    .filter(|pass| pass.incremental)
+                    .count() as u64,
+            );
+        pagination.region_placements = placement_passes.next;
+        pagination.pagination_blocks_placed = pagination
+            .pagination_blocks_placed
+            .wrapping_add(placement_passes.placed_blocks as u64);
         let layout = pagination
             .layout
             .as_mut()
@@ -3557,6 +3860,7 @@ impl EngineSession {
         // Checkpoints of a prefix pass describe a cut document.
         if provisional {
             pagination.checkpoints.clear();
+            pagination.region_placements.clear();
         }
         drop(pagination);
         if let (true, Some(render_env)) = (resident_body && !provisional, parsed_render_env) {
@@ -4071,6 +4375,61 @@ impl EngineSession {
         Ok(paragraphs)
     }
 
+    fn prepare_placement_fingerprints(
+        &self,
+        previous: &PaginationState,
+        input: &LayoutInput,
+        block_fingerprints: &mut [Fingerprint],
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
+    ) -> Result<(), String> {
+        if let Some(previous_input) = previous.input.as_ref() {
+            for ((previous, next), fingerprint) in previous_input
+                .measured
+                .iter()
+                .zip(&input.measured)
+                .zip(block_fingerprints.iter_mut())
+            {
+                if relative_run_position_fingerprint(&previous.block)
+                    != relative_run_position_fingerprint(&next.block)
+                {
+                    *fingerprint = measured_fingerprint(next)?;
+                }
+            }
+        }
+        // A preview shows the document at its source positions, so a block whose
+        // content is unchanged but whose positions moved shows other source: it is
+        // placed afresh rather than shifted.
+        // Over an unchanged document lowered from the body story, only a block
+        // holding a revision whose decision changed can show other source.
+        if let Some((key, preview, resident)) = revision_preview
+            && key != previous.revision_preview_key
+            && incremental_structure_eligible(previous, input)
+            && let moved = (resident && previous.doc_epoch == self.doc_epoch())
+                .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
+                .transpose()?
+            && moved.as_ref().is_none_or(|moved| !moved.is_empty())
+        {
+            let retained = previous.input.as_ref().expect("eligibility checked input");
+            for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
+                .iter_mut()
+                .zip(&previous.block_fingerprints)
+                .zip(&input.measured)
+                .zip(&retained.measured)
+            {
+                if *fingerprint == *retained_fingerprint
+                    && moved
+                        .as_ref()
+                        .is_none_or(|moved| block_holds_paragraph(&next.block, moved))
+                    && crate::fingerprint::fingerprint_with_positions(&next.block)?
+                        != crate::fingerprint::fingerprint_with_positions(&retained.block)?
+                {
+                    *fingerprint ^= 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn layout_document_value_with_fingerprints(
         &self,
         mut input: LayoutInput,
@@ -4094,51 +4453,12 @@ impl EngineSession {
         let mut deltas = HashMap::new();
         let run = {
             let mut previous = self.pagination.borrow_mut();
-            if let Some(previous_input) = previous.input.as_ref() {
-                for ((previous, next), fingerprint) in previous_input
-                    .measured
-                    .iter()
-                    .zip(&input.measured)
-                    .zip(&mut block_fingerprints)
-                {
-                    if relative_run_position_fingerprint(&previous.block)
-                        != relative_run_position_fingerprint(&next.block)
-                    {
-                        *fingerprint = measured_fingerprint(next)?;
-                    }
-                }
-            }
-            // A preview shows the document at its source positions, so a block whose
-            // content is unchanged but whose positions moved shows other source: it is
-            // placed afresh rather than shifted.
-            // Over an unchanged document lowered from the body story, only a block
-            // holding a revision whose decision changed can show other source.
-            if let Some((key, preview, resident)) = revision_preview
-                && key != previous.revision_preview_key
-                && incremental_eligible(&previous, &input, input_options_fingerprint)
-                && let moved = (resident && previous.doc_epoch == self.doc_epoch())
-                    .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
-                    .transpose()?
-                && moved.as_ref().is_none_or(|moved| !moved.is_empty())
-            {
-                let retained = previous.input.as_ref().expect("eligibility checked input");
-                for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
-                    .iter_mut()
-                    .zip(&previous.block_fingerprints)
-                    .zip(&input.measured)
-                    .zip(&retained.measured)
-                {
-                    if *fingerprint == *retained_fingerprint
-                        && moved
-                            .as_ref()
-                            .is_none_or(|moved| block_holds_paragraph(&next.block, moved))
-                        && crate::fingerprint::fingerprint_with_positions(&next.block)?
-                            != crate::fingerprint::fingerprint_with_positions(&retained.block)?
-                    {
-                        *fingerprint ^= 1;
-                    }
-                }
-            }
+            self.prepare_placement_fingerprints(
+                &previous,
+                &input,
+                &mut block_fingerprints,
+                revision_preview,
+            )?;
             let first_dirty = previous
                 .block_fingerprints
                 .iter()
@@ -4154,6 +4474,19 @@ impl EngineSession {
                 });
             if let Some(dirty_index) = first_dirty
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
+                && previous
+                    .input
+                    .as_ref()
+                    .expect("eligibility checked input")
+                    .measured
+                    .iter()
+                    .zip(&input.measured)
+                    .zip(previous.block_fingerprints.iter().zip(&block_fingerprints))
+                    .all(|((previous, next), (previous_key, next_key))| {
+                        previous_key == next_key
+                            || !(placement_block_is_coupled(&previous.block)
+                                || placement_block_is_coupled(&next.block))
+                    })
             {
                 let previous = &mut *previous;
                 deltas = position_deltas(
@@ -5792,10 +6125,10 @@ impl EngineSession {
                 "A font the layout measured with is no longer registered.",
             ));
         };
-        let options_fingerprint = layout_options_fingerprint(request.clone());
+        let options_fingerprint = self.region_layout_fingerprint(request.clone());
         if let Some(current) = current
             && (self.font_set_fingerprint(&current).as_ref() != Some(&font_set_fingerprint)
-                || layout_options_fingerprint(current) != options_fingerprint)
+                || self.region_layout_fingerprint(current) != options_fingerprint)
         {
             return Err(refuse(
                 ExportFailureCode::StaleLayout,
@@ -15632,8 +15965,9 @@ mod tests {
 
     #[test]
     fn region_layout_key_excludes_only_recognized_preview_decisions() {
+        let local_ids = BTreeSet::from(["1".to_owned(), "2".to_owned()]);
         let request = json!({"bodyStory": "body", "renderEnv": {}});
-        let key = layout_options_fingerprint(request.clone());
+        let key = layout_options_fingerprint(request.clone(), &local_ids);
         for preview in [
             json!({}),
             json!({"1": "accepted"}),
@@ -15641,7 +15975,7 @@ mod tests {
         ] {
             let mut next = request.clone();
             next["renderEnv"]["revisionPreview"] = preview;
-            assert_eq!(layout_options_fingerprint(next), key);
+            assert_eq!(layout_options_fingerprint(next, &local_ids), key);
         }
         for (field, value) in [
             (
@@ -15663,18 +15997,74 @@ mod tests {
             let mut next = request.clone();
             next["renderEnv"][field] = value;
             next["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
-            assert_ne!(layout_options_fingerprint(next), key, "{field}");
+            assert_ne!(layout_options_fingerprint(next, &local_ids), key, "{field}");
         }
         for preview in [json!({"mode": "balloons"}), json!("accepted"), json!(null)] {
             let mut next = request.clone();
             next["renderEnv"]["revisionPreview"] = preview;
-            assert_ne!(layout_options_fingerprint(next), key);
+            assert_ne!(layout_options_fingerprint(next, &local_ids), key);
         }
+        let mut non_body = request.clone();
+        non_body["renderEnv"]["revisionPreview"] = json!({"header": "accepted"});
+        assert_ne!(layout_options_fingerprint(non_body, &local_ids), key);
         let mut unknown = request;
         unknown["renderEnv"]["revisionPreview"] = json!({"mode": "balloons"});
-        let unknown_key = layout_options_fingerprint(unknown.clone());
+        let unknown_key = layout_options_fingerprint(unknown.clone(), &local_ids);
         unknown["renderEnv"]["revisionPreview"]["1"] = json!("rejected");
-        assert_eq!(layout_options_fingerprint(unknown), unknown_key);
+        assert_eq!(layout_options_fingerprint(unknown, &local_ids), unknown_key);
+    }
+
+    #[test]
+    fn region_layout_key_keeps_revisions_shared_with_non_body_content() {
+        let bytes = preview_fixture::document(&preview_pagination_body(&[(45, "ins", "1")]));
+        let request = json!({"bodyStory": "body", "renderEnv": {}});
+        let mut decided = request.clone();
+        decided["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+        let engine = preview_seeded(&bytes);
+        assert_eq!(
+            engine.region_layout_fingerprint(request.clone()),
+            engine.region_layout_fingerprint(decided.clone())
+        );
+        let revision = json!({"type": "insertion", "info": {"id": 1, "author": "Ann"},
+            "content": [{"type": "run", "content": [{"type": "text", "text": "Non-body"}]}]});
+        for story in [
+            "hf:header",
+            "hf:footer",
+            "fn:5",
+            "en:5",
+            "comment:5",
+            "textbox:5",
+        ] {
+            let engine = preview_seeded(&bytes);
+            let blocks = [json!({"type": "paragraph", "content": [revision.clone()]})];
+            crate::seed::seed_blocks(engine.doc(), None, &[(story.to_owned(), &blocks)]).unwrap();
+            assert_ne!(
+                engine.region_layout_fingerprint(request.clone()),
+                engine.region_layout_fingerprint(decided.clone()),
+                "{story}"
+            );
+        }
+        let engine = preview_seeded(&bytes);
+        let shape = json!({"shapeType": "textBox", "textBody": {
+            "content": [{"type": "paragraph", "content": [revision]}]
+        }});
+        engine
+            .doc()
+            .apply_raw_ops(
+                "body",
+                vec![crate::RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::new(),
+                }],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+        assert_ne!(
+            engine.region_layout_fingerprint(request),
+            engine.region_layout_fingerprint(decided)
+        );
     }
 
     fn preview_pagination_request(font: u32) -> serde_json::Value {
@@ -15747,28 +16137,38 @@ mod tests {
             crate::seed::seed_blocks(
                 engine.doc(),
                 None,
-                &[
-                    ("hf:header".to_owned(), &fields),
-                    ("hf:footer".to_owned(), &fields),
-                ],
+                &["hf:header", "hf:footer"]
+                    .into_iter()
+                    .filter(|story| {
+                        crate::story_ref(&engine.doc().yrs_doc().transact(), story).is_err()
+                    })
+                    .map(|story| (story.to_owned(), &fields[..]))
+                    .collect::<Vec<_>>(),
             )
             .unwrap();
         }
-        for note in request["notes"]["contents"].as_array().into_iter().flatten() {
+        for note in request["notes"]["contents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             let prefix = if note["noteKind"] == "footnote" {
                 "fn"
             } else {
                 "en"
             };
-            engine
-                .doc()
-                .create_story(
-                    &format!("{prefix}:{}", note["id"].as_u64().unwrap()),
-                    "Note text that reserves room on the page.",
-                    "Normal",
-                    "left",
-                )
-                .unwrap();
+            let story = format!("{prefix}:{}", note["id"].as_u64().unwrap());
+            if crate::story_ref(&engine.doc().yrs_doc().transact(), &story).is_err() {
+                engine
+                    .doc()
+                    .create_story(
+                        &story,
+                        "Note text that reserves room on the page.",
+                        "Normal",
+                        "left",
+                    )
+                    .unwrap();
+            }
         }
         engine
     }
@@ -15829,6 +16229,28 @@ mod tests {
             engine.pagination.borrow().checkpoints,
             fresh.pagination.borrow().checkpoints
         );
+        {
+            let retained = engine.pagination.borrow();
+            let expected = fresh.pagination.borrow();
+            assert_eq!(
+                retained.region_placements.len(),
+                expected.region_placements.len()
+            );
+            for pass in &retained.region_placements {
+                let expected = expected
+                    .region_placements
+                    .iter()
+                    .find(|expected| {
+                        expected.phase == pass.phase && expected.options == pass.options
+                    })
+                    .expect("fresh engine retained the same placement phase");
+                assert_eq!(
+                    serde_json::to_string(&pass.layout).unwrap(),
+                    serde_json::to_string(&expected.layout).unwrap()
+                );
+                assert_eq!(pass.checkpoints, expected.checkpoints);
+            }
+        }
         assert_eq!(
             preview_pagination_display(engine, request),
             preview_pagination_display(&fresh, request)
@@ -15916,8 +16338,16 @@ mod tests {
                         "headerDefault": "header", "footerDefault": "footer"
                     });
                 }
-                let visible = if kind == "ins" { "accepted" } else { "rejected" };
-                let hidden = if kind == "ins" { "rejected" } else { "accepted" };
+                let visible = if kind == "ins" {
+                    "accepted"
+                } else {
+                    "rejected"
+                };
+                let hidden = if kind == "ins" {
+                    "rejected"
+                } else {
+                    "accepted"
+                };
                 request["renderEnv"]["revisionPreview"] = json!({"1": hidden});
                 let engine = preview_pagination_engine(&bytes, &request);
                 let count = preview_pagination_prime(&engine, &request);
@@ -15933,9 +16363,10 @@ mod tests {
                 if headers {
                     assert!(
                         engine
-                            .with_display_list(|list| list.pages.iter().all(|page| {
-                                page.header.is_some() && page.footer.is_some()
-                            }))
+                            .with_display_list(|list| list
+                                .pages
+                                .iter()
+                                .all(|page| { page.header.is_some() && page.footer.is_some() }))
                             .unwrap()
                     );
                 }
@@ -16076,9 +16507,7 @@ mod tests {
                         preview_fixture::revision(
                             "ins",
                             "1",
-                            &format!(
-                                r#"<w:r><w:t> inserted</w:t><w:{reference} w:id="5"/></w:r>"#
-                            )
+                            &format!(r#"<w:r><w:t> inserted</w:t><w:{reference} w:id="5"/></w:r>"#)
                         )
                     ),
                 ));
@@ -16091,6 +16520,413 @@ mod tests {
                 assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
                 assert!(!engine.pagination.borrow().last_incremental);
             }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    fn preview_pagination_anchor() -> &'static str {
+        r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>left</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="285750" cy="285750"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="9" name="anchor"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="9" name="anchor"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="image"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="285750" cy="285750"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+    }
+
+    #[test]
+    fn retained_preview_decisions_near_and_far_from_anchors_match_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for anchor_at in [8, 45] {
+            let body: String = (0..90)
+                .map(|index| {
+                    let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                    if index == 45 {
+                        content.push_str(&preview_pagination_revision("ins", "1", " changed"));
+                    }
+                    if index == anchor_at {
+                        content.push_str(preview_pagination_anchor());
+                    }
+                    preview_pagination_paragraph(index, &content)
+                })
+                .collect();
+            let bytes = preview_fixture::document(&body);
+            let mut request = preview_pagination_request(font);
+            let engine = preview_pagination_engine(&bytes, &request);
+            preview_pagination_prime(&engine, &request);
+            assert!(engine.pagination.borrow().measured_with_floats);
+            for decision in ["accepted", "rejected"] {
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                let meta = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                let pagination = engine.pagination.borrow();
+                assert_eq!(pagination.last_incremental, anchor_at != 45);
+                if anchor_at != 45 {
+                    assert!(pagination.rebuilt_page_start > 0);
+                    assert!(pagination.rebuilt_page_end < meta.page_count);
+                }
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_far_from_page_side_shapes_resumes_wrapping_passes() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let shape = r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="285750" cy="285750"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="9" name="shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="285750" cy="285750"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+        let body = preview_pagination_body(&[(45, "ins", "1")]).replace(
+            &preview_fixture::run("Paragraph 8"),
+            &format!("{}{shape}", preview_fixture::run("Paragraph 8")),
+        );
+        let bytes = preview_fixture::document(&body);
+        let mut request = preview_pagination_request(font);
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        assert!(engine.pagination.borrow().region_placements.len() >= 2);
+        for decision in ["accepted", "rejected"] {
+            let placed = engine.stats().pagination_blocks_placed;
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            let meta = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.last_incremental);
+            assert!(pagination.rebuilt_page_start > 0);
+            assert!(pagination.rebuilt_page_end < meta.page_count);
+            assert!(
+                pagination
+                    .region_placements
+                    .iter()
+                    .all(|pass| pass.incremental)
+            );
+            assert!(engine.stats().pagination_blocks_placed - placed < 90);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_decisions_between_floating_tables_resume() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let body: String = (0..90)
+            .map(|index| {
+                let mut block = String::new();
+                if [12, 70].contains(&index) {
+                    block.push_str(
+                        &preview_fixture::table(&preview_pagination_paragraph(
+                            100 + index,
+                            &preview_fixture::run("Float"),
+                        ))
+                        .replace("2400", "900")
+                        .replace(
+                            "<w:tblPr>",
+                            r#"<w:tblPr><w:tblpPr w:horzAnchor="text" w:vertAnchor="text" w:tblpX="0" w:tblpY="0"/>"#,
+                        ),
+                    );
+                }
+                let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                if index == 45 {
+                    content.push_str(&preview_pagination_revision("ins", "1", " changed"));
+                }
+                block.push_str(&preview_pagination_paragraph(index, &content));
+                block
+            })
+            .collect();
+        let bytes = preview_fixture::document(&body);
+        let mut request = preview_pagination_request(font);
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        assert_eq!(
+            engine
+                .pagination
+                .borrow()
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .filter(|measured| matches!(&measured.block, LayoutBlock::Table(table) if table.floating.is_some()))
+                .count(),
+            2
+        );
+        for decision in ["accepted", "rejected"] {
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            let meta = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.last_incremental);
+            assert!(pagination.rebuilt_page_start > 0);
+            assert!(pagination.rebuilt_page_end < meta.page_count);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_decisions_with_notes_elsewhere_resume_every_note_pass() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for kind in ["footnote", "endnote"] {
+            let body: String = (0..90)
+                .map(|index| {
+                    let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                    if index == 45 {
+                        content.push_str(&preview_pagination_revision("ins", "1", " changed"));
+                    }
+                    if kind == "footnote" && index == 12 {
+                        content.push_str(preview_pagination_anchor());
+                    }
+                    for (at, id) in [(8, 5), (78, 6)] {
+                        if index == at {
+                            content.push_str(&format!(
+                                r#"<w:r><w:{kind}Reference w:id="{id}"/></w:r>"#
+                            ));
+                        }
+                    }
+                    preview_pagination_paragraph(index, &content)
+                })
+                .collect();
+            let bytes = preview_fixture::document(&body);
+            let mut request = preview_pagination_request(font);
+            request["notes"] = json!({"contents": [
+                {"id": 5, "noteKind": kind, "height": 0},
+                {"id": 6, "noteKind": kind, "height": 0}
+            ]});
+            let engine = preview_pagination_engine(&bytes, &request);
+            preview_pagination_prime(&engine, &request);
+            for decision in ["accepted", "rejected"] {
+                let placed = engine.stats().pagination_blocks_placed;
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                let meta = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                let pagination = engine.pagination.borrow();
+                assert!(pagination.last_incremental, "{kind} {decision}");
+                assert!(pagination.rebuilt_page_start > 0);
+                assert!(pagination.rebuilt_page_end < meta.page_count);
+                assert!(pagination.region_placements.len() >= 2);
+                assert!(
+                    pagination
+                        .region_placements
+                        .iter()
+                        .all(|pass| pass.incremental)
+                );
+                assert!(engine.stats().pagination_blocks_placed - placed < 90);
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_text_decisions_in_note_paragraphs_keep_full_placement() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let body = preview_pagination_body(&[(45, "ins", "1")]).replace(
+            &preview_fixture::run("Paragraph 45"),
+            &format!(
+                r#"{}<w:r><w:footnoteReference w:id="5"/></w:r>"#,
+                preview_fixture::run("Paragraph 45")
+            ),
+        );
+        let bytes = preview_fixture::document(&body);
+        let mut request = preview_pagination_request(font);
+        request["notes"] = json!({"contents": [{"id": 5, "noteKind": "footnote", "height": 0}]});
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        for decision in ["accepted", "rejected"] {
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            assert!(!engine.pagination.borrow().last_incremental);
+            assert!(
+                engine
+                    .pagination
+                    .borrow()
+                    .region_placements
+                    .iter()
+                    .all(|pass| !pass.incremental)
+            );
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    fn preview_pagination_story_document(body: &str, kind: &str, content: &str) -> Vec<u8> {
+        let (part, relationship, root, wrapped) = match kind {
+            "header" => ("header.xml", "header", "hdr", content.to_owned()),
+            "footer" => ("footer.xml", "footer", "ftr", content.to_owned()),
+            "footnote" => (
+                "footnotes.xml",
+                "footnotes",
+                "footnotes",
+                format!(r#"<w:footnote w:id="5">{content}</w:footnote>"#),
+            ),
+            _ => unreachable!(),
+        };
+        let mut parts = ooxml_opc::unzip_parts(&preview_fixture::document(body)).unwrap();
+        for (path, bytes) in &mut parts {
+            let addition = match path.as_str() {
+                "[Content_Types].xml" => Some((
+                    "</Types>",
+                    format!(
+                        r#"<Override PartName="/word/{part}" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{relationship}+xml"/></Types>"#
+                    ),
+                )),
+                "word/_rels/document.xml.rels" => Some((
+                    "</Relationships>",
+                    format!(
+                        r#"<Relationship Id="{kind}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{relationship}" Target="{part}"/></Relationships>"#
+                    ),
+                )),
+                _ => None,
+            };
+            if let Some((closing, replacement)) = addition {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace(closing, &replacement)
+                    .into_bytes();
+            }
+        }
+        parts.push((
+            format!("word/{part}"),
+            format!(r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">{wrapped}</w:{root}>"#).into_bytes(),
+        ));
+        if matches!(kind, "header" | "footer") {
+            parts.push((
+                format!("word/_rels/{part}.rels"),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/></Relationships>"#.to_vec(),
+            ));
+        }
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn retained_preview_body_decisions_with_header_float_bands_resume() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let content = preview_pagination_paragraph(
+            100,
+            &format!(
+                "{}{}",
+                preview_fixture::run("Header"),
+                preview_pagination_anchor()
+                    .replace(
+                        r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+                        "<wp:wrapTopAndBottom/>"
+                    )
+                    .replace(r#"relativeFrom="paragraph""#, r#"relativeFrom="page""#)
+                    .replace(
+                        "<wp:posOffset>0</wp:posOffset>",
+                        "<wp:posOffset>571500</wp:posOffset>"
+                    )
+            ),
+        );
+        let body = format!(
+            r#"{}<w:sectPr><w:headerReference w:type="default" r:id="header"/></w:sectPr>"#,
+            preview_pagination_body(&[(45, "ins", "1")])
+        );
+        let bytes = preview_pagination_story_document(&body, "header", &content);
+        let mut request = preview_pagination_request(font);
+        request["regions"]["sections"][0]["headerFooterRefs"] = json!({"headerDefault": "header"});
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        assert!(
+            engine
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pages
+                .iter()
+                .any(|page| !page.float_bands.is_empty())
+        );
+        for decision in ["accepted", "rejected"] {
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            let meta = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.last_incremental);
+            assert!(pagination.rebuilt_page_start > 0);
+            assert!(pagination.rebuilt_page_end < meta.page_count);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_header_and_footer_height_decisions_keep_full_placement() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for kind in ["header", "footer"] {
+            let content = preview_pagination_paragraph(
+                100,
+                &format!(
+                    "{}{}",
+                    preview_fixture::run("Band"),
+                    preview_fixture::revision(
+                        "ins",
+                        "1",
+                        &"<w:r><w:br/><w:t>Added band line</w:t></w:r>".repeat(3),
+                    )
+                ),
+            );
+            let body = format!(
+                r#"{}<w:sectPr><w:{kind}Reference w:type="default" r:id="{kind}"/></w:sectPr>"#,
+                preview_pagination_body(&[(40, "ins", "1"), (45, "ins", "2")])
+            );
+            let bytes = preview_pagination_story_document(&body, kind, &content);
+            let mut request = preview_pagination_request(font);
+            request["regions"]["sections"][0]["headerFooterRefs"] = if kind == "header" {
+                json!({"headerDefault": "header"})
+            } else {
+                json!({"footerDefault": "footer"})
+            };
+            request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+            let engine = preview_pagination_engine(&bytes, &request);
+            preview_pagination_prime(&engine, &request);
+            let before = engine.pagination.borrow().layout.as_ref().unwrap().pages[0]
+                .margins
+                .clone();
+            request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            assert!(!engine.pagination.borrow().last_incremental);
+            assert_ne!(
+                engine.pagination.borrow().layout.as_ref().unwrap().pages[0].margins,
+                before
+            );
+            request["renderEnv"]["revisionPreview"] = json!({"1": "accepted", "2": "rejected"});
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            assert!(engine.pagination.borrow().last_incremental);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_decisions_inside_footnotes_keep_full_placement() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let body = preview_pagination_body(&[]).replace(
+            &preview_fixture::run("Paragraph 8"),
+            &format!(
+                r#"{}<w:r><w:footnoteReference w:id="5"/></w:r>"#,
+                preview_fixture::run("Paragraph 8")
+            ),
+        );
+        let content = preview_pagination_paragraph(
+            100,
+            &format!(
+                "{}{}",
+                preview_fixture::run("Note"),
+                preview_fixture::revision(
+                    "ins",
+                    "1",
+                    "<w:r><w:br/><w:t>Added note line</w:t></w:r>"
+                )
+            ),
+        );
+        let bytes = preview_pagination_story_document(&body, "footnote", &content);
+        let mut request = preview_pagination_request(font);
+        request["notes"] = json!({"contents": [{"id": 5, "noteKind": "footnote", "height": 0}]});
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        for decision in ["accepted", "rejected"] {
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            assert!(!engine.pagination.borrow().last_incremental);
+            assert!(
+                engine
+                    .pagination
+                    .borrow()
+                    .region_placements
+                    .iter()
+                    .all(|pass| !pass.incremental)
+            );
         }
         docx_layout::clear_measure_fonts();
     }
@@ -16120,7 +16956,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_preview_floats_and_global_environment_changes_keep_full_placement() {
+    fn retained_preview_global_environment_changes_keep_full_placement() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         for (bytes, floats) in [
@@ -16139,11 +16975,10 @@ mod tests {
             assert!(!engine.pagination.borrow().last_incremental);
             request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
             assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
-            if floats {
-                assert!(!engine.pagination.borrow().last_incremental);
-            } else {
-                assert!(engine.pagination.borrow().last_incremental);
-            }
+            assert!(
+                engine.pagination.borrow().last_incremental,
+                "floats={floats}"
+            );
         }
         docx_layout::clear_measure_fonts();
     }

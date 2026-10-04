@@ -602,10 +602,39 @@ fn segment(text: &str, kind: Option<RevisionKind>) -> (String, Option<RevisionKi
     (text.to_owned(), kind)
 }
 
+fn assert_matches_fresh(
+    engine: &EngineSession,
+    output: &str,
+    setup: impl FnOnce() -> EngineSession,
+    env: &RenderEnv,
+    font: u32,
+) -> (EngineSession, String) {
+    let fresh = setup();
+    let expected = fresh
+        .layout_document_with_regions_json(&layout_request(env, font))
+        .unwrap();
+    assert_eq!(output, expected);
+    fresh.build_display_list_frame("{}", 0).unwrap();
+    assert_eq!(
+        engine
+            .with_display_list(|list| serde_json::to_vec(list).unwrap())
+            .unwrap(),
+        fresh
+            .with_display_list(|list| serde_json::to_vec(list).unwrap())
+            .unwrap()
+    );
+    assert_eq!(
+        engine.lower_story_json("body", env).unwrap(),
+        fresh.lower_story_json("body", env).unwrap()
+    );
+    (fresh, expected)
+}
+
 #[test]
 fn a_changed_preview_rebuilds_the_retained_frame() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
-    let (engine, [replace, delete, insert]) = proposals();
+    let bytes = document(PROPOSALS);
+    let (engine, [replace, delete, insert]) = proposals_in(&bytes);
     let native = RenderEnv::default();
     engine
         .layout_document_with_regions_json(&layout_request(&native, font))
@@ -627,18 +656,13 @@ fn a_changed_preview_rebuilds_the_retained_frame() {
 
     let mut epoch = engine.stats().frame_epoch;
     let mut frame = |env: &RenderEnv| {
-        let incremental = engine.stats().incremental_pagination_calls;
-        engine
+        let output = engine
             .layout_document_with_regions_json(&layout_request(env, font))
             .unwrap();
-        assert_eq!(
-            engine.stats().incremental_pagination_calls,
-            incremental,
-            "a preview change paginates afresh"
-        );
         engine.build_display_list_frame("{}", epoch).unwrap();
         assert!(engine.stats().frame_epoch > epoch);
         epoch = engine.stats().frame_epoch;
+        assert_matches_fresh(&engine, &output, || proposals_in(&bytes).0, env, font);
         painted(&engine)
     };
     assert_eq!(
@@ -744,22 +768,12 @@ fn a_changed_preview_refreshes_positions_in_an_identical_later_block() {
     assert_eq!(engine.with_display_list(|list| list.pages.len()), Some(2));
     let initial = engine.stats();
     let request = layout_request(&rejected, font);
-    engine.layout_document_with_regions_json(&request).unwrap();
-    assert_eq!(
-        engine.stats().incremental_pagination_calls,
-        initial.incremental_pagination_calls
-    );
+    let output = engine.layout_document_with_regions_json(&request).unwrap();
     engine
         .build_display_list_frame("{}", initial.frame_epoch)
         .unwrap();
 
-    let fresh = EngineSession::new(75111);
-    fresh
-        .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
-        .unwrap();
-    fresh.layout_document_with_regions_json(&request).unwrap();
-    fresh.build_display_list_frame("{}", 0).unwrap();
+    let (fresh, _) = assert_matches_fresh(&engine, &output, || twin_x_engine().0, &rejected, font);
     assert_eq!(
         engine.with_display_list(Clone::clone).unwrap(),
         fresh.with_display_list(Clone::clone).unwrap()
@@ -803,7 +817,7 @@ fn a_resident_edit_after_a_preview_only_preflight_lays_out_the_retained_request(
 }
 
 #[test]
-fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
+fn a_preview_decision_matches_a_fresh_layout() {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let filler = |range: std::ops::Range<usize>| -> String {
         range
@@ -819,20 +833,21 @@ fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
         filler(0..240),
         filler(240..300)
     ));
-    let blocks = 303;
     let layout = |engine: &EngineSession, ids: &[String; 3], env: &RenderEnv| {
-        let mut output = engine
+        let output = engine
             .layout_document_with_regions_json(&layout_request(env, font))
             .unwrap();
+        let mut normalized = output.clone();
         for (index, id) in ids.iter().enumerate() {
-            output = output.replace(id.as_str(), &format!("revision-{index}"));
+            normalized = normalized.replace(id.as_str(), &format!("revision-{index}"));
         }
-        let mut output: Value = serde_json::from_str(&output).unwrap();
-        output["layout"].take()
+        let mut normalized: Value = serde_json::from_str(&normalized).unwrap();
+        (normalized["layout"].take(), output)
     };
     let (engine, ids) = proposals_in(&bytes);
-    let native = layout(&engine, &ids, &RenderEnv::default());
+    let (native, _) = layout(&engine, &ids, &RenderEnv::default());
     assert!(native["pages"].as_array().unwrap().len() > 3);
+    engine.build_display_list_frame("{}", 0).unwrap();
     let [replace, delete, insert] = [0, 1, 2];
     for decisions in [
         vec![(insert, Accepted)],
@@ -848,16 +863,13 @@ fn a_preview_decision_paginates_afresh_as_a_fresh_layout_would() {
                     .collect::<Vec<_>>(),
             )
         };
-        let before = engine.stats();
-        let decided = layout(&engine, &ids, &env(&ids));
-        let after = engine.stats();
-        assert_eq!(
-            after.incremental_pagination_calls,
-            before.incremental_pagination_calls
-        );
-        assert!(after.pagination_blocks_placed - before.pagination_blocks_placed >= blocks);
+        let (decided, output) = layout(&engine, &ids, &env(&ids));
+        engine
+            .build_display_list_frame("{}", engine.stats().frame_epoch)
+            .unwrap();
         let (fresh, fresh_ids) = proposals_in(&bytes);
-        assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)));
+        let (fresh, _) = assert_matches_fresh(&engine, &output, || fresh, &env(&ids), font);
+        assert_eq!(decided, layout(&fresh, &fresh_ids, &env(&fresh_ids)).0);
     }
 }
 
@@ -884,24 +896,28 @@ fn a_decision_that_only_moves_a_paragraphs_positions_lays_it_out_again() {
             .unwrap();
         let epoch = engine.stats().frame_epoch;
         engine.build_display_list_frame("{}", epoch).unwrap();
-        let mut output: Value = serde_json::from_str(&output).unwrap();
+        let mut layout: Value = serde_json::from_str(&output).unwrap();
         let primitives = engine
             .with_display_list(|list| serde_json::to_value(&list.pages[0].primitives).unwrap())
             .unwrap();
-        (output["layout"].take(), primitives)
+        (layout["layout"].take(), primitives, output)
     };
     let engine = EngineSession::new(75110);
     seed_from_docx(engine.doc(), &bytes).unwrap();
     pass(&engine, &preview(&[("1", Accepted), ("2", Rejected)]));
     let decided = preview(&[("1", Rejected), ("2", Accepted), ("3", Accepted)]);
-    let before = engine.stats();
     let incremental = pass(&engine, &decided);
-    assert_eq!(
-        engine.stats().incremental_pagination_calls,
-        before.incremental_pagination_calls
+    let (fresh, _) = assert_matches_fresh(
+        &engine,
+        &incremental.2,
+        || {
+            let fresh = EngineSession::new(75111);
+            seed_from_docx(fresh.doc(), &bytes).unwrap();
+            fresh
+        },
+        &decided,
+        font,
     );
-    let fresh = EngineSession::new(75111);
-    seed_from_docx(fresh.doc(), &bytes).unwrap();
     let expected = pass(&fresh, &decided);
     assert_eq!(
         incremental.0["pages"][0]["fragments"][0], expected.0["pages"][0]["fragments"][0],
@@ -1083,19 +1099,43 @@ fn a_preview_change_reads_revisions_in_a_story_without_paragraphs() {
     engine
         .layout_document_with_regions_json(&layout_request(&RenderEnv::default(), font))
         .unwrap();
-    let request = layout_request(&preview(&[("1", Accepted)]), font);
-    let before = engine.stats();
+    let env = preview(&[("1", Accepted)]);
+    let request = layout_request(&env, font);
     let decided = engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    let (_, expected) = assert_matches_fresh(&engine, &decided, seeded, &env, font);
+    assert_eq!(decided, expected);
+}
+
+#[test]
+fn a_global_render_environment_change_keeps_full_placement() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let filler: String = (0..120)
+        .map(|index| format!("<w:p><w:r><w:t>Filler paragraph {index} carries enough words to wrap onto a second line of the page.</w:t></w:r></w:p>"))
+        .collect();
+    let bytes = document(&format!(
+        r#"{PROPOSALS}<w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r></w:p>{filler}"#
+    ));
+    let (engine, [replace, ..]) = proposals_in(&bytes);
+    let mut env = preview(&[(&replace, Accepted)]);
+    let before = engine
+        .layout_document_with_regions_json(&layout_request(&env, font))
+        .unwrap();
+    engine.build_display_list_frame("{}", 0).unwrap();
+    let initial = engine.stats();
+    env.show_hidden_text = true;
+    let after = engine
+        .layout_document_with_regions_json(&layout_request(&env, font))
+        .unwrap();
     assert_eq!(
         engine.stats().incremental_pagination_calls,
-        before.incremental_pagination_calls
+        initial.incremental_pagination_calls
     );
-    assert_eq!(
-        decided,
-        seeded()
-            .layout_document_with_regions_json(&request)
-            .unwrap()
-    );
+    assert_ne!(after, before);
+    engine
+        .build_display_list_frame("{}", initial.frame_epoch)
+        .unwrap();
+    assert_matches_fresh(&engine, &after, || proposals_in(&bytes).0, &env, font);
 }
 
 #[test]
