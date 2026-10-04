@@ -7,8 +7,9 @@ import { createPresentationSession } from '../../../pptx/src/session/client';
 import { createPresentationSessionHost } from '../../../pptx/src/session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { PptxEditor } from '../PptxEditor';
-import type { PptxWorkerViewerApi } from '../PptxEditor';
+import type { PptxEditorProps, PptxWorkerViewerApi } from '../PptxEditor';
 import { EditorToolbar, ToolbarCommandButton } from '../index';
+import { isMacPlatform } from '../commands/descriptors';
 import { presentationSessionOpener, ViewerSession } from './useSessionPresentation';
 import { frameImages } from './sessionPaint';
 
@@ -20,7 +21,7 @@ const restorers: (() => void)[] = [];
 let observed: HTMLElement[] = [];
 let visibility: IntersectionObserverCallback;
 let observerRoot: Element | Document | null | undefined;
-let painted: { canvas: HTMLCanvasElement; list: SlideDisplayList; scale: number }[];
+let painted: { canvas: HTMLCanvasElement; list: SlideDisplayList; scale: number; dpr: number }[];
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -66,7 +67,7 @@ function open(viewer: PresentationSession) {
 }
 
 function visible(indices: number[], isIntersecting = true) {
-  visibility(indices.map((index) => ({ target: observed[index], isIntersecting }) as IntersectionObserverEntry),
+  visibility(indices.map((index) => ({ target: observed[index], isIntersecting }) as unknown as IntersectionObserverEntry),
     {} as IntersectionObserver);
 }
 
@@ -89,8 +90,8 @@ beforeEach(() => {
   const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
     getContext as unknown as HTMLCanvasElement['getContext']);
   restorers.push(() => context.mockRestore());
-  const paint = spyOn(pptx, 'paintSlide').mockImplementation(async (ctx, list, _dpr, scale = 1) => {
-    painted.push({ canvas: ctx.canvas, list, scale });
+  const paint = spyOn(pptx, 'paintSlide').mockImplementation(async (ctx, list, dpr = 1, scale = 1) => {
+    painted.push({ canvas: ctx.canvas, list, scale, dpr });
   });
   restorers.push(() => paint.mockRestore());
 });
@@ -293,6 +294,45 @@ describe('session viewer', () => {
     await act(async () => resume.resolve());
   });
 
+  it('returns no-session results when the file is replaced during async API operations', async () => {
+    const old = session();
+    const next = session();
+    const opener = open(old.viewer);
+    const ready: PptxWorkerViewerApi[] = [];
+    const onReady = (api: PptxWorkerViewerApi) => { ready.push(api); };
+    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen onReady={onReady} />);
+    await waitFor(() => expect(ready).toHaveLength(1));
+    await waitFor(() => expect((view.getByTestId('pptx-notes-textarea') as HTMLTextAreaElement).value).toBe('Notes 0'));
+    const read = deferred<pptx.PptxReadResult>();
+    const version = deferred<string>();
+    const found = deferred<pptx.PptxFindResult>();
+    const saved = deferred<Uint8Array>();
+    old.call.readContent.mockImplementation(() => read.promise);
+    old.call.version.mockImplementation(() => version.promise);
+    old.call.findText.mockImplementation(() => found.promise);
+    const save = spyOn(old.viewer, 'save').mockImplementation(() => saved.promise);
+    restorers.push(() => save.mockRestore());
+    const api = ready[0];
+    const request = { expectVersion: 'v1', steps: [] };
+    const pending = [api.readContent(), api.version(), api.findText({ text: 'old' }), api.saveAsync(),
+      api.validateEdits(request), api.applyEdits(request)];
+    opener.mockResolvedValue(next.viewer);
+    view.rerender(<PptxEditor file={new Uint8Array([4])} fonts={[]} readOnly experimentalWorkerOpen onReady={onReady} />);
+    await waitFor(() => expect(ready).toHaveLength(2));
+    await act(async () => {
+      read.resolve({ ok: true, version: 'old', slides: [], stories: [] });
+      version.resolve('old');
+      found.resolve({ ok: true, version: 'old', matches: [], truncated: false });
+      saved.resolve(new Uint8Array([7]));
+      expect(await Promise.all(pending)).toEqual([null, null, null, null, null, null]);
+    });
+    const calls = old.call.readContent.mock.calls.length;
+    expect(await api.readContent()).toBeNull();
+    expect(old.call.readContent).toHaveBeenCalledTimes(calls);
+    expect(await api.goToSlideAsync(1)).toBe(false);
+    expect(await ready[1].version()).toBe('v1');
+  });
+
   it('surfaces worker failure without falling back locally', async () => {
     const opener = open(session().viewer);
     const failure = new Error('Worker unavailable');
@@ -325,7 +365,7 @@ describe('session viewer', () => {
     await waitFor(() => expect(saved).toHaveBeenCalledWith(new Uint8Array([8, 9])));
     expect(requested).toHaveBeenCalledTimes(1);
     await act(async () => { await api.commands.execute('zoom', { scale: 1.5 }); });
-    await waitFor(() => expect(painted.at(-1)?.scale).toBe(1.5));
+    await waitFor(() => expect(painted[painted.length - 1]?.scale).toBe(1.5));
   });
 
   it('bounds cached frames while retaining the active frame', async () => {
@@ -340,6 +380,150 @@ describe('session viewer', () => {
     expect(Array.from({ length: 40 }, (_, index) => run.frame(index)).filter(Boolean)).toHaveLength(25);
     expect(run.frame(0)).toBeDefined();
     run.dispose();
+  });
+
+  it('saves from the platform shortcut without throwing', async () => {
+    const { viewer } = session();
+    open(viewer);
+    const saved = mock(() => {});
+    const requested = mock(async () => true);
+    let api!: PptxWorkerViewerApi;
+    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen
+      onReady={(value) => { api = value; }} onSave={saved} onSaveRequest={requested} />);
+    await waitFor(() => expect(api).toBeDefined());
+    const errors = mock((event: ErrorEvent) => { event.preventDefault(); });
+    window.addEventListener('error', errors);
+    restorers.push(() => window.removeEventListener('error', errors));
+    const stage = view.container.querySelector('[tabindex="0"]')!;
+    expect(() => fireEvent.keyDown(stage, { key: 's', ...(isMacPlatform() ? { metaKey: true } : { ctrlKey: true }) })).not.toThrow();
+    await waitFor(() => expect(saved).toHaveBeenCalledWith(new Uint8Array([8, 9])));
+    expect(requested).toHaveBeenCalledTimes(1);
+    expect(viewer.save).toHaveBeenCalledTimes(1);
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it('repaints active slides and thumbnails when DPR changes and removes listeners', async () => {
+    open(session().viewer);
+    const originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio');
+    const originalMedia = Object.getOwnPropertyDescriptor(window, 'matchMedia');
+    const setDpr = (value: number) => Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value });
+    const makeMedia = (media: string) => {
+      let change!: () => void;
+      return {
+        media, change: () => change(),
+        addEventListener: mock((_type: string, listener: () => void) => { change = listener; }),
+        removeEventListener: mock(() => {}),
+      };
+    };
+    const queries: ReturnType<typeof makeMedia>[] = [];
+    setDpr(1);
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: (query: string) => {
+      const media = makeMedia(query);
+      queries.push(media);
+      return media as unknown as MediaQueryList;
+    } });
+    restorers.push(() => {
+      if (originalDpr) Object.defineProperty(window, 'devicePixelRatio', originalDpr);
+      else Reflect.deleteProperty(window, 'devicePixelRatio');
+      if (originalMedia) Object.defineProperty(window, 'matchMedia', originalMedia);
+      else Reflect.deleteProperty(window, 'matchMedia');
+    });
+    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    await waitFor(() => expect(observed).toHaveLength(4));
+    await act(async () => visible([1]));
+    await waitFor(() => expect(painted).toHaveLength(2));
+    expect(queries[0].media).toBe('(resolution: 1dppx)');
+    for (const ratio of [2, 1]) {
+      const previous = queries[queries.length - 1];
+      painted = [];
+      await act(async () => { setDpr(ratio); previous.change(); });
+      await waitFor(() => expect(painted).toHaveLength(2));
+      expect(painted.every((paint) => paint.dpr === ratio)).toBe(true);
+      expect(painted.some((paint) => paint.canvas.closest('aside'))).toBe(true);
+      expect(painted.some((paint) => !paint.canvas.closest('aside'))).toBe(true);
+      expect(previous.removeEventListener).toHaveBeenCalledTimes(1);
+      expect(queries[queries.length - 1].media).toBe(`(resolution: ${ratio}dppx)`);
+    }
+    view.unmount();
+    expect(queries[queries.length - 1].removeEventListener).toHaveBeenCalledTimes(1);
+  });
+
+  for (const extent of [1, 20, 40]) it(`keeps fit painting positive in a ${extent}px viewport`, async () => {
+    open(session().viewer);
+    const originalWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    const originalHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => extent });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => extent });
+    restorers.push(() => {
+      if (originalWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', originalWidth);
+      else Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth');
+      if (originalHeight) Object.defineProperty(HTMLElement.prototype, 'clientHeight', originalHeight);
+      else Reflect.deleteProperty(HTMLElement.prototype, 'clientHeight');
+    });
+    render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen />);
+    await waitFor(() => expect(painted).toHaveLength(1));
+    expect(Number.isFinite(painted[0].scale)).toBe(true);
+    expect(painted[0].scale).toBeGreaterThan(0);
+    expect(painted[0].canvas.width).toBeGreaterThanOrEqual(1);
+    expect(painted[0].canvas.height).toBeGreaterThanOrEqual(1);
+  });
+
+  it('evicts the least recently used bitmap and closes it after every paint releases it', async () => {
+    const image = frame(0);
+    image.media = new Map(Array.from({ length: 27 }, (_, index) => [String(index), new Uint8Array([index])] as const));
+    const bitmaps = Array.from({ length: 27 }, () => ({ close: mock(() => {}) }));
+    const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation(async (bytes) =>
+      bitmaps[bytes[0]] as unknown as ImageBitmap);
+    restorers.push(() => decode.mockRestore());
+    const images = frameImages();
+    const first = images.resolve(image);
+    const second = images.resolve(image);
+    await first('0');
+    await second('0');
+    for (let index = 1; index < 25; index += 1) {
+      const paint = images.resolve(image);
+      await paint(String(index));
+      paint.release();
+    }
+    await second('1');
+    const next = images.resolve(image);
+    await next('25');
+    next.release();
+    expect(bitmaps[0].close).not.toHaveBeenCalled();
+    expect(bitmaps[1].close).not.toHaveBeenCalled();
+    first.release();
+    expect(bitmaps[0].close).not.toHaveBeenCalled();
+    second.release();
+    expect(bitmaps[0].close).toHaveBeenCalledTimes(1);
+    const last = images.resolve(image);
+    await last('26');
+    expect(bitmaps[2].close).toHaveBeenCalledTimes(1);
+    images.dispose();
+    expect(bitmaps[26].close).not.toHaveBeenCalled();
+    last.release();
+    last.release();
+    images.dispose();
+    expect(decode).toHaveBeenCalledTimes(27);
+    for (const bitmap of bitmaps) expect(bitmap.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a pending bitmap once decoding and its disposed paint finish', async () => {
+    const decoded = deferred<ImageBitmap>();
+    const bitmap = { close: mock(() => {}) } as unknown as ImageBitmap;
+    const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation(() => decoded.promise);
+    restorers.push(() => decode.mockRestore());
+    const images = frameImages();
+    const image = frame(0);
+    image.media = new Map([['image', new Uint8Array([1])]]);
+    const paint = images.resolve(image);
+    const pending = paint('image');
+    images.dispose();
+    decoded.resolve(bitmap);
+    await pending;
+    expect(bitmap.close).not.toHaveBeenCalled();
+    paint.release();
+    paint.release();
+    expect(bitmap.close).toHaveBeenCalledTimes(1);
   });
 
   it('skips undecoded TIFF without invoking the wasm decoder', async () => {
@@ -365,8 +549,8 @@ describe('session viewer', () => {
     let api!: PptxWorkerViewerApi;
     render(<PptxEditor file={bytes} fonts={[]} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await waitFor(() => expect(api).toBeDefined());
-    expect((await api.readContent()).ok).toBe(true);
-    expect((await api.saveAsync()).byteLength).toBeGreaterThan(0);
+    expect((await api.readContent())!.ok).toBe(true);
+    expect((await api.saveAsync())!.byteLength).toBeGreaterThan(0);
   });
 
   for (const optIn of [false, true]) it(`keeps local opening when worker mode is inactive (${optIn})`, async () => {
@@ -375,7 +559,7 @@ describe('session viewer', () => {
     const failure = new Error('Local open reached');
     const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw failure; });
     restorers.push(() => init.mockRestore(), () => local.mockRestore());
-    const view = render(optIn ? <PptxEditor file={file} fonts={[]} experimentalWorkerOpen readOnly={false} /> :
+    const view = render(optIn ? <PptxEditor {...{ file, fonts: [], experimentalWorkerOpen: true, readOnly: false } as PptxEditorProps} /> :
       <PptxEditor file={file} fonts={[]} />);
     await waitFor(() => expect(view.getByText(failure.message)).toBeDefined());
     expect(local).toHaveBeenCalledTimes(1);

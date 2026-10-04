@@ -207,10 +207,20 @@ export function useSessionPresentation(
           }, current);
         const viewer = opened;
         const require = () => viewer.require();
-        const refusal = async () => ({
-          ok: false as const, version: await require().call.version(),
+        const afterSession = async <T,>(operation: (session: PresentationSession) => Promise<T>): Promise<T | null> => {
+          if (!viewer.current) return null;
+          try {
+            const result = await operation(require());
+            return viewer.current ? result : null;
+          } catch (error) {
+            if (!viewer.current) return null;
+            throw error;
+          }
+        };
+        const refusal = () => afterSession(async (session) => ({
+          ok: false as const, version: await session.call.version(),
           failure: { code: 'read-only' as const, message: 'The editor is read-only' },
-        });
+        }));
         const api: PptxWorkerViewerApi = {
           handle: null, commands, save: () => null, getPositionAtPoint: () => null,
           selectText: () => false, clearSelection: () => {}, refreshProposals: () => {},
@@ -221,10 +231,14 @@ export function useSessionPresentation(
             if (accepted) latest.current.focus();
             return accepted;
           },
-          goToSlideAsync: (slide) => viewer.showAsync(slide),
-          saveAsync: async () => require().save(), version: async () => require().call.version(),
-          readContent: async (request) => require().call.readContent(request),
-          findText: async (request) => require().call.findText(request),
+          goToSlideAsync: async (slide) => {
+            const painted = await viewer.showAsync(slide);
+            return viewer.current && painted;
+          },
+          saveAsync: () => afterSession((session) => session.save()),
+          version: () => afterSession((session) => session.call.version()),
+          readContent: (request) => afterSession((session) => session.call.readContent(request)),
+          findText: (request) => afterSession((session) => session.call.findText(request)),
           validateEdits: refusal, applyEdits: refusal,
         };
         offFailure = session.onFailure((failure) => viewer.fail(failure));

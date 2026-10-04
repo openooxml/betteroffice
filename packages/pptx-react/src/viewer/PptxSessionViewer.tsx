@@ -18,7 +18,7 @@ import { useSessionPresentation, type ViewerSession } from './useSessionPresenta
 
 export function PptxSessionViewer(props: PptxWorkerViewerProps) {
   const { t } = useTranslation();
-  const rootRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const railRef = useRef<HTMLElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -26,6 +26,7 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
   const [commands] = useState(createPptxCommandController);
   const [zoom, setZoom] = useState<PptxZoom>('fit');
   const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const [dpr, setDpr] = useState(devicePixelRatio);
   const focus = useCallback(() => stageRef.current?.focus(), []);
   const { run, loading, error, notes, reportError } = useSessionPresentation(props, commands.store, focus);
   const frame = run?.current ? run.frame(run.active) : undefined;
@@ -84,7 +85,21 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
     return () => commands.detach(binding);
   }, [commands, binding]);
   useLayoutEffect(() => commands.refresh());
-  useCommandShortcuts({ commands, containerRef: rootRef });
+  useCommandShortcuts({ commands, containerRef: rootRef, suspended: () => false });
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    let media: MediaQueryList | undefined;
+    const update = () => {
+      const ratio = devicePixelRatio();
+      setDpr(ratio);
+      media?.removeEventListener('change', update);
+      media = window.matchMedia(`(resolution: ${ratio}dppx)`);
+      media.addEventListener('change', update);
+    };
+    update();
+    return () => media?.removeEventListener('change', update);
+  }, []);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -96,8 +111,8 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
     return () => observer.disconnect();
   }, []);
   const scale = zoom === 'fit' ? !frame || viewport.width <= 0 || viewport.height <= 0 ? 1 :
-    Math.min((viewport.width - 40) / frame.displayList.width,
-      (viewport.height - 40) / frame.displayList.height, 1) : zoom;
+    Math.min(Math.max(1, viewport.width - 40) / Math.max(1, frame.displayList.width),
+      Math.max(1, viewport.height - 40) / Math.max(1, frame.displayList.height), 1) : zoom;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -106,16 +121,19 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
     if (!ctx) return;
     let cancelled = false;
     const current = () => !cancelled && run.current && run.frame(run.active) === frame;
-    const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame.displayList, dpr, scale);
-    void Promise.resolve().then(() => {
-      if (current()) return paintSlide(currentContext(ctx, current), frame.displayList, dpr, scale, {
-        resolveImage: run.images.resolve(frame),
-      });
+    if (canvas.width < 1) canvas.width = 1;
+    if (canvas.height < 1) canvas.height = 1;
+    void Promise.resolve().then(async () => {
+      if (!current()) return;
+      const resolveImage = run.images.resolve(frame);
+      try {
+        await paintSlide(currentContext(ctx, current), frame.displayList, dpr, scale, { resolveImage });
+      } finally { resolveImage.release(); }
     }).then(() => { if (current()) run.didPaint(frame); })
       .catch((error) => { if (current()) run.fail(error); });
     return () => { cancelled = true; };
-  }, [run, frame, scale]);
+  }, [run, frame, scale, dpr]);
 
   useEffect(() => {
     const rail = railRef.current;
@@ -160,7 +178,7 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
                   <span style={styles.slideNumber}>{index + 1}</span>
                   <span style={styles.slidePreview}>
                     {visible && cached && frame && run.isPainted(frame) ? (
-                      <Thumbnail run={run} frame={cached} />
+                      <Thumbnail run={run} frame={cached} dpr={dpr} />
                     ) : <span style={styles.slideTitle}>{title}</span>}
                   </span>
                 </button>
@@ -188,7 +206,7 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
   );
 }
 
-function Thumbnail({ run, frame }: { run: ViewerSession; frame: PresentationFrame }) {
+function Thumbnail({ run, frame, dpr }: { run: ViewerSession; frame: PresentationFrame; dpr: number }) {
   const ref = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
     const canvas = ref.current;
@@ -196,17 +214,25 @@ function Thumbnail({ run, frame }: { run: ViewerSession; frame: PresentationFram
     if (!canvas || !ctx || !run.current) return;
     let cancelled = false;
     const current = () => !cancelled && run.current && run.visible.has(frame.slideIndex);
-    const dpr = window.devicePixelRatio || 1;
     const scale = 128 / frame.displayList.width;
     sizeCanvasForSlide(canvas, frame.displayList, dpr, scale);
-    void Promise.resolve().then(() => {
-      if (current()) return paintSlide(currentContext(ctx, current), frame.displayList, dpr, scale, {
-        resolveImage: run.images.resolve(frame),
-      });
+    if (canvas.width < 1) canvas.width = 1;
+    if (canvas.height < 1) canvas.height = 1;
+    void Promise.resolve().then(async () => {
+      if (!current()) return;
+      const resolveImage = run.images.resolve(frame);
+      try {
+        await paintSlide(currentContext(ctx, current), frame.displayList, dpr, scale, { resolveImage });
+      } finally { resolveImage.release(); }
     }).catch(() => {});
     return () => { cancelled = true; };
-  }, [run, frame]);
+  }, [run, frame, dpr]);
   return <canvas ref={ref} style={{ display: 'block', maxWidth: '100%', height: 'auto' }} aria-hidden="true" />;
+}
+
+function devicePixelRatio(): number {
+  const ratio = typeof window === 'undefined' ? 1 : window.devicePixelRatio;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
 }
 
 function download(bytes: Uint8Array, name: string): void {

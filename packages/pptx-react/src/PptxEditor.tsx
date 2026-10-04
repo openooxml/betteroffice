@@ -50,6 +50,7 @@ import {
 } from 'react';
 import type {
   CSSProperties,
+  JSX,
   KeyboardEvent,
   PointerEvent,
   ReactNode,
@@ -195,13 +196,19 @@ export interface PptxEditorApi {
 
 /** @experimental */
 export interface PptxWorkerViewerApi extends Omit<
-  PptxEditorApi, 'handle' | 'save' | 'getPositionAtPoint' | 'selectText'
+  PptxEditorApi, 'handle' | 'save' | 'getPositionAtPoint' | 'selectText' |
+  'version' | 'readContent' | 'findText' | 'validateEdits' | 'applyEdits'
 > {
   handle: null;
   save: () => null;
   getPositionAtPoint: (clientX: number, clientY: number) => null;
   selectText: (target: PptxTextSelectionTarget) => false;
-  saveAsync: () => Promise<Uint8Array>;
+  saveAsync: () => Promise<Uint8Array | null>;
+  version: () => Promise<string | null>;
+  readContent: (request?: PptxReadRequest) => Promise<PptxReadResult | null>;
+  findText: (request: PptxFindRequest) => Promise<PptxFindResult | null>;
+  validateEdits: (request: PptxEditRequest) => Promise<PptxValidationResult | null>;
+  applyEdits: (request: PptxEditRequest) => Promise<PptxEditResult | null>;
   /** Accepts a 1-based slide number; resolves after painting. */
   goToSlideAsync: (slide: number) => Promise<boolean>;
 }
@@ -254,10 +261,6 @@ export type PptxWorkerViewerProps = Omit<
   experimentalWorkerOpen: true;
   onReady?: (api: PptxWorkerViewerApi) => void;
 };
-
-type PptxEditorDispatchProps = PptxWorkerViewerProps | (PptxEditorProps & (
-  { experimentalWorkerOpen?: false } | { readOnly?: false; experimentalWorkerOpen?: boolean }
-));
 
 interface PictureOrigin {
   handle: PresentationHandle;
@@ -475,13 +478,15 @@ const initialStyle: EffectiveTextStyle = {
   fontFamily: 'Arial',
 };
 
+export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
+export function PptxEditor(props: PptxEditorProps): JSX.Element;
 export function PptxEditor({
   i18n,
   ...props
-}: PptxEditorDispatchProps) {
+}: PptxWorkerViewerProps | PptxEditorProps): JSX.Element {
   return (
     <LocaleProvider i18n={i18n}>
-      {props.experimentalWorkerOpen && props.readOnly ? (
+      {'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && props.readOnly ? (
         <PptxSessionViewer {...props} i18n={i18n} />
       ) : (
         <PptxEditorContent {...props as PptxEditorProps} i18n={i18n} />
