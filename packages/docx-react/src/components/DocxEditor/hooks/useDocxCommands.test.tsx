@@ -193,7 +193,7 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
 
 describe('editor command binding', () => {
   for (const readOnly of [true, false]) {
-    test(`worker viewer revision decisions refuse ${readOnly ? 'read-only' : 'viewing-mode'} without input admission`, async () => {
+    test(`worker viewer mutations refuse ${readOnly ? 'read-only' : 'viewing-mode'} without input admission`, async () => {
       const { session } = await newSession();
       const hydrate = mock(async () => () => {});
       const request = mock(() => {});
@@ -207,12 +207,18 @@ describe('editor command binding', () => {
         await awaitWorkerOpenReplica(session);
         return operation();
       });
-      expect(code(await editor.store.execute('reviewAccept', { revisionId: 'revision' }))).toBe(
-        readOnly ? 'read-only' : 'viewing-mode'
-      );
-      expect(code(await editor.store.execute('reviewReject', null))).toBe(
-        readOnly ? 'read-only' : 'viewing-mode'
-      );
+      const accept = spyOn(session, 'acceptChange');
+      const reject = spyOn(session, 'rejectChange');
+      const listing = spyOn(session, 'listRevisions');
+      for (const id of ['bold', 'insertPageBreak', 'reviewAccept', 'reviewReject'] as const) {
+        const result = editor.store.execute(id, id === 'reviewAccept' || id === 'reviewReject' ? { revisionId: 'revision' } : null);
+        expect(admit).not.toHaveBeenCalled();
+        expect(code(await result)).toBe(readOnly ? 'read-only' : 'viewing-mode');
+      }
+      expect(code(await editor.store.execute('reviewReject', null))).toBe(readOnly ? 'read-only' : 'viewing-mode');
+      expect(accept).not.toHaveBeenCalled();
+      expect(reject).not.toHaveBeenCalled();
+      expect(listing).not.toHaveBeenCalled();
       expect(admit).not.toHaveBeenCalled();
       expect(replica.started).toBe(false);
       expect(request).not.toHaveBeenCalled();
@@ -220,6 +226,64 @@ describe('editor command binding', () => {
       expect(fallback).not.toHaveBeenCalled();
     });
   }
+
+  test('viewer revision navigation refuses without reading or admitting the edit peer', async () => {
+    const { session } = await newSession();
+    const request = mock(() => {});
+    const hydrate = mock(async () => () => {});
+    const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, { active: () => true, request });
+    const editor = mount(session, {
+      mode: 'viewing', experimentalWorkerOpen: true, viewerSession: true,
+      pagedEditorRef: { current: { isWorkerViewer: () => false } as PagedEditorRef },
+    });
+    const admit = spyOn(editor.bridge, 'runAfterPendingInput').mockImplementation(() => new Promise<never>(() => {}));
+    const listing = spyOn(session, 'listRevisions');
+    for (const id of ['reviewNext', 'reviewPrevious'] as const) {
+      expect(editor.store.getState(id)).toMatchObject({ enabled: false, disabledReason: { code: 'no-revisions' } });
+      const result = editor.store.execute(id, null);
+      expect(admit).not.toHaveBeenCalled();
+      expect(code(await result)).toBe('no-revisions');
+    }
+    expect(listing).not.toHaveBeenCalled();
+    expect(replica.started).toBe(false);
+    expect(request).not.toHaveBeenCalled();
+    expect(hydrate).not.toHaveBeenCalled();
+  });
+
+  test('viewer session revision decisions refuse after worker read routing ends', async () => {
+    const { session } = await newSession();
+    const editor = mount(session, {
+      mode: 'viewing', viewerSession: true,
+      pagedEditorRef: { current: { isWorkerViewer: () => false } as PagedEditorRef },
+    });
+    const admit = spyOn(editor.bridge, 'runAfterPendingInput').mockImplementation(() => new Promise<never>(() => {}));
+    const listing = spyOn(session, 'listRevisions');
+    for (const id of ['reviewAccept', 'reviewReject'] as const) {
+      const result = editor.store.execute(id, { revisionId: 'revision' });
+      expect(admit).not.toHaveBeenCalled();
+      expect(code(await result)).toBe('viewing-mode');
+    }
+    expect(listing).not.toHaveBeenCalled();
+  });
+
+  test('editor revision navigation remains ordered and selects document revisions', async () => {
+    const { session, paraId } = await newSession();
+    session.insertText({ story: 'body', paraId, offset: 5 }, ' new', { name: 'Reviewer', date: '2026-01-01T00:00:00Z' });
+    const [revision] = session.listRevisions();
+    const editor = mount(session, {
+      pagedEditorRef: { current: { isWorkerViewer: () => false, getSelectionRange: () => null } as unknown as PagedEditorRef },
+    });
+    const admit = spyOn(editor.bridge, 'runAfterPendingInput');
+    const select = spyOn(editor.bridge, 'select');
+    for (const id of ['reviewNext', 'reviewPrevious'] as const) {
+      expect(code(await editor.store.execute(id, null))).toBe('executed');
+      expect(select).toHaveBeenLastCalledWith(
+        { story: revision.range.story, ...revision.range.start },
+        { story: revision.range.story, ...revision.range.end }
+      );
+    }
+    expect(admit).toHaveBeenCalledTimes(2);
+  });
 
   test('editor revision decisions remain ordered after pending input', async () => {
     const { session } = await newSession();
@@ -436,6 +500,34 @@ describe('editor command binding', () => {
     ).toBe(1);
     expect(session.paragraphs('body')[0].text).toBe('Xbaz bar qux');
   });
+
+  for (const onDemand of [true, false]) {
+    test(`viewer print skips peer admission with ${onDemand ? 'an on-demand' : 'a regular'} pending replica`, async () => {
+      const { session } = await newSession();
+      const hydrate = mock(async () => () => {});
+      const request = mock(() => {});
+      const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, onDemand ? { active: () => true, request } : undefined);
+      const displayList = { pages: [] } as unknown as DisplayList;
+      const prepare = mock(async (_list: DisplayList) => {});
+      const print = mock(() => true);
+      const cancel = mock(() => {});
+      const editor = mount(session, {
+        mode: 'viewing', viewerSession: true, experimentalWorkerOpen: true,
+        reservePrint: () => ({ prepare, print, cancel }),
+        renderedDisplayList: async () => displayList,
+      });
+      const admit = spyOn(editor.bridge, 'runAfterPendingInput').mockImplementation(() => new Promise<never>(() => {}));
+      const printing = editor.store.execute('print', null);
+      expect(admit).not.toHaveBeenCalled();
+      expect(code(await printing)).toBe('executed');
+      expect(prepare).toHaveBeenCalledWith(displayList);
+      expect(print).toHaveBeenCalledTimes(1);
+      expect(cancel).not.toHaveBeenCalled();
+      expect(replica.started).toBe(false);
+      expect(request).not.toHaveBeenCalled();
+      expect(hydrate).not.toHaveBeenCalled();
+    });
+  }
 
   test('print reserves its window at once and prints only after input and rendering settle', async () => {
     const { session } = await newSession();

@@ -122,6 +122,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
  "indexmap",
+ "memchr",
  "quick-xml",
  "ryu-js",
  "serde",
