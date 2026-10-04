@@ -11,6 +11,8 @@ export { openWorkbookSession } from './session/client';
 export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
 /** @experimental */
 export type {
+  WorkbookCellGeometry,
+  WorkbookCellInputs,
   WorkbookFrame,
   WorkbookFrameOptions,
   WorkbookSessionEvents,
@@ -18,6 +20,7 @@ export type {
   WorkbookSessionOpenOptions,
   WorkbookSessionState,
   WorkbookSheetSummary,
+  WorkbookSheetView,
 } from './session/methods';
 
 export type {

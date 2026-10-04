@@ -17,6 +17,7 @@ import {
   type WorkbookFrame,
   type WorkbookSessionEvents,
   type WorkbookSessionMethods,
+  type WorkbookSheetView,
 } from './methods';
 
 let fixture: Uint8Array;
@@ -100,6 +101,24 @@ async function matchingFrame(worker: WorkbookSession, main: WorkbookHandle): Pro
   return frame;
 }
 
+async function matchingSheetView(
+  worker: WorkbookSession, main: WorkbookHandle, sheet: number
+): Promise<WorkbookSheetView> {
+  main.setActiveSheet(sheet);
+  const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
+    main.sheetInfo();
+  const grid = main.displayList(viewport).grid;
+  if (!grid) throw new Error('Missing frame grid');
+  const view = await worker.call.sheetView(sheet);
+  expect(view).toEqual({
+    sheet, version: await worker.call.version(), contentWidth, contentHeight, frozenRows, frozenCols,
+    initialScrollX, initialScrollY,
+    frozenWidth: frozenCols === 0 ? 0 : grid.colOffsets[frozenCols],
+    frozenHeight: frozenRows === 0 ? 0 : grid.rowOffsets[frozenRows],
+  });
+  return view;
+}
+
 describe('workbook sessions', () => {
   test('declares ordered methods and marks edits as user input', () => {
     expect(Object.keys(WORKBOOK_SESSION_METHODS)).toEqual(Object.keys(WORKBOOK_SESSION_POLICIES));
@@ -112,6 +131,155 @@ describe('workbook sessions', () => {
     for (const policy of Object.values(WORKBOOK_SESSION_POLICIES)) {
       expect(typeof policy).toBe('object');
       expect((policy as MethodPolicy).reorderable).not.toBe(true);
+    }
+  });
+
+  for (const name of ['sample.xlsx', 'charts.xlsx'] as const) {
+    test(`matches ${name} view reads without changing active sheet, state or saved bytes`, async () => {
+      const bytes = name === 'sample.xlsx' ? fixture : chartFixture;
+      const main = openWorkbook(bytes);
+      let worker: WorkbookSession | undefined;
+      try {
+        worker = await session(bytes);
+        const state = worker.state;
+        const version = await worker.call.version();
+        const saved = await worker.save();
+        const changes: WorkbookSessionEvents['changed'][] = [];
+        worker.on('changed', (change) => { changes.push(change); });
+        for (const sheet of state.sheets) {
+          const view = await matchingSheetView(worker, main, sheet.index);
+          if (name === 'charts.xlsx' && sheet.index === 0) {
+            expect(view).toMatchObject({ frozenRows: 1, frozenCols: 1 });
+            expect(view.frozenWidth).toBeGreaterThan(0);
+            expect(view.frozenHeight).toBeGreaterThan(0);
+          }
+          for (const [row, col] of [[0, 0], [2, 1], [30, 10], [1048575, 16383]]) {
+            expect(await worker.call.cellGeometry(sheet.index, row, col)).toEqual({
+              sheet: sheet.index, version, rect: main.cellRect(sheet.index, row, col),
+              scrollPosition: main.cellPosition(sheet.index, row, col),
+            });
+          }
+          const inputs = await worker.call.cellInputs(sheet.index, 'A1:D5');
+          expect(inputs).toEqual({
+            sheet: sheet.index, version, cells: main.rangeCells(sheet.index, 'A1:D5'),
+          });
+          expect(inputs.cells[0][0]).toEqual(main.cell(sheet.index, 0, 0));
+          for (const window of [viewport, { ...viewport, x: 1500, y: 1500 }]) {
+            const frame = await worker.call.frame(window, { sheet: sheet.index });
+            expect(frame.displayList).toEqual(main.displayList(window));
+            const expected = name === 'sample.xlsx' && sheet.index === 0 && window === viewport
+              ? [{
+                start: { row: 0, col: 0 }, end: { row: 0, col: 3 },
+              }] : [];
+            expect(frame.mergedRanges).toEqual(expected);
+          }
+        }
+        main.setActiveSheet(state.activeSheet);
+        await matchingFrame(worker, main);
+        expect(worker.state).toEqual(state);
+        expect(await worker.call.version()).toBe(version);
+        expect(await worker.save()).toEqual(saved);
+        expect(changes).toEqual([]);
+      } finally {
+        main.dispose();
+        await worker?.dispose();
+      }
+    });
+  }
+
+  test('view metadata, geometry and editable input follow edits and their version', async () => {
+    const main = openWorkbook(fixture);
+    let worker: WorkbookSession | undefined;
+    try {
+      worker = await session();
+      const before = await matchingSheetView(worker, main, 0);
+      const geometry = await worker.call.cellGeometry(0, 69, 0);
+      const batch = (expectVersion: string): XlsxEditRequest => ({
+        expectVersion,
+        steps: [
+          { op: 'setCellInputs', target: target('A70'), inputs: [['updated']] },
+          { op: 'patchStyle', target: target('A70'), patch: { fontSize: 40 } },
+          { op: 'setCellInputs', target: target('B8:F8'), inputs: [[
+            '=1+2', "'=literal", "'123", 'TRUE', '12.5',
+          ]] },
+        ],
+      });
+      const applied = await worker.call.applyEdits(batch(before.version));
+      expect(applied).toMatchObject({ ok: true, applied: true });
+      expect(main.applyEdits(batch(main.version()))).toMatchObject({ ok: true, applied: true });
+      const after = await matchingSheetView(worker, main, 0);
+      expect(after.version).toBe(applied.version);
+      expect(after.version).not.toBe(before.version);
+      expect(after.contentHeight).toBeGreaterThan(before.contentHeight);
+      const moved = await worker.call.cellGeometry(0, 69, 0);
+      expect(moved.version).toBe(applied.version);
+      expect(moved.rect).toEqual(main.cellRect(0, 69, 0));
+      expect(moved.rect.h).toBeGreaterThan(geometry.rect.h);
+      expect(moved.scrollPosition).toEqual(main.cellPosition(0, 69, 0));
+      const inputs = await worker.call.cellInputs(0, 'B8:F8');
+      expect(inputs.version).toBe(applied.version);
+      expect(inputs.cells).toEqual(main.rangeCells(0, 'B8:F8'));
+      for (let col = 1; col <= 5; col += 1) {
+        expect(inputs.cells[0][col - 1]).toEqual(main.cell(0, 7, col));
+      }
+      expect(inputs.cells[0][0]).toMatchObject({ input: '=1+2', isFormula: true });
+      const frame = await matchingFrame(worker, main);
+      expect(frame.mergedRanges).toEqual([
+        { start: { row: 0, col: 0 }, end: { row: 0, col: 3 } },
+      ]);
+      expect(frame.version).toBe(applied.version);
+    } finally {
+      main.dispose();
+      await worker?.dispose();
+    }
+  });
+
+  test('frame merges cross every viewport edge and exclude frozen gaps', async () => {
+    const main = openWorkbook(chartFixture);
+    let worker: WorkbookSession | undefined;
+    try {
+      const expected = [
+        { start: { row: 0, col: 0 }, end: { row: 0, col: 1 } },
+        { start: { row: 8, col: 11 }, end: { row: 10, col: 11 } },
+        { start: { row: 11, col: 8 }, end: { row: 11, col: 10 } },
+        { start: { row: 12, col: 13 }, end: { row: 12, col: 15 } },
+        { start: { row: 13, col: 12 }, end: { row: 15, col: 12 } },
+        { start: { row: 8, col: 8 }, end: { row: 10, col: 10 } },
+        { start: { row: 1, col: 1 }, end: { row: 1, col: 10 } },
+        { start: { row: 1, col: 0 }, end: { row: 10, col: 0 } },
+        { start: { row: 11, col: 11 }, end: { row: 11, col: 12 } },
+      ];
+      const excluded = [
+        { start: { row: 3, col: 3 }, end: { row: 4, col: 4 } },
+        { start: { row: 3, col: 11 }, end: { row: 4, col: 11 } },
+        { start: { row: 12, col: 3 }, end: { row: 12, col: 4 } },
+        { start: { row: 16, col: 16 }, end: { row: 17, col: 17 } },
+      ];
+      expect(main.applyOps([
+        { type: 'setFreezePane', sheet: 0, pane: {
+          rows: 2, cols: 2, top_left: { row: 10, col: 10 },
+        } },
+        ...[...expected, ...excluded].map((range) => ({ type: 'mergeCells', sheet: 0, range })),
+      ]).applied).toBe(true);
+      worker = await session(main.save());
+      const position = main.cellPosition(0, 10, 10);
+      const frozen = main.cellRect(0, 1, 1);
+      const first = main.cellRect(0, 10, 10);
+      const end = main.cellRect(0, 14, 14);
+      const window = {
+        x: position.x + first.w / 4,
+        y: position.y + first.h / 4,
+        width: frozen.x + frozen.w + end.x - first.x - first.w / 2,
+        height: frozen.y + frozen.h + end.y - first.y - first.h / 2,
+      };
+      const frame = await worker.call.frame(window, { sheet: 0 });
+      expect(frame.displayList).toEqual(main.displayList(window));
+      expect(frame.displayList.grid?.rowIndices).toEqual([0, 1, 10, 11, 12, 13]);
+      expect(frame.displayList.grid?.colIndices).toEqual([0, 1, 10, 11, 12, 13]);
+      expect(frame.mergedRanges).toEqual(expected);
+    } finally {
+      main.dispose();
+      await worker?.dispose();
     }
   });
 
@@ -315,6 +483,16 @@ describe('workbook sessions', () => {
     }
   });
 
+  test('rejects invalid sheet indices on direct handle view reads', () => {
+    const main = openWorkbook(fixture);
+    try {
+      for (const sheet of [-1, 0.5, main.sheetCount(), 2 ** 32, NaN]) {
+        expect(() => main.visibleMergedRanges(sheet, viewport)).toThrow(RangeError);
+        expect(() => main.sheetInfoFor(sheet)).toThrow(RangeError);
+      }
+    } finally { main.dispose(); }
+  });
+
   test('rejects invalid viewports and sheet indices without changing the session', async () => {
     const worker = await session();
     try {
@@ -329,7 +507,14 @@ describe('workbook sessions', () => {
         await expect(worker.call.frame(viewport, { sheet })).rejects.toMatchObject({
           name: 'RangeError',
         });
+        await expect(worker.call.sheetView(sheet)).rejects.toMatchObject({ name: 'RangeError' });
+        await expect(worker.call.cellGeometry(sheet, 0, 0)).rejects.toMatchObject({ name: 'RangeError' });
+        await expect(worker.call.cellInputs(sheet, 'A1')).rejects.toMatchObject({ name: 'RangeError' });
       }
+      for (const [row, col] of [[-1, 0], [0.5, 0], [1048576, 0], [0, 16384], [NaN, 0]]) {
+        await expect(worker.call.cellGeometry(0, row, col)).rejects.toThrow();
+      }
+      await expect(worker.call.cellInputs(0, 'not a range')).rejects.toThrow();
       expect(worker.state).toEqual(state);
       expect(worker.failure).toBeUndefined();
       const frame = await worker.call.frame(viewport);
@@ -422,6 +607,8 @@ describe('workbook sessions', () => {
         () => client.call.validateEdits({ expectVersion: 'stale', steps: [] }),
         () => client.call.applyEdits({ expectVersion: 'stale', steps: [] }),
         () => client.call.frame(viewport),
+        () => client.call.sheetView(0), () => client.call.cellGeometry(0, 0, 0),
+        () => client.call.cellInputs(0, 'A1'),
         () => client.call.sheets(), () => client.call.calculationStatus(),
         () => client.call.save(), () => client.call.dispose(),
       ];
@@ -560,5 +747,47 @@ describe('workbook sessions', () => {
     };
     await expect(createWorkbookSession(fixture, {}, transport)).rejects.toThrow('attach');
     expect(closed).toBe(1);
+  });
+
+  test('an aborted signal closes the transport of an open in flight', async () => {
+    const pair = createInProcessPair();
+    let closed = 0;
+    const transport: SessionTransport = {
+      post: (message, transfer) => pair.client.post(message, transfer),
+      listen: (listener) => pair.client.listen(listener),
+      onError: (listener) => pair.client.onError(listener),
+      close() { closed += 1; pair.client.close(); },
+    };
+    const controller = new AbortController();
+    const opening = createWorkbookSession(fixture, { signal: controller.signal }, transport);
+    controller.abort();
+    await expect(opening).rejects.toMatchObject({
+      name: 'SessionFailure', code: 'disposed', message: 'Session was disposed',
+    });
+    expect(closed).toBeGreaterThan(0);
+  });
+
+  test('an abort after the open reply rejects before returning the session', async () => {
+    const pair = createInProcessPair();
+    const controller = new AbortController();
+    let closed = 0;
+    const transport: SessionTransport = {
+      post: (message, transfer) => pair.client.post(message, transfer),
+      listen: (listener) => pair.client.listen((message) => {
+        listener(message);
+        if (isHostMessage(message) && message.kind === 'reply' && message.ok) controller.abort();
+      }),
+      onError: (listener) => pair.client.onError(listener),
+      close() { closed += 1; pair.client.close(); },
+    };
+    const opening = createWorkbookSession(fixture, { signal: controller.signal }, transport);
+    pair.host.post({
+      protocol: 1, kind: 'reply', id: 1, ok: true,
+      value: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
+    });
+    await expect(opening).rejects.toMatchObject({
+      name: 'SessionFailure', code: 'disposed', message: 'Session was disposed',
+    });
+    expect(closed).toBeGreaterThan(0);
   });
 });

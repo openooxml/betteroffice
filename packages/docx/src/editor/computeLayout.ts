@@ -1,3 +1,4 @@
+import { layoutMetaSummary, type LayoutMetaV1 } from '../yrs/layoutMeta';
 import type { ResidentMeasurementConfig } from '../layout/measure';
 import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
@@ -194,10 +195,17 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
  * to lay the document out on this thread first.
  */
 export function workerLayoutComputation(
-  layoutJson: string,
-  layoutRevision?: number
+  layoutReply: string | LayoutMetaV1,
+  layoutRevision?: number,
+  headersFooters?: string
 ): LayoutComputation {
-  const output = JSON.parse(layoutJson) as ResidentRegionLayoutRetainedOutput;
+  const output: ResidentRegionLayoutRetainedOutput = typeof layoutReply === 'string'
+    ? JSON.parse(layoutReply) as ResidentRegionLayoutRetainedOutput
+    : {
+        layout: layoutMetaSummary(layoutReply),
+        notesConverged: layoutReply.notesConverged,
+        headersFooters: JSON.parse(layoutReply.headersFooters ?? headersFooters ?? 'null') ?? undefined,
+      };
   const unavailable = (): never => {
     throw new Error('the measured blocks of a worker-run layout live in the worker');
   };

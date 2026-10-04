@@ -94,6 +94,8 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
+import { deriveLimits, scaledRect } from './viewer/sessionGeometry';
+import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -164,6 +166,23 @@ export interface XlsxEditorApi {
   applyEdits: (request: XlsxEditRequest) => Promise<XlsxEditResult>;
 }
 
+/** @experimental */
+export interface XlsxWorkerViewerApi extends Omit<
+  XlsxEditorApi, 'handle' | 'save' | 'selectCells' | 'version' | 'readCells' |
+  'findText' | 'validateEdits' | 'applyEdits'
+> {
+  handle: null;
+  save: () => null;
+  selectCells: (sheet: number, selection: Selection) => false;
+  saveAsync: () => Promise<Uint8Array | null>;
+  selectCellsAsync: (sheet: number, selection: Selection) => Promise<boolean>;
+  version: () => Promise<string | null>;
+  readCells: (request: XlsxReadRequest) => Promise<XlsxReadResult | null>;
+  findText: (request: XlsxFindRequest) => Promise<XlsxFindResult | null>;
+  validateEdits: (request: XlsxEditRequest) => Promise<XlsxValidationResult | null>;
+  applyEdits: (request: XlsxEditRequest) => Promise<XlsxEditResult | null>;
+}
+
 function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
   return {
     ok: false,
@@ -230,6 +249,14 @@ export interface XlsxEditorProps extends XlsxEditorPluginProps {
   /** `false` hides the toolbar region, whatever `toolbar` is. */
   showToolbar?: boolean;
 }
+
+/** @experimental */
+export type XlsxWorkerViewerProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly' | 'collaboration'> & {
+  readOnly: true;
+  experimentalWorkerOpen: true;
+  onError?: (error: Error) => void;
+  onReady?: (api: XlsxWorkerViewerApi) => void | (() => void);
+};
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
 interface EditState {
@@ -301,34 +328,6 @@ function buildDemoDisplayList(width: number, height: number, cellText: string): 
   return { width, height, commands };
 }
 
-// median of the gaps between consecutive offsets, or a fallback when the window
-// has no tracks. the median ignores outliers like a single very wide column, so
-// the extent-to-count estimate below is not skewed by one atypical track.
-function medianTrack(offsets: number[] | undefined, fallback: number): number {
-  if (!offsets || offsets.length < 2) return fallback;
-  const gaps: number[] = [];
-  for (let i = 1; i < offsets.length; i++) gaps.push(offsets[i] - offsets[i - 1]);
-  gaps.sort((a, b) => a - b);
-  const mid = gaps[gaps.length >> 1];
-  return mid > 0 ? mid : fallback;
-}
-
-// derive nav bounds from the scrollable extent: rows/cols estimated from the
-// content size over a representative (median) track size, rowsPerPage from the
-// viewport. a slack of one keeps the row/col just past the used edge reachable.
-function deriveLimits(
-  dl: DisplayList | null,
-  info: SheetInfo,
-  viewportHeight: number
-): SelectionLimits {
-  const rowH = medianTrack(dl?.grid?.rowOffsets, ROW_H);
-  const colW = medianTrack(dl?.grid?.colOffsets, COL_W);
-  const rows = Math.max(1, Math.round(info.contentHeight / rowH)) + 1;
-  const cols = Math.max(1, Math.round(info.contentWidth / colW)) + 1;
-  const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
-  return { rows, cols, rowsPerPage };
-}
-
 // trigger a browser download of a byte blob under the given name and mime type.
 function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
   const blob = new Blob([new Uint8Array(bytes)], { type: mime });
@@ -368,15 +367,6 @@ function covers(painted: PaintMark, wanted: PaintMark): boolean {
     painted.view === wanted.view &&
     painted.mutation >= wanted.mutation
   );
-}
-
-function scaledRect(rect: { x: number; y: number; w: number; h: number }, zoom: number) {
-  return {
-    x: rect.x * zoom,
-    y: rect.y * zoom,
-    w: rect.w * zoom,
-    h: rect.h * zoom,
-  };
 }
 
 const LAST_ROW = 1_048_575;
@@ -567,10 +557,16 @@ function useSyncedState<T>(initial: T) {
 /**
  * The xlsx editor React component.
  */
-export function XlsxEditor(props: XlsxEditorProps) {
+export function XlsxEditor(props: XlsxWorkerViewerProps): React.JSX.Element;
+export function XlsxEditor(props: XlsxEditorProps): React.JSX.Element;
+export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxEditorProps): React.JSX.Element {
   return (
     <LocaleProvider i18n={props.i18n}>
-      <XlsxEditorContent {...props} />
+      {'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && props.readOnly ? (
+        <XlsxSessionViewer {...props as XlsxWorkerViewerProps} />
+      ) : (
+        <XlsxEditorContent {...props as XlsxEditorProps} />
+      )}
     </LocaleProvider>
   );
 }

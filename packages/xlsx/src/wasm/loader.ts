@@ -14,7 +14,7 @@ import initWasmModule, {
 } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
-import type { ChartRegion, DisplayList } from '../display-list/types';
+import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
   XlsxCellAddress,
   XlsxEditRequest,
@@ -366,6 +366,9 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Observe owned update bytes from local commits and accepted remote updates. */
   onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
+  sheetCount(): number;
+  /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
+  sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
@@ -413,6 +416,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Searches formatted text in sheet and row order. */
   searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
+  /** Absolute sheet rectangle in unzoomed pixels. */
+  cellRect(sheet: number, row: number, col: number): Rect;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -421,6 +426,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   captureFormat(sheet: number, range: string): CapturedFormat;
   applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
   mergedRanges(sheet: number, range: string): MergedRange[];
+  visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
   /**
    * render the current sheet viewport to png bytes via the native raster
@@ -721,6 +727,15 @@ export function openWorkbook(
     sheetInfo(): SheetInfo {
       return parseJson(() => doc.sheetInfoJson());
     },
+    sheetCount(): number {
+      return wasmCall(() => doc.sheetCount());
+    },
+    sheetInfoFor(sheet: number): SheetInfo {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      return parseJson(() => doc.sheetInfoForJson(sheet));
+    },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
@@ -797,6 +812,9 @@ export function openWorkbook(
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
+    cellRect(sheet: number, row: number, col: number): Rect {
+      return parseJson(() => doc.cellRectJson(JSON.stringify({ sheet, row, col })));
+    },
     rangeCells(sheet: number, range: string): CellEdit[][] {
       const parsed = parseJson<{ cells: CellEdit[][] }>(() =>
         doc.rangeCellsJson(JSON.stringify({ sheet, range }))
@@ -835,6 +853,15 @@ export function openWorkbook(
     mergedRanges(sheet: number, range: string): MergedRange[] {
       const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
         doc.mergedRangesJson(JSON.stringify({ sheet, range }))
+      );
+      return parsed.ranges;
+    },
+    visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[] {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
+        doc.visibleMergedRangesJson(sheet, JSON.stringify(viewport))
       );
       return parsed.ranges;
     },

@@ -33,6 +33,7 @@ use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
     chart_at_point, display_text, moved_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 use crate::authority::{
@@ -1010,6 +1011,44 @@ impl Workbook {
         ))
     }
 
+    pub fn sheet_info_for(&self, sheet: SheetId) -> Result<SheetInfo> {
+        if sheet == self.active_sheet {
+            return self.sheet_info();
+        }
+        let sheet_ref = self.sheet(sheet)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let content = sheet_content(sheet_ref.used_range(), sheet_ref.freeze_pane, &geometry);
+        Ok(SheetInfo {
+            sheet_ids: self.sheet_keys(),
+            sheet_names: self
+                .model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect(),
+            active_sheet: sheet,
+            content_width: content.width,
+            content_height: content.height,
+            frozen_rows: content.frozen_rows,
+            frozen_cols: content.frozen_cols,
+            initial_scroll_x: content.initial_scroll_x,
+            initial_scroll_y: content.initial_scroll_y,
+        })
+    }
+
+    pub fn cell_rect(&self, sheet: SheetId, cell: CellRef) -> Result<xlsx_render::Rect> {
+        validate_cell_ref(cell)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let x = geometry.col_x(cell.col);
+        let y = geometry.row_y(cell.row);
+        Ok(xlsx_render::Rect {
+            x,
+            y,
+            w: geometry.col_x(cell.col + 1) - x,
+            h: geometry.row_y(cell.row + 1) - y,
+        })
+    }
+
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
@@ -1243,6 +1282,20 @@ impl Workbook {
             .copied()
             .filter(|merged| ranges_intersect(*merged, range))
             .collect())
+    }
+
+    pub fn visible_merged_ranges(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<Vec<CellRange>> {
+        let sheet_ref = self.sheet(sheet)?;
+        validate_viewport(viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(sheet_ref, &geometry, viewport)?;
+        Ok(visible_merged_ranges_with_geometry(
+            sheet_ref, viewport, &geometry,
+        ))
     }
 
     pub fn edit_cell(
@@ -4080,6 +4133,72 @@ fn invalidates_proposals(op: &Op) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_merged_ranges_include_viewport_edges_and_exclude_frozen_gaps() {
+        let mut sheet = Sheet::new("Frozen");
+        sheet.freeze_pane = Some(FreezePane::new(2, 2, CellRef::new(10, 10)));
+        let expected: Vec<_> = [
+            "A1:B1", "L9:L11", "I12:K12", "N13:P13", "M14:M16", "I9:K11", "B2:K2", "A2:A11",
+            "L12:M12",
+        ]
+        .into_iter()
+        .map(|range| CellRange::parse_a1(range).unwrap())
+        .collect();
+        sheet.merges = expected.clone();
+        sheet.merges.extend(
+            ["D4:E5", "L4:L5", "D13:E13", "Q17:R18"]
+                .into_iter()
+                .map(|range| CellRange::parse_a1(range).unwrap()),
+        );
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
+        let col_width = geometry.col_x(11) - geometry.col_x(10);
+        let row_height = geometry.row_y(11) - geometry.row_y(10);
+        let viewport = Viewport {
+            x: geometry.col_x(10) - geometry.col_x(2) + col_width / 4.0,
+            y: geometry.row_y(10) - geometry.row_y(2) + row_height / 4.0,
+            width: geometry.col_x(2) + geometry.col_x(14) - geometry.col_x(10) - col_width / 2.0,
+            height: geometry.row_y(2) + geometry.row_y(14) - geometry.row_y(10) - row_height / 2.0,
+        };
+        let workbook = Workbook::from_model(WorkbookModel {
+            sheets: vec![Sheet::new("First"), sheet],
+            ..Default::default()
+        })
+        .unwrap();
+        let version = workbook.version();
+        let saved = workbook.save().unwrap();
+        let grid = workbook
+            .display_list_for(SheetId(1), &viewport)
+            .unwrap()
+            .grid;
+        assert_eq!(grid.row_indices.unwrap(), [0, 1, 10, 11, 12, 13]);
+        assert_eq!(grid.col_indices.unwrap(), [0, 1, 10, 11, 12, 13]);
+        assert_eq!(
+            workbook
+                .visible_merged_ranges(SheetId(1), &viewport)
+                .unwrap(),
+            expected
+        );
+        assert!(
+            workbook
+                .visible_merged_ranges(SheetId(2), &viewport)
+                .is_err()
+        );
+        assert!(
+            workbook
+                .visible_merged_ranges(
+                    SheetId(1),
+                    &Viewport {
+                        width: 0.0,
+                        ..viewport
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(workbook.active_sheet(), SheetId(0));
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.save().unwrap(), saved);
+    }
 
     #[test]
     fn contains_lowercased_matches_std_lowercase_semantics() {

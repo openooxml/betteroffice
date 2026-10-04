@@ -6,7 +6,8 @@ import {
   type SessionTransport,
 } from '../../../../shared/office-session';
 import {
-  initWasm, openWorkbook, workbookDisplayListJson, type SheetInfo, type WorkbookHandle,
+  initWasm, openWorkbook, workbookDisplayListJson,
+  type SheetInfo, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_POLICIES,
@@ -45,6 +46,12 @@ export function createWorkbookSessionHost(
     opened?.dispose();
   }
 
+  function checkSheet(opened: WorkbookHandle, sheet: number): void {
+    if (!Number.isInteger(sheet) || sheet < 0 || sheet >= opened.sheetCount()) {
+      throw new RangeError('Sheet index is out of range');
+    }
+  }
+
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
@@ -81,16 +88,41 @@ export function createWorkbookSessionHost(
     },
     frame(_, viewport, options = {}) {
       const opened = workbook();
-      const info = opened.sheetInfo();
-      const sheet = options.sheet === undefined ? info.activeSheet : options.sheet;
-      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= info.sheetIds.length) {
-        throw new RangeError('Sheet index is out of range');
-      }
-      const buffer = encoder.encode(workbookDisplayListJson(opened, viewport, options.sheet)).buffer;
+      const sheet = options.sheet === undefined ? opened.sheetInfo().activeSheet : options.sheet;
+      checkSheet(opened, sheet);
+      const json = workbookDisplayListJson(opened, viewport, options.sheet);
+      const mergedRanges = opened.visibleMergedRanges(sheet, viewport);
+      const buffer = encoder.encode(json).buffer;
       epoch += 1;
       return transferable({
-        displayList: buffer, version: opened.version(), epoch, sheet, viewport,
+        displayList: buffer, version: opened.version(), epoch, sheet, viewport, mergedRanges,
       }, [buffer]);
+    },
+    sheetView(_, sheet) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
+        opened.sheetInfoFor(sheet);
+      const edge = opened.cellRect(sheet, Math.max(0, frozenRows - 1), Math.max(0, frozenCols - 1));
+      return {
+        sheet, version: opened.version(), contentWidth, contentHeight, frozenRows, frozenCols,
+        initialScrollX, initialScrollY,
+        frozenWidth: frozenCols === 0 ? 0 : edge.x + edge.w,
+        frozenHeight: frozenRows === 0 ? 0 : edge.y + edge.h,
+      };
+    },
+    cellGeometry(_, sheet, row, col) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return {
+        sheet, version: opened.version(), rect: opened.cellRect(sheet, row, col),
+        scrollPosition: opened.cellPosition(sheet, row, col),
+      };
+    },
+    cellInputs(_, sheet, range) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return { sheet, version: opened.version(), cells: opened.rangeCells(sheet, range) };
     },
     sheets: () => sheets(workbook().sheetInfo()),
     calculationStatus: () => workbook().calculationStatus(),

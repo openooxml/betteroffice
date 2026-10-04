@@ -26,6 +26,22 @@ struct SheetInfo {
     initial_scroll_y: f32,
 }
 
+impl From<betteroffice_xlsx::SheetInfo> for SheetInfo {
+    fn from(info: betteroffice_xlsx::SheetInfo) -> Self {
+        Self {
+            sheet_ids: info.sheet_ids,
+            sheet_names: info.sheet_names,
+            active_sheet: info.active_sheet.0,
+            content_width: info.content_width,
+            content_height: info.content_height,
+            frozen_rows: info.frozen_rows,
+            frozen_cols: info.frozen_cols,
+            initial_scroll_x: info.initial_scroll_x,
+            initial_scroll_y: info.initial_scroll_y,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct EditArgs {
     sheet: u32,
@@ -433,6 +449,18 @@ impl Session {
         serde_json::to_string(&self.sheet_info()?).map_err(|error| error.to_string())
     }
 
+    pub fn sheet_count(&self) -> usize {
+        self.workbook.sheet_count()
+    }
+
+    pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, String> {
+        let info = self
+            .workbook
+            .sheet_info_for(SheetId(sheet))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&SheetInfo::from(info)).map_err(|error| error.to_string())
+    }
+
     pub fn calculation_status_json(&self) -> Result<String, String> {
         serde_json::to_string(&CalculationStatus {
             limited_cells: self.changed_list(&self.workbook.last_calculation().limited_cells),
@@ -611,6 +639,16 @@ impl Session {
         serde_json::to_string(&CellPosition { x, y }).map_err(|error| error.to_string())
     }
 
+    pub fn cell_rect_json(&self, args: &str) -> Result<String, String> {
+        let args: CellArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad cell args: {error}"))?;
+        let rect = self
+            .workbook
+            .cell_rect(SheetId(args.sheet), CellRef::new(args.row, args.col))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&rect).map_err(|error| error.to_string())
+    }
+
     pub fn range_cells_json(&self, args: &str) -> Result<String, String> {
         let args: RangeArgs =
             serde_json::from_str(args).map_err(|error| format!("bad range args: {error}"))?;
@@ -720,6 +758,20 @@ impl Session {
         let ranges = self
             .workbook
             .merged_ranges(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
+    }
+
+    pub fn visible_merged_ranges_json(
+        &self,
+        sheet: u32,
+        viewport_json: &str,
+    ) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let ranges = self
+            .workbook
+            .visible_merged_ranges(SheetId(sheet), &viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
     }
@@ -880,17 +932,7 @@ impl Session {
     fn sheet_info(&self) -> Result<SheetInfo, String> {
         self.workbook
             .sheet_info()
-            .map(|info| SheetInfo {
-                sheet_ids: info.sheet_ids,
-                sheet_names: info.sheet_names,
-                active_sheet: info.active_sheet.0,
-                content_width: info.content_width,
-                content_height: info.content_height,
-                frozen_rows: info.frozen_rows,
-                frozen_cols: info.frozen_cols,
-                initial_scroll_x: info.initial_scroll_x,
-                initial_scroll_y: info.initial_scroll_y,
-            })
+            .map(SheetInfo::from)
             .map_err(|error| error.to_string())
     }
 
@@ -1107,6 +1149,55 @@ mod tests {
             text_command(&display_value(&session), "15");
             assert_eq!(session.save().unwrap(), source);
         }
+    }
+
+    #[test]
+    fn sheet_view_json_reads_preserve_active_sheet_version_and_saved_bytes() {
+        let bytes = sample_xlsx();
+        let mut session = Session::open(&bytes, None).unwrap();
+        let mut reference = Session::open(&bytes, None).unwrap();
+        let info = session.sheet_info_json().unwrap();
+        let version = session.document_version();
+        let saved = session.save().unwrap();
+        reference.set_active_sheet(1).unwrap();
+        assert_eq!(
+            session.sheet_info_for_json(1).unwrap(),
+            reference.sheet_info_json().unwrap()
+        );
+        let rect: serde_json::Value = serde_json::from_str(
+            &session
+                .cell_rect_json(r#"{"sheet":1,"row":3,"col":2}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        let at: serde_json::Value = serde_json::from_str(
+            &session
+                .cell_position_json(r#"{"sheet":1,"row":3,"col":2}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rect["x"], at["x"]);
+        assert_eq!(rect["y"], at["y"]);
+        assert!(rect["w"].as_f64().unwrap() > 0.0);
+        assert!(rect["h"].as_f64().unwrap() > 0.0);
+        assert!(session.sheet_info_for_json(2).is_err());
+        assert!(
+            session
+                .cell_rect_json(r#"{"sheet":1,"row":1048576,"col":0}"#)
+                .is_err()
+        );
+        assert_eq!(session.sheet_info_json().unwrap(), info);
+        assert_eq!(session.document_version(), version);
+        assert_eq!(session.save().unwrap(), saved);
+        session
+            .edit_cell_json(r#"{"sheet":1,"row":70,"col":20,"input":"grown"}"#, None)
+            .unwrap();
+        assert_ne!(session.document_version(), version);
+        assert_ne!(
+            session.sheet_info_for_json(1).unwrap(),
+            reference.sheet_info_json().unwrap()
+        );
+        assert_eq!(session.workbook.active_sheet(), SheetId(0));
     }
 
     #[test]
