@@ -2534,7 +2534,9 @@ test.each([
       ...(status === 'ok' ? { layoutJson } : {}),
     });
     if (status === 'stale' && session === 'a viewer') {
-      await expect(act(() => pass)).rejects.toBeInstanceOf(SupersededPreviewError);
+      await act(async () => {
+        await expect(pass).rejects.toBeInstanceOf(SupersededPreviewError);
+      });
     } else if (status === 'stale') {
       expect(await act(() => pass)).toBeNull();
     } else {
