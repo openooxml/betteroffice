@@ -990,13 +990,15 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
   const handoffFromRef = useRef<YrsSession | null>(null);
+  const viewerSessionRef = useRef(false);
   const canvasRenderer = useCanvasRenderer(
     rustFontChainsProviderRef,
     resolvedIdsForRender,
     () => pagedEditorRef.current?.relayout(),
     memoryBudget?.workerLimitBytes,
     handoffFromRef,
-    experimentalWorkerOpen
+    experimentalWorkerOpen,
+    viewerSessionRef
   );
   // The full session failing to lay out or render as it opens fails the
   // load, which reports it. Each render error is handled once: one the
@@ -1239,6 +1241,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const workerProposals = modeReadOnly && !collaboration;
   // A viewer session holds no document here: selection, copy and point reads go to the worker.
   const viewerSession = useViewerSession(Boolean(experimentalWorkerOpen), workerProposals, yrsSeedGeneration);
+  viewerSessionRef.current = viewerSession;
   // Hit testing answers from the first painted page once the query engine has loaded.
   useEffect(() => {
     if (viewerSession) void loadRustDisplayListQueryEngine().catch(() => {});

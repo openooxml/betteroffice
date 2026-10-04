@@ -1202,6 +1202,42 @@ fn persisted_receipt_json(session_id: &str, persisted: &PersistedParagraphIds) -
     json!({ "status": "applied", "assignments": assignments, "diagnostics": diagnostics })
 }
 
+#[wasm_bindgen]
+pub struct RetainedLayoutMeta {
+    inner: crate::engine::RetainedLayoutMeta,
+}
+
+#[wasm_bindgen]
+impl RetainedLayoutMeta {
+    #[wasm_bindgen(getter)]
+    pub fn page_count(&self) -> u32 {
+        self.inner.page_count as u32
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn partial(&self) -> bool {
+        self.inner.partial
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn provisional(&self) -> bool {
+        self.inner.provisional
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn notes_converged(&self) -> bool {
+        self.inner.notes_converged
+    }
+
+    pub fn page_sizes(&self) -> Vec<f64> {
+        self.inner.page_sizes.clone()
+    }
+
+    pub fn layout_shell_json(&self) -> String {
+        self.inner.layout_shell_json.clone()
+    }
+}
+
 /// One yrs replica of the DOCX editing model, held for a JS host.
 ///
 /// Owns the [`EditingDoc`] plus the (single) JS update observer. The JS facade
@@ -1792,6 +1828,23 @@ impl EditSession {
         let _fonts = self.fonts.enter();
         self.engine
             .layout_document_with_regions_retained_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    pub fn layout_document_with_regions_retained_meta(
+        &self,
+        input: &str,
+    ) -> Result<RetainedLayoutMeta, JsValue> {
+        let _fonts = self.fonts.enter();
+        self.engine
+            .layout_document_with_regions_retained_meta(input)
+            .map(|inner| RetainedLayoutMeta { inner })
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    pub fn retained_layout_json(&self) -> Result<String, JsValue> {
+        self.engine
+            .retained_layout_json()
             .map_err(|error| JsValue::from_str(&error))
     }
 

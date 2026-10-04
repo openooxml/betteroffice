@@ -1,3 +1,4 @@
+import { readRetainedLayoutMeta } from './layoutMeta';
 import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
@@ -54,6 +55,8 @@ export type ResidentEngineSession = Pick<
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
   | 'layoutDocumentWithRegionsRetainedJson'
+  | 'layoutDocumentWithRegionsRetainedMeta'
+  | 'retainedLayoutJson'
   | 'loadMediaSources'
   | 'loadNoteSeparators'
   | 'loadState'
@@ -357,6 +360,9 @@ export async function createResidentEngineSession(
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
     layoutDocumentWithRegionsRetainedJson: (input) =>
       session.layout_document_with_regions_retained_json(input),
+    layoutDocumentWithRegionsRetainedMeta: (input) =>
+      readRetainedLayoutMeta(session.layout_document_with_regions_retained_meta(input)),
+    retainedLayoutJson: () => session.retained_layout_json(),
     beginRegionLayout: (input) =>
       JSON.parse(session.begin_region_layout(input)) as YrsRegionLayoutProgress,
     resumeRegionLayout: (blocks) =>

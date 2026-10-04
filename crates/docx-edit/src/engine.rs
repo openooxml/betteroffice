@@ -112,6 +112,8 @@ struct ResidentRegionState {
     /// [`layout_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
+    notes_converged: bool,
+    provisional: bool,
     /// Inputs retained from the last full region pass so a plain body-text
     /// edit can relayout residently. `None` when the pass was not
     /// resident-body or the document shape rules the fast path out.
@@ -173,6 +175,15 @@ enum NoteSettlement {
     Covering(Vec<usize>),
     /// Some page's notes take more space than the layout reserves for them.
     Unsettled,
+}
+
+pub struct RetainedLayoutMeta {
+    pub page_count: usize,
+    pub partial: bool,
+    pub provisional: bool,
+    pub notes_converged: bool,
+    pub page_sizes: Vec<f64>,
+    pub layout_shell_json: String,
 }
 
 struct RegionPass {
@@ -2733,6 +2744,54 @@ impl EngineSession {
         self.layout_regions_retained_json(input_json, None)
     }
 
+    pub fn layout_document_with_regions_retained_meta(
+        &self,
+        input_json: &str,
+    ) -> Result<RetainedLayoutMeta, String> {
+        let pass = self.layout_regions(input_json, None)?;
+        let mut pagination = self.pagination.borrow_mut();
+        let layout = pagination
+            .layout
+            .as_mut()
+            .expect("layout retained after region layout");
+        let fragments: Vec<_> = layout
+            .pages
+            .iter_mut()
+            .map(|page| std::mem::take(&mut page.fragments))
+            .collect();
+        let layout_shell_json = serde_json::to_string(&*layout);
+        for (page, fragments) in layout.pages.iter_mut().zip(fragments) {
+            page.fragments = fragments;
+        }
+        let layout_shell_json = layout_shell_json.map_err(|error| format!("serialize: {error}"))?;
+        Ok(RetainedLayoutMeta {
+            page_count: layout.pages.len(),
+            partial: layout.partial,
+            provisional: pass.provisional,
+            notes_converged: pass.notes_converged,
+            page_sizes: layout
+                .pages
+                .iter()
+                .flat_map(|page| [page.size.w, page.size.h])
+                .collect(),
+            layout_shell_json,
+        })
+    }
+
+    pub fn retained_layout_json(&self) -> Result<String, String> {
+        let pass = {
+            let regions = self.regions.borrow();
+            let state = regions
+                .as_ref()
+                .ok_or("resident region layout is not built")?;
+            RegionPass {
+                notes_converged: state.notes_converged,
+                provisional: state.provisional,
+            }
+        };
+        self.retained_region_layout_json(&pass)
+    }
+
     /// [`Self::layout_document_with_regions_retained_json`] for a caller that
     /// reads only the retained state: the layout is not serialized.
     pub fn layout_document_with_regions_retained(&self, input_json: &str) -> Result<(), String> {
@@ -3411,6 +3470,8 @@ impl EngineSession {
             request_json: input_json,
             request_fingerprint,
             headers_footers,
+            notes_converged,
+            provisional,
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),
@@ -13163,6 +13224,57 @@ mod tests {
             "renderEnv": {}
         });
         (engine, request, deletion.revision_ids[0].clone())
+    }
+
+    #[test]
+    fn retained_layout_meta_matches_json_with_regions_and_notes() {
+        let (engine, request, _) = selective_display_engine();
+        let request = request.to_string();
+        let json = engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let meta = engine
+            .layout_document_with_regions_retained_meta(&request)
+            .unwrap();
+        let pages = output["layout"]["pages"].as_array().unwrap();
+        assert!(pages.len() > 1);
+        assert!(output["headersFooters"]["variants"].as_array().unwrap().len() >= 2);
+        assert!(pages.iter().any(|page| page["noteAreas"]
+            .as_array()
+            .is_some_and(|areas| !areas.is_empty())));
+        assert_eq!(meta.page_count, pages.len());
+        assert_eq!(
+            meta.partial,
+            output["layout"]["partial"].as_bool().unwrap_or(false)
+        );
+        assert_eq!(
+            meta.provisional,
+            output["provisional"].as_bool().unwrap_or(false)
+        );
+        assert_eq!(
+            meta.notes_converged,
+            output["notesConverged"].as_bool().unwrap()
+        );
+        assert_eq!(meta.page_sizes.len(), pages.len() * 2);
+        for (index, page) in pages.iter().enumerate() {
+            assert_eq!(
+                meta.page_sizes[index * 2].to_bits(),
+                page["size"]["w"].as_f64().unwrap().to_bits()
+            );
+            assert_eq!(
+                meta.page_sizes[index * 2 + 1].to_bits(),
+                page["size"]["h"].as_f64().unwrap().to_bits()
+            );
+        }
+        let shell: serde_json::Value = serde_json::from_str(&meta.layout_shell_json).unwrap();
+        let mut expected_shell = output["layout"].clone();
+        for page in expected_shell["pages"].as_array_mut().unwrap() {
+            page["fragments"] = serde_json::json!([]);
+        }
+        assert_eq!(shell, expected_shell);
+        assert_eq!(engine.retained_layout_json().unwrap(), json);
+        docx_layout::clear_measure_fonts();
     }
 
     #[test]

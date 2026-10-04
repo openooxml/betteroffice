@@ -1,3 +1,4 @@
+import type { LayoutMetaV1 } from './layoutMeta';
 import type {
   YrsEngineApplyProfile,
   YrsResidentCaretSnapshot,
@@ -51,6 +52,7 @@ export interface ResidentEngineWorkerFrame {
   deletedUnits: number;
   /** The region layout the worker ran, when the request handed it the layout. */
   layoutJson?: string;
+  layoutMeta?: LayoutMetaV1 | { v: number };
   /** `layoutJson` covers only the first pages; `completeLayout` finishes it. */
   layoutProvisional?: boolean;
 }
@@ -59,6 +61,8 @@ export interface ResidentEngineWorkerFrame {
 export interface ResidentEngineWorkerLayoutOptions {
   /** Display extras minus the header/footer payload the worker's layout supplies. */
   layoutExtras?: string;
+  layoutReply?: 'meta';
+  headersFootersEpoch?: number;
   /** The host state vector the snapshot brings the worker to. */
   stateVector?: Uint8Array;
   /** Lay out just the body's first pages before replying. */
@@ -101,6 +105,7 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
 const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
   'sync',
+  'layoutJson',
   'buildFrame',
   'releasePages',
   'applyInput',
@@ -395,6 +400,15 @@ export class ResidentEngineWorkerClient {
     return reply;
   }
 
+  async layoutJson(layoutRevision: number): Promise<{ status: 'ok'; layoutJson: string } | { status: 'stale' }> {
+    const response = await this.request({ type: 'layoutJson', layoutRevision });
+    if (response.layoutJsonStatus === 'stale') return { status: 'stale' };
+    if (response.layoutJsonStatus !== 'ok' || response.layoutJson === undefined) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its retained layout');
+    }
+    return { status: 'ok', layoutJson: response.layoutJson };
+  }
+
   /** @internal */
   async proposal(operation: ResidentProposalOperation): Promise<ResidentProposalReply> {
     if (!this.bootstrapped) {
@@ -530,6 +544,8 @@ export class ResidentEngineWorkerClient {
         extras,
         expectedFrameEpoch: options.frameEpoch ?? 0,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.layoutReply ? { layoutReply: options.layoutReply } : {}),
+        ...(options.headersFootersEpoch !== undefined ? { headersFootersEpoch: options.headersFootersEpoch } : {}),
         ...(options.displayWindow
           ? {
               displayWindow: options.displayWindow,
@@ -581,6 +597,8 @@ export class ResidentEngineWorkerClient {
         expectedFrameEpoch,
         paintCaret,
         ...(options.layoutExtras !== undefined ? { layoutExtras: options.layoutExtras } : {}),
+        ...(options.layoutReply ? { layoutReply: options.layoutReply } : {}),
+        ...(options.headersFootersEpoch !== undefined ? { headersFootersEpoch: options.headersFootersEpoch } : {}),
         ...(options.provisionalPages !== undefined
           ? { provisionalPages: options.provisionalPages }
           : {}),
@@ -915,6 +933,7 @@ function frameResult(
     ...(response.documentAsOpened === undefined ? {} : { documentAsOpened: response.documentAsOpened }),
     deletedUnits: response.deletedUnits ?? 0,
     ...(response.layoutJson !== undefined ? { layoutJson: response.layoutJson } : {}),
+    ...(response.layoutMeta !== undefined ? { layoutMeta: response.layoutMeta } : {}),
     ...(response.layoutProvisional ? { layoutProvisional: true } : {}),
   };
 }

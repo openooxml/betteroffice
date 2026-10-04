@@ -1,3 +1,4 @@
+import type { LayoutMetaV1 } from './layoutMeta';
 import type {
   YrsEngineApplyProfile,
   YrsLoc,
@@ -138,6 +139,8 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       layoutExtras?: string;
+      layoutReply?: 'meta';
+      headersFootersEpoch?: number;
       /** Pages `[start, end)` a full build compiles; the rest stay unbuilt. */
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
@@ -175,6 +178,7 @@ export type ResidentEngineWorkerRequest =
       previewParagraphBudget?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
+  | { id: number; type: 'layoutJson'; layoutRevision: number }
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
@@ -198,6 +202,8 @@ export type ResidentEngineWorkerRequest =
        * from the layout it runs and returns that layout as `layoutJson`.
        */
       layoutExtras?: string;
+      layoutReply?: 'meta';
+      headersFootersEpoch?: number;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
       provisionalPages?: number;
@@ -317,6 +323,8 @@ export type ResidentEngineWorkerResponse = (
       stateVector?: ArrayBuffer;
       /** The region layout the worker ran, for a request carrying `layoutExtras`. */
       layoutJson?: string;
+      layoutMeta?: LayoutMetaV1 | { v: number };
+      layoutJsonStatus?: 'ok' | 'stale';
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
       /** An `open` reply: the opened package's host metadata JSON. */
