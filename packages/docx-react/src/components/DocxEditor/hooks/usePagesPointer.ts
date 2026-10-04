@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import type { CaretPosition, SelectionRect } from '@betteroffice/docx/layout';
 import type { WrapType } from '@betteroffice/docx/docx/wrapTypes';
@@ -51,6 +51,14 @@ interface ImageInfo {
   inlinePositionEmu?: { horizontalEmu: number; verticalEmu: number };
 }
 
+interface QueuedGesture {
+  queries: DisplayListQueries;
+  anchor: CanvasPointHit;
+  head: CanvasPointHit;
+  kind: 'caret' | 'range' | 'word' | 'paragraph';
+  dragging: boolean;
+}
+
 export interface UsePagesPointerOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
@@ -68,6 +76,8 @@ export interface UsePagesPointerOptions {
   syncYrsInputState: (docChanged: boolean) => boolean;
   readOnly: boolean;
   inputScope?: number;
+  queueInput?: boolean;
+  inputQueries?: DisplayListQueries | null;
   replicaPending?: () => boolean;
   replicaReady?: boolean;
   /** the non-body part open for editing — the body is inert behind it */
@@ -199,6 +209,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     syncYrsInputState,
     readOnly,
     inputScope,
+    queueInput = false,
+    inputQueries,
     replicaPending,
     replicaReady = true,
     partEdit = null,
@@ -227,6 +239,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     epoch: number;
   } | null>(null);
   const pendingGestureCleanupRef = useRef<(() => void) | null>(null);
+  const queuedGestureRef = useRef<QueuedGesture | null>(null);
   const clearPendingGesture = useCallback(() => {
     pendingGestureRef.current = null;
     pendingGestureCleanupRef.current?.();
@@ -286,10 +299,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     };
   }, [bumpInputEpoch, canvasHostRef, pagesContainerRef, yrsInputRef]);
   const gestureScope = inputScope ?? yrsSession;
+  const gestureScopeRef = useRef(gestureScope);
+  gestureScopeRef.current = gestureScope;
   useEffect(() => {
     clearPendingGesture();
     isDraggingRef.current = false;
     dragAnchorRef.current = null;
+    queuedGestureRef.current = null;
     return clearPendingGesture;
   }, [clearPendingGesture, gestureScope]);
   const pendingPartCaretRef = useRef<{
@@ -417,6 +433,60 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
+  const prepareQueuedGestureRef = useRef<(gesture: QueuedGesture) => () => void>(() => () => {});
+  prepareQueuedGestureRef.current = (gesture) => {
+    const position = (point: CanvasPointHit) => {
+      const hit = point.hit ?? gesture.queries.hitTestRegions(point.pageIndex, point.x, point.y);
+      return hit?.region === 'body' ? hit.pos : null;
+    };
+    const anchor = position(gesture.anchor);
+    const head = position(gesture.head);
+    const anchorTarget = anchor == null ? null : resolveTarget(anchor);
+    const headTarget = head == null ? null : resolveTarget(head);
+    if (!anchorTarget || !headTarget || anchorTarget.story !== headTarget.story) return () => {};
+    const kind = anchor !== head ? 'range' : gesture.kind;
+    const apply = yrsInputRef.current?.captureSelectionFromDisplay?.(
+      anchorTarget.displayPosition, headTarget.displayPosition, anchorTarget.story, kind
+    );
+    return () => {
+      if (queuedGestureRef.current === gesture) queuedGestureRef.current = null;
+      if (yrsSession && anchorTarget.cell && headTarget.cell && sameYrsTable(anchorTarget.cell, headTarget.cell)) {
+        yrsSession.setCellSelection({ anchor: anchorTarget.cell, head: headTarget.cell });
+      }
+      apply?.();
+      yrsInputRef.current?.keepSelectionInPlace();
+    };
+  };
+  const beginQueuedGesture = useCallback((e: React.MouseEvent): boolean => {
+    queuedGestureRef.current = null;
+    if (!queueInput || partEdit) return false;
+    const queries = inputQueries ?? displayListQueries;
+    const host = canvasHostRef?.current ?? pagesContainerRef.current;
+    const point = queries && host ? resolveCanvasPoint(host, queries, e.clientX, e.clientY) : null;
+    if (!queries || !point) return false;
+    if (point.hit && point.hit.region !== 'body') return false;
+    const gesture: QueuedGesture = {
+      queries, anchor: point, head: point,
+      kind: e.detail >= 3 ? 'paragraph' : e.detail === 2 ? 'word' : 'caret', dragging: true,
+    };
+    const scope = gestureScopeRef.current;
+    const queued = yrsInputRef.current?.queueSelection?.(async () => {
+      await queries.whenReady();
+      return gestureScopeRef.current === scope ? prepareQueuedGestureRef.current(gesture) : () => {};
+    }, !displayListQueries || queries.isReady?.() === false);
+    if (!queued) return false;
+    queuedGestureRef.current = gesture;
+    focusInput();
+    if (!partEdit) setIsFocused(true);
+    return true;
+  }, [canvasHostRef, displayListQueries, focusInput, inputQueries, pagesContainerRef, partEdit, queueInput, setIsFocused, yrsInputRef]);
+  const updateQueuedGesture = useCallback((clientX: number, clientY: number): void => {
+    const gesture = queuedGestureRef.current;
+    const host = canvasHostRef?.current ?? pagesContainerRef.current;
+    if (!gesture?.dragging || !host) return;
+    const point = resolveCanvasPoint(host, gesture.queries, clientX, clientY, { clampToNearestPage: true });
+    if (point) gesture.head = point;
+  }, [canvasHostRef, pagesContainerRef]);
 
   const beginTextDrag = useCallback(
     (position: number): void => {
@@ -555,6 +625,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setTableInsertButton(null);
       clearTableInsertTimer();
       e.preventDefault();
+      if (beginQueuedGesture(e)) return;
       if (readOnly) {
         const position = getPositionFromMouse(e.clientX, e.clientY);
         if (beginPendingGesture(position, e.detail)) return;
@@ -654,6 +725,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     },
     [
       beginTextDrag,
+      beginQueuedGesture,
       beginPendingGesture,
       bumpInputEpoch,
       clearPendingGesture,
@@ -755,6 +827,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handleMouseUp = useCallback(
     (e: MouseEvent) => {
+      updateQueuedGesture(e.clientX, e.clientY);
+      if (queuedGestureRef.current) queuedGestureRef.current.dragging = false;
       const wasDragging = isDraggingRef.current || yrsCellDraggingRef.current;
       // the release applies a queued drag frame now, so it cannot land after a multi-click's selection
       if (dragRafRef.current != null) {
@@ -774,7 +848,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // gets its answer here
       if (wasDragging) resolveHoverCursor(e.clientX, e.clientY);
     },
-    [getPositionFromMouse, resolveHoverCursor, stopDragAutoScroll, updatePendingGestureHead]
+    [getPositionFromMouse, resolveHoverCursor, stopDragAutoScroll, updatePendingGestureHead, updateQueuedGesture]
   );
 
   useEffect(() => {
@@ -924,6 +998,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // selection remains keyboard-ready even when the canvas host is outside
       // PagedEditor's React subtree.
       focusInput();
+      if (queuedGestureRef.current) return;
       const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
       const queries = displayListQueries;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
@@ -1199,8 +1274,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     contextmenu: handlePagesContextMenu,
   };
 
-  useEffect(() => {
-    if (!displayListQueries) return;
+  const bindCanvasHandlers = useCallback(() => {
+    if (!displayListQueries && !queueInput) return;
     const asReactEvent = (e: MouseEvent) => e as unknown as React.MouseEvent;
     const onCurrentCanvas = (e: MouseEvent): boolean => {
       const target = e.target instanceof Element ? e.target.closest('.canvas-pages') : null;
@@ -1210,6 +1285,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (onCurrentCanvas(e)) canvasHandlersRef.current.mousedown(asReactEvent(e));
     };
     const onMouseMove = (e: MouseEvent) => {
+      updateQueuedGesture(e.clientX, e.clientY);
       // no event fires once the pointer is off the pages, so the move that
       // leaves them is what drops the hover cursor
       if (onCurrentCanvas(e)) canvasHandlersRef.current.mousemove(asReactEvent(e));
@@ -1234,7 +1310,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       document.removeEventListener('click', onClick);
       document.removeEventListener('contextmenu', onContextMenu);
     };
-  }, [canvasHostRef, displayListQueries]);
+  }, [canvasHostRef, displayListQueries, queueInput, updateQueuedGesture]);
+  useLayoutEffect(() => {
+    if (queueInput) return bindCanvasHandlers();
+  }, [bindCanvasHandlers, queueInput]);
+  useEffect(() => {
+    if (!queueInput) return bindCanvasHandlers();
+  }, [bindCanvasHandlers, queueInput]);
 
   return {
     applyPendingSelection,

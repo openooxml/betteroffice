@@ -26,6 +26,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
@@ -490,7 +491,10 @@ function useHarness(props: HarnessProps) {
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
 
-async function openingEditor(workerPreview = true, viewer = false) {
+async function openingEditor(workerPreview = true, viewer = false, options: {
+  delayQueries?: boolean;
+  onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
+} = {}) {
   const isFullOpen = (request: ResidentEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
   const worker = installWorker(workerPreview
@@ -503,6 +507,24 @@ async function openingEditor(workerPreview = true, viewer = false) {
   const editor = createRef<PagedEditorRef>();
   const canvasHost = createRef<HTMLDivElement>();
   let harness!: ReturnType<typeof useHarness>;
+  let releaseQueries = () => {};
+  const queryReady = new Promise<void>((resolve) => { releaseQueries = resolve; });
+  let queriesReleased = !options.delayQueries;
+  const inputQueryFacades = new WeakMap<DisplayListQueries, DisplayListQueries>();
+  const inputQueries = (queries: DisplayListQueries | null | undefined) => {
+    if (!queries || !options.delayQueries) return queries;
+    let facade = inputQueryFacades.get(queries);
+    if (!facade) {
+      facade = {
+        ...queries,
+        isReady: () => queriesReleased && queries.isReady(),
+        whenReady: async () => { await queryReady; await queries.whenReady(); },
+        hitTestRegions: (...args) => queriesReleased ? queries.hitTestRegions(...args) : null,
+      };
+      inputQueryFacades.set(queries, facade);
+    }
+    return facade;
+  };
   const props = { ...initialProps, source: longBytes, previewFirstPage: true, workerPreview,
     hydrateOnDemand: viewer, workerProposals: viewer, readOnly: viewer };
   function Editable({ source, generation }: Pick<HarnessProps, 'source' | 'generation'>) {
@@ -515,10 +537,30 @@ async function openingEditor(workerPreview = true, viewer = false) {
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
-        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+        canvasHostRef={canvasHost} displayListQueries={queriesReleased ? harness.renderer.queries : null}
+        inputQueries={viewer ? undefined : inputQueries(harness.renderer.inputQueries)} />
     </>;
   }
   const view = render(<Editable {...props} />);
+  const click = (position: number) => {
+    const queries = harness.renderer.queries!;
+    const caret = queries.caretRect(position)!;
+    const size = queries.pageSize(0)!;
+    const canvas = canvasHost.current!.firstElementChild!;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
+      bottom: size.height, ...size }) as DOMRect;
+    const point = { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+    if (fireEvent.mouseDown(canvas, point)) (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.mouseUp(window, point);
+    fireEvent.click(canvas, point);
+  };
+  const type = (text: string) => {
+    for (const key of text) {
+      const target = document.activeElement!;
+      fireEvent.keyDown(target, { key });
+      fireEvent.input(target, { target: { value: key } });
+    }
+  };
   const waitForPreview = async (generation = 1) => {
     await waitFor(() => {
       expect(harness.core.previewing).toBe(true);
@@ -527,24 +569,16 @@ async function openingEditor(workerPreview = true, viewer = false) {
     const preview = harness.core.session!;
     act(() => harness.pipeline.runLayoutPipeline());
     await waitFor(() => expect(harness.renderer.presentedEngine).toBe(preview));
-    act(() => harness.presentFrame());
+    await waitFor(() => expect(harness.renderer.queries?.isReady()).toBe(true));
+    act(() => {
+      harness.presentFrame();
+      options.onFirstPagePainted?.({ click, type });
+    });
     return preview;
   };
   try {
     const preview = await waitForPreview();
     await waitFor(() => expect(worker.posted.some(isFullOpen)).toBe(true));
-    const click = (position: number) => {
-      const queries = harness.renderer.queries!;
-      const caret = queries.caretRect(position)!;
-      const size = queries.pageSize(0)!;
-      const canvas = canvasHost.current!.firstElementChild!;
-      canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
-        bottom: size.height, ...size }) as DOMRect;
-      const point = { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 };
-      fireEvent.mouseDown(canvas, point);
-      fireEvent.mouseUp(window, point);
-      fireEvent.click(canvas, point);
-    };
     const switchToFull = async () => {
       act(() => frames.run());
       act(() => frames.run());
@@ -577,7 +611,11 @@ async function openingEditor(workerPreview = true, viewer = false) {
       });
     };
     return {
-      ...worker, frames, editor, view, preview, click, switchToFull, presentFull, loadPeer,
+      ...worker, frames, editor, view, preview, click, type, switchToFull, presentFull, loadPeer,
+      releaseInputQueries() {
+        queriesReleased = true;
+        releaseQueries();
+      },
       get harness() { return harness; },
       async replace() {
         view.rerender(<Editable source={longBytes.slice()} generation={2} />);
@@ -587,11 +625,13 @@ async function openingEditor(workerPreview = true, viewer = false) {
       },
       close() {
         view.unmount();
+        releaseQueries();
         frames.restore();
       },
     };
   } catch (error) {
     view.unmount();
+    releaseQueries();
     frames.restore();
     throw error;
   }
@@ -740,6 +780,101 @@ test('keys typed during opening land in order, none dropped', async () => {
   }
 });
 
+test('a key typed right after the first page paints is kept', async () => {
+  const opened = await openingEditor(true, false, {
+    delayQueries: true,
+    onFirstPagePainted: ({ click, type }) => {
+      click(6);
+      type('QZXJ');
+    },
+  });
+  const insertPreview = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.preview.storyIds()).toEqual([]);
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    try {
+      expect(opened.view.getByTestId('yrs-input')).toBe(textarea);
+      expect(document.activeElement).toBe(textarea);
+      await opened.presentFull(full);
+      expect(load).not.toHaveBeenCalled();
+      opened.releaseInputQueries();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJ paragraph');
+      expect(full.selection()?.head.offset).toBe(9);
+      act(() => opened.harness.presentFrame());
+      act(() => opened.frames.run());
+      act(() => opened.frames.run());
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJ paragraph');
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(insertPreview).not.toHaveBeenCalled();
+      expect(opened.harness.mainOpens).toEqual([false]);
+      expect(opened.harness.errors).toEqual([]);
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    insertPreview.mockRestore();
+    opened.close();
+  }
+});
+
+test('two bursts typed milliseconds apart around first paint both land, in order', async () => {
+  const opened = await openingEditor(true, false, {
+    delayQueries: true,
+    onFirstPagePainted: ({ click, type }) => {
+      click(6);
+      type('QZXJ');
+      click(6);
+      type('JWKV');
+    },
+  });
+  try {
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    try {
+      await opened.presentFull(full);
+      opened.releaseInputQueries();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJJWKV paragraph');
+      expect(full.selection()?.head.offset).toBe(13);
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJJWKV paragraph');
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(opened.harness.errors).toEqual([]);
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    opened.close();
+  }
+});
+
+test('clicks interleaved with held and hydrating input keep their original positions', async () => {
+  const opened = await openingEditor();
+  try {
+    opened.click(6);
+    opened.type('QZXJ');
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.click(2);
+    opened.type('JWKV');
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('FJWKVirstQZXJ paragraph');
+    expect(full.selection()?.head.offset).toBe(5);
+    expect(opened.harness.errors).toEqual([]);
+    expect(opened.harness.mainOpens).toEqual([false]);
+  } finally {
+    opened.close();
+  }
+});
+
 test('a composition started during opening commits exactly once after the switch', async () => {
   const opened = await openingEditor();
   const insert = spyOn(opened.preview, 'insertText');
@@ -777,7 +912,7 @@ test('a composition started during opening commits exactly once after the switch
 });
 
 test('input held during opening is discarded when another document replaces it', async () => {
-  const opened = await openingEditor(false);
+  const opened = await openingEditor(false, false, { delayQueries: true });
   const insert = spyOn(opened.preview, 'insertText');
   try {
     const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
@@ -793,6 +928,7 @@ test('input held during opening is discarded when another document replaces it',
     fireEvent.input(textarea, { target: { value: 'C' } });
     const full = await opened.switchToFull();
     await opened.presentFull(full);
+    opened.releaseInputQueries();
     await opened.loadPeer(full);
     expect(full.paragraphs('body')).toHaveLength(205);
     expect(full.paragraphs('body')[0].text).toBe('CFirst paragraph');

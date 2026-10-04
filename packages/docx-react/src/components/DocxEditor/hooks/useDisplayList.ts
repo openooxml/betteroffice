@@ -3399,6 +3399,7 @@ export interface UseCanvasRendererResult {
   resolveImage: ImageResolver;
   /** Rust display-list query facade for adapter interactions. */
   queries: DisplayListQueries | null;
+  inputQueries?: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
   pageNavigation: DisplayPageNavigation;
@@ -3652,6 +3653,7 @@ export function useCanvasRenderer(
     reset,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
+    inputQueries: experimentalWorkerOpen ? snapshotQueries : null,
     resolveQueries,
     pageNavigation,
     settledDisplayList,

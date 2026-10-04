@@ -227,6 +227,7 @@ export interface PagedEditorProps {
   readOnly?: boolean;
   holdInput?: boolean;
   inputScope?: number;
+  inputQueries?: DisplayListQueries | null;
   /**
    * A viewer session's reads of the document the resident worker holds. The session holds no
    * document on this thread: selection, copy and point reads go to the worker.
@@ -545,6 +546,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly = false,
       holdInput = false,
       inputScope,
+      inputQueries,
       viewerDocumentRead: viewerDocumentReadProp,
       onViewerCommentRangesChange,
       viewerSidebarActive = true,
@@ -1633,6 +1635,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       syncYrsInputState,
       readOnly: readOnly && !holdInput,
       inputScope,
+      inputQueries,
+      queueInput: !!yrsCore.experimentalWorkerOpen && !yrsCore.hydrateOnDemand && !viewerDocumentRead,
       replicaPending: viewerDocumentRead
         ? undefined
         : () =>

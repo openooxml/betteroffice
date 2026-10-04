@@ -84,6 +84,7 @@ export function DocxEditorPagedArea({
   readOnly,
   holdInput,
   inputScope,
+  inputQueries,
   viewerDocumentRead,
   showHiddenText = false,
   onYrsContentChange,
@@ -173,6 +174,7 @@ export function DocxEditorPagedArea({
   readOnly: boolean;
   holdInput?: boolean;
   inputScope?: number;
+  inputQueries?: DisplayListQueries | null;
   /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
   viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
   showHiddenText?: boolean;
@@ -472,6 +474,7 @@ export function DocxEditorPagedArea({
         readOnly={readOnly}
         holdInput={holdInput}
         inputScope={inputScope}
+        inputQueries={inputQueries}
         viewerDocumentRead={viewerDocumentRead}
         showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}

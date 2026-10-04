@@ -2634,6 +2634,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               readOnly={readOnly}
               holdInput={holdOpeningInput}
               inputScope={yrsSeedGeneration}
+              inputQueries={viewerSession ? undefined : canvasRenderer.inputQueries}
               viewerDocumentRead={viewerSession ? canvasRenderer.readWorkerDocument : undefined}
               showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}

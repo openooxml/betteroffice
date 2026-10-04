@@ -70,6 +70,10 @@ export interface YrsInputRef {
   runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
   hasPendingInput(): boolean;
   hasHeldInput?(): boolean;
+  queueSelection?(prepare: () => Promise<() => void>, force?: boolean): boolean;
+  captureSelectionFromDisplay?(
+    anchor: number, head: number, story: string, kind: 'caret' | 'range' | 'word' | 'paragraph'
+  ): () => void;
   setSelectionFromDisplay(anchor: number, head?: number, story?: string, gesture?: number): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -175,7 +179,14 @@ const BASE_STYLE: CSSProperties = {
   caretColor: 'transparent',
 };
 
+interface HeldSelection {
+  kind: 'selection';
+  prepare: () => Promise<() => void>;
+  apply?: () => void;
+}
+
 type HeldInput =
+  | HeldSelection
   | { kind: 'text'; text: string }
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
@@ -287,11 +298,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const holdInputRef = useRef(holdInput);
   holdInputRef.current = holdInput;
   const heldInputRef = useRef({ scope: inputScope, entries: [] as HeldInput[] });
+  const pendingSelectionsRef = useRef<HeldSelection[]>([]);
   if (heldInputRef.current.scope !== inputScope) {
     if (compositionHeldRef.current && (composingRef.current || compositionPendingRef.current)) {
       discardedCompositionRef.current = true;
     }
     heldInputRef.current = { scope: inputScope, entries: [] };
+    pendingSelectionsRef.current = [];
   }
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
@@ -364,6 +377,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const replicaInputRef = useRef({ inputEpoch, applyPendingSelection });
   replicaInputRef.current = { inputEpoch, applyPendingSelection };
+  const preparePendingSelections = useCallback(
+    async (admitted: YrsSession | null, queue: InputOperationQueue | null): Promise<void> => {
+      // Bind source positions before replayed edits move them.
+      while (pendingSelectionsRef.current.length > 0 && isCurrentInput(admitted, queue)) {
+        const entries = pendingSelectionsRef.current;
+        pendingSelectionsRef.current = [];
+        for (const entry of entries) {
+          entry.apply = await entry.prepare();
+          if (!isCurrentInput(admitted, queue)) return;
+        }
+      }
+    },
+    [isCurrentInput]
+  );
   const readerScrollRef = useRef<{ waiting: number; scrolls: number; stop(): void } | null>(null);
   // Counts the reader's scrolling from now until the returned check runs.
   const watchReaderScroll = useCallback((): (() => boolean) => {
@@ -410,11 +437,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           ? awaitWorkerOpenReplica(admitted)
           : undefined;
       if (!replica) {
-        queue?.enqueue(() => {
+        const apply = () => {
           if (!isCurrentInput(admitted, queue)) return onDropped?.();
           if (replicaReadyRef?.current !== false) replicaInputRef.current.applyPendingSelection?.();
           return operation(false);
-        });
+        };
+        queue?.enqueue(() => pendingSelectionsRef.current.length > 0
+          ? preparePendingSelections(admitted, queue).then(apply)
+          : apply());
         return;
       }
       const epoch = replicaInputRef.current.inputEpoch?.();
@@ -438,6 +468,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           onDropped?.();
           return;
         }
+        if (pendingSelectionsRef.current.length > 0) await preparePendingSelections(admitted, queue);
+        if (!isCurrentInput(admitted, queue)) return onDropped?.();
         replicaInputRef.current.applyPendingSelection?.();
         await operation(true);
         if (scrolled && isCurrentInput(admitted, queue)) {
@@ -445,7 +477,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
       });
     },
-    [isCurrentInput, replicaReadyRef, sealInputBatches, session, watchReaderScroll]
+    [isCurrentInput, preparePendingSelections, replicaReadyRef, sealInputBatches, session, watchReaderScroll]
+  );
+
+  const replaySelection = useCallback((entry: HeldSelection): void => {
+    enqueueInputOperation(() => entry.apply?.(), 'mutation');
+  }, [enqueueInputOperation]);
+  const queueSelection = useCallback(
+    (prepare: HeldSelection['prepare'], force = false): boolean => {
+      if (!force && !holdInput && replicaReadyRef?.current !== false && !inputOperationQueueRef.current?.hasPending()) return false;
+      if (readOnly) return true;
+      const entry: HeldSelection = { kind: 'selection', prepare };
+      pendingSelectionsRef.current.push(entry);
+      if (!holdOperation(entry)) replaySelection(entry);
+      return true;
+    },
+    [holdInput, holdOperation, readOnly, replaySelection, replicaReadyRef]
   );
 
   const advanceInteractionEpoch = useCallback((): void => {
@@ -1130,15 +1177,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ]
   );
 
-  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll });
-  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll };
+  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection });
+  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection };
   useLayoutEffect(() => {
     if (!holdInput && !readOnly && enabled && session) {
       const entries = heldInputRef.current.entries;
       heldInputRef.current.entries = [];
       for (const entry of entries) {
         const handlers = inputHandlersRef.current;
-        if (entry.kind === 'text') handlers.insertText(entry.text);
+        if (entry.kind === 'selection') handlers.replaySelection(entry);
+        else if (entry.kind === 'text') handlers.insertText(entry.text);
         else if (entry.kind === 'split') handlers.splitParagraph();
         else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
         else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
@@ -1537,6 +1585,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     return () => {
       inputLifetimeRef.current.mounted = false;
       heldInputRef.current.entries = [];
+      pendingSelectionsRef.current = [];
       for (const notify of heldInputWaitersRef.current) notify();
       heldInputWaitersRef.current.clear();
       readerScrollRef.current?.stop();
@@ -1576,6 +1625,33 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       runAfterPendingInput,
       hasPendingInput,
       hasHeldInput,
+      queueSelection,
+      captureSelectionFromDisplay(anchor, head, targetStory, kind) {
+        let anchorLoc = displayPositionToLoc(anchor, targetStory);
+        let headLoc = displayPositionToLoc(head, targetStory);
+        if (!session || !anchorLoc || !headLoc) return () => {};
+        if (kind === 'word' || kind === 'paragraph') {
+          const paraId = anchorLoc.paraId;
+          const paragraph = session.paragraphs(anchorLoc.story).find((candidate) => candidate.paraId === paraId);
+          if (!paragraph) return () => {};
+          const [start, end] = kind === 'word'
+            ? findWordBoundaries(paragraph.text, anchorLoc.offset)
+            : [0, paragraph.text.length];
+          headLoc = { ...anchorLoc, offset: end };
+          anchorLoc = { ...anchorLoc, offset: start };
+        }
+        const stickyAnchor = session.encodeStickyPosition(anchorLoc);
+        const stickyHead = session.encodeStickyPosition(headLoc);
+        return () => {
+          if (!isCurrentInput(session)) return;
+          const currentAnchor = session.resolveStickyPosition(stickyAnchor);
+          const currentHead = session.resolveStickyPosition(stickyHead);
+          if (!currentAnchor || !currentHead) return;
+          advanceInteractionEpoch();
+          verticalCaretGoalRef.current.reset();
+          setSelection(currentAnchor, currentHead);
+        };
+      },
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
@@ -1643,6 +1719,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       hasPendingInput,
       hasHeldInput,
       insertText,
+      isCurrentInput,
+      queueSelection,
       deleteSelection,
       runAfterPendingInput,
       selectAll,
