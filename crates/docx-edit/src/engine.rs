@@ -2200,24 +2200,64 @@ fn certify_retained_blocks(
                     Some(retained.clone())
                 } else {
                     let normalized = normalize_retained_block(blocks, index, regions, section);
-                    if normalized == measured.block
-                        && serde_json::to_vec(&normalized)
-                            .map_err(|error| format!("retain normalized block: {error}"))?
-                            == serde_json::to_vec(&measured.block)
-                                .map_err(|error| format!("retain measured block: {error}"))?
-                    {
-                        let raw = source == &measured.block
-                            && serde_json::to_vec(source)
-                                .map_err(|error| format!("retain source block: {error}"))?
-                                == serde_json::to_vec(&measured.block)
-                                    .map_err(|error| format!("retain measured block: {error}"))?;
-                        Some(BlockCertificate::new(
-                            blocks,
-                            index,
-                            Rc::clone(context),
-                            section,
-                            raw,
-                        ))
+                    if normalized == measured.block {
+                        let normalized_bytes = serde_json::to_vec(&normalized)
+                            .map_err(|error| format!("retain normalized block: {error}"))?;
+                        let measured_bytes = serde_json::to_vec(&measured.block)
+                            .map_err(|error| format!("retain measured block: {error}"))?;
+                        if normalized_bytes == measured_bytes {
+                            let raw = source == &measured.block && {
+                                let unchanged = match (source, &normalized) {
+                                    (
+                                        LayoutBlock::Paragraph(source),
+                                        LayoutBlock::Paragraph(normalized),
+                                    ) => {
+                                        let fields =
+                                            |paragraph: &docx_layout::types::ParagraphBlock| {
+                                                paragraph.attrs.as_ref().map(|attrs| {
+                                                    (
+                                                        attrs.doc_grid_pitch_px.map(f64::to_bits),
+                                                        attrs.spacing.as_ref().map(|spacing| {
+                                                            (
+                                                                spacing.before.map(f64::to_bits),
+                                                                spacing.after.map(f64::to_bits),
+                                                            )
+                                                        }),
+                                                    )
+                                                })
+                                            };
+                                        fields(source) == fields(normalized)
+                                    }
+                                    (
+                                        LayoutBlock::Image(_)
+                                        | LayoutBlock::Chart(_)
+                                        | LayoutBlock::PageBreak(_)
+                                        | LayoutBlock::ColumnBreak(_)
+                                        | LayoutBlock::Unsupported,
+                                        _,
+                                    ) => true,
+                                    _ => false,
+                                };
+                                let source_bytes =
+                                    if unchanged {
+                                        Cow::Borrowed(normalized_bytes.as_slice())
+                                    } else {
+                                        Cow::Owned(serde_json::to_vec(source).map_err(|error| {
+                                            format!("retain source block: {error}")
+                                        })?)
+                                    };
+                                source_bytes.as_ref() == measured_bytes.as_slice()
+                            };
+                            Some(BlockCertificate::new(
+                                blocks,
+                                index,
+                                Rc::clone(context),
+                                section,
+                                raw,
+                            ))
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
