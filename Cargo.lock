@@ -1219,7 +1219,6 @@ dependencies = [
  "betteroffice-pptx-render",
  "serde",
  "serde_json",
- "sha2",
  "wasm-bindgen",
  "yrs",
 ]
