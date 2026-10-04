@@ -35,7 +35,9 @@ export interface MethodPolicy {
   holdsIdleTasks?: boolean;
 }
 
-export type MethodPolicies<M extends SessionMethods> = { [K in keyof M]: MethodPolicy };
+export type MethodPolicies<M extends SessionMethods> = {
+  [K in keyof M]: MethodPolicy | ((...args: Parameters<M[K]>) => MethodPolicy);
+};
 export type SessionEvents = Record<string, unknown>;
 
 export interface SessionState {

@@ -2,10 +2,10 @@ import {
   hasOwn, isClientMessage, isDeferredReply, isTransferResult,
   type ClientMessage, type HostMessage, type ReplyError,
 } from './protocol';
-import { createResidentScheduler } from './scheduler';
+import { createResidentScheduler, type TaskExecutor } from './scheduler';
 import type { SessionTransport } from './transport';
 import {
-  SESSION_SUPERSEDED, SessionFailure, type MethodHandlers, type MethodPolicies,
+  SESSION_SUPERSEDED, SessionFailure, type MethodHandlers, type MethodPolicies, type MethodPolicy,
   type SessionEvents, type SessionMethods, type SessionScheduler,
 } from './types';
 
@@ -13,6 +13,7 @@ export interface SessionHostOptions<M extends SessionMethods, C> {
   handlers: MethodHandlers<M, C>;
   policies: MethodPolicies<M>;
   context: C;
+  executor?: TaskExecutor;
   onDispose?(): void;
 }
 
@@ -49,16 +50,16 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
   let unlisten = () => {};
   let unerror = () => {};
   const timeouts = new Set<ReturnType<typeof setTimeout>>();
-  const tasks = new Set<{ cancel(reason?: unknown): void }>();
+  const tasks = new Set<{ cancel(): void }>();
   const ended = () => disposed || failure !== undefined;
   function cleanup(): void {
     unlisten();
     unerror();
     for (const id of timeouts) clearTimeout(id);
+    timeouts.clear();
     for (const task of tasks) {
       try { task.cancel(); } catch {}
     }
-    timeouts.clear();
     tasks.clear();
     try { options.onDispose?.(); } catch {}
   }
@@ -88,35 +89,48 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
     timeouts.add(id);
     return () => { clearTimeout(id); timeouts.delete(id); };
   }
-  function track(cancel: (reason?: unknown) => void) {
-    let ended = false;
+  function track(cancel?: () => void) {
     const task = {
       end() {
-        ended = true;
         tasks.delete(task);
       },
-      cancel(reason?: unknown) {
-        if (ended) return;
+      cancel() {
         task.end();
-        cancel(reason);
+        cancel?.();
       },
     };
-    tasks.add(task);
+    if (cancel) tasks.add(task);
     return task;
+  }
+  function invoke<T>(hook: () => T, fallback: T): T {
+    if (ended()) return fallback;
+    const reject = (error: unknown): T => {
+      if (ended()) return fallback;
+      if (!terminal(error)) throw error;
+      fail(classify(error));
+      return fallback;
+    };
+    try {
+      const value = hook();
+      return value instanceof Promise ? value.catch(reject) as T : value;
+    } catch (error) {
+      return reject(error);
+    }
   }
   const resident = createResidentScheduler({
     now: Date.now,
     turn: (callback) => { timeout(callback, 0); },
     timer: timeout,
+    executor: options.executor,
     failed: (error) => fail(classify(error)),
   });
   const scheduler: SessionScheduler = {
     schedule(task) {
-      const tracked = track(() => task.cancel?.());
       if (ended()) {
-        try { tracked.cancel(); } catch {}
+        try { task.cancel?.(); } catch {}
         return;
       }
+      const tracked = track(task.cancel && (() => task.cancel!()));
       resident.schedule({
         kind: task.kind,
         idleAfterInputMs: task.idleAfterInputMs,
@@ -124,80 +138,68 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
         set version(value) { task.version = value; },
         get generation() { return task.generation; },
         set generation(value) { task.generation = value; },
-        onStale: task.onStale ? () => task.onStale!() : undefined,
-        cancel: () => tracked.cancel(),
-        fail: task.fail ? (error) => {
-          if (terminal(error)) {
-            fail(classify(error));
-            return;
-          }
+        ...(task.onStale ? { onStale: () => invoke(() => task.onStale!(), 'cancel') } : {}),
+        ...(task.cancel ? { cancel() {
           tracked.end();
-          task.fail!(error);
-        } : undefined,
+          return invoke(() => task.cancel!(), undefined);
+        } } : {}),
+        ...(task.fail ? { fail(error: unknown) {
+          tracked.end();
+          return invoke(() => task.fail!(error), undefined);
+        } } : {}),
         async run(budgetMs) {
-          if (ended()) {
-            tracked.cancel();
-            return 'done';
-          }
+          if (ended()) return 'done';
           try {
             const step = await task.run(budgetMs);
-            if (ended()) {
-              tracked.cancel();
-              return 'done';
-            }
             if (step === 'done') tracked.end();
-            return step;
+            return ended() ? 'done' : step;
           } catch (error) {
+            tracked.end();
+            if (ended()) return 'done';
             if (terminal(error)) {
               fail(classify(error));
               return 'done';
             }
-            tracked.end();
             throw error;
           }
         },
       });
     },
     dispatch(task) {
-      const tracked = track((reason) => {
-        try { task.cancel?.(reason); } catch (error) {
-          if (terminal(error)) {
-            fail(classify(error));
-            return;
-          }
-          throw error;
-        }
-      });
       if (ended()) {
-        try { tracked.cancel(); } catch {}
+        try { task.cancel?.(); } catch {}
         return;
       }
+      const tracked = track(task.cancel && (() => task.cancel!()));
       resident.dispatch({
-        ...task,
-        cancel: (reason) => tracked.cancel(reason),
+        kind: task.kind,
+        input: task.input,
+        transfer: task.transfer,
+        get version() { return task.version; },
+        set version(value) { task.version = value; },
+        get generation() { return task.generation; },
+        set generation(value) { task.generation = value; },
+        ...(task.cancel ? { cancel(reason?: unknown) {
+          tracked.end();
+          return invoke(() => task.cancel!(reason), undefined);
+        } } : {}),
         compute(input) {
-          if (ended()) {
-            tracked.cancel();
-            throw failure ?? new SessionFailure('disposed', 'Session was disposed');
-          }
-          try {
-            return task.compute(input);
-          } catch (error) {
-            if (terminal(error)) fail(classify(error));
-            throw error;
-          }
+          return invoke(() => task.compute(input), undefined as ReturnType<typeof task.compute>);
         },
         async install(result) {
-          if (ended()) {
-            tracked.cancel();
-            return;
-          }
+          if (ended()) return;
           try {
             await task.install(result);
-            tracked.end();
           } catch (error) {
-            if (terminal(error)) fail(classify(error));
+            tracked.end();
+            if (ended()) return;
+            if (terminal(error)) {
+              fail(classify(error));
+              return;
+            }
             throw error;
+          } finally {
+            tracked.end();
           }
         },
       });
@@ -241,11 +243,19 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
       cleanup();
       transport.close();
     } else if (!failure) {
-      const policy = hasOwn(options.policies, message.method)
+      const configured = hasOwn(options.policies, message.method)
         ? options.policies[message.method as keyof M] : undefined;
-      if (!hasOwn(options.handlers, message.method) || !policy) {
+      if (!hasOwn(options.handlers, message.method) || !configured) {
         send({ protocol: 1, kind: 'reply', id: message.id, ok: false,
           error: { name: 'Error', message: `Unknown session method: ${message.method}` } });
+        return;
+      }
+      let policy: MethodPolicy;
+      try {
+        policy = typeof configured === 'function'
+          ? (configured as (...args: unknown[]) => MethodPolicy)(...message.args) : configured;
+      } catch (error) {
+        send({ protocol: 1, kind: 'reply', id: message.id, ok: false, error: replyError(error) });
         return;
       }
       resident.submit({ ...policy, run: () => run(message), supersede: () => send({

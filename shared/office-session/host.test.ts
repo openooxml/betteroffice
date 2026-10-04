@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { createSessionClient } from './client';
 import { createSessionHost } from './host';
 import { deferReply, isClientMessage, isHostMessage, transferable, type HostMessage } from './protocol';
-import type { SchedulerTask } from './scheduler';
+import type { SchedulerTask, TaskExecutor } from './scheduler';
 import { createInProcessPair } from './testing/inProcessTransport';
 import { SESSION_SUPERSEDED, SessionFailure, type MethodPolicies, type SessionScheduler } from './types';
 
@@ -35,7 +35,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function session() {
+function session(executor?: TaskExecutor) {
   const pair = createInProcessPair();
   const held = deferred<string>();
   const started = deferred<void>();
@@ -44,7 +44,7 @@ function session() {
   let disposeCount = 0;
   let hostBuffer: ArrayBuffer | undefined;
   const host = createSessionHost<Methods, Events, string[]>(pair.host, {
-    policies, context: order,
+    policies, context: order, executor,
     handlers: {
       echo: (_, value) => value,
       add: (_, a, b) => a + b,
@@ -323,6 +323,88 @@ describe('session host and cloned transport', () => {
     await client.dispose();
   });
 
+  it('resolves per-call policies from arguments to control ordering', async () => {
+    type Methods = { hold(): void; read(value: string, reorderable: boolean): string; input(): void };
+    for (const reorderable of [false, true]) {
+      const pair = createInProcessPair();
+      const held = deferred<void>();
+      const started = deferred<void>();
+      const received = deferred<void>();
+      const order: string[] = [];
+      const args: Array<[string, boolean]> = [];
+      const host = createSessionHost<Methods, {}, string[]>(pair.host, {
+        context: order,
+        policies: {
+          hold: { lane: 'interactive' },
+          read: (value, reorderable) => {
+            args.push([value, reorderable]);
+            return { lane: 'interactive', reorderable };
+          },
+          input: { lane: 'input' },
+        },
+        handlers: {
+          hold: () => { started.resolve(); return held.promise; },
+          read: (context, value) => { context.push(value); return value; },
+          input: (context) => { context.push('input'); },
+        },
+      });
+      const client = createSessionClient<Methods, {}>(pair.client, {
+        methods: { hold: true, read: true, input: true },
+      });
+      const off = pair.host.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'input') {
+          received.resolve();
+        }
+      });
+      const hold = client.call.hold();
+      await started.promise;
+      const read = client.call.read('read', reorderable);
+      const input = client.call.input();
+      await received.promise;
+      off();
+      expect(host.scheduler.pending().foreground).toBe(2);
+      expect(args).toEqual([['read', reorderable]]);
+      held.resolve();
+      await Promise.all([hold, read, input]);
+      expect(order).toEqual(reorderable ? ['input', 'read'] : ['read', 'input']);
+      await client.dispose();
+    }
+  });
+
+  it('replies to throwing policy functions without failing the session', async () => {
+    type Methods = { read(value: string): string; echo(): string };
+    for (const error of [
+      new Error('policy'), new WebAssembly.RuntimeError('policy'),
+      new SessionFailure('out-of-memory', 'policy'),
+    ]) {
+      const pair = createInProcessPair();
+      const args: string[] = [];
+      let calls = 0;
+      createSessionHost<Methods, {}, null>(pair.host, {
+        context: null,
+        policies: {
+          read: (value) => { args.push(value); throw error; },
+          echo: { lane: 'interactive' },
+        },
+        handlers: {
+          read: (_, value) => { calls += 1; return value; },
+          echo: () => 'value',
+        },
+      });
+      const client = createSessionClient<Methods, {}>(pair.client, {
+        methods: { read: true, echo: true },
+      });
+      const reply = await client.call.read('read').catch((error) => error);
+      expect(reply.name).toBe(error.name);
+      expect(reply.message).toBe(error.message);
+      expect(args).toEqual(['read']);
+      expect(calls).toBe(0);
+      expect(client.failure).toBeUndefined();
+      expect(await client.call.echo()).toBe('value');
+      await client.dispose();
+    }
+  });
+
   it('makes deferred session failures terminal', async () => {
     const pair = createInProcessPair();
     const done = deferred<string>();
@@ -371,6 +453,61 @@ describe('session host and cloned transport', () => {
       await s.client.dispose();
       expect(s.disposeCount).toBe(1);
     }
+  });
+
+  it('installs dispatched results through the executor', async () => {
+    const result = deferred<unknown>();
+    const installed = deferred<number>();
+    const jobs: Array<{ kind: string; input: unknown; transfer?: Transferable[] }> = [];
+    const executor: TaskExecutor = {
+      run<Input, Result>(job: { kind: string; input: Input; transfer?: Transferable[] }): Promise<Result> {
+        jobs.push(job);
+        return result.promise as Promise<Result>;
+      },
+    };
+    const s = session(executor);
+    const transfer: Transferable[] = [];
+    let computes = 0;
+    let cancels = 0;
+    s.host.scheduler.dispatch({
+      kind: 'pure', version: 0, generation: 0, input: 4, transfer,
+      compute(input) { computes += 1; return input; },
+      install(value) { installed.resolve(value); },
+      cancel() { cancels += 1; },
+    });
+    expect(jobs).toEqual([{ kind: 'pure', input: 4, transfer }]);
+    result.resolve(8);
+    expect(await installed.promise).toBe(8);
+    expect(computes).toBe(0);
+    expect(await s.client.call.add(1, 2)).toBe(3);
+    expect(s.client.failure).toBeUndefined();
+    await s.client.dispose();
+    await s.disposed.promise;
+    expect(cancels).toBe(0);
+  });
+
+  it('guards install rejections through the executor', async () => {
+    const result = deferred<unknown>();
+    const s = session({
+      run<Input, Result>(_job: { kind: string; input: Input; transfer?: Transferable[] }) {
+        return result.promise as Promise<Result>;
+      },
+    });
+    const failed = deferred<SessionFailure>();
+    let computes = 0;
+    let installs = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.dispatch({
+      kind: 'pure', version: 0, generation: 0, input: 1,
+      compute(input) { computes += 1; return input; },
+      async install() { installs += 1; throw new WebAssembly.RuntimeError('trap'); },
+    });
+    result.resolve(2);
+    expect((await failed.promise).code).toBe('trap');
+    expect(computes).toBe(0);
+    expect(installs).toBe(1);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
   });
 
   it('makes background session failures terminal before task fail hooks', async () => {
@@ -538,6 +675,31 @@ describe('session host and cloned transport', () => {
     expect(cancels).toBe(1);
   });
 
+  it('fails the session when a stale pure cancel throws twice', async () => {
+    const s = session();
+    const failed = deferred<SessionFailure>();
+    const error = new Error('x');
+    const reasons: unknown[] = [];
+    let computes = 0;
+    let installs = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.dispatch({
+      kind: 'pure', version: 0, generation: 0, input: 1,
+      compute(input) { computes += 1; return input; },
+      install() { installs += 1; },
+      cancel(reason) { reasons.push(reason); throw error; },
+    });
+    s.host.scheduler.bump({ version: true });
+    expect((await failed.promise).code).toBe('crash');
+    expect(s.client.failure?.message).toBe('x');
+    expect(reasons).toEqual([undefined, error]);
+    expect(computes).toBe(0);
+    expect(installs).toBe(0);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
+    expect(reasons).toEqual([undefined, error]);
+  });
+
   it('does not cancel completed or stale-cancelled tasks during shutdown', async () => {
     for (const state of ['completed', 'cancelled'] as const) {
       const s = session();
@@ -592,34 +754,39 @@ describe('session host and cloned transport', () => {
     expect(cancels).toBe(1);
   });
 
-  it('cancels a running background slice once and suppresses its yield after disposal', async () => {
-    const s = session();
-    const started = deferred<void>();
-    const held = deferred<'yield'>();
-    const finished = deferred<void>();
-    let runs = 0;
-    let cancels = 0;
-    s.host.scheduler.schedule({
-      kind: 'slice', version: 0, generation: 0,
-      async run() {
-        runs += 1;
-        started.resolve();
-        const step = await held.promise;
-        finished.resolve();
-        return step;
-      },
-      cancel() { cancels += 1; },
-    });
-    await started.promise;
-    await s.client.dispose();
-    await s.disposed.promise;
-    expect(cancels).toBe(1);
-    held.resolve('yield');
-    await finished.promise;
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    expect(runs).toBe(1);
-    expect(cancels).toBe(1);
-    expect(s.host.scheduler.pending().background).toBe(0);
+  it('cancels a running slice once and suppresses late yields and errors after disposal', async () => {
+    for (const settle of ['yield', 'reject'] as const) {
+      const s = session();
+      const started = deferred<void>();
+      const held = deferred<'yield'>();
+      const finished = deferred<void>();
+      let runs = 0;
+      let cancels = 0;
+      let failures = 0;
+      s.host.scheduler.schedule({
+        kind: 'slice', version: 0, generation: 0,
+        async run() {
+          runs += 1;
+          started.resolve();
+          try { return await held.promise; }
+          finally { finished.resolve(); }
+        },
+        cancel() { cancels += 1; },
+        fail() { failures += 1; },
+      });
+      await started.promise;
+      await s.client.dispose();
+      await s.disposed.promise;
+      expect(cancels).toBe(1);
+      if (settle === 'yield') held.resolve('yield');
+      else held.reject(new Error('x'));
+      await finished.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(runs).toBe(1);
+      expect(cancels).toBe(1);
+      expect(failures).toBe(0);
+      expect(s.host.scheduler.pending().background).toBe(0);
+    }
   });
 
   it('transfers deferred results and keeps ordinary deferred errors non-terminal', async () => {
