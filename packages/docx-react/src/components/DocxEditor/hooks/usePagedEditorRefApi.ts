@@ -271,7 +271,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         return;
       }
       const pending = input.flushPendingInput();
-      const ready = workerOpenEnabledRef.current ? awaitWorkerOpenReplica(session) : undefined;
+      const ready = workerOpenEnabledRef.current && !session.isDisplayOnly() ? awaitWorkerOpenReplica(session) : undefined;
       await (ready ? Promise.all([pending, ready]) : pending);
       if (session !== yrsSessionRef.current || !yrsInputRef.current) {
         throw new Error('The document changed while flushing input');
