@@ -19,12 +19,13 @@ use crate::write::{
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-oracle"))]
+#[cfg_attr(not(test), allow(dead_code))]
 mod oracle;
 #[cfg(test)]
 mod oracle_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-oracle"))]
 thread_local! {
     static EMISSION_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DETECTOR_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -154,6 +155,10 @@ where
 impl SheetPatch<'_> {
     /// Patched `<sheetData>`; `None` when the source resists cell-by-cell patching.
     pub(crate) fn sheet_data(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path() {
+            return self.sheet_data_oracle(source);
+        }
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
@@ -593,6 +598,10 @@ impl SheetPatch<'_> {
 
     /// Source addresses whose cell changed or is gone.
     fn changed_source_cells(&self) -> BTreeSet<(u32, u32)> {
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path() {
+            return self.changed_source_cells_oracle();
+        }
         let mut changed = BTreeSet::new();
         let mut cells = self.sheet.iter_cells().peekable();
         let mut previous = None;
