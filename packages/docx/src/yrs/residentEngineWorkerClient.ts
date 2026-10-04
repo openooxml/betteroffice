@@ -97,6 +97,8 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
   applied: true;
 }
 
+const EMPTY_YRS_UPDATE_V1_BYTES = 2;
+
 // Not `completeLayout`: page builds run between the steps of a sliced completion.
 const FRAME_REQUESTS = new Set<AwaitedRequest['type']>([
   'bootstrap',
@@ -153,6 +155,7 @@ export class ResidentEngineWorkerClient {
   private terminalError: Error | null = null;
   private ready = false;
   private revision = 0;
+  private documentSequence = 0;
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
   private bootstrapped = false;
@@ -231,6 +234,11 @@ export class ResidentEngineWorkerClient {
     return this.revision;
   }
 
+  /** @internal */
+  stateSequence(): number {
+    return this.documentSequence;
+  }
+
   /** @internal The newest frame epoch a reply carried; 0 before any frame. */
   answeredFrame(): number {
     return this.answeredFrameEpoch;
@@ -281,6 +289,7 @@ export class ResidentEngineWorkerClient {
    * new document's pages paint where the old ones were.
    */
   rebootstrap(): void {
+    this.documentSequence += 1;
     this.bootstrapped = false;
     this.remoteVector = null;
     this.appliedFontsRevision = null;
@@ -748,6 +757,7 @@ export class ResidentEngineWorkerClient {
 
   invalidate(update: Uint8Array, selection: YrsSelection | null): void {
     if (this.terminalError) return;
+    this.documentSequence += 1;
     this.ready = false;
     const owned = update.slice();
     const id = this.nextId++;
@@ -787,6 +797,15 @@ export class ResidentEngineWorkerClient {
     transfer: Transferable[] = []
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
     if (this.terminalError) return Promise.reject(this.terminalError);
+    if (
+      request.type === 'open' ||
+      ((request.type === 'bootstrap' || request.type === 'sync') &&
+        !request.snapshot.workerAuthoritative &&
+        request.snapshot.state.byteLength > EMPTY_YRS_UPDATE_V1_BYTES &&
+        (request.type !== 'bootstrap' || !request.opened)) ||
+      request.type === 'applyInput' || request.type === 'applyDelete' ||
+      (request.type === 'proposal' && request.operation.kind !== 'snapshot')
+    ) this.documentSequence += 1;
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       if (this.pending.size === 0) this.armWatchdog();

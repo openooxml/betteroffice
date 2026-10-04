@@ -1923,11 +1923,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     emitSelection(false);
   }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady]);
 
+  const focusedSessionRef = useRef<YrsSession | null>(null);
   useEffect(() => {
-    if (!enabled || !session || readOnly) return;
-    const frame = requestAnimationFrame(() =>
-      textareaRef.current?.focus({ preventScroll: true })
-    );
+    if (!enabled || !session || readOnly) {
+      focusedSessionRef.current = null;
+      return;
+    }
+    const storyOnly = focusedSessionRef.current === session;
+    focusedSessionRef.current = session;
+    const frame = requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      if (storyOnly) {
+        const active = textarea.ownerDocument.activeElement;
+        const root = textarea.closest('.paged-editor') ?? textarea;
+        if (active && active !== textarea.ownerDocument.body && !root.contains(active)) return;
+      }
+      textarea.focus({ preventScroll: true });
+    });
     return () => cancelAnimationFrame(frame);
   }, [enabled, readOnly, session, story]);
 

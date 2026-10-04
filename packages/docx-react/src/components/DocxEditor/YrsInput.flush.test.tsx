@@ -284,8 +284,8 @@ test.each([false, true])('opening body Tab keeps native focus movement with shif
 
 test.each([false, true])('held click in a table prevents Tab and replays cell navigation with shift=%s', async (shift) => {
   const session = await seededSession();
+  session.insertTable({ ...session.selection()!.head, offset: 0 }, 1, 2);
   const body = session.selection()!.head;
-  session.insertTable({ ...body, offset: 0 }, 1, 2);
   const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
   const story = stories[shift ? 1 : 0];
   const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
@@ -368,6 +368,9 @@ test.each([false, true])('held Tab replayed outside a table leaves document, sel
       input.current!.focus();
       expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
     });
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
     expect(fireEvent.keyDown(textarea, { key: 'ArrowDown' })).toBe(false);
     expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
     expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
@@ -377,7 +380,7 @@ test.each([false, true])('held Tab replayed outside a table leaves document, sel
     view.rerender(inputFor(session, input, undefined, undefined, props));
     await act(async () => { await bounded(input.current!.flushPendingInput()); });
     expect(verticalMove).toHaveBeenCalledTimes(1);
-    const caret = { ...body, offset: 1 };
+    const caret = { ...body, offset: 0 };
     expect(session.selection()).toEqual({ anchor: caret, head: caret });
     expect(session.cellSelection()).toBeNull();
     expect(session.encodeState()).toEqual(state);
@@ -421,8 +424,8 @@ test.each([false, true])('held Tab outside a table at replay is a no-op and the 
     await act(async () => { await bounded(input.current!.flushPendingInput()); });
     expect(verticalMove).toHaveBeenCalledTimes(1);
     expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['', '']);
-    expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === body.paraId)?.text).toBe('SXeed');
-    const caret = { ...body, offset: 2 };
+    expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === body.paraId)?.text).toBe('XSeed');
+    const caret = { ...body, offset: 1 };
     expect(session.selection()).toEqual({ anchor: caret, head: caret });
     expect(session.cellSelection()).toBeNull();
     expect(document.activeElement).toBe(textarea);

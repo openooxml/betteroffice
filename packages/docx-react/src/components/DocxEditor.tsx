@@ -1861,6 +1861,16 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [state.parseError, resetCanvasRenderer, setScrollPageInfo]);
 
   const pluginOverlayTarget = useCanvasOverlayTarget((plugins?.length ?? 0) > 0, editorContentRef);
+  const pluginHostSession =
+    yrsCore.session &&
+    !opening &&
+    (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
+    yrsCore.sessionGeneration === yrsSeedGeneration &&
+    history.state &&
+    !state.isLoading &&
+    !state.parseError
+      ? yrsCore.session
+      : null;
   const pluginHost = useDocxPluginHost({
     plugins,
     pluginGrants,
@@ -1876,16 +1886,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       yrsCore.session &&
       !workerOpenReplicaPending(yrsCore.session)
     ),
-    session:
-      yrsCore.session &&
-      !opening &&
-      (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
-      yrsCore.sessionGeneration === yrsSeedGeneration &&
-      history.state &&
-      !state.isLoading &&
-      !state.parseError
-        ? yrsCore.session
-        : null,
+    session: pluginHostSession,
     loadGeneration: yrsSeedGeneration,
     queries: canvasRenderer.queries,
     viewerDocumentRead: viewerReads ? canvasRenderer.readWorkerDocument : undefined,
@@ -2615,6 +2616,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             <DocxEditorPagedArea
               commandBridgeRef={commandBridgeRef}
               yrsCore={yrsCore}
+              pluginHostOpen={pluginHostSession !== null}
               onError={reportPagedError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}

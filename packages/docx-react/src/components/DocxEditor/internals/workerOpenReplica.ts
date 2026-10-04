@@ -14,7 +14,9 @@ interface PendingReplica {
   pending: boolean;
   onDemand?: WorkerOpenReplicaDemand;
   readonly started: boolean;
+  readonly hydrated: boolean;
   initialVersion: string;
+  hydratingVersion?: string;
   readyVersion?: string;
   loadedVersion?: string;
   /** The worker's version for the opened state, once the session mirrors the worker. */
@@ -134,6 +136,7 @@ export function deferWorkerOpenReplica(
         finishing = true;
         try {
           plan[nextStep++]!();
+          if (current()) replica.hydratingVersion = session.version();
         } finally {
           finishing = false;
         }
@@ -154,6 +157,9 @@ export function deferWorkerOpenReplica(
     onDemand,
     get started() {
       return started || !replica.pending;
+    },
+    get hydrated() {
+      return hydrated;
     },
     initialVersion: session.version(),
     start() {
@@ -203,6 +209,11 @@ export function workerOpenReplicaStarted(session: YrsSession): boolean {
 
 export function workerOpenReplicaPending(session: YrsSession): boolean {
   return replicas.get(session)?.pending === true;
+}
+
+export function workerOpenReplicaHydrating(session: YrsSession): boolean {
+  const replica = replicas.get(session);
+  return replica?.pending === true && replica.started && !replica.hydrated;
 }
 
 /**
@@ -260,6 +271,9 @@ export function workerOpenSourceVersion(session: YrsSession, version: string | n
   const replica = replicas.get(session);
   if (!replica || version === null) return version;
   let mapped = version;
+  if (replica.pending && mapped === replica.hydratingVersion) {
+    mapped = replica.handoverVersion ?? replica.mirrorVersion ?? replica.initialVersion;
+  }
   if (mapped === replica.initialVersion) {
     mapped = replica.mirrorVersion ?? replica.readyVersion ?? mapped;
   }

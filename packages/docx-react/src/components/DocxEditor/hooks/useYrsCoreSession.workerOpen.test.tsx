@@ -28,7 +28,7 @@ import type {
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
-import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
+import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
@@ -48,6 +48,7 @@ import { flushEditorInput } from '../editorBatches';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
 import type { DocxPlugin, DocxPluginContext, DocxPluginEvent } from '../../../plugins/types';
 import * as pluginHosts from '../../../plugins/useDocxPluginHost';
+import * as pluginHostFactories from '../../../plugins/createDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -526,14 +527,21 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
   source?: Uint8Array;
   residentInput?: boolean;
   publishLayout?: boolean;
+  holdFullLayout?: boolean;
   holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
   onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
 } = {}) {
   const isFullOpen = (request: ResidentEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
+  let layoutHeld = false;
+  let fullOpenId = 0;
+  const holdReply = options.holdFullLayout
+    ? (request: ResidentEngineWorkerRequest) => options.holdReply?.(request) === true ||
+      (layoutHeld && (request.type === 'sync' || request.type === 'completeLayout'))
+    : options.holdReply;
   const worker = installWorker(workerPreview
-    ? { holdReply: (request) => isFullOpen(request) || options.holdReply?.(request) === true, holdState: true }
-    : { holdOpen: true, holdState: true, holdReply: options.holdReply });
+    ? { holdReply: (request) => isFullOpen(request) || holdReply?.(request) === true, holdState: true }
+    : { holdOpen: true, holdState: true, holdReply });
   const frames = holdFrames();
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
     value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
@@ -571,11 +579,23 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
     }
     return facade;
   };
-  const props = { ...initialProps, source: options.source ?? longBytes, previewFirstPage: true, workerPreview,
+  const props = { ...initialProps, source: options.source ?? (options.holdFullLayout ? await longFixture(1200) : longBytes),
+    previewFirstPage: true, workerPreview,
     hydrateOnDemand: viewer, workerProposals: viewer, readOnly: viewer };
   const selections: Array<ReturnType<YrsSession['cellSelection']>> = [];
   function Editable({ source, generation, readOnly = viewer, hydrateOnDemand = viewer }: Pick<HarnessProps, 'source' | 'generation' | 'readOnly' | 'hydrateOnDemand'>) {
     harness = useHarness({ ...props, source, generation, readOnly, hydrateOnDemand });
+    const layoutInWorker = useMemo<LayoutInWorker>(() => {
+      const layout = harness.renderer.layoutInWorker;
+      if (!options.holdFullLayout) return layout;
+      let pending: ReturnType<LayoutInWorker> = null;
+      return Object.assign((session: YrsSession, request: string) => {
+        if (!layoutHeld || session.isDisplayOnly() || !replicaHelpers.workerOpenReplicaPending(session)) {
+          return layout(session, request);
+        }
+        return pending ??= layout(session, request);
+      }, { prewarm: layout.prewarm, ownsDocument: layout.ownsDocument });
+    }, [harness.core.session, harness.renderer.layoutInWorker]);
     return <>
       <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
       <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
@@ -583,8 +603,9 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
         viewerDocumentRead={viewer ? harness.renderer.readWorkerDocument : undefined}
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
-        layoutInWorker={harness.renderer.layoutInWorker}
-        onLayoutComputed={options.publishLayout ? harness.renderer.onLayoutComputed : undefined}
+        layoutInWorker={layoutInWorker}
+        onLayoutComputed={options.publishLayout || (options.holdFullLayout && !harness.core.previewing)
+          ? harness.renderer.onLayoutComputed : undefined}
         applyResidentInput={options.residentInput ? harness.renderer.applyInput : undefined}
         canvasHostRef={canvasHost} displayListQueries={queriesReleased ? harness.renderer.queries : null}
         inputQueries={viewer ? undefined : inputQueries(harness.renderer.inputQueries)}
@@ -646,6 +667,8 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       await waitFor(() => expect(worker.posted.some(isFullOpen)).toBe(true));
       const request = worker.posted.filter(isFullOpen).at(-1)!;
       if (workerPreview) await waitFor(() => expect(worker.replies.has(request.id)).toBe(true));
+      fullOpenId = request.id;
+      layoutHeld = options.holdFullLayout === true;
       await act(async () => {
         if (workerPreview) worker.reply(request);
         else worker.workers.at(-1)!.release();
@@ -656,7 +679,11 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       return harness.core.session!;
     };
     const presentFull = async (full: YrsSession, startPeer = true) => {
-      act(() => harness.pipeline.runLayoutPipeline());
+      if (options.holdFullLayout) {
+        await worker.received('completeLayout', fullOpenId);
+      } else {
+        act(() => harness.pipeline.runLayoutPipeline());
+      }
       await waitFor(() => expect(harness.renderer.presentedEngine).toBe(full));
       act(() => harness.presentFrame());
       expect(harness.core.opening).toBe(false);
@@ -674,6 +701,16 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
     return {
       ...worker, frames, editor, view, preview, click, type, switchToFull, presentFull, loadPeer,
       mouseDown, mouseMove, mouseUp, pointAt, selections,
+      reply(request: ResidentEngineWorkerRequest) {
+        worker.reply(request);
+        if (!options.holdFullLayout || request.type !== 'completeLayout') return;
+        layoutHeld = false;
+        for (const pending of worker.posted) {
+          if (pending.type === 'sync' && pending.id > fullOpenId && worker.replies.has(pending.id)) {
+            worker.reply(pending);
+          }
+        }
+      },
       releaseInputQueries() {
         queriesReleased = true;
         releaseQueries();
@@ -684,6 +721,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
         view.rerender(<Editable {...props} readOnly={readOnly} hydrateOnDemand={hydrateOnDemand} />);
       },
       async replace() {
+        if (options.holdFullLayout) layoutHeld = false;
         view.rerender(<Editable source={props.source.slice()} generation={2} />);
         const replacement = await waitForPreview(2);
         await waitFor(() => expect(worker.workers).toHaveLength(2));
@@ -1518,9 +1556,12 @@ test('switching to viewing before eager hydration settles transferred input and 
     opened.click(1);
     opened.type('Q');
     const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
     await opened.presentFull(full, false);
     expect(opened.harness.core.replicaReady).toBe(false);
-    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(opened.harness.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
     expect(opened.editor.current!.hasPendingInput()).toBe(true);
     let flushed = false;
     const flush = opened.editor.current!.flushPendingInput().then(() => { flushed = true; });
@@ -1903,6 +1944,361 @@ function holdHydrationTasks() {
   };
 }
 
+function holdFontEditorReadiness(trace: string[]) {
+  const progress = replicaHelpers.notifyWorkerOpenLayoutProgress;
+  const hold = spyOn(replicaHelpers, 'notifyWorkerOpenLayoutProgress').mockImplementation((session, kind) => {
+    progress(session, !session.isDisplayOnly() && kind === 'complete' ? 'provisional' : kind);
+  });
+  const createHost = pluginHostFactories.createDocxPluginHost;
+  let readLayout: Parameters<typeof createHost>[0]['layout'] = () => ({
+    queries: null, complete: false, failed: false,
+  });
+  const capture = spyOn(pluginHostFactories, 'createDocxPluginHost').mockImplementation((access) => {
+    readLayout = access.layout;
+    const host = createHost(access);
+    const open = host.open;
+    host.open = (session) => {
+      trace.push('plugin-open');
+      open(session);
+    };
+    return host;
+  });
+  return {
+    complete: (session: YrsSession) => progress(session, 'complete'),
+    layout: () => readLayout(),
+    restore: registerRestore(() => {
+      capture.mockRestore();
+      hold.mockRestore();
+    }),
+  };
+}
+
+async function pendingFontEditor() {
+  const trace: string[] = [];
+  const readiness = holdFontEditorReadiness(trace);
+  const recorder = workerLoadRecorder();
+  const opened = openingPluginEditor(recorder.plugin);
+  const fallback = holdLayoutFallback();
+  let tasks: ReturnType<typeof holdHydrationTasks> | undefined;
+  let restoreRequirements = () => {};
+  const close = () => {
+    try {
+      opened.close();
+    } finally {
+      restoreRequirements();
+      tasks?.restore();
+      fallback.restore();
+      readiness.restore();
+    }
+  };
+  try {
+    await opened.preview();
+    const full = await opened.open();
+    await opened.drain();
+    const readRequirements = full.layoutFontRequirementsJson;
+    const requirements = spyOn(full, 'layoutFontRequirementsJson').mockImplementation((input) => {
+      trace.push('font-refresh');
+      return readRequirements(input);
+    });
+    restoreRequirements = registerRestore(() => requirements.mockRestore());
+    const initializedPosts = opened.posted.length;
+    tasks = holdHydrationTasks();
+    const state = opened.posted.find((request) => request.type === 'encodeState')!;
+    act(() => opened.reply(state));
+    await opened.until(() => tasks!.tasks.length === 1);
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaHydrating(full)).toBe(true);
+    return { ...opened, full, trace, readiness, requirements, initializedPosts, tasks, fallback, close };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+test('a font announcement while the editor peer is pending replays once after the plugin host opens', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  const results: unknown[] = [];
+  try {
+    for (const held of [true, false]) {
+      const opened = await pendingFontEditor();
+      try {
+        if (held) act(() => {
+          fonts.dispatchEvent(new Event('loadingdone'));
+          fonts.dispatchEvent(new Event('loadingdone'));
+        });
+        await opened.drain();
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(opened.posted.slice(opened.initializedPosts).filter((request) => request.type === 'fontRequirements'))
+          .toHaveLength(0);
+        await act(async () => { await opened.tasks.run(); });
+        await act(async () => { await opened.tasks.run(); });
+        expect(opened.full.paragraphs('body')[0]!.text).toBe('First paragraph');
+        expect(replicaHelpers.workerOpenReplicaPending(opened.full)).toBe(true);
+        expect(replicaHelpers.workerOpenReplicaHydrating(opened.full)).toBe(false);
+        expect(opened.fallback.timers.size).toBe(2);
+        if (held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+        await opened.drain();
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(opened.posted.slice(opened.initializedPosts).filter((request) => request.type === 'fontRequirements'))
+          .toHaveLength(0);
+        const beforeLayout = opened.editor()!.getLayout();
+        const beforeQueries = opened.readiness.layout().queries;
+        const beforePosts = opened.posted.length;
+        act(() => opened.readiness.complete(opened.full));
+        await act(async () => { await Promise.resolve(); });
+        expect(opened.trace).toEqual(['plugin-open']);
+        if (!held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+        await act(async () => {
+          while (opened.tasks.tasks.length) await opened.tasks.run();
+        });
+        opened.tasks.restore();
+        await opened.until(() => opened.editor()!.getLayout() !== beforeLayout &&
+          opened.readiness.layout().queries !== beforeQueries && opened.readiness.layout().complete);
+        await opened.drain();
+        expect(opened.requirements).toHaveBeenCalledTimes(1);
+        expect(opened.trace).toEqual(['plugin-open', 'font-refresh']);
+        const posts = opened.posted.slice(beforePosts).map((request) => request.type).sort();
+        expect(posts.filter((type) => type === 'fontRequirements')).toHaveLength(0);
+        expect(posts.filter((type) => type === 'sync')).toHaveLength(1);
+        const layout = opened.editor()!.getLayout()!;
+        const queries = opened.readiness.layout().queries!;
+        expect(queries.isReady()).toBe(true);
+        expect(queries.pageCount()).toBe(layout.pages.length);
+        expect(sourceVersionOf(queries)).toBe(sourceVersionOf(layout));
+        expect(queries.caretRect(1)).not.toBeNull();
+        const canvases = [...opened.view.container.querySelectorAll<HTMLElement>('.canvas-page')];
+        expect(canvases.length).toBeGreaterThan(0);
+        results.push({
+          posts,
+          pages: layout.pages.map((page) => ({
+            size: page.size,
+            margins: page.margins,
+            fragments: page.fragments.map(({ kind, x, y, width, pmStart, pmEnd }) => ({
+              kind, x, y, width, pmStart, pmEnd,
+            })),
+          })),
+          sizes: Array.from({ length: queries.pageCount() }, (_, index) => queries.pageSize(index)),
+          caret: queries.caretRect(1),
+          canvases: canvases.map((canvas) => ({
+            page: canvas.getAttribute('data-page-index'),
+            width: canvas.style.width,
+            height: canvas.style.height,
+          })),
+        });
+      } finally {
+        opened.close();
+      }
+    }
+    expect(results[0]).toEqual(results[1]);
+  } finally {
+    if (descriptor) Object.defineProperty(document, 'fonts', descriptor);
+    else Reflect.deleteProperty(document, 'fonts');
+  }
+}, 30_000);
+
+test('a held font announcement is dropped when the document is replaced or the editor unmounts before readiness', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  const results: unknown[] = [];
+  try {
+    for (const [action, held] of [['replace', true], ['replace', false], ['unmount', true]] as const) {
+      const opened = await pendingFontEditor();
+      const oldWorker = spyOn(opened.workers[0]!, 'postMessage');
+      let restoreReplacementRequirements = () => {};
+      let restoreReplacementWorker = () => {};
+      try {
+        act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+        await act(async () => { await opened.tasks.run(); });
+        await act(async () => { await opened.tasks.run(); });
+        expect(replicaHelpers.workerOpenReplicaPending(opened.full)).toBe(true);
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(oldWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+        const beforeReplacementPosts = opened.posted.length;
+        if (action === 'unmount') opened.view.unmount();
+        else {
+          let replacement!: Promise<void>;
+          act(() => {
+            replacement = opened.ref.current!.loadDocumentBuffer(longBytes.slice().buffer as ArrayBuffer);
+          });
+          await opened.until(() => opened.session() !== null && opened.session() !== opened.full &&
+            opened.session()?.isDisplayOnly() === true);
+          const fullOpen = () => opened.posted.slice(beforeReplacementPosts).find((request) =>
+            request.type === 'open' && request.previewBlocks === undefined);
+          await opened.until(() => {
+            const request = fullOpen();
+            return !!request && opened.replies.has(request.id);
+          });
+          act(() => opened.reply(fullOpen()!));
+          await opened.settle(replacement);
+          await opened.until(() => opened.session() !== null && opened.session() !== opened.full &&
+            opened.session()?.isDisplayOnly() === false &&
+            replicaHelpers.workerOpenReplicaStarted(opened.session()!) &&
+            opened.posted.slice(beforeReplacementPosts).some((request) =>
+              request.type === 'encodeState' && opened.replies.has(request.id)));
+          await opened.drain();
+        }
+        await act(async () => {
+          opened.readiness.complete(opened.full);
+          opened.fallback.advance(30_000);
+          while (opened.tasks.tasks.length) await opened.tasks.run();
+        });
+        if (action === 'unmount') opened.tasks.restore();
+        await opened.drain();
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(oldWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+        expect(opened.trace).toEqual([]);
+        if (action === 'replace') {
+          const replacement = opened.session()!;
+          const replacementWorker = spyOn(opened.workers.at(-1)!, 'postMessage');
+          restoreReplacementWorker = registerRestore(() => replacementWorker.mockRestore());
+          const readRequirements = replacement.layoutFontRequirementsJson;
+          const requirements = spyOn(replacement, 'layoutFontRequirementsJson').mockImplementation((input) => {
+            opened.trace.push('font-refresh:B');
+            return readRequirements(input);
+          });
+          restoreReplacementRequirements = registerRestore(() => requirements.mockRestore());
+          const state = opened.posted.slice(beforeReplacementPosts).find((request) => request.type === 'encodeState')!;
+          act(() => opened.reply(state));
+          await opened.until(() => opened.tasks.tasks.length === 1);
+          expect(replacement.isDisplayOnly()).toBe(false);
+          expect(replicaHelpers.workerOpenReplicaStarted(replacement)).toBe(true);
+          expect(replicaHelpers.workerOpenReplicaPending(replacement)).toBe(true);
+          expect(replicaHelpers.workerOpenReplicaHydrating(replacement)).toBe(true);
+          expect(requirements).not.toHaveBeenCalled();
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          if (held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+          await opened.drain();
+          expect(requirements).not.toHaveBeenCalled();
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          await act(async () => { await opened.tasks.run(); });
+          await act(async () => { await opened.tasks.run(); });
+          expect(replacement.paragraphs('body')[0]!.text).toBe('First paragraph');
+          expect(replicaHelpers.workerOpenReplicaPending(replacement)).toBe(true);
+          expect(replicaHelpers.workerOpenReplicaHydrating(replacement)).toBe(false);
+          expect(opened.fallback.timers.size).toBe(2);
+          await opened.drain();
+          expect(requirements).not.toHaveBeenCalled();
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          expect(opened.trace).toEqual([]);
+          const beforeLayout = opened.editor()!.getLayout();
+          const beforeQueries = opened.readiness.layout().queries;
+          const beforePosts = opened.posted.length;
+          act(() => opened.readiness.complete(replacement));
+          await act(async () => { await Promise.resolve(); });
+          expect(replicaHelpers.workerOpenReplicaPending(replacement)).toBe(false);
+          expect(opened.trace).toEqual(['plugin-open']);
+          if (!held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+          await act(async () => {
+            while (opened.tasks.tasks.length) await opened.tasks.run();
+          });
+          opened.tasks.restore();
+          await opened.until(() => opened.editor()!.getLayout() !== beforeLayout &&
+            opened.readiness.layout().queries !== beforeQueries && opened.readiness.layout().complete);
+          await opened.drain();
+          expect(opened.session()).toBe(replacement);
+          expect(opened.requirements).not.toHaveBeenCalled();
+          expect(oldWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          expect(requirements).toHaveBeenCalledTimes(1);
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          expect(opened.trace).toEqual(['plugin-open', 'font-refresh:B']);
+          const posts = opened.posted.slice(beforePosts).map((request) => request.type).sort();
+          expect(posts.filter((type) => type === 'fontRequirements')).toHaveLength(0);
+          expect(posts.filter((type) => type === 'sync')).toHaveLength(1);
+          const layout = opened.editor()!.getLayout()!;
+          const queries = opened.readiness.layout().queries!;
+          expect(queries.isReady()).toBe(true);
+          expect(queries.pageCount()).toBe(layout.pages.length);
+          expect(sourceVersionOf(queries)).toBe(sourceVersionOf(layout));
+          expect(queries.caretRect(1)).not.toBeNull();
+          const canvases = [...opened.view.container.querySelectorAll<HTMLElement>('.canvas-page')];
+          expect(canvases.length).toBeGreaterThan(0);
+          results.push({
+            posts,
+            pages: layout.pages.map((page) => ({
+              size: page.size,
+              margins: page.margins,
+              fragments: page.fragments.map(({ kind, x, y, width, pmStart, pmEnd }) => ({
+                kind, x, y, width, pmStart, pmEnd,
+              })),
+            })),
+            sizes: Array.from({ length: queries.pageCount() }, (_, index) => queries.pageSize(index)),
+            caret: queries.caretRect(1),
+            canvases: canvases.map((canvas) => ({
+              page: canvas.getAttribute('data-page-index'),
+              width: canvas.style.width,
+              height: canvas.style.height,
+            })),
+          });
+        }
+      } finally {
+        restoreReplacementRequirements();
+        restoreReplacementWorker();
+        oldWorker.mockRestore();
+        opened.close();
+      }
+    }
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual(results[1]);
+  } finally {
+    if (descriptor) Object.defineProperty(document, 'fonts', descriptor);
+    else Reflect.deleteProperty(document, 'fonts');
+  }
+}, 30_000);
+
+test('font announcements in viewer sessions are not held', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  let opened: Awaited<ReturnType<typeof openingEditor>> | undefined;
+  let tasks: ReturnType<typeof holdHydrationTasks> | undefined;
+  let restoreRequirements = () => {};
+  try {
+    opened = await openingEditor(true, true);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
+    await act(async () => {});
+    act(() => { requestWorkerOpenReplica(full); });
+    await waitFor(() => expect(opened!.posted.some((request) => request.type === 'encodeState')).toBe(true));
+    tasks = holdHydrationTasks();
+    await act(async () => opened!.workers.at(-1)!.release());
+    await waitFor(() => expect(tasks!.tasks).toHaveLength(1));
+    const beforePosts = opened.posted.length;
+    const beforeLayout = opened.editor.current!.getLayout();
+    const requirements = spyOn(full, 'layoutFontRequirementsJson');
+    restoreRequirements = registerRestore(() => requirements.mockRestore());
+    expect(opened.harness.core.hydrateOnDemand).toBe(true);
+    expect(full.isDisplayOnly()).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(registeredWorkerProposalAuthority(full)?.holdsWorkerState() ?? false).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+    await waitFor(() => expect(opened!.posted.slice(beforePosts)
+      .filter((request) => request.type === 'fontRequirements')).toHaveLength(1));
+    await waitFor(() => expect(opened!.editor.current!.getLayout()).not.toBe(beforeLayout));
+    expect(opened.posted.slice(beforePosts).filter((request) => request.type === 'sync')).toHaveLength(1);
+    expect(opened.posted.slice(beforePosts).filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(requirements).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(tasks.tasks).toHaveLength(1);
+  } finally {
+    try {
+      opened?.close();
+    } finally {
+      restoreRequirements();
+      tasks?.restore();
+      if (descriptor) Object.defineProperty(document, 'fonts', descriptor);
+      else Reflect.deleteProperty(document, 'fonts');
+    }
+  }
+});
+
 function holdPeerFallback() {
   const schedule = globalThis.setTimeout;
   const unschedule = globalThis.clearTimeout;
@@ -1983,6 +2379,10 @@ async function finishHeldHydration(
   tasks: ReturnType<typeof holdHydrationTasks>
 ) {
   await waitFor(() => expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(true));
+  await act(async () => {
+    while (tasks.tasks.length) await tasks.run();
+  });
+  expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
   await act(async () => opened.workers.at(-1)!.release());
   await waitFor(() => expect(tasks.tasks).toHaveLength(1));
   await act(async () => tasks.run());
@@ -2062,7 +2462,7 @@ function stubDocumentVisibility(initial: 'visible' | 'hidden') {
 
 test('held input and loading reads wait for the current worker layout after hydration', async () => {
   const opened = await openingEditor(true, false, {
-    holdReply: (request) => request.type === 'completeLayout',
+    holdFullLayout: true,
   });
   const tasks = holdHydrationTasks();
   const fallback = holdLayoutFallback();
@@ -2119,6 +2519,36 @@ test('a completed worker layout commits readiness as soon as hydration finishes'
     await finishHeldHydration(opened, tasks);
     expect(opened.harness.core.replicaReady).toBe(true);
     expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('a first worker pass that completes layout commits readiness and replays held input without a completion request', async () => {
+  const opened = await openingEditor();
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.click(6);
+    opened.type('A');
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowLeft' });
+    opened.type('B');
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    await finishHeldHydration(opened, tasks);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    await waitFor(() => {
+      expect(full.paragraphs('body')[0].text).toBe('FirstBA paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    });
+    expect(opened.posted.some((request) => request.type === 'completeLayout')).toBe(false);
     expect(fallback.timers.size).toBe(0);
     expect(opened.harness.errors).toEqual([]);
   } finally {
@@ -2205,7 +2635,7 @@ test('page progress after layout completion commits readiness as soon as hydrati
 
 test('flushing held input commits a hydrated peer before worker layout completes', async () => {
   const opened = await openingEditor(true, false, {
-    holdReply: (request) => request.type === 'completeLayout',
+    holdFullLayout: true,
   });
   const tasks = holdHydrationTasks();
   const fallback = holdLayoutFallback();
@@ -2233,7 +2663,7 @@ test('flushing held input commits a hydrated peer before worker layout completes
 
 test('an on-demand request commits a hydrated peer before worker layout completes', async () => {
   const opened = await openingEditor(true, false, {
-    holdReply: (request) => request.type === 'completeLayout',
+    holdFullLayout: true,
   });
   const tasks = holdHydrationTasks();
   const fallback = holdLayoutFallback();
@@ -2258,7 +2688,7 @@ test('an on-demand request commits a hydrated peer before worker layout complete
 
 test('layout progress keeps readiness pending past ten seconds until it stalls for three seconds', async () => {
   const opened = await openingEditor(true, false, {
-    holdReply: (request) => request.type === 'completeLayout',
+    holdFullLayout: true,
   });
   const tasks = holdHydrationTasks();
   const fallback = holdLayoutFallback();
@@ -2289,7 +2719,7 @@ test('layout progress keeps readiness pending past ten seconds until it stalls f
 
 test('readiness commits thirty seconds after hydration even with ongoing layout progress', async () => {
   const opened = await openingEditor(true, false, {
-    holdReply: (request) => request.type === 'completeLayout',
+    holdFullLayout: true,
   });
   const tasks = holdHydrationTasks();
   const fallback = holdLayoutFallback();
@@ -2320,7 +2750,7 @@ test('readiness commits thirty seconds after hydration even with ongoing layout 
 
 test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
   const opened = await openingEditor(true, false, {
-    holdReply: (request) => request.type === 'completeLayout',
+    holdFullLayout: true,
   });
   const tasks = holdHydrationTasks();
   const fallback = holdLayoutFallback();
@@ -2683,11 +3113,14 @@ test.each([false, true])('hiding a tab starts the editor peer immediately with s
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     act(() => result.current.presentFrame());
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
     expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
     act(() => visibility.hide());
     expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
@@ -3049,6 +3482,12 @@ test('a failed revision count starts the on-demand replica', async () => {
   }
 });
 
+function expectStatePrefetchAfterPageBuilds(posted: readonly ResidentEngineWorkerRequest[]): void {
+  const types = posted.map((request) => request.type);
+  expect(types.filter((type) => type === 'encodeState')).toHaveLength(1);
+  expect(types.indexOf('encodeState')).toBeGreaterThan(types.lastIndexOf('buildPages'));
+}
+
 test('turning off on-demand hydration starts a pending replica on idle after layout settles', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
@@ -3057,6 +3496,8 @@ test('turning off on-demand hydration starts a pending replica on idle after lay
     const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
     const requestReplica = result.current.core.requestReplica;
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
@@ -3070,8 +3511,12 @@ test('turning off on-demand hydration starts a pending replica on idle after lay
     expect(replicaHelpers.workerOpenReplicaOnDemand(session)).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expectStatePrefetchAfterPageBuilds(posted);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
     await act(async () => frames.runIdle());
+    await waitFor(() => expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true));
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     await act(async () => {
       workers[0].release();
@@ -3120,6 +3565,8 @@ test('a painted main preview hands off to the worker before hydrating the full r
     await act(async () => { workers[0].release(); });
     await waitFor(() => expect(result.current.core.previewing).toBe(false));
     const full = result.current.core.session!;
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
     expect(full).not.toBe(preview);
     expect(full.isDisplayOnly()).toBe(false);
     expect(full.storyIds()).toEqual([]);
@@ -3158,8 +3605,12 @@ test('a painted main preview hands off to the worker before hydrating the full r
     expect(result.current.core.opening).toBe(false);
     expect(destroyed).toHaveBeenCalledTimes(1);
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expectStatePrefetchAfterPageBuilds(posted);
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
     await act(async () => frames.runIdle());
+    await waitFor(() => expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true));
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.core.replicaReady).toBe(false);
@@ -3675,9 +4126,91 @@ test('a viewer skips peer scheduling and defers background page builds until idl
   }
 }, 15_000);
 
+test('the editor state prefetch waits for a sliced background page-build reply', async () => {
+  const options = {
+    holdCompletion: true,
+    holdReply: (request: ResidentEngineWorkerRequest) =>
+      request.type === 'buildPages' || request.type === 'encodeState',
+  };
+  const { posted, workers, received, reply, replies } = installWorker(options);
+  const frames = holdFrames();
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  try {
+    const props = { ...initialProps, source: await longFixture(1200) };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    act(() => result.current.presentFrame());
+    const layout = result.current.renderer.settledDisplayList(null, null, 'document');
+    void layout.catch(() => {});
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    let batch = await received('buildPages');
+    while (batch.type === 'buildPages' && !batch.background) {
+      await act(async () => reply(batch));
+      batch = await received('buildPages', batch.id);
+    }
+    if (batch.type !== 'buildPages') throw new Error('expected a page build');
+    expect(batch.background).toBe(true);
+    expect(batch.pages.length).toBeGreaterThan(4);
+    expect(batch.pages).toEqual(expect.arrayContaining([5, 6]));
+    expect(replies.has(batch.id)).toBe(true);
+    const window = result.current.renderer.settledDisplayList(null, null, 'window');
+    void window.catch(() => {});
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    const postedBeforeReply = posted.length;
+    await act(async () => reply(batch));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    const prefetched = await received('encodeState');
+    expect(posted.indexOf(prefetched)).toBeGreaterThanOrEqual(postedBeforeReply);
+    expectStatePrefetchAfterPageBuilds(posted);
+    await frames.untilCommitted(layout);
+    await window;
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => {
+      reply(prefetched);
+      frames.runIdle();
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expectStatePrefetchAfterPageBuilds(posted);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    visibility.restore();
+    fallback.restore();
+    frames.restore();
+  }
+}, 15_000);
+
 test('the editor peer waits for window layout to settle and then starts on idle', async () => {
-  const options = { holdCompletion: true };
-  const { posted, workers } = installWorker(options);
+  let holdMargin = true;
+  let marginId: number | null = null;
+  const options = {
+    holdCompletion: true,
+    holdReply: (request: ResidentEngineWorkerRequest) => {
+      if (!holdMargin || request.type !== 'buildPages' || !request.background) return false;
+      marginId ??= request.id;
+      return request.id === marginId;
+    },
+  };
+  const { posted, workers, received, reply } = installWorker(options);
   const frames = holdFrames();
   const visibility = stubDocumentVisibility('visible');
   try {
@@ -3685,6 +4218,8 @@ test('the editor peer waits for window layout to settle and then starts on idle'
     const { result, unmount } = renderHook(useHarness, { initialProps: props });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const full = result.current.core.session!;
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
     await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
@@ -3698,13 +4233,27 @@ test('the editor peer waits for window layout to settle and then starts on idle'
     });
     expect(settled).toBe(false);
     expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(false);
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
     expect(result.current.core.replicaReady).toBe(false);
     options.holdCompletion = false;
     await act(async () => workers[0].release());
+    await waitFor(() => expect(posted.some((request) => request.type === 'buildPages')).toBe(true));
+    await waitFor(() => expect(marginId).not.toBeNull());
+    const margin = await received('buildPages', marginId! - 1);
+    expect(margin).toMatchObject({ type: 'buildPages', pages: [5, 6], background: true });
+    expect(settled).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    holdMargin = false;
+    await act(async () => reply(margin));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.findIndex((request) => request.type === 'encodeState')).toBeGreaterThan(posted.indexOf(margin));
     await frames.untilCommitted(layout);
     expect(settled).toBe(true);
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
     expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(true);
     await act(async () => frames.runIdle());
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
@@ -3719,6 +4268,239 @@ test('the editor peer waits for window layout to settle and then starts on idle'
   }
 }, 15_000);
 
+test.each(['resolved', 'in flight'] as const)(
+  'a host change after state prefetch is %s hydrates the current worker state',
+  async (stage) => {
+    const worker = installWorker({ holdReply: (request) => request.type === 'encodeState' });
+    const frames = holdFrames();
+    const visibility = stubDocumentVisibility('visible');
+    let resident!: NonNullable<Awaited<ReturnType<OpenInWorker>>>;
+    const openInWorker: OpenInWorker = async (...args) => {
+      const opened = await result.current.renderer.openInWorker(...args);
+      if (opened) resident = opened;
+      return opened;
+    };
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: await longFixture(1), openInWorker },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      const load = spyOn(session, 'loadState');
+      registerRestore(() => load.mockRestore());
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+      const prefetched = await worker.received('encodeState');
+      const before = worker.responses.get(prefetched)!;
+      if (!before.ok || !before.state) throw new Error('expected prefetched state');
+      expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(load).not.toHaveBeenCalled();
+      if (stage === 'resolved') await act(async () => worker.reply(prefetched));
+      const identities = await resident.documentRead({ kind: 'paragraphIdentities' });
+      const paragraph = identities.value.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+      await act(async () => {
+        const changed = await resident.proposal({
+          kind: 'propose',
+          request: {
+            expectVersion: identities.version,
+            proposals: [{
+              id: 'after-prefetch', paragraph,
+              suggest: { author: 'Host', date: '2026-10-04T00:00:00Z' },
+              op: 'insertText', at: 'start', text: 'Changed ',
+            }],
+          },
+        });
+        expect(changed.result).toMatchObject({ ok: true });
+      });
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      await act(async () => frames.runIdle());
+      await waitFor(() => expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(2));
+      const fresh = await worker.received('encodeState', prefetched.id);
+      const after = worker.responses.get(fresh)!;
+      if (!after.ok || !after.state) throw new Error('expected current worker state');
+      expect(after.version).not.toBe(before.version);
+      expect(load).not.toHaveBeenCalled();
+      await act(async () => {
+        if (stage === 'in flight') worker.reply(prefetched);
+        worker.reply(fresh);
+        await awaitWorkerOpenReplica(session);
+      });
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(load.mock.calls[0]![0]).toEqual(new Uint8Array(after.state));
+      expect(load.mock.calls[0]![0]).not.toEqual(new Uint8Array(before.state));
+      expect(session.paragraphs('body')[0].text).toBe('Changed First paragraph');
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(result.current.core.replicaReady).toBe(true);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      visibility.restore();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('an already settled editor window prefetches state when its peer begins waiting', async () => {
+  const { posted, received, reply } = installWorker({ holdReply: (request) => request.type === 'encodeState' });
+  const frames = holdFrames();
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: await longFixture(1), onLayoutWait },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    const prefetched = await received('encodeState');
+    expect(onLayoutWait).toHaveBeenCalledTimes(1);
+    expect(posted.some((request) => request.type === 'buildPages')).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => reply(prefetched));
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test('a failed state prefetch takes the encode-failure fallback without encoding again', async () => {
+  const { workers, posted, received, reply, replies } = installWorker({
+    holdReply: (request) => request.type === 'encodeState',
+  });
+  const frames = holdFrames();
+  const visibility = stubDocumentVisibility('visible');
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: await longFixture(1) },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    const prefetched = await received('encodeState');
+    const lateState = replies.get(prefetched.id)!;
+    await act(async () => {
+      workers[0].onmessage?.({
+        data: { id: prefetched.id, ok: false, error: 'prefetch failed' },
+      } as MessageEvent);
+      reply(prefetched);
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.mainOpens).toEqual([true]));
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.errors).toEqual([]);
+    await act(async () => lateState());
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([true]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test.each([
+  ['replace', 'resolved'], ['replace', 'in flight'],
+  ['unmount', 'resolved'], ['unmount', 'in flight'],
+] as const)(
+  'a document %s discards a %s state prefetch before peer start',
+  async (action, stage) => {
+    let holdStateReply = true;
+    const { posted, received, reply, responses } = installWorker({
+      holdReply: (request) => holdStateReply && request.type === 'encodeState',
+    });
+    const frames = holdFrames();
+    const visibility = stubDocumentVisibility('visible');
+    const { result, rerender, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: await longFixture(1) },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const previous = result.current.core.session!;
+      const loadPrevious = spyOn(previous, 'loadState');
+      registerRestore(() => loadPrevious.mockRestore());
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(previous));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+      const prefetched = await received('encodeState');
+      const oldState = responses.get(prefetched)!;
+      if (!oldState.ok || !oldState.state) throw new Error('expected previous document state');
+      if (stage === 'resolved') await act(async () => reply(prefetched));
+      expect(replicaHelpers.workerOpenReplicaStarted(previous)).toBe(false);
+      const staleIdle = [...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000);
+      expect(staleIdle).toHaveLength(1);
+      holdStateReply = false;
+      if (action === 'replace') {
+        const source = await longFixture(2);
+        act(() => rerender({ ...initialProps, source, generation: 2 }));
+        await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+      } else unmount();
+      await act(async () => {
+        if (stage === 'in flight') reply(prefetched);
+        for (const { callback } of staleIdle) callback({ didTimeout: false, timeRemaining: () => 50 });
+        frames.runIdle();
+      });
+      expect(loadPrevious).not.toHaveBeenCalled();
+      expect(replicaHelpers.workerOpenReplicaPending(previous)).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+      if (action === 'replace') {
+        const replacement = result.current.core.session!;
+        const load = spyOn(replacement, 'loadState');
+        registerRestore(() => load.mockRestore());
+        act(() => result.current.pipeline.runLayoutPipeline());
+        await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(replacement));
+        act(() => result.current.presentFrame());
+        await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
+        await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+        expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(2);
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(load.mock.calls[0]![0]).not.toEqual(new Uint8Array(oldState.state));
+        expect(texts(replacement).body).toEqual(['First paragraph', 'Tail paragraph']);
+        expect(loadPrevious).not.toHaveBeenCalled();
+        expect(result.current.mainOpens).toEqual([false]);
+      } else expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      if (action === 'replace') unmount();
+      visibility.restore();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
 test.each([false, true])('the ten-second fallback starts the editor peer when layout never settles with ownFrame=%s', async (ownFrame) => {
   const { posted, workers } = installWorker({ holdState: true });
   const frames = holdFrames();
@@ -3731,6 +4513,8 @@ test.each([false, true])('the ten-second fallback starts the editor peer when la
     });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
     if (ownFrame) {
       act(() => result.current.pipeline.runLayoutPipeline());
       await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
@@ -3740,7 +4524,8 @@ test.each([false, true])('the ten-second fallback starts the editor peer when la
     act(() => frames.runIdle());
     act(() => fallback.advance(9999));
     expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
     act(() => fallback.advance(1));
     expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
@@ -3779,6 +4564,8 @@ test.each(['layout', 'idle'] as const)('replacing a document cancels the pending
     });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const previous = result.current.core.session!;
+    const load = spyOn(previous, 'loadState');
+    registerRestore(() => load.mockRestore());
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(previous));
     act(() => result.current.presentFrame());
@@ -3799,7 +4586,8 @@ test.each(['layout', 'idle'] as const)('replacing a document cancels the pending
       frames.runIdle();
     });
     expect(replicaHelpers.workerOpenReplicaPending(previous)).toBe(false);
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(load).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.errors).toEqual([]);
   } finally {
@@ -4185,6 +4973,8 @@ test('an editor peer stays pending past five seconds without its own frame and s
     });
     await waitFor(() => expect(hostPublished).toBe(true), bounds);
     const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
       result.current.ref.current!.save(),
@@ -4220,9 +5010,13 @@ test('an editor peer stays pending past five seconds without its own frame and s
     }, bounds);
 
     act(() => result.current.presentFrame());
-    expect(encodeRequests()).toHaveLength(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
     act(() => frames.run());
-    expect(encodeRequests()).toHaveLength(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
 
     const windowReady = result.current.renderer.settledDisplayList(
       null, null, 'window', controller.signal
@@ -4235,7 +5029,9 @@ test('an editor peer stays pending past five seconds without its own frame and s
     }, bounds);
     expect(windowOutcome).toMatchObject({ status: 'fulfilled' });
 
-    expect(encodeRequests()).toHaveLength(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expectStatePrefetchAfterPageBuilds(posted);
     expect(frames.idleCallbacks.size).toBeGreaterThan(0);
     act(() => frames.runIdle());
     await waitFor(() => expect(encodeRequests()).toHaveLength(1), bounds);

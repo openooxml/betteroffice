@@ -107,7 +107,8 @@ import type {
   LayoutInWorker,
   ResidentFrameApplyResult,
 } from './hooks/useDisplayList';
-import { workerOpenReplicaPending } from './internals/workerOpenReplica';
+import { workerOpenReplicaPending, workerOpenReplicaStarted } from './internals/workerOpenReplica';
+import { registeredWorkerProposalAuthority } from './internals/workerProposalAuthority';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
 import { useRustMeasurement, type RustFontChainsProvider } from './hooks/useRustMeasurement';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -206,6 +207,7 @@ export interface PagedEditorProps {
   document: Document | null;
   /** The parent-owned authoritative editing session. */
   yrsCore: YrsCoreSession;
+  pluginHostOpen?: boolean;
   /** Collaboration identity and replica lifecycle callback. */
   collaboration?: DocxEditorCollaborationOptions;
   /** Document styles for style resolution. */
@@ -537,6 +539,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const {
       document,
       yrsCore,
+      pluginHostOpen,
       collaboration,
       styles,
       theme: _theme,
@@ -1992,6 +1995,24 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsCore.replicaReady, yrsCore.workerProposalsReady,
     ]);
 
+    const fontRefreshStateRef = useRef({ yrsCore, viewerDocumentReadProp });
+    fontRefreshStateRef.current = { yrsCore, viewerDocumentReadProp };
+    const holdFontRefresh = useCallback(() => {
+      const { yrsCore: core, viewerDocumentReadProp: viewerRead } = fontRefreshStateRef.current;
+      const session = core.session;
+      return Boolean(
+        core.experimentalWorkerOpen &&
+        !core.hydrateOnDemand &&
+        !core.previewing &&
+        !viewerRead &&
+        session &&
+        !session.isDisplayOnly?.() &&
+        workerOpenReplicaStarted(session) &&
+        workerOpenReplicaPending(session) &&
+        registeredWorkerProposalAuthority(session)?.holdsWorkerState() !== true
+      );
+    }, []);
+
     // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
       runLayoutPipeline,
@@ -2001,6 +2022,10 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       renderEnv: yrsRenderEnv,
+      holdFontRefresh,
+      fontRefreshReleased: Boolean(yrsCore.session) && yrsCore.replicaReady &&
+        pluginHostOpen !== false && !workerOpenReplicaPending(yrsCore.session!),
+      fontRefreshScope: yrsCore.session,
     });
 
     const displayPositionToYrsLoc = (position: number | PointPosition): YrsLoc | null => {

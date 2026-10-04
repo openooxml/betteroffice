@@ -337,6 +337,7 @@ export function useYrsCoreSession(
   workerOpenEnabledRef.current = Boolean(openInWorker);
   const pendingReplicaRef = useRef<ReturnType<typeof deferWorkerOpenReplica> | null>(null);
   const startReplicaRef = useRef<(() => void) | null>(null);
+  const replicaStatePrefetchRef = useRef<{ start(): void; clear(): void } | null>(null);
   // Asks the worker whether the document has tracked changes, once per session.
   const revisionQueryRef = useRef<(() => void) | null>(null);
   const workerLaidOutRef = useRef<(() => void) | null>(null);
@@ -630,6 +631,34 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            type StateRevision = NonNullable<ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>>;
+            type PrefetchedState = {
+              revision: StateRevision;
+              result: Promise<Uint8Array>;
+            };
+            let prefetchedState: PrefetchedState | null = null;
+            const clearPrefetchedState = (): void => {
+              prefetchedState = null;
+            };
+            const sameRevision = (revision: StateRevision): boolean => {
+              const current = worker.stateRevision?.();
+              return current?.owner === revision.owner && current.sequence === revision.sequence;
+            };
+            const encodeReplicaState = async (): Promise<Uint8Array> => {
+              const cached = prefetchedState;
+              clearPrefetchedState();
+              let update: Uint8Array;
+              if (cached && sameRevision(cached.revision)) {
+                update = await cached.result;
+                if (!sameRevision(cached.revision)) update = await worker.encodeState();
+              } else {
+                update = await worker.encodeState();
+              }
+              if (stale() || sessionRef.current !== next || !pending.pending) {
+                throw new Error('The document changed while opening the replica');
+              }
+              return update;
+            };
             const gate = { reached: false, wanted: eagerReplica };
             const request = (): void => {
               pending.requestReady();
@@ -644,7 +673,7 @@ export function useYrsCoreSession(
               async () => {
                 const handover = beginWorkerProposalHandover(next);
                 const handedOver = handover ? await handover : null;
-                const update = handedOver ? handedOver.state : await worker.encodeState();
+                const update = handedOver ? handedOver.state : await encodeReplicaState();
                 return [
                   () => { next.openDocx(source, false); },
                   () => next.loadState(update),
@@ -652,6 +681,7 @@ export function useYrsCoreSession(
                 ];
               },
               () => {
+                clearPrefetchedState();
                 if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
                   throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                 }
@@ -670,7 +700,10 @@ export function useYrsCoreSession(
               {
                 current: () => !stale() && sessionRef.current === next &&
                   pendingReplicaRef.current === pending,
-                cancel: () => worker.destroy(),
+                cancel: () => {
+                  clearPrefetchedState();
+                  worker.destroy();
+                },
                 waitForLayout: eagerReplica,
               }
             );
@@ -702,6 +735,21 @@ export function useYrsCoreSession(
               });
             }
             pendingReplicaRef.current = pending;
+            replicaStatePrefetchRef.current = {
+              clear: clearPrefetchedState,
+              start: () => {
+                if (
+                  hydrateOnDemandRef.current || stale() || sessionRef.current !== next ||
+                  !pending.pending || pending.started || prefetchedState ||
+                  registeredWorkerProposalAuthority(next)
+                ) return;
+                const revision = worker.stateRevision?.();
+                if (!revision) return;
+                const result = worker.encodeState(true);
+                prefetchedState = { revision, result };
+                void result.catch(() => {});
+              },
+            };
             replicaGateRef.current = gate;
             requestReplicaRef.current = request;
             let revisionsQueried = false;
@@ -735,6 +783,7 @@ export function useYrsCoreSession(
             replicaReadyRef.current = false;
             setReplicaReady(false);
             void pending.ready.catch((error: unknown) => {
+              clearPrefetchedState();
               if (!stale() && sessionRef.current === next && pendingReplicaRef.current === pending) {
                 const onError = callbacksRef.current?.onReplicaError ?? callbacksRef.current?.onError;
                 onError?.(
@@ -785,6 +834,8 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      replicaStatePrefetchRef.current?.clear();
+      replicaStatePrefetchRef.current = null;
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
@@ -853,6 +904,7 @@ export function useYrsCoreSession(
   useEffect(() => {
     if (!openInWorker) return;
     const pending = pendingReplicaRef.current;
+    const prefetch = replicaStatePrefetchRef.current;
     if (
       !session ||
       session !== sessionRef.current ||
@@ -886,7 +938,9 @@ export function useYrsCoreSession(
       startPeer();
     } else if (hasOwnWorkerFrame && (!handoffFrom || options?.shownEngine === session)) {
       const settled = workerOpenRef.current?.settledDisplayList?.(
-        null, null, 'window', controller.signal
+        null, null, 'window', controller.signal, () => {
+          if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
+        }
       ) ?? Promise.resolve();
       void settled.then(() => {
         if (controller.signal.aborted) return;

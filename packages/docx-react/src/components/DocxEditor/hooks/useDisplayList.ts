@@ -97,7 +97,8 @@ import { nearestPages } from './pageBuildOrder';
 import { scheduleIdlePageBuild, type PageBuildTask } from './pageBuildScheduler';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
-  encodeState(): Promise<Uint8Array>;
+  encodeState(prefetch?: boolean): Promise<Uint8Array>;
+  stateRevision?(): { owner: ResidentEngineWorkerClient; sequence: number } | null;
   revisionCount(): Promise<number>;
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
@@ -191,7 +192,8 @@ export interface UseRustDisplayListResult {
     relayout: (() => void) | null,
     timeoutMs?: number | null,
     scope?: 'document' | 'window',
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onPagesPosted?: () => void
   ): Promise<DisplayList>;
   /**
    * Drops the settled display list. Without `failure` a new document is on its way, so waiters
@@ -497,7 +499,10 @@ export function useRustDisplayList(
   const workerPreviewKeysRef = useRef(new Map<number, string>());
   const settledEpochRef = useRef<number | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
-  const settleWaitersRef = useRef(new Map<() => void, 'document' | 'window'>());
+  const settleWaitersRef = useRef(new Map<() => void, {
+    scope: 'document' | 'window';
+    onPagesPosted?: (pages: readonly number[]) => void;
+  }>());
   const settleRelayoutRef = useRef<(() => void) | null>(null);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
@@ -1608,7 +1613,36 @@ export function useRustDisplayList(
         const opened = await requestOpenedWorker(hostEngine, (owner) => owner.opening!);
         return {
           ...opened,
-          encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
+          encodeState: (prefetch?: boolean) => {
+            if (!prefetch) return requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState());
+            return (async () => {
+              const previous = workerRef.current;
+              let owner = previous;
+              try {
+                const state = await requestOpenedWorker(hostEngine, (current) => {
+                  owner = current;
+                  return current.client.encodeState();
+                });
+                if (
+                  owner && owner !== previous && isCurrentWorker(hostEngine, owner) &&
+                  !owner.client.bootstrapSent()
+                ) requestLayoutRef.current?.();
+                return state;
+              } catch (error) {
+                if (
+                  !(error instanceof ResidentWorkerOutOfMemoryError) && owner &&
+                  isCurrentWorker(hostEngine, owner) && owner.client.hasFailed()
+                ) dropWorker(hostEngine, error);
+                throw error;
+              }
+            })();
+          },
+          stateRevision: () => {
+            const owner = workerRef.current;
+            return owner?.engine === hostEngine && !owner.client.hasFailed()
+              ? { owner: owner.client, sequence: owner.client.stateSequence() }
+              : null;
+          },
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op) =>
             requestOpenedWorker(hostEngine, async (owner) => {
@@ -1862,7 +1896,7 @@ export function useRustDisplayList(
       const [start, end] = displayWindowRef.current;
       const settling = settleWaitersRef.current.size > 0;
       const windowOnly = settling
-        ? ![...settleWaitersRef.current.values()].includes('document')
+        ? ![...settleWaitersRef.current.values()].some((waiter) => waiter.scope === 'document')
         : workerOpen;
       const first = windowOnly ? Math.max(0, start - WORKER_OPEN_BUILD_MARGIN_PAGES) : 0;
       const last = windowOnly
@@ -2029,6 +2063,7 @@ export function useRustDisplayList(
         );
         requestLayoutRef.current?.();
       };
+      const provisional = provisionalPageFrameRef.current;
       const request: Promise<DisplayPagesFrame | { superseded: true } | null> = worker
         ? release.length > 0
           ? worker.client.releasePages(
@@ -2049,6 +2084,11 @@ export function useRustDisplayList(
           if (!result || 'superseded' in result || !current()) {
             finish();
             return;
+          }
+          if (worker && build.kind === 'build' && !provisional) {
+            for (const waiter of settleWaitersRef.current.values()) {
+              waiter.onPagesPosted?.(batch);
+            }
           }
           const attach = (nextFrame: RetainedFrame): void => {
             if (!current()) {
@@ -3178,10 +3218,35 @@ export function useRustDisplayList(
       relayout: (() => void) | null,
       timeoutMs: number | null = 15_000,
       scope: 'document' | 'window' = 'document',
-      signal?: AbortSignal
+      signal?: AbortSignal,
+      onPagesPosted?: () => void
     ): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
+        const waiting: {
+          scope: 'document' | 'window';
+          onPagesPosted?: (pages: readonly number[]) => void;
+        } = { scope };
+        const peerWait = onPagesPosted !== undefined;
+        if (onPagesPosted) waiting.onPagesPosted = (pages) => {
+          if (
+            signal?.aborted || provisionalPageFrameRef.current ||
+            frameEngineRef.current !== (engineRef.current ?? null)
+          ) return;
+          const [start, end] = displayWindowRef.current;
+          const unbuilt = snapshotRef.current.displayList?.pages.some((page, index) =>
+            page.unbuilt &&
+            (scope === 'document' || (
+              index >= start - WORKER_OPEN_BUILD_MARGIN_PAGES &&
+              index < end + WORKER_OPEN_BUILD_MARGIN_PAGES
+            )) && !pages.includes(index)
+          );
+          if (unbuilt) return;
+          const posted = onPagesPosted;
+          onPagesPosted = undefined;
+          waiting.onPagesPosted = undefined;
+          posted?.();
+        };
         const settle = (): boolean => {
           const failure = signal?.aborted
             ? new Error('The layout wait was cancelled')
@@ -3197,6 +3262,10 @@ export function useRustDisplayList(
           );
           const current =
             displayList !== null &&
+            (!peerWait || (
+              frameEngineRef.current === (engineRef.current ?? null) &&
+              !provisionalPageFrameRef.current
+            )) &&
             settledEpochRef.current === contentEpochRef.current &&
             !isLayoutQueued(engineRef.current) &&
             !unbuilt;
@@ -3208,7 +3277,10 @@ export function useRustDisplayList(
           signal?.removeEventListener('abort', waiter);
           if (timer !== undefined) clearTimeout(timer);
           if (failure) reject(failure);
-          else resolve(displayList!);
+          else {
+            waiting.onPagesPosted?.([]);
+            resolve(displayList!);
+          }
           return true;
         };
         const waiter = (): void => {
@@ -3216,7 +3288,7 @@ export function useRustDisplayList(
         };
         if (settle()) return;
         if (relayout) settleRelayoutRef.current = relayout;
-        settleWaitersRef.current.set(waiter, scope);
+        settleWaitersRef.current.set(waiter, waiting);
         signal?.addEventListener('abort', waiter, { once: true });
         if (timeoutMs !== null) {
           timer = setTimeout(() => {

@@ -64,6 +64,7 @@ export function DocxEditorPagedArea({
   // Document + section
   document,
   yrsCore,
+  pluginHostOpen,
   collaboration,
   theme,
   initialSectionProperties,
@@ -156,6 +157,7 @@ export function DocxEditorPagedArea({
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   document: Document | null;
   yrsCore: YrsCoreSession;
+  pluginHostOpen?: boolean;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -453,6 +455,7 @@ export function DocxEditorPagedArea({
         commandBridgeRef={commandBridgeRef}
         document={document}
         yrsCore={yrsCore}
+        pluginHostOpen={pluginHostOpen}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
