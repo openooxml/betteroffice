@@ -480,7 +480,7 @@ export interface DocxEditorRef {
   readonly commands: DocxCommandStore;
   /** @deprecated Use {@link readParagraphs} or {@link exportStructuredWithPages}. Throws DocxAsyncOnlyError in worker viewers. */
   getDocument: () => Document | null;
-  /** @deprecated The paged editor is internal; use the editor ref's members. */
+  /** @deprecated The paged editor is internal; use the editor ref's members. Returns null in viewer sessions. */
   getEditorRef: () => PagedEditorRef | null;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput: () => Promise<void>;
@@ -619,11 +619,11 @@ export interface DocxEditorRef {
   loadDocument: (doc: Document) => void;
   /** Load a DOCX buffer programmatically (ArrayBuffer, Uint8Array, Blob, or File) */
   loadDocumentBuffer: (buffer: DocxInput) => Promise<void>;
-  /** @deprecated Use {@link insertComment}. */
+  /** @deprecated Use {@link insertComment}. Returns null in viewer sessions. */
   addComment: (options: DocxCommentInsertion) => number | null;
-  /** @deprecated Use {@link insertCommentReply}. */
+  /** @deprecated Use {@link insertCommentReply}. Returns null in viewer sessions. */
   replyToComment: (commentId: number, text: string, author: string) => number | null;
-  /** Resolve (mark as done) a comment. */
+  /** Resolve (mark as done) a comment. Does nothing in viewer sessions. */
   resolveComment: (commentId: number) => void;
   /** @deprecated In a viewer session it queues the change through the worker and returns true; use {@link proposeChanges} for the result. */
   proposeChange: (options: {
@@ -637,7 +637,7 @@ export interface DocxEditorRef {
     query: string,
     options?: { caseSensitive?: boolean; limit?: number }
   ) => Array<{ paraId: string; match: string; before: string; after: string }>;
-  /** @deprecated Use {@link commands}; they act on the selection. */
+  /** @deprecated Use {@link commands}; they act on the selection. Returns false in viewer sessions. */
   applyFormatting: (options: {
     paraId: string;
     search?: string;
@@ -652,9 +652,9 @@ export interface DocxEditorRef {
       fontFamily?: { ascii?: string; hAnsi?: string };
     };
   }) => boolean;
-  /** @deprecated Use {@link applyEdits} with a `setParagraphStyle` step. */
+  /** @deprecated Use {@link applyEdits} with a `setParagraphStyle` step. Returns false in viewer sessions. */
   setParagraphStyle: (options: { paraId: string; styleId: string }) => boolean;
-  /** @deprecated Use {@link commands}; they act on the selection. */
+  /** @deprecated Use {@link commands}; they act on the selection. Returns false in viewer sessions. */
   insertBreak: (options: {
     paraId: string;
     type: 'page' | 'sectionNextPage' | 'sectionContinuous';
@@ -706,9 +706,9 @@ export interface DocxEditorRef {
   scrollToComment: (commentId: number) => Promise<boolean>;
   /** Selects and reveals a revision's range, returning false when it no longer exists. */
   scrollToChange: (revisionId: number) => Promise<boolean>;
-  /** Inserts an anchored comment after pending input commits. */
+  /** Inserts an anchored comment after pending input commits. Returns null in viewer sessions. */
   insertComment: (options: DocxCommentInsertion) => Promise<number | null>;
-  /** Adds a reply to an existing comment. */
+  /** Adds a reply to an existing comment. Returns null in viewer sessions. */
   insertCommentReply: (commentId: number, text: string, author: string) => Promise<number | null>;
   /** Subscribes to committed document versions and returns an unsubscribe function. */
   onDocumentChange: (listener: (change: DocxDocumentChange) => void) => () => void;
@@ -1411,7 +1411,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     parseError: state.parseError,
     document: history.state,
     session: yrsCore.session,
-    viewerSession: viewerReads,
+    viewerSession,
     readOnly: readOnlyProp || opening,
     mode: editingMode,
     modeControlled: modeProp !== undefined,
@@ -1998,6 +1998,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   useDocxEditorRefApi({
     experimentalWorkerOpen,
+    viewerSession,
     ref,
     document: history.state,
     documentFromYrs: yrsCore.documentFromYrs,
@@ -2163,7 +2164,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       refreshTrackedChanges(session);
     },
     onAcceptChangeById: (revisionId) => {
-      if (viewerReads) return;
+      if (viewerSession) return;
       const revision = pagedEditorRef.current
         ?.getYrsSession()
         ?.listRevisions()
@@ -2173,7 +2174,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
     },
     onRejectChangeById: (revisionId) => {
-      if (viewerReads) return;
+      if (viewerSession) return;
       const revision = pagedEditorRef.current
         ?.getYrsSession()
         ?.listRevisions()
