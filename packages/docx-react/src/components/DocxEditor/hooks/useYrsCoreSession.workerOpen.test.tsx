@@ -270,10 +270,7 @@ interface HarnessProps {
   onPresented?: (session: unknown) => void;
   /** Asks for the replica as soon as the session exists, as DocxEditor does for plugins, sidebars or the outline. */
   wanted?: boolean;
-  /** Passes the renderer's own pending completion, as DocxEditor does. */
-  followCompletion?: boolean;
-  /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
-  holdReplica?: boolean;
+  layoutReady?: Promise<void>;
 }
 
 function useHarness(props: HarnessProps) {
@@ -289,6 +286,12 @@ function useHarness(props: HarnessProps) {
     props.experimentalWorkerOpen
   );
   useEffect(() => renderer.resetSettled(), [props.generation]);
+  const settledDisplayList = useCallback<typeof renderer.settledDisplayList>(async (...args) => {
+    const displayList = await renderer.settledDisplayList(...args);
+    await props.layoutReady;
+    if (args[3]?.aborted) throw new Error('The layout wait was cancelled');
+    return displayList;
+  }, [props.layoutReady, renderer.settledDisplayList]);
   const [host, setHost] = useState<YrsDocxHost | null>(null);
   const [commentsSidebarOpen, setCommentsSidebarOpen] = useState(false);
   const mainOpens = useRef<boolean[]>([]);
@@ -334,8 +337,7 @@ function useHarness(props: HarnessProps) {
         workerProposals: props.workerProposals,
         refreshWorkerLayout: () => workerRelayout.current?.(),
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
-        ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
-        ...(props.followCompletion ? { pendingCompletion: renderer.pendingCompletion } : {}),
+        settledDisplayList: props.layoutReady ? settledDisplayList : renderer.settledDisplayList,
         hydrateOnDemand: props.hydrateOnDemand,
         onWorkerRevisions: props.onWorkerRevisions,
         onWorkerContentChange: props.onWorkerContentChange,
@@ -630,8 +632,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       act(() => harness.presentFrame());
       expect(harness.core.opening).toBe(false);
       if (!startPeer) return;
-      act(() => frames.run());
-      act(() => frames.run());
+      await frames.settleAndIdle(harness.renderer.settledDisplayList(null, null, 'window'));
       await waitFor(() => expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(true));
     };
     const loadPeer = async (full: YrsSession) => {
@@ -793,6 +794,7 @@ test('keys typed during opening land in order, none dropped', async () => {
       act(() => opened.harness.presentFrame());
       act(() => opened.frames.run());
       act(() => opened.frames.run());
+      act(() => opened.frames.runIdle());
       await act(async () => { await opened.editor.current!.flushPendingInput(); });
       expect(full.paragraphs('body').slice(0, 3).map((paragraph) => paragraph.text))
         .toEqual(['FirstA', 'BP', 'QR paragraph']);
@@ -845,6 +847,7 @@ test('a key typed right after the first page paints is kept', async () => {
       act(() => opened.harness.presentFrame());
       act(() => opened.frames.run());
       act(() => opened.frames.run());
+      act(() => opened.frames.runIdle());
       await act(async () => { await opened.editor.current!.flushPendingInput(); });
       expect(full.paragraphs('body')[0].text).toBe('FirstQZXJ paragraph');
       expect(load).toHaveBeenCalledTimes(1);
@@ -1079,8 +1082,7 @@ test('switching to viewing before eager hydration settles transferred input and 
     expect(opened.harness.core.hydrateOnDemand).toBe(true);
     expect((opened.view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(flushed).toBe(false);
-    act(() => opened.frames.run());
-    act(() => opened.frames.run());
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(true));
     await act(async () => {
       opened.workers.at(-1)!.release();
@@ -1209,8 +1211,7 @@ test('viewer sessions stay read-only while opening', async () => {
     act(() => opened.harness.pipeline.runLayoutPipeline());
     await waitFor(() => expect(opened.harness.renderer.presentedEngine).toBe(full));
     act(() => opened.harness.presentFrame());
-    act(() => opened.frames.run());
-    act(() => opened.frames.run());
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
     expect((opened.view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(opened.editor.current!.hasPendingInput()).toBe(false);
     expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
@@ -1410,9 +1411,73 @@ function texts(session: YrsSession) {
   ]));
 }
 
+function holdIdle() {
+  const request = globalThis.requestIdleCallback;
+  const cancel = globalThis.cancelIdleCallback;
+  const callbacks = new Map<number, { callback: IdleRequestCallback; options?: IdleRequestOptions }>();
+  let nextId = 0;
+  globalThis.requestIdleCallback = (callback, options) => {
+    callbacks.set(++nextId, { callback, options });
+    return nextId;
+  };
+  globalThis.cancelIdleCallback = (id) => { callbacks.delete(id); };
+  return {
+    callbacks,
+    run() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const { callback } of pending) callback({ didTimeout: false, timeRemaining: () => 50 });
+    },
+    restore() {
+      globalThis.requestIdleCallback = request;
+      globalThis.cancelIdleCallback = cancel;
+    },
+  };
+}
+
+function holdPeerFallback() {
+  const schedule = globalThis.setTimeout;
+  const unschedule = globalThis.clearTimeout;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  let now = 0;
+  let nextId = 0;
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
+    ((...input: Parameters<typeof setTimeout>) => {
+      const [callback, delay, ...args] = input;
+      if (delay === 10_000 && typeof callback === 'function') {
+        const id = --nextId;
+        timers.set(id, { at: now + delay, callback: () => callback(...args) });
+        return id as unknown as ReturnType<typeof setTimeout>;
+      }
+      return schedule(callback, delay, ...args);
+    }) as typeof setTimeout
+  );
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation(
+    ((id?: ReturnType<typeof setTimeout>) => {
+      if (!timers.delete(id as unknown as number)) unschedule(id);
+    }) as typeof clearTimeout
+  );
+  return {
+    timers,
+    advance(ms: number) {
+      now += ms;
+      for (const [id, timer] of [...timers]) {
+        if (timer.at > now) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    },
+    restore() {
+      timeout.mockRestore();
+      clear.mockRestore();
+    },
+  };
+}
+
 function holdFrames() {
   const request = globalThis.requestAnimationFrame;
   const cancel = globalThis.cancelAnimationFrame;
+  const idle = holdIdle();
   const frames = new Map<number, FrameRequestCallback>();
   let nextId = 0;
   globalThis.requestAnimationFrame = (callback) => {
@@ -1425,8 +1490,22 @@ function holdFrames() {
     frames.clear();
     for (const callback of pending) callback(performance.now());
   };
+  const untilCommitted = async <T,>(promise: Promise<T>): Promise<T> => {
+    let settled = false;
+    void promise.then(() => { settled = true; }, () => { settled = true; });
+    while (!settled) {
+      await act(async () => {
+        run();
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      });
+    }
+    await act(async () => {});
+    return promise;
+  };
   return {
     run,
+    runIdle: idle.run,
+    idleCallbacks: idle.callbacks,
     async until<T>(promise: Promise<T>): Promise<T> {
       let settled = false;
       void promise.then(() => { settled = true; }, () => { settled = true; });
@@ -1436,21 +1515,15 @@ function holdFrames() {
       }
       return promise;
     },
-    async untilCommitted<T>(promise: Promise<T>): Promise<T> {
-      let settled = false;
-      void promise.then(() => { settled = true; }, () => { settled = true; });
-      while (!settled) {
-        await act(async () => {
-          run();
-          await new Promise<void>((resolve) => setImmediate(resolve));
-        });
-      }
-      await act(async () => {});
-      return promise;
+    untilCommitted,
+    async settleAndIdle(promise: Promise<unknown>) {
+      await untilCommitted(promise);
+      await act(async () => idle.run());
     },
     restore() {
       globalThis.requestAnimationFrame = request;
       globalThis.cancelAnimationFrame = cancel;
+      idle.restore();
     },
   };
 }
@@ -1471,7 +1544,7 @@ function stubDocumentVisibility(initial: 'visible' | 'hidden') {
   };
 }
 
-test('a hidden document starts the editor peer after its own frame without animation frames', async () => {
+test('a hidden document starts the editor peer immediately without layout or idle', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
   const visibility = stubDocumentVisibility('hidden');
@@ -1479,15 +1552,13 @@ test('a hidden document starts the editor peer after its own frame without anima
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.renderer.frame).toBeNull();
-    act(() => result.current.pipeline.runLayoutPipeline());
-    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
-    expect(result.current.renderer.presentedEngine).toBe(session);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
     expect(result.current.mainOpens).toEqual([]);
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     await act(async () => {
       workers[0].release();
@@ -1503,18 +1574,21 @@ test('a hidden document starts the editor peer after its own frame without anima
   }
 });
 
-test.each([0, 1])('hiding a tab after %s animation frames starts the editor peer immediately', async (painted) => {
+test.each([false, true])('hiding a tab starts the editor peer immediately with settledLayout=%s', async (settledLayout) => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
   const visibility = stubDocumentVisibility('visible');
-  const { result, unmount } = renderHook(useHarness, { initialProps });
+  const layoutReady = settledLayout ? undefined : new Promise<void>(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, layoutReady },
+  });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     act(() => result.current.presentFrame());
-    if (painted) act(() => frames.run());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
     act(() => visibility.hide());
@@ -1522,6 +1596,7 @@ test.each([0, 1])('hiding a tab after %s animation frames starts the editor peer
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     act(() => visibility.hide());
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     await act(async () => {
@@ -1552,8 +1627,7 @@ test.each([false, true])('textarea input waits for readiness with hydrateOnDeman
       act(() => result.current.pipeline.runLayoutPipeline());
       await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
       act(() => result.current.presentFrame());
-      act(() => frames.run());
-      act(() => frames.run());
+      await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
       await waitFor(() => expect(posted.map((request) => request.type)).toContain('revisionCount'));
       expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     }
@@ -1655,8 +1729,7 @@ test('an on-demand replica stays empty past its load point until requested', asy
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     act(() => result.current.presentFrame());
-    act(() => frames.run());
-    act(() => frames.run());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
     await act(async () => {});
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
@@ -1685,7 +1758,9 @@ test('an on-demand replica stays empty past its load point until requested', asy
 test('tracked changes start an on-demand replica without a replica request', async () => {
   const { workers, posted } = installWorker({ holdState: true, revisionCount: 1 });
   const frames = holdFrames();
-  const props = { ...initialProps, hydrateOnDemand: true, holdReplica: true };
+  let releaseLayout!: () => void;
+  const layoutReady = new Promise<void>((resolve) => { releaseLayout = resolve; });
+  const props: HarnessProps = { ...initialProps, hydrateOnDemand: true, layoutReady };
   const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -1695,18 +1770,19 @@ test('tracked changes start an on-demand replica without a replica request', asy
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     await act(async () => {});
     expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
-    rerender({ ...props, holdReplica: false });
+    await act(async () => releaseLayout());
     expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
-    act(() => frames.run());
-    act(() => frames.run());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
-    rerender({ ...props, holdReplica: true });
-    rerender({ ...props, holdReplica: false });
+    rerender({ ...props, layoutReady: new Promise<void>(() => {}) });
+    rerender({ ...props, layoutReady: undefined });
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     await act(async () => {});
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(result.current.core.replicaReady).toBe(false);
@@ -1725,16 +1801,16 @@ test('tracked changes start an on-demand replica without a replica request', asy
 });
 
 test.each(['wanted', 'awaited'] as const)(
-  'a replica %s before the first layout loads only once the rest of the layout is asked of the worker',
+  'a replica %s before the first layout loads on idle after window layout settles',
   async (how) => {
-    const { workers, posted } = installWorker({ holdState: true, holdCompletion: true });
+    const options = { holdState: true, holdCompletion: true };
+    const { workers, posted } = installWorker(options);
     const frames = holdFrames();
     const { result, unmount } = renderHook(useHarness, {
       initialProps: {
         ...initialProps,
         source: await longFixture(1200),
         hydrateOnDemand: true,
-        followCompletion: true,
         wanted: how === 'wanted',
       },
     });
@@ -1754,6 +1830,11 @@ test.each(['wanted', 'awaited'] as const)(
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
+      act(() => frames.runIdle());
+      expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+      options.holdCompletion = false;
+      await act(async () => workers[0].release());
+      await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
       await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
       const types = posted.map((request) => request.type);
       expect(types.indexOf('encodeState')).toBeGreaterThan(types.indexOf('bootstrap'));
@@ -1774,15 +1855,15 @@ test.each(['wanted', 'awaited'] as const)(
   15_000
 );
 
-test('the revision count is asked once the rest of the layout is asked of the worker, not after it completes', async () => {
-  const { workers, posted } = installWorker({ holdCompletion: true });
+test('the revision count is asked once on idle after window layout settles', async () => {
+  const options = { holdCompletion: true };
+  const { workers, posted } = installWorker(options);
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
     initialProps: {
       ...initialProps,
       source: await longFixture(1200),
       hydrateOnDemand: true,
-      followCompletion: true,
     },
   });
   try {
@@ -1797,6 +1878,11 @@ test('the revision count is asked once the rest of the layout is asked of the wo
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
+    expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     await act(async () => {
@@ -1805,6 +1891,7 @@ test('the revision count is asked once the rest of the layout is asked of the wo
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     await act(async () => {});
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
@@ -1819,8 +1906,10 @@ test('the revision count is asked once the rest of the layout is asked of the wo
 test('a failed revision count starts the on-demand replica', async () => {
   const { workers, posted } = installWorker({ holdState: true, failRevisionCount: true });
   const frames = holdFrames();
-  const props = { ...initialProps, hydrateOnDemand: true, holdReplica: true };
-  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+  let releaseLayout!: () => void;
+  const layoutReady = new Promise<void>((resolve) => { releaseLayout = resolve; });
+  const props = { ...initialProps, hydrateOnDemand: true, layoutReady };
+  const { result, unmount } = renderHook(useHarness, { initialProps: props });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
@@ -1829,12 +1918,12 @@ test('a failed revision count starts the on-demand replica', async () => {
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     await act(async () => {});
     expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-    rerender({ ...props, holdReplica: false });
-    act(() => frames.run());
-    act(() => frames.run());
+    await act(async () => releaseLayout());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
     expect(result.current.core.replicaReady).toBe(false);
@@ -1852,7 +1941,7 @@ test('a failed revision count starts the on-demand replica', async () => {
   }
 });
 
-test('turning off on-demand hydration starts a pending replica after two frames', async () => {
+test('turning off on-demand hydration starts a pending replica on idle after layout settles', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames();
   try {
@@ -1864,8 +1953,7 @@ test('turning off on-demand hydration starts a pending replica after two frames'
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     act(() => result.current.presentFrame());
-    act(() => frames.run());
-    act(() => frames.run());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     act(() => rerender({ ...props, hydrateOnDemand: false }));
     expect(result.current.core.session).toBe(session);
@@ -1873,9 +1961,9 @@ test('turning off on-demand hydration starts a pending replica after two frames'
     expect(result.current.core.hydrateOnDemand).toBe(false);
     expect(replicaHelpers.workerOpenReplicaOnDemand(session)).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
-    act(() => frames.run());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-    act(() => frames.run());
+    await act(async () => frames.runIdle());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     await act(async () => {
       workers[0].release();
@@ -1933,6 +2021,7 @@ test('a painted main preview hands off to the worker before hydrating the full r
     expect(result.current.core.opening).toBe(true);
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     expect(posted.map((request) => request.type)).toEqual(['open']);
 
     const inheritedPreviewFrame = result.current.renderer.displayList;
@@ -1942,6 +2031,7 @@ test('a painted main preview hands off to the worker before hydrating the full r
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     expect(posted.map((request) => request.type)).toEqual(['open']);
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.core.handoffFrom).toBe(preview);
@@ -1959,9 +2049,9 @@ test('a painted main preview hands off to the worker before hydrating the full r
     expect(result.current.core.handoffFrom).toBeNull();
     expect(result.current.core.opening).toBe(false);
     expect(destroyed).toHaveBeenCalledTimes(1);
-    act(() => frames.run());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-    act(() => frames.run());
+    await act(async () => frames.runIdle());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(result.current.mainOpens).toEqual([]);
     expect(result.current.core.replicaReady).toBe(false);
@@ -2413,25 +2503,38 @@ test('a package the worker cannot preview opens its preview here and the full do
   }
 });
 
-test('the replica waits while the shown engine is still to ask the worker for the rest of its layout', async () => {
-  const { posted } = installWorker();
+test('the editor peer waits for window layout to settle and then starts on idle', async () => {
+  const options = { holdCompletion: true };
+  const { posted, workers } = installWorker(options);
   const frames = holdFrames();
+  const visibility = stubDocumentVisibility('visible');
   try {
-    const props = { ...initialProps, source: longBytes, holdReplica: true };
-    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    const props = { ...initialProps, source: await longFixture(1200) };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const full = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
     act(() => result.current.presentFrame());
-    act(() => frames.run());
-    act(() => frames.run());
-    await act(async () => {});
+    let settled = false;
+    const layout = result.current.renderer.settledDisplayList(null, null, 'window');
+    void layout.then(() => { settled = true; }, () => {});
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(settled).toBe(false);
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(false);
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(result.current.core.replicaReady).toBe(false);
-    rerender({ ...props, holdReplica: false });
-    act(() => frames.run());
-    act(() => frames.run());
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    await frames.untilCommitted(layout);
+    expect(settled).toBe(true);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(true);
+    await act(async () => frames.runIdle());
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(true);
     expect(result.current.mainOpens).toEqual([false]);
@@ -2439,6 +2542,95 @@ test('the replica waits while the shown engine is still to ask the worker for th
     unmount();
   } finally {
     cleanup();
+    visibility.restore();
+    frames.restore();
+  }
+}, 15_000);
+
+test.each([false, true])('the ten-second fallback starts the editor peer when layout never settles with ownFrame=%s', async (ownFrame) => {
+  const { posted, workers } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  const layoutReady = new Promise<void>(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, layoutReady },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    if (ownFrame) {
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    }
+    act(() => frames.runIdle());
+    act(() => fallback.advance(9999));
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => fallback.advance(1));
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(fallback.timers.size).toBe(0);
+    act(() => frames.runIdle());
+    act(() => fallback.advance(10_000));
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    fallback.restore();
+    frames.restore();
+  }
+});
+
+test.each(['layout', 'idle'] as const)('replacing a document cancels the pending peer start during %s', async (stage) => {
+  const { posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  let releaseLayout!: () => void;
+  const layoutReady = new Promise<void>((resolve) => { releaseLayout = resolve; });
+  const { result, rerender, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, layoutReady: stage === 'layout' ? layoutReady : undefined },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const previous = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(previous));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    expect(replicaHelpers.workerOpenReplicaStarted(previous)).toBe(false);
+    const idleCallbacks = [...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000);
+    expect(idleCallbacks).toHaveLength(stage === 'idle' ? 1 : 0);
+    const staleFallbacks = [...fallback.timers.values()];
+    expect(staleFallbacks).toHaveLength(1);
+    act(() => rerender({ ...initialProps, source: bytes.slice(), generation: 2, layoutReady: undefined }));
+    await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+    expect(result.current.core.session).not.toBe(previous);
+    expect([...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000)).toHaveLength(0);
+    await act(async () => {
+      releaseLayout();
+      for (const { callback } of idleCallbacks) callback({ didTimeout: false, timeRemaining: () => 50 });
+      for (const { callback } of staleFallbacks) callback();
+      frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaPending(previous)).toBe(false);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    fallback.restore();
     frames.restore();
   }
 });
@@ -2578,8 +2770,7 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     act(() => result.current.presentFrame());
-    act(() => frames.run());
-    act(() => frames.run());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
@@ -2684,8 +2875,7 @@ test('opening the comments sidebar hydrates the pending replica and keeps worker
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     act(() => result.current.openCommentsSidebar());
     act(() => result.current.presentFrame());
-    act(() => frames.run());
-    act(() => frames.run());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
     await act(async () => { workers[0]!.release(); await awaitWorkerOpenReplica(session); });
     expect(result.current.mainOpens).toEqual([false]);
@@ -2766,9 +2956,9 @@ test('an on-demand replica requested before any frame waits for its own frame', 
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
     act(() => result.current.presentFrame());
-    act(() => frames.run());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-    act(() => frames.run());
+    await act(async () => frames.runIdle());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     const types = posted.map((request) => request.type);
     expect(types.indexOf('revisionCount')).toBeGreaterThan(-1);
@@ -2788,7 +2978,7 @@ test('an on-demand replica requested before any frame waits for its own frame', 
   }
 }, 15_000);
 
-test('an editor peer stays pending past five seconds without its own frame and starts once after two frames', async () => {
+test('an editor peer stays pending past five seconds without its own frame and starts once on idle', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const immediate = setImmediate;
   jest.useFakeTimers();
@@ -2835,18 +3025,20 @@ test('an editor peer stays pending past five seconds without its own frame and s
     expect(result.current.renderer.status).toBe('ready');
     act(() => result.current.presentFrame());
     await act(async () => {
-      jest.advanceTimersByTime(1500);
+      jest.advanceTimersByTime(0);
       await Promise.resolve();
     });
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
     act(() => frames.run());
     await act(async () => {
-      jest.advanceTimersByTime(1500);
+      jest.advanceTimersByTime(0);
       await Promise.resolve();
     });
     expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-    act(() => frames.run());
     jest.useRealTimers();
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    await act(async () => frames.runIdle());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(completed.value).toBe(false);
     await act(async () => { workers[0].release(); await calls; });
@@ -2859,6 +3051,7 @@ test('an editor peer stays pending past five seconds without its own frame and s
     act(() => result.current.presentFrame());
     act(() => frames.run());
     act(() => frames.run());
+    act(() => frames.runIdle());
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
   } finally {
     unmount();
@@ -3996,23 +4189,23 @@ test('a later proposal succeeds after an OOM during the first proposal', async (
 }, 15_000);
 
 test.each([true, false])(
-  'worker revisions are asked at the replica gate, before the completion finishes, with onWorkerRevisions=%s',
+  'worker revisions are asked once on idle after window layout settles with onWorkerRevisions=%s',
   async (withCallback) => {
     let completionReplied = false;
     const asked: boolean[] = [];
     const onWorkerRevisions = mock(() => {});
-    const { workers, posted } = installWorker({
+    const options = {
       holdState: true,
       holdBootstrap: true,
       holdCompletion: true,
       revisionCount: 1,
       onRevisionCount: () => asked.push(completionReplied),
-    });
+    };
+    const { workers, posted } = installWorker(options);
     const frames = holdFrames();
     const props = {
       ...workerProposalProps,
       source: await longFixture(1200),
-      followCompletion: true,
       onWorkerRevisions: withCallback ? onWorkerRevisions : undefined,
     };
     const { result, unmount } = renderHook(useHarness, { initialProps: props });
@@ -4040,11 +4233,17 @@ test.each([true, false])(
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
+      act(() => frames.runIdle());
+      expect(posted.some((request) => request.type === 'revisionCount')).toBe(false);
+      expect(onWorkerRevisions).not.toHaveBeenCalled();
+      options.holdCompletion = false;
+      await act(async () => workers[0].release());
+      await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
       await waitFor(() => expect(posted.filter((request) =>
         request.type === 'revisionCount'
       )).toHaveLength(1));
-      expect(asked).toEqual([false]);
-      expect(completionReplied).toBe(false);
+      expect(asked).toEqual([true]);
+      expect(completionReplied).toBe(true);
       expect(posted.findIndex((request) => request.type === 'revisionCount')).toBeGreaterThan(
         posted.findIndex((request) => request.type === 'completeLayout')
       );
@@ -4058,6 +4257,7 @@ test.each([true, false])(
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
+      act(() => frames.runIdle());
       await act(async () => {});
       expect(onWorkerRevisions).toHaveBeenCalledTimes(withCallback ? 1 : 0);
       expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
@@ -4070,7 +4270,7 @@ test.each([true, false])(
       expect(result.current.mainOpens).toEqual([]);
       await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
       expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
-      expect(completionReplied).toBe(false);
+      expect(completionReplied).toBe(true);
       if (withCallback) {
         await act(async () => { workers[0].release(); });
         await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));

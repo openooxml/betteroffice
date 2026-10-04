@@ -188,7 +188,8 @@ export interface UseRustDisplayListResult {
   settledDisplayList(
     relayout: (() => void) | null,
     timeoutMs?: number | null,
-    scope?: 'document' | 'window'
+    scope?: 'document' | 'window',
+    signal?: AbortSignal
   ): Promise<DisplayList>;
   /**
    * Drops the settled display list. Without `failure` a new document is on its way, so waiters
@@ -3161,12 +3162,15 @@ export function useRustDisplayList(
     (
       relayout: (() => void) | null,
       timeoutMs: number | null = 15_000,
-      scope: 'document' | 'window' = 'document'
+      scope: 'document' | 'window' = 'document',
+      signal?: AbortSignal
     ): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         const settle = (): boolean => {
-          const failure = settleErrorRef.current;
+          const failure = signal?.aborted
+            ? new Error('The layout wait was cancelled')
+            : settleErrorRef.current;
           const displayList = snapshotRef.current.displayList;
           const [start, end] = displayWindowRef.current;
           const unbuilt = displayList?.pages.some(
@@ -3186,6 +3190,7 @@ export function useRustDisplayList(
             return false;
           }
           settleWaitersRef.current.delete(waiter);
+          signal?.removeEventListener('abort', waiter);
           if (timer !== undefined) clearTimeout(timer);
           if (failure) reject(failure);
           else resolve(displayList!);
@@ -3197,9 +3202,11 @@ export function useRustDisplayList(
         if (settle()) return;
         if (relayout) settleRelayoutRef.current = relayout;
         settleWaitersRef.current.set(waiter, scope);
+        signal?.addEventListener('abort', waiter, { once: true });
         if (timeoutMs !== null) {
           timer = setTimeout(() => {
             settleWaitersRef.current.delete(waiter);
+            signal?.removeEventListener('abort', waiter);
             reject(new Error('The document did not finish rendering'));
           }, timeoutMs);
         }

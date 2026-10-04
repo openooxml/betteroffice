@@ -10,7 +10,12 @@ import type {
 } from '@betteroffice/docx/yrs';
 import { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
-import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
+import type {
+  OpenInWorker,
+  OpenPreviewInWorker,
+  UseRustDisplayListResult,
+  WorkerOpenedDocument,
+} from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
 import {
   adoptWorkerOpenHandoverVersion,
@@ -95,10 +100,9 @@ interface WorkerOpenOptions {
   /** Opens the first-page preview in the worker too, so this thread runs none of it. */
   openPreviewInWorker?: OpenPreviewInWorker;
   renderedFrame: object | null;
+  settledDisplayList?: UseRustDisplayListResult['settledDisplayList'];
   workerProposals?: boolean;
   refreshWorkerLayout?: () => void;
-  /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
-  pendingCompletion?: unknown;
   /** Leaves the replica unhydrated until a caller needs it; see requestReplica. */
   hydrateOnDemand?: boolean;
   /** A worker-held proposal changed document content. */
@@ -836,43 +840,55 @@ export function useYrsCoreSession(
   useEffect(() => {
     if (!openInWorker) return;
     const pending = pendingReplicaRef.current;
-    const start = startReplicaRef.current;
     if (
       !session ||
       session !== sessionRef.current ||
-      !hasOwnWorkerFrame ||
       !pending?.pending ||
-      !start
+      !startReplicaRef.current ||
+      previewing
     ) return;
-    if (previewing || (handoffFrom && options?.shownEngine !== session)) return;
-    // The replica blocks this thread: it loads once the worker is laying out the rest.
-    if (workerOpen?.pendingCompletion === session) return;
     const visibilityDocument = globalThis.document;
-    if (typeof requestAnimationFrame !== 'function' || visibilityDocument?.visibilityState === 'hidden') {
-      const timer = setTimeout(openReplicaGate, 0);
-      return () => clearTimeout(timer);
-    }
-    const startAfterPaint = (): void => {
-      cancelAnimationFrame(frameId);
+    const controller = new AbortController();
+    let idleId: number | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = (): void => {
+      controller.abort();
+      clearTimeout(fallbackTimer);
+      if (timer !== null) clearTimeout(timer);
+      if (idleId !== null) cancelIdleCallback(idleId);
       visibilityDocument?.removeEventListener('visibilitychange', onVisibilityChange);
-      openReplicaGate();
+    };
+    const startPeer = (): void => {
+      if (controller.signal.aborted) return;
+      cleanup();
+      if (sessionRef.current === session && pendingReplicaRef.current === pending) openReplicaGate();
     };
     const onVisibilityChange = (): void => {
-      if (visibilityDocument?.visibilityState === 'hidden') startAfterPaint();
+      if (visibilityDocument?.visibilityState === 'hidden') startPeer();
     };
+    const fallbackTimer = setTimeout(startPeer, 10_000);
     visibilityDocument?.addEventListener('visibilitychange', onVisibilityChange);
-    let frameId = requestAnimationFrame(() => {
-      frameId = requestAnimationFrame(startAfterPaint);
-    });
-    return () => {
-      cancelAnimationFrame(frameId);
-      visibilityDocument?.removeEventListener('visibilitychange', onVisibilityChange);
-    };
+    if (visibilityDocument?.visibilityState === 'hidden') {
+      startPeer();
+    } else if (hasOwnWorkerFrame && (!handoffFrom || options?.shownEngine === session)) {
+      const settled = workerOpenRef.current?.settledDisplayList?.(
+        null, null, 'window', controller.signal
+      ) ?? Promise.resolve();
+      void settled.then(() => {
+        if (controller.signal.aborted) return;
+        if (typeof requestIdleCallback === 'function') {
+          idleId = requestIdleCallback(startPeer, { timeout: 2000 });
+        } else {
+          timer = setTimeout(startPeer, 0);
+        }
+      }, () => {});
+    }
+    return cleanup;
   }, [
     openInWorker,
     session,
     hasOwnWorkerFrame,
-    workerOpen?.pendingCompletion,
+    openReplicaGate,
     workerOpen?.hydrateOnDemand,
     previewing,
     handoffFrom,
