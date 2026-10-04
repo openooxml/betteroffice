@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { createSessionClient } from './client';
 import { createSessionHost } from './host';
 import { deferReply, isClientMessage, isHostMessage, transferable, type HostMessage } from './protocol';
+import type { SchedulerTask } from './scheduler';
 import { createInProcessPair } from './testing/inProcessTransport';
 import { SESSION_SUPERSEDED, SessionFailure, type MethodPolicies, type SessionScheduler } from './types';
 
@@ -426,6 +427,140 @@ describe('session host and cloned transport', () => {
     await s.client.dispose();
     await s.disposed.promise;
     expect(cancels).toBe(0);
+  });
+
+  it('refreshes the original task stamps when stale work continues', async () => {
+    const s = session();
+    const stamps = deferred<number[]>();
+    const task: SchedulerTask = {
+      kind: 'slice', version: 0, generation: 0,
+      onStale: () => 'continue',
+      run() {
+        stamps.resolve([task.version, task.generation]);
+        return 'done';
+      },
+    };
+    s.host.scheduler.schedule(task);
+    s.host.scheduler.bump({ version: true });
+    s.host.scheduler.bump({ generation: true });
+    expect(await stamps.promise).toEqual([1, 2]);
+    await s.client.dispose();
+    await s.disposed.promise;
+  });
+
+  it('delivers a stale cancel error to the task fail hook once', async () => {
+    const s = session();
+    const failed = deferred<void>();
+    const error = new Error('x');
+    const failures: unknown[] = [];
+    let cancels = 0;
+    let runs = 0;
+    s.host.scheduler.schedule({
+      kind: 'slice', version: 0, generation: 0,
+      run() { runs += 1; return 'done'; },
+      cancel() { cancels += 1; throw error; },
+      fail(error) { failures.push(error); failed.resolve(); },
+    });
+    s.host.scheduler.bump({ version: true });
+    await failed.promise;
+    expect(failures).toEqual([error]);
+    expect(await s.client.call.add(1, 2)).toBe(3);
+    expect(s.client.failure).toBeUndefined();
+    await s.client.dispose();
+    await s.disposed.promise;
+    expect(failures).toEqual([error]);
+    expect(cancels).toBe(1);
+    expect(runs).toBe(0);
+  });
+
+  it('makes stale hook traps terminal before task fail hooks', async () => {
+    const s = session();
+    const failed = deferred<SessionFailure>();
+    let taskFailures = 0;
+    let runs = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.schedule({
+      kind: 'slice', version: 0, generation: 0,
+      onStale() { throw new WebAssembly.RuntimeError('trap'); },
+      run() { runs += 1; return 'done'; },
+      fail() { taskFailures += 1; },
+    });
+    s.host.scheduler.bump({ generation: true });
+    expect((await failed.promise).code).toBe('trap');
+    expect(s.client.failure?.message).toBe('trap');
+    expect(taskFailures).toBe(0);
+    expect(runs).toBe(0);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
+  });
+
+  it('makes stale cancel traps terminal before task fail hooks', async () => {
+    const s = session();
+    const failed = deferred<SessionFailure>();
+    let taskFailures = 0;
+    let cancels = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.schedule({
+      kind: 'slice', version: 0, generation: 0,
+      run: () => 'done',
+      cancel() { cancels += 1; throw new WebAssembly.RuntimeError('trap'); },
+      fail() { taskFailures += 1; },
+    });
+    s.host.scheduler.bump({ version: true });
+    expect((await failed.promise).code).toBe('trap');
+    expect(taskFailures).toBe(0);
+    expect(cancels).toBe(1);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
+    expect(cancels).toBe(1);
+  });
+
+  it('makes pure cancel traps terminal', async () => {
+    const s = session();
+    const failed = deferred<SessionFailure>();
+    let cancels = 0;
+    let computes = 0;
+    let installs = 0;
+    s.client.onFailure((error) => { failed.resolve(error); });
+    s.host.scheduler.dispatch({
+      kind: 'pure', version: 0, generation: 0, input: 1,
+      compute(input) { computes += 1; return input; },
+      install() { installs += 1; },
+      cancel() { cancels += 1; throw new WebAssembly.RuntimeError('trap'); },
+    });
+    s.host.scheduler.bump({ version: true });
+    expect((await failed.promise).code).toBe('trap');
+    expect(cancels).toBe(1);
+    expect(computes).toBe(0);
+    expect(installs).toBe(0);
+    expect(s.disposeCount).toBe(1);
+    await s.client.dispose();
+    expect(cancels).toBe(1);
+  });
+
+  it('does not cancel completed or stale-cancelled tasks during shutdown', async () => {
+    for (const state of ['completed', 'cancelled'] as const) {
+      const s = session();
+      const drained = deferred<void>();
+      let runs = 0;
+      let cancels = 0;
+      s.host.scheduler.schedule({
+        kind: 'slice', version: 0, generation: 0,
+        run() { runs += 1; return 'done'; },
+        cancel() { cancels += 1; },
+      });
+      if (state === 'cancelled') s.host.scheduler.bump({ version: true });
+      s.host.scheduler.schedule({
+        kind: 'drain', version: s.host.scheduler.version, generation: s.host.scheduler.generation,
+        run() { drained.resolve(); return 'done'; },
+      });
+      await drained.promise;
+      expect(runs).toBe(state === 'completed' ? 1 : 0);
+      expect(cancels).toBe(state === 'completed' ? 0 : 1);
+      await s.client.dispose();
+      await s.disposed.promise;
+      expect(cancels).toBe(state === 'completed' ? 0 : 1);
+    }
   });
 
   it('cancels queued background tasks once during an idle hold', async () => {
