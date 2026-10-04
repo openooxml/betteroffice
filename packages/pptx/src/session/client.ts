@@ -45,7 +45,7 @@ function copyFonts(
   return faces?.map((face) => {
     const bytes = new Uint8Array(face.bytes).buffer;
     transfer.push(bytes);
-    return { ...face, bytes };
+    return { family: face.family, bytes, bold: face.bold, italic: face.italic };
   });
 }
 

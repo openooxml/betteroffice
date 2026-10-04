@@ -61,7 +61,7 @@ export type PresentationSessionMethods = {
 };
 
 /** Exhaustive RPC names used by the session client. */
-export const PRESENTATION_SESSION_METHODS = Object.keys({
+export const PRESENTATION_SESSION_METHODS = {
   open: true,
   version: true,
   readContent: true,
@@ -72,7 +72,7 @@ export const PRESENTATION_SESSION_METHODS = Object.keys({
   slideSize: true,
   save: true,
   dispose: true,
-} satisfies Record<keyof PresentationSessionMethods, true>) as (keyof PresentationSessionMethods)[];
+} satisfies { readonly [K in keyof PresentationSessionMethods]-?: true };
 
 /** Non-reorderable policies preserve call order across all lanes. */
 export const PRESENTATION_SESSION_POLICIES: MethodPolicies<PresentationSessionMethods> = {
@@ -81,7 +81,7 @@ export const PRESENTATION_SESSION_POLICIES: MethodPolicies<PresentationSessionMe
   readContent: { lane: 'interactive' },
   findText: { lane: 'interactive' },
   validateEdits: { lane: 'interactive' },
-  applyEdits: { lane: 'input', mutates: true },
+  applyEdits: { lane: 'input', mutates: true, userInput: true },
   slides: { lane: 'interactive' },
   slideSize: { lane: 'interactive' },
   save: { lane: 'interactive' },

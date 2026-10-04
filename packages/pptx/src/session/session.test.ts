@@ -9,6 +9,7 @@ import { openPresentationSession, type PresentationSession } from './client';
 import { createPresentationSessionHost } from './host';
 import {
   PRESENTATION_SESSION_METHODS,
+  PRESENTATION_SESSION_POLICIES,
   type PresentationSessionEvents,
   type PresentationSessionMethods,
 } from './methods';
@@ -33,6 +34,11 @@ function read(result: PptxReadResult): Extract<PptxReadResult, { ok: true }> {
   return result;
 }
 
+function content(result: PptxReadResult): Omit<Extract<PptxReadResult, { ok: true }>, 'version'> {
+  const { version: _, ...value } = read(result);
+  return value;
+}
+
 async function session(clientId: number): Promise<PresentationSession> {
   const pair = createInProcessPair();
   createPresentationSessionHost(pair.host);
@@ -43,6 +49,16 @@ async function session(clientId: number): Promise<PresentationSession> {
 }
 
 describe('presentation sessions', () => {
+  test('declares ordered methods and marks edits as user input', () => {
+    expect(Object.keys(PRESENTATION_SESSION_METHODS)).toEqual(Object.keys(PRESENTATION_SESSION_POLICIES));
+    expect(PRESENTATION_SESSION_POLICIES.applyEdits).toEqual({
+      lane: 'input', mutates: true, userInput: true,
+    });
+    for (const policy of Object.values(PRESENTATION_SESSION_POLICIES)) {
+      expect(policy.reorderable).not.toBe(true);
+    }
+  });
+
   test('matches main-thread projections, reads, edits and saved bytes', async () => {
     const main = openPresentation(fixture, {
       clientId: 9701, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
@@ -65,7 +81,8 @@ describe('presentation sessions', () => {
       const workerBefore = read(await worker.call.readContent());
       expect(await worker.call.version()).toBe(workerBefore.version);
       expect(mainBefore.version).toBe(main.version());
-      expect({ ...workerBefore, version: mainBefore.version }).toEqual(mainBefore);
+      expect(workerBefore.version).not.toBe(mainBefore.version);
+      expect(content(workerBefore)).toEqual(content(mainBefore));
       const story = mainBefore.stories.find((candidate) => candidate.paragraphs[0]?.editable);
       if (!story) throw new Error('Fixture has no editable story');
       const request: PptxEditRequest = {
@@ -84,8 +101,13 @@ describe('presentation sessions', () => {
       const mainApplied = main.applyEdits({ ...request, expectVersion: mainBefore.version });
       if (!applied.ok || !mainApplied.ok) throw new Error('Parity batch was refused');
       expect(applied.applied).toBe(true);
-      expect({ ...applied, baseVersion: mainApplied.baseVersion, version: mainApplied.version })
-        .toEqual(mainApplied);
+      expect(applied.baseVersion).toBe(workerBefore.version);
+      expect(mainApplied.baseVersion).toBe(mainBefore.version);
+      const { baseVersion: workerBase, version: workerVersion, ...workerReceipt } = applied;
+      const { baseVersion: mainBase, version: mainVersion, ...mainReceipt } = mainApplied;
+      expect(workerBase).not.toBe(mainBase);
+      expect(workerVersion).not.toBe(mainVersion);
+      expect(workerReceipt).toEqual(mainReceipt);
       expect(await worker.call.version()).toBe(applied.version);
       expect(main.version()).toBe(mainApplied.version);
       expect(applied.version).not.toBe(workerBefore.version);
@@ -93,13 +115,21 @@ describe('presentation sessions', () => {
       const workerAfter = read(await worker.call.readContent());
       const mainAfter = read(main.readContent());
       expect(workerAfter.version).toBe(applied.version);
-      expect({ ...workerAfter, version: mainAfter.version }).toEqual(mainAfter);
+      expect(mainAfter.version).toBe(mainApplied.version);
+      expect(content(workerAfter)).toEqual(content(mainAfter));
       const filtered = read(await worker.call.readContent({ slideIds: [story.slideId] }));
       const mainFiltered = read(main.readContent({ slideIds: [story.slideId] }));
-      expect({ ...filtered, version: mainFiltered.version }).toEqual(mainFiltered);
+      expect(filtered.version).toBe(applied.version);
+      expect(mainFiltered.version).toBe(mainApplied.version);
+      expect(content(filtered)).toEqual(content(mainFiltered));
       const found = await worker.call.findText({ text: 'Session: ' });
       const mainFound = main.findText({ text: 'Session: ' });
-      expect({ ...found, version: mainFound.version }).toEqual(mainFound);
+      expect(found.version).toBe(applied.version);
+      expect(mainFound.version).toBe(mainApplied.version);
+      const { version: foundVersion, ...matches } = found;
+      const { version: mainFoundVersion, ...mainMatches } = mainFound;
+      expect(foundVersion).not.toBe(mainFoundVersion);
+      expect(matches).toEqual(mainMatches);
       expect(await worker.save()).toEqual(main.save());
       expect(new Uint8Array(await worker.call.save())).toEqual(main.save());
       expect(worker.state).toMatchObject({ version: 1, dirty: true });
@@ -204,6 +234,43 @@ describe('presentation sessions', () => {
       await expect(client.call.version()).rejects.toThrow('disposed');
       await expect(client.call.open(bytes)).rejects.toThrow('disposed');
     } finally { await client.dispose(); }
+  });
+
+  test('opens from an initial update with fallback fonts and preserves caller buffers', async () => {
+    const source = openPresentation(fixture, { clientId: 9705 });
+    try {
+      source.setSlideNotes(source.snapshot().slides[0].id, 'Restored notes');
+      const initialUpdate = source.encodeStateAsUpdate();
+      const retainedUpdate = initialUpdate.slice();
+      const faces = [{ family: 'Liberation Sans', bytes: fontBytes }];
+      const main = openPresentation(fixture, {
+        clientId: 9706, initialUpdate, fonts: faces, fallbackFonts: faces,
+      });
+      let worker: PresentationSession | undefined;
+      try {
+        const pair = createInProcessPair();
+        createPresentationSessionHost(pair.host);
+        const transferred: ArrayBuffer[] = [];
+        const transport: SessionTransport = { ...pair.client, post(message, transfer) {
+          transferred.push(...(transfer ?? []) as ArrayBuffer[]);
+          pair.client.post(message, transfer);
+        } };
+        worker = await openPresentationSession(fixture, {
+          clientId: 9706, initialUpdate, fonts: faces, fallbackFonts: faces, transport,
+        });
+        expect(transferred).toHaveLength(4);
+        expect(transferred.every((buffer) => buffer.byteLength === 0)).toBe(true);
+        expect(initialUpdate).toEqual(retainedUpdate);
+        expect(faces[0].bytes).toBe(fontBytes);
+        expect(fontBytes.byteLength).toBeGreaterThan(0);
+        expect(content(await worker.call.readContent())).toEqual(content(main.readContent()));
+        expect(await worker.save()).toEqual(main.save());
+        expect(worker.state).toMatchObject({ version: 0, dirty: false });
+      } finally {
+        main.dispose();
+        await worker?.dispose();
+      }
+    } finally { source.dispose(); }
   });
 
   test('transfers owned copies of document and font buffers, including subviews', async () => {

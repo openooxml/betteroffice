@@ -4,7 +4,6 @@ import { defineConfig } from 'tsup';
 export default defineConfig({
   entry: {
     index: 'src/index.ts',
-    'wasm-pptx': 'src/wasm/loader.ts',
     pptxSessionWorker: 'src/session/worker.ts',
   },
   format: ['esm'],
@@ -14,6 +13,9 @@ export default defineConfig({
   clean: true,
   treeshake: true,
   minify: true,
+  esbuildOptions(options) {
+    options.chunkNames = 'chunk-[hash]';
+  },
   onSuccess: async () => {
     await rename('dist/pptxSessionWorker.js', 'dist/pptxSessionWorker.mjs');
     await mkdir('dist/generated', { recursive: true });
