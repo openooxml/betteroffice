@@ -320,6 +320,13 @@ export function useYrsCoreSession(
   mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const projectionStoriesRef = useRef(new DirtyProjectionStories());
+  const workerSaveStoriesRef = useRef(new DirtyProjectionStories());
+  const markProjectionStories = useCallback((stories: readonly string[]): void => {
+    for (const story of stories) {
+      projectionStoriesRef.current.add(story);
+      workerSaveStoriesRef.current.add(story);
+    }
+  }, []);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
@@ -412,6 +419,7 @@ export function useYrsCoreSession(
     let unregisterSave: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
+    workerSaveStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
     let abandoned = false;
@@ -645,7 +653,7 @@ export function useYrsCoreSession(
               save: async (comments, peer) => {
                 if (stale()) throw new Error('The document changed while saving');
                 const currentHost = documentRef.current ?? host?.document;
-                const dirty = peer ? projectionStoriesRef.current.capture() : undefined;
+                const dirty = peer ? workerSaveStoriesRef.current.capture() : undefined;
                 const saved = await worker.save({
                   comments,
                   ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
@@ -723,9 +731,7 @@ export function useYrsCoreSession(
                 current: () => !stale(),
                 laidOut: () => laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
-                projectionChanged: (stories) => {
-                  for (const story of stories) projectionStoriesRef.current.add(story);
-                },
+                projectionChanged: markProjectionStories,
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);
                   worker.mirrorReady();
@@ -805,6 +811,7 @@ export function useYrsCoreSession(
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
           projectionStoriesRef.current.clear();
+          workerSaveStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
           previewingRef.current = false;
           retiringRef.current = opened.session;
@@ -850,6 +857,7 @@ export function useYrsCoreSession(
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
       projectionStoriesRef.current.clear();
+      workerSaveStoriesRef.current.clear();
     };
   }, [
     enabled,
@@ -859,6 +867,7 @@ export function useYrsCoreSession(
     collaborationClientId,
     collaborationInitialUpdate,
     openInWorker,
+    markProjectionStories,
     retire,
     retirePreview,
   ]);
@@ -1105,8 +1114,8 @@ export function useYrsCoreSession(
         : typeof stories === 'string'
           ? [stories]
           : stories;
-    for (const story of dirty) projectionStoriesRef.current.add(story);
-  }, []);
+    markProjectionStories(dirty);
+  }, [markProjectionStories]);
 
   return {
     session,

@@ -322,6 +322,69 @@ test('an editor flushes its loaded peer and posts its diff immediately before sa
   save.mockRestore();
 });
 
+test('a worker save keeps body edits already projected by getDocument', async () => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  const { core, pagedEditorRef, io, workerDocument } = opened.hook.result.current;
+  const body = opened.session.paragraphs('body')[0]!;
+  opened.session.insertText({ story: 'body', paraId: body.paraId, offset: 0 }, 'Body edit ');
+  core.publishDirectInput('body');
+  const projected = pagedEditorRef.current!.getDocument();
+  expect(projected).not.toBeNull();
+  expect(JSON.stringify(projected!.package.document.content)).toContain('Body edit ');
+  const story = 'hf:rIdHeader1';
+  const header = opened.session.paragraphs(story)[0]!;
+  opened.session.insertText({ story, paraId: header.paraId, offset: 0 }, 'Header edit ');
+  core.publishDirectInput(story);
+  const save = spyOn(workerDocument.current!, 'save');
+  try {
+    const buffer = await io.handleSave();
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    const zip = await JSZip.loadAsync(buffer!);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('Body edit ');
+    expect(await zip.file('word/header1.xml')!.async('string')).toContain('Header edit ');
+    expect(save.mock.calls[0]![0].stories).toEqual(['body', story]);
+    expect(opened.errors).toEqual([]);
+  } finally {
+    save.mockRestore();
+  }
+});
+
+test.each(['getDocument', 'fallback'] as const)('%s keeps body edits after a worker save and a header edit', async (kind) => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  const { core, pagedEditorRef, io } = opened.hook.result.current;
+  expect(pagedEditorRef.current!.getDocument()).not.toBeNull();
+  const body = opened.session.paragraphs('body')[0]!;
+  opened.session.insertText({ story: 'body', paraId: body.paraId, offset: 0 }, 'Body edit ');
+  core.publishDirectInput('body');
+  const saved = await io.handleSave();
+  expect(saved).toBeInstanceOf(ArrayBuffer);
+  const first = await JSZip.loadAsync(saved!);
+  expect(await first.file('word/document.xml')!.async('string')).toContain('Body edit ');
+  const story = 'hf:rIdHeader1';
+  const header = opened.session.paragraphs(story)[0]!;
+  opened.session.insertText({ story, paraId: header.paraId, offset: 0 }, 'Header edit ');
+  core.publishDirectInput(story);
+  if (kind === 'getDocument') {
+    const projected = pagedEditorRef.current!.getDocument();
+    expect(projected).not.toBeNull();
+    expect(JSON.stringify(projected!.package.document.content)).toContain('Body edit ');
+    expect(JSON.stringify(projected!.package.headers?.get('rIdHeader1')?.content)).toContain('Header edit ');
+  } else {
+    registerWorkerOpenSave(opened.session, {
+      available: () => false,
+      save: async () => { throw new Error('Unexpected worker save'); },
+    });
+    const buffer = await io.handleSave();
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    const zip = await JSZip.loadAsync(buffer!);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('Body edit ');
+    expect(await zip.file('word/header1.xml')!.async('string')).toContain('Header edit ');
+  }
+  expect(opened.errors).toEqual([]);
+});
+
 test('an unavailable worker save preserves peer stories for the main-thread fallback', async () => {
   const opened = await workerOpened(false);
   await act(async () => { await requestWorkerOpenReplica(opened.session); });

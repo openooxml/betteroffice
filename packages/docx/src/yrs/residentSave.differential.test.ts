@@ -8,7 +8,6 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
-  dirtyProjectionStory,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
@@ -32,13 +31,15 @@ import { yrsToDocument } from './yrsToDocument';
  */
 
 async function saveWorkerArm(arms: Arms) {
-  return arms.client.save({
+  const saved = await arms.client.save({
     comments: hostComments(arms.workerHost),
     host: hostSaveMetadata(arms.workerHost),
     ...(arms.peer
-      ? { stateVector: arms.peer.encodeStateVector(), stories: [...arms.main.dirtyStories] }
+      ? { stateVector: arms.peer.encodeStateVector(), stories: [...arms.workerSaveStories] }
       : {}),
   });
+  if (arms.peer) arms.workerSaveStories.clear();
+  return saved;
 }
 
 const DATE = '2026-10-02T12:00:00Z';
@@ -51,7 +52,7 @@ type Story = (typeof STORIES)[number];
 type Topology = 'A/editor' | 'B/viewer';
 type Action =
   | 'insert' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
-  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'undo' | 'redo';
+  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo';
 interface Operation {
   action: Action;
   story: Story;
@@ -177,16 +178,24 @@ class MainArm {
   readonly dirtyStories = new Set<string>();
   private compatibilityBase: Document | null = null;
 
-  constructor(readonly session: YrsSession, readonly host: Document) {}
+  constructor(
+    readonly session: YrsSession,
+    readonly host: Document,
+    private readonly markWorkerStory?: (story: string) => void
+  ) {}
 
   publishDirectInput(stories?: readonly string[]): void {
     if (!this.session.hasStory('body')) return;
     for (const story of stories ?? [this.session.selection()?.head.story ?? 'body']) {
-      this.dirtyStories.add(dirtyProjectionStory(story));
+      const root = ['hf:', 'fn:', 'en:'].some((prefix) => story.startsWith(prefix))
+        ? story.split(':', 2).join(':')
+        : 'body';
+      this.dirtyStories.add(root);
+      this.markWorkerStory?.(root);
     }
   }
 
-  async save(): Promise<Uint8Array> {
+  project(): Document {
     const base = this.compatibilityBase ?? this.session.materializeDocx();
     if (!base) throw new Error('The main arm has no compatibility package');
     const projected = yrsToDocument(
@@ -195,6 +204,11 @@ class MainArm {
     );
     this.dirtyStories.clear();
     this.compatibilityBase = projected;
+    return projected;
+  }
+
+  async save(): Promise<Uint8Array> {
+    const projected = this.project();
     const bytes = await saveEditorDocument(this.session, projected, hostComments(this.host));
     projected.originalBuffer = bytes;
     return new Uint8Array(bytes);
@@ -220,6 +234,7 @@ interface Arms {
   client: ResidentEngineWorkerClient;
   workerHost: Document;
   main: MainArm;
+  workerSaveStories: Set<string>;
   peer?: YrsSession;
   mirror?: ResidentProposalReply['mirror'];
   commentStories: Map<number, Story>;
@@ -253,10 +268,13 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
     if (!materialized.includes('"type":"rawXml"') || !materialized.includes('x:mark')) {
       throw new Error('The foreign inline run was not retained as raw XML');
     }
+    const workerSaveStories = new Set<string>();
     return {
       worker, client, log,
       workerHost: decodeDocxHostJson(hostJson, source).document,
-      main: new MainArm(session, host),
+      main: new MainArm(session, host, topology === 'A/editor'
+        ? (story) => workerSaveStories.add(story) : undefined),
+      workerSaveStories,
       ...(topology === 'A/editor' ? { peer: session } : {}),
       commentStories: new Map<number, Story>([[1, 'body'], [2, 'hf:rIdH1']]),
       nextComment: 3, nextProposal: 1,
@@ -520,6 +538,10 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
       if (arms.peer) await flushPeer(arms);
       else arms.log.push('flush (viewer has no peer)');
       return;
+    case 'project':
+      arms.log.push(`main project dirty=${JSON.stringify([...arms.main.dirtyStories].sort())}`);
+      arms.main.project();
+      return;
     case 'undo':
     case 'redo': {
       const changed = action === 'undo' ? session.undo() : session.redo();
@@ -540,11 +562,18 @@ function operations(topology: Topology, random: Random): Operation[] {
     group('body', ['workerDeleteComment']), group('hf:rIdH1', ['workerDeleteComment']),
     group('body', ['flush', 'decide', 'withdraw']),
   ];
-  if (topology === 'A/editor') groups.push(group(random.pick(STORIES), ['insert', 'undo', 'redo']));
+  if (topology === 'A/editor') groups.push(
+    [
+      { action: 'insert', story: 'body' },
+      { action: 'project', story: 'body' },
+      { action: 'insert', story: 'hf:rIdH1' },
+    ],
+    group(random.pick(STORIES), ['insert', 'undo', 'redo'])
+  );
   const required = random.shuffle(groups).flat();
   const weighted: Action[] = ['insert', 'insert', 'delete', 'delete', 'addComment', 'addComment',
     'reply', 'reply', 'deleteComment', 'workerDeleteComment', 'proposal', 'decide', 'withdraw', 'flush',
-    ...(topology === 'A/editor' ? ['undo', 'redo'] as const : [])];
+    ...(topology === 'A/editor' ? ['project', 'undo', 'redo'] as const : [])];
   while (required.length < OPS) {
     const action = random.pick(weighted);
     required.push({
@@ -598,8 +627,9 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       const compareSave = async () => {
         await flushPeer(current);
         const dirty = JSON.stringify([...current.main.dirtyStories].sort());
+        const workerDirty = JSON.stringify([...current.workerSaveStories].sort());
         const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
-        log.push(`save ${++saveNumber} dirty=${dirty} comments=${comments}`);
+        log.push(`save ${++saveNumber} dirty=${dirty} workerDirty=${workerDirty} comments=${comments}`);
         const actual = await saveWorkerArm(current);
         const expected = await current.main.save();
         savesCompared += 1;
