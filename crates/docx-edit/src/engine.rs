@@ -3974,6 +3974,19 @@ impl EngineSession {
 
     fn region_layout_fingerprint(&self, request: serde_json::Value) -> String {
         use yrs::{Map, ReadTxn};
+        if request["bodyStory"] != "body"
+            || !request
+                .get("renderEnv")
+                .and_then(|env| env.get("revisionPreview"))
+                .and_then(serde_json::Value::as_object)
+                .is_some_and(|preview| {
+                    preview
+                        .values()
+                        .any(|value| matches!(value.as_str(), Some("accepted" | "rejected")))
+                })
+        {
+            return layout_options_fingerprint(request, &BTreeSet::new());
+        }
         let mut locality = self.preview_locality.borrow_mut();
         if locality
             .as_ref()
@@ -4026,13 +4039,10 @@ impl EngineSession {
                 local_ids,
             });
         }
-        let empty_ids = BTreeSet::new();
-        let local_ids = if request["bodyStory"] == "body" {
-            &locality.as_ref().expect("locality populated").local_ids
-        } else {
-            &empty_ids
-        };
-        layout_options_fingerprint(request, local_ids)
+        layout_options_fingerprint(
+            request,
+            &locality.as_ref().expect("locality populated").local_ids,
+        )
     }
 
     /// A region layout pass through lowering the body; its measurement is left
@@ -17626,6 +17636,28 @@ mod tests {
         let unknown_key = layout_options_fingerprint(unknown.clone(), &local_ids);
         unknown["renderEnv"]["revisionPreview"]["1"] = json!("rejected");
         assert_eq!(layout_options_fingerprint(unknown, &local_ids), unknown_key);
+    }
+
+    #[test]
+    fn region_layout_key_without_preview_decisions_skips_locality() {
+        let engine = EngineSession::new(75210);
+        let empty_ids = BTreeSet::new();
+        let local_ids = BTreeSet::from(["1".to_owned()]);
+        for request in [
+            json!({"bodyStory": "body"}),
+            json!({"bodyStory": "body", "renderEnv": {}}),
+            json!({"bodyStory": "body", "renderEnv": "accepted"}),
+            json!({"bodyStory": "body", "renderEnv": {"revisionPreview": {}}}),
+            json!({"bodyStory": "body", "renderEnv": {"revisionPreview": null}}),
+            json!({"bodyStory": "body", "renderEnv": {"revisionPreview": "accepted"}}),
+            json!({"bodyStory": "body", "renderEnv": {"revisionPreview": ["accepted"]}}),
+            json!({"bodyStory": "body", "renderEnv": {"revisionPreview": {"1": "pending"}}}),
+        ] {
+            let key = layout_options_fingerprint(request.clone(), &empty_ids);
+            assert_eq!(layout_options_fingerprint(request.clone(), &local_ids), key);
+            assert_eq!(engine.region_layout_fingerprint(request), key);
+            assert!(engine.preview_locality.borrow().is_none());
+        }
     }
 
     #[test]
