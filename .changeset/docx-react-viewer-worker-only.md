@@ -2,4 +2,4 @@
 "@betteroffice/docx-react": minor
 ---
 
-Read-only and viewing editors keep documents only in the worker: `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError` (use `readParagraphs` or `findText`), `getSelectionInfo` returns `null` (use `readSelectionInfo`), and unanswerable async calls, export included, reject. A worker that fails to open twice reports the new `DocxWorkerError` to `onError`.
+With `experimentalWorkerOpen`, read-only and viewing editors keep documents only in the worker: `getDocument`, `getPageContent` and `findInDocument` throw `DocxAsyncOnlyError`, `getSelectionInfo` returns `null`, and unanswerable async calls reject. Opens and viewer renders failing on a replacement worker report the new `DocxWorkerError` to `onError` and show an alert.
