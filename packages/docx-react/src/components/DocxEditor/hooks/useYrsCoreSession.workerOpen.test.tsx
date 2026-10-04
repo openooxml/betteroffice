@@ -611,19 +611,24 @@ test('a viewer command preserves select-all while its worker read is pending', a
       expect(unit && replies.has(unit.id)).toBe(true);
     });
     expect(unit).toMatchObject({ read: { expectVersion: session.version() } });
-    expect(responses.get(unit)).toMatchObject({ ok: true, read: { version: session.version(), value: expect.anything() } });
+    expect(responses.get(unit)).toMatchObject({ ok: true, read: { version: session.version(), value: { anchor: 0, head: 33 } } });
     const operation = mock(() => editor.current!.readSelectedText());
     let commandSettled = false;
     const command = bridge.current!.runAfterPendingInput(operation).then((text) => {
       commandSettled = true;
       return text;
     });
-    await waitFor(() => expect(operation).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+    expect(operation).not.toHaveBeenCalled();
+    expect(bridge.current!.hasPendingInput()).toBe(true);
     expect(commandSettled).toBe(false);
     let selected!: string | null;
     await act(async () => { reply(unit); });
+    expect(editor.current!.getSelectionRange()).toEqual({ from: 0, to: 33 });
     selected = await command;
     expect(selected).toBe('First paragraph\nTail paragraph');
+    expect(operation).toHaveBeenCalledTimes(1);
+    expect(bridge.current!.hasPendingInput()).toBe(false);
     expect(workerOpenDocumentHeld(session)).toBe(true);
     expect(harness.core.replicaReady).toBe(false);
     expect(harness.mainOpens).toEqual([]);
