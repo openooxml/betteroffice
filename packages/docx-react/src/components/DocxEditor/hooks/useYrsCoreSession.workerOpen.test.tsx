@@ -7,6 +7,9 @@ import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import * as yrsFacade from '@betteroffice/docx/yrs';
+import * as docx from '@betteroffice/docx/docx';
+import type { Document } from '@betteroffice/docx/types/document';
+import { createFontLoadScope } from '@betteroffice/docx/utils';
 import {
   createYrsSession,
   preloadResidentEngineWorker,
@@ -33,6 +36,8 @@ import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import { useFileIO } from './useFileIO';
+import { useDocumentLoader } from './useDocumentLoader';
+import { useHistory } from '../../../hooks/useHistory';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
@@ -261,6 +266,7 @@ interface HarnessProps {
   openPreviewInWorker?: OpenPreviewInWorker;
   source: Uint8Array;
   generation: number;
+  loader?: ReturnType<typeof useDocumentLoader>;
   collaboration?: DocxEditorCollaborationOptions;
   readOnly?: boolean;
   workerProposals?: boolean;
@@ -279,6 +285,7 @@ interface HarnessProps {
 }
 
 function useHarness(props: HarnessProps) {
+  const generation = props.loader?.yrsSeedGeneration ?? props.generation;
   const relayout = useRef<(() => void) | null>(null);
   const workerRelayout = useRef<(() => void) | null>(null);
   const handoffFromRef = useRef<YrsSession | null>(null);
@@ -293,7 +300,7 @@ function useHarness(props: HarnessProps) {
     props.experimentalWorkerOpen,
     viewerSessionRef
   );
-  useEffect(() => renderer.resetSettled(), [props.generation]);
+  useEffect(() => renderer.resetSettled(), [generation]);
   const [host, setHost] = useState<YrsDocxHost | null>(null);
   const [, setCommentsSidebarOpen] = useState(false);
   const mainOpens = useRef<boolean[]>([]);
@@ -309,11 +316,12 @@ function useHarness(props: HarnessProps) {
     return (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
   }, [props.openInWorker, renderer.openInWorker]);
   const core = useYrsCoreSession(
-    true, host?.document ?? null, null, props.source, props.generation, props.collaboration,
+    true, host?.document ?? null, props.loader?.yrsSeedDocument ?? null,
+    props.loader ? props.loader.yrsSeedBytes : props.source, generation, props.collaboration,
     {
       isCurrentLoad: (generation) => {
         loadChecks.current.push(generation);
-        return generation === props.generation;
+        return props.loader ? props.loader.isCurrentLoad(generation) : generation === props.generation;
       },
       onSession: (session) => {
         renderer.recordSession(session);
@@ -323,11 +331,15 @@ function useHarness(props: HarnessProps) {
           return open(input, seed, options);
         };
       },
-      onHostDocument: (host, _generation, session) => {
+      onHostDocument: (host, generation, session, options) => {
         setHost(host);
+        props.loader?.acceptHostDocument(host, generation, session, options);
         props.onHostDocument?.(session);
       },
-      onError: notifyError,
+      onError: (error, generation, options) => {
+        notifyError(error);
+        props.loader?.failHostDocument(error, generation, options);
+      },
     },
     {
       previewFirstPage: props.previewFirstPage,
@@ -436,8 +448,8 @@ function useHarness(props: HarnessProps) {
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
-    loadParsedDocument: () => {},
-    loadBuffer: async () => {},
+    loadParsedDocument: props.loader?.loadParsedDocument ?? (() => {}),
+    loadBuffer: props.loader?.loadBuffer ?? (async () => {}),
     comments: [],
     setComments: () => {},
     setShowCommentsSidebar: () => {},
@@ -494,6 +506,235 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+function parsedDocument(originalBuffer?: ArrayBuffer): Document {
+  return {
+    ...(originalBuffer ? { originalBuffer } : {}),
+    package: {
+      document: {
+        content: [{
+          type: 'paragraph',
+          content: [{ type: 'run', content: [{ type: 'text', text: 'Host changed text' }] }],
+        }],
+      },
+    },
+  } as Document;
+}
+
+function useParsedDocumentHarness(props: { document: Document | null; viewer?: boolean }) {
+  const history = useHistory<Document | null>(null);
+  const [fontScope] = useState(() => {
+    const scope = createFontLoadScope();
+    scope.loadDocumentFonts = async () => {};
+    scope.loadFontsWithMapping = async () => {};
+    return scope;
+  });
+  useEffect(() => () => fontScope.dispose(), [fontScope]);
+  const loadErrors = useRef<Error[]>([]);
+  const commentsLoadedRef = useRef(false);
+  const [loading, setLoadingState] = useState({ isLoading: false, parseError: null as string | null });
+  const loader = useDocumentLoader({
+    documentBuffer: null,
+    initialDocument: props.document,
+    workerViewer: props.viewer !== false,
+    externalContent: false,
+    history,
+    pagedEditorRef: { current: null },
+    setLoadingState,
+    setComments: () => {},
+    setShowCommentsSidebar: () => {},
+    onError: (error) => loadErrors.current.push(error),
+    resetForNewDocument: () => { commentsLoadedRef.current = false; },
+    commentsLoadedRef,
+    commentIdAllocator: createCommentIdAllocator(),
+    setDocumentFonts: () => {},
+    fontScope,
+  });
+  const harness = useHarness({
+    ...initialProps, loader, viewer: props.viewer !== false, readOnly: props.viewer !== false,
+  });
+  return { ...harness, loader, history, loading, loadErrors: loadErrors.current };
+}
+
+for (const entry of ['prop', 'loadDocument'] as const) {
+  test.each([false, true])(`a viewer opened by ${entry} serializes once with originalBuffer=%s and opens only in the worker`, async (originalBuffer) => {
+    const { posted } = installWorker();
+    const serialized = await longFixture(2);
+    const parsed = parsedDocument(originalBuffer ? bytes.slice().buffer : undefined);
+    const create = spyOn(docx, 'createDocx').mockResolvedValue(serialized.buffer as ArrayBuffer);
+    const repack = spyOn(docx, 'repackDocx').mockResolvedValue(serialized.buffer as ArrayBuffer);
+    const seeded = spyOn(yrsFacade, 'documentToYrs');
+    const main = trackMainLoads();
+    const { result, rerender, unmount } = renderHook(useParsedDocumentHarness, {
+      initialProps: { document: entry === 'prop' ? parsed : null },
+    });
+    try {
+      if (entry === 'loadDocument') act(() => result.current.ref.current!.loadDocument(parsed));
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+      act(() => rerender({ document: entry === 'prop' ? parsed : null }));
+      const opens = posted.filter((request) => request.type === 'open');
+      expect(opens).toHaveLength(1);
+      expect(new Uint8Array(opens[0].bytes)).toEqual(serialized);
+      const writer = originalBuffer ? repack : create;
+      expect(writer.mock.calls).toEqual([[parsed]]);
+      expect(originalBuffer ? create : repack).not.toHaveBeenCalled();
+      expect(seeded).not.toHaveBeenCalled();
+      expect(workerOpenDocumentHeld(result.current.core.session!)).toBe(true);
+      expect(result.current.core.session!.storyIds()).toEqual([]);
+      expect(result.current.loader.yrsSeedDocument).toBeNull();
+      expect(result.current.history.state).toBe(result.current.host!.document);
+      expect(result.current.history.state).not.toBe(parsed);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.errors).toEqual([]);
+      expect(result.current.loadErrors).toEqual([]);
+      expect(main.loads.length).toBeGreaterThan(0);
+      for (const load of main.loads) expect(load.mock.calls).toHaveLength(0);
+    } finally {
+      unmount();
+      main.restore();
+      seeded.mockRestore();
+      create.mockRestore();
+      repack.mockRestore();
+    }
+  });
+
+  test(`switching parsed viewer documents through ${entry} opens each serialized document in a new worker session`, async () => {
+    const { posted } = installWorker();
+    const replacement = await longFixture(2);
+    const first = parsedDocument();
+    const second = parsedDocument();
+    const writer = spyOn(docx, 'createDocx')
+      .mockResolvedValueOnce(bytes.slice().buffer as ArrayBuffer)
+      .mockResolvedValueOnce(replacement.buffer as ArrayBuffer);
+    const main = trackMainLoads();
+    const { result, rerender, unmount } = renderHook(useParsedDocumentHarness, {
+      initialProps: { document: entry === 'prop' ? first : null },
+    });
+    try {
+      if (entry === 'loadDocument') act(() => result.current.ref.current!.loadDocument(first));
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session;
+      const generation = result.current.loader.yrsSeedGeneration;
+      act(() => {
+        if (entry === 'prop') rerender({ document: second });
+        else result.current.ref.current!.loadDocument(second);
+      });
+      await waitFor(() => expect(result.current.core.sessionGeneration).toBe(generation + 1));
+      const opens = posted.filter((request) => request.type === 'open');
+      expect(opens).toHaveLength(2);
+      expect(opens.map((request) => new Uint8Array(request.bytes))).toEqual([bytes, replacement]);
+      expect(writer.mock.calls).toEqual([[first], [second]]);
+      expect(result.current.core.session).not.toBe(session);
+      expect(workerOpenDocumentHeld(result.current.core.session!)).toBe(true);
+      expect(result.current.loader.yrsSeedDocument).toBeNull();
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.loadErrors).toEqual([]);
+      for (const load of main.loads) expect(load.mock.calls).toHaveLength(0);
+    } finally {
+      unmount();
+      main.restore();
+      writer.mockRestore();
+    }
+  });
+
+  test.each([false, true])(`a serialization failure through ${entry} reports a typed open error with originalBuffer=%s`, async (originalBuffer) => {
+    const { posted } = installWorker();
+    const cause = new Error('Cannot serialize the host document');
+    const parsed = parsedDocument(originalBuffer ? bytes.slice().buffer : undefined);
+    const writer = originalBuffer
+      ? spyOn(docx, 'repackDocx').mockRejectedValue(cause)
+      : spyOn(docx, 'createDocx').mockRejectedValue(cause);
+    const main = trackMainLoads();
+    const { result, unmount } = renderHook(useParsedDocumentHarness, {
+      initialProps: { document: entry === 'prop' ? parsed : null },
+    });
+    try {
+      if (entry === 'loadDocument') act(() => result.current.ref.current!.loadDocument(parsed));
+      await waitFor(() => expect(result.current.loadErrors).toHaveLength(1));
+      const error = result.current.loadErrors[0] as DocxWorkerError;
+      expect(error).toBeInstanceOf(DocxWorkerError);
+      expect(error.stage).toBe('open');
+      expect(error.cause).toBe(cause);
+      expect(writer.mock.calls).toEqual([[parsed]]);
+      expect(result.current.loading).toEqual({ isLoading: false, parseError: error.message });
+      expect(result.current.core.session).toBeNull();
+      expect(result.current.history.state).toBeNull();
+      expect(result.current.loader.yrsSeedDocument).toBeNull();
+      expect(result.current.loader.yrsSeedBytes).toBeNull();
+      expect(posted.filter((request) => request.type === 'open')).toEqual([]);
+      expect(result.current.mainOpens).toEqual([]);
+      for (const load of main.loads) expect(load.mock.calls).toHaveLength(0);
+    } finally {
+      unmount();
+      main.restore();
+      writer.mockRestore();
+    }
+  });
+}
+
+test.each(['prop', 'loadDocument'] as const)('an editor opened by %s keeps its parsed document and eager main session without serialization', async (entry) => {
+  const { posted } = installWorker();
+  const parsed = parsedDocument(bytes.slice().buffer);
+  const create = spyOn(docx, 'createDocx');
+  const repack = spyOn(docx, 'repackDocx');
+  const { result, unmount } = renderHook(useParsedDocumentHarness, {
+    initialProps: { document: entry === 'prop' ? parsed : null, viewer: false },
+  });
+  try {
+    if (entry === 'loadDocument') act(() => result.current.ref.current!.loadDocument(parsed));
+    await waitFor(() => expect(result.current.core.session).not.toBeNull());
+    expect(result.current.core.session!.paragraphs('body').some((paragraph) => paragraph.text === 'Host changed text')).toBe(true);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.loader.yrsSeedDocument).toBe(parsed);
+    expect(result.current.history.state).toBe(parsed);
+    expect(posted.filter((request) => request.type === 'open')).toEqual([]);
+    expect(create).not.toHaveBeenCalled();
+    expect(repack).not.toHaveBeenCalled();
+    expect(result.current.loadErrors).toEqual([]);
+  } finally {
+    unmount();
+    create.mockRestore();
+    repack.mockRestore();
+  }
+});
+
+test.each(['success', 'failure'] as const)('a replaced parsed viewer serialization ignores a late %s', async (outcome) => {
+  const { posted } = installWorker();
+  let resolve!: (buffer: ArrayBuffer) => void;
+  let reject!: (error: Error) => void;
+  const pending = new Promise<ArrayBuffer>((yes, no) => { resolve = yes; reject = no; });
+  const first = parsedDocument();
+  const second = parsedDocument();
+  const writer = spyOn(docx, 'createDocx')
+    .mockImplementationOnce(() => pending)
+    .mockResolvedValueOnce(bytes.slice().buffer as ArrayBuffer);
+  const main = trackMainLoads();
+  const { result, rerender, unmount } = renderHook(useParsedDocumentHarness, {
+    initialProps: { document: first },
+  });
+  try {
+    expect(writer).toHaveBeenCalledTimes(1);
+    act(() => rerender({ document: second }));
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session;
+    await act(async () => {
+      if (outcome === 'success') resolve(bytes.slice().buffer as ArrayBuffer);
+      else reject(new Error('The replaced document could not serialize'));
+      await pending.catch(() => {});
+    });
+    expect(writer.mock.calls).toEqual([[first], [second]]);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.core.session).toBe(session);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.loadErrors).toEqual([]);
+    for (const load of main.loads) expect(load.mock.calls).toHaveLength(0);
+  } finally {
+    unmount();
+    main.restore();
+    writer.mockRestore();
+  }
+});
 
 test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
   const { workers, posted } = installWorker({ holdState: true });

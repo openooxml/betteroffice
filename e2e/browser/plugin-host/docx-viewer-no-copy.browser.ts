@@ -1,4 +1,5 @@
 import { expect, test, type Page } from 'playwright/test';
+import type { DocxExportInline, DocxLayoutMap, DocxPagedStructuredContent } from '@betteroffice/docx/yrs';
 
 interface PersistedParagraph {
   kind: 'persisted';
@@ -24,7 +25,7 @@ interface ViewerEditor {
   whenLayoutComplete(): Promise<number>;
   flushPendingInput(): Promise<void>;
   exportStructuredWithPages(options: { revisionView: 'markup'; stories: string[] }): Promise<
-    { ok: true; content: { layout: { pages: unknown[] } } } | { ok: false; failure: { code: string; message: string } }
+    { ok: true; content: DocxPagedStructuredContent<DocxLayoutMap> } | { ok: false; failure: { code: string; message: string } }
   >;
   readSelectionInfo(): Promise<{ selectedText: string } | null>;
   listContentControls(): Promise<{ ok: boolean }>;
@@ -84,7 +85,7 @@ interface ViewerWindow {
   __wasmInstantiations: number;
 }
 
-async function open(page: Page, kind = 'readOnly') {
+async function open(page: Page, kind = 'readOnly', source?: 'bytes' | 'prop' | 'loadDocument') {
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
   await page.addInitScript(() => {
     const target = window as unknown as ViewerWindow;
@@ -97,7 +98,8 @@ async function open(page: Page, kind = 'readOnly') {
       };
     }
   });
-  await page.goto(`/docx-viewer-sidebars.html?noCopy=1&kind=${kind}`);
+  const fixture = source ? `&fixture=public&source=${source}` : '';
+  await page.goto(`/docx-viewer-sidebars.html?noCopy=1&kind=${kind}${fixture}`);
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible({ timeout: 120_000 });
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.mainDocumentLoads().sessionsCaptured
@@ -148,7 +150,52 @@ async function exportPages(page: Page) {
   });
 }
 
+async function pageContents(page: Page) {
+  return page.evaluate(async () => {
+    const result = await (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.exportStructuredWithPages({
+      revisionView: 'markup', stories: ['body'],
+    });
+    if (!result.ok) throw new Error(result.failure.message);
+    const { structured, layout } = result.content;
+    const nodes = new Map<string, Extract<DocxExportInline, { kind: 'text' }>>();
+    const collect = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      const node = value as DocxExportInline;
+      if (node.kind === 'text') nodes.set(node.id, node);
+      for (const child of Object.values(value)) collect(child);
+    };
+    collect(structured);
+    return {
+      pages: layout.pages,
+      text: layout.pages.map((page) => layout.fragments
+        .filter((fragment) => fragment.pageIndex === page.pageIndex)
+        .flatMap((fragment) => {
+          const node = nodes.get(fragment.nodeId);
+          if (!node || node.anchor.kind !== 'range' || fragment.slice.kind !== 'text') return [];
+          return [node.text.slice(
+            fragment.slice.range.start.offset - node.anchor.start.offset,
+            fragment.slice.range.end.offset - node.anchor.start.offset
+          )];
+        }).join('')),
+    };
+  });
+}
+
 for (const kind of ['readOnly', 'viewing']) {
+  for (const entry of ['prop', 'loadDocument'] as const) {
+    test(`a ${kind} viewer opened by ${entry} renders the public fixture like its serialized bytes without a main copy`, async ({ page }) => {
+      await open(page, kind, 'bytes');
+      const expected = await pageContents(page);
+      expect(expected.pages.length).toBeGreaterThan(0);
+      expect(expected.text.join('')).toContain('Parsed document host edit.');
+      await open(page, kind, entry);
+      const actual = await pageContents(page);
+      expect(actual.pages).toEqual(expected.pages);
+      expect(actual.text).toEqual(expected.text);
+      await expectNoCopy(page);
+    });
+  }
+
   test(`a ${kind} viewer keeps every main session empty across reads, proposals and idle gates`, async ({ page }) => {
     const wasm = await open(page, kind);
     await focusPages(page);

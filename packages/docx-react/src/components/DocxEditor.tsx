@@ -1054,6 +1054,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   };
   // 'viewing' mode acts as read-only
   const modeReadOnly = readOnlyProp || editingMode === 'viewing';
+  const workerViewer = Boolean(experimentalWorkerOpen) && !mediaTokens && modeReadOnly && !collaboration;
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const writeModeRef = useRef<EditorMode>(editingMode);
   writeModeRef.current = modeReadOnly ? 'viewing' : editingMode;
@@ -1072,7 +1073,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // History hook for undo/redo - start with null document
-  const history = useDocumentHistory<Document | null>(initialDocument || null, {
+  const history = useDocumentHistory<Document | null>(workerViewer ? null : initialDocument || null, {
     maxEntries: 100,
     groupingInterval: 500,
   });
@@ -1202,6 +1203,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
+    workerViewer,
     externalContent: false,
     history,
     pagedEditorRef,
