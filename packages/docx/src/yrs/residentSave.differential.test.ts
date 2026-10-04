@@ -807,8 +807,10 @@ function liveSaveCommentIds(commentsXmlIds: ReadonlySet<string>, saveCommentIds:
   return new Set(saveCommentIds.filter((id) => commentsXmlIds.has(id)));
 }
 
+const XML_OPAQUE = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g;
+
 function danglingRangeMarkers(xml: string, liveIds: ReadonlySet<string>): string[] {
-  return [...xml.matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
+  return [...xml.replace(XML_OPAQUE, '').matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
     .map((match) => match[1]!)
     .filter((id) => !liveIds.has(id));
 }
@@ -818,9 +820,16 @@ const COMMENT_REFERENCE_RUN =
   /<w:r\b[^<>]*>\s*(?:<w:rPr\b[^<>]*>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>\s*)?<w:commentReference\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>\s*<\/w:r>/g;
 
 function withoutStaleCommentMarkers(xml: string, ids: ReadonlySet<string>): string {
-  return [COMMENT_REFERENCE_RUN, COMMENT_RANGE_MARKER].reduce((text, pattern) =>
-    text.replace(pattern, (marker, id: string) => ids.has(id) ? '' : marker), xml
+  const strip = (text: string) => [COMMENT_REFERENCE_RUN, COMMENT_RANGE_MARKER].reduce((result, pattern) =>
+    result.replace(pattern, (marker, id: string) => ids.has(id) ? '' : marker), text
   );
+  let result = '';
+  let offset = 0;
+  for (const opaque of xml.matchAll(XML_OPAQUE)) {
+    result += strip(xml.slice(offset, opaque.index)) + opaque[0];
+    offset = opaque.index! + opaque[0].length;
+  }
+  return result + strip(xml.slice(offset));
 }
 
 function mergedTextRuns(xml: string): string {
@@ -850,7 +859,7 @@ function mergedTextRuns(xml: string): string {
     const start = runStart;
     const end = tag.index! + tag[0].length;
     const match = xml.slice(start, end).match(pattern);
-    if (!match || (!match[2] && /^\s|\s$/.test(match[3]!))) continue;
+    if (!match || match[3]!.includes('&#') || (!match[2] && /^\s|\s$/.test(match[3]!))) continue;
     const properties = match[1] ?? '';
     if (previous && previous.end === start && previous.properties === properties) {
       previous.end = end;
@@ -958,6 +967,15 @@ test('the stale comment marker exemption merges cached text runs without hiding 
   const unpreservedWorker = splitWorker.replace(' xml:space="preserve"', '');
   expect(staleMainPartExempt(unpreservedWorker, main, liveIds)).toBe(false);
   expect(mergedTextRuns(unpreservedWorker)).toBe(unpreservedWorker);
+  const encodedMain = main.replace('<w:t>Alpa beta</w:t>', '<w:t xml:space="preserve">&#32;Alpa beta</w:t>');
+  const encodedWorker = worker.replace('<w:t>Alpa betaY gamma.</w:t>', '<w:t>&#32;Alpa betaY gamma.</w:t>');
+  expect(staleMainPartExempt(encodedWorker, encodedMain, liveIds)).toBe(false);
+  const cdata = '<w:r><w:t><![CDATA[<w:commentRangeStart w:id="5"/>]]></w:t></w:r>';
+  expect(withoutStaleCommentMarkers(cdata, new Set(['5']))).toBe(cdata);
+  const cdataMain = main.replace('</w:p>', `${cdata}</w:p>`);
+  expect(staleMainPartExempt(worker.replace('</w:p>', `${cdata}</w:p>`), cdataMain, liveIds)).toBe(true);
+  expect(staleMainPartExempt(worker.replace('</w:p>', '<w:r><w:t><![CDATA[]]></w:t></w:r></w:p>'), cdataMain, liveIds))
+    .toBe(false);
   expect(staleMainPartExempt(worker, main.replace('gamma', 'gamma!'), liveIds)).toBe(false);
   const formatted = main.replace('<w:r><w:t>Y</w:t></w:r>',
     '<w:r><w:rPr><w:b/></w:rPr><w:t>Y</w:t></w:r>');
@@ -993,6 +1011,7 @@ test('text run merging preserves formatting, whitespace and other children', () 
     '<w:r><w:t> keep</w:t></w:r>',
     '<w:r><w:t>keep </w:t></w:r>',
     '<w:r><w:t> keep </w:t></w:r>',
+    '<w:r><w:t xml:space="preserve">&#32;keep</w:t></w:r>',
     '<w:r><w:tab/></w:r>',
     '<w:r><w:t>keep</w:t><w:tab/></w:r>',
     '<w:r><w:t>keep</w:t><w:br/></w:r>',
