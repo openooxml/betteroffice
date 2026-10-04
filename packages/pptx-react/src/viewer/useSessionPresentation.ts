@@ -147,7 +147,8 @@ export class ViewerSession {
           const id = this.session.state.slides[index].id;
           this.cache.set(JSON.stringify([id, frame.version]), frame);
           while (this.cache.size > 25) {
-            const oldest = [...this.cache].find(([, cached]) => cached.slideIndex !== this.active);
+            const oldest = [...this.cache].find(([, cached]) =>
+              cached.slideIndex !== this.active && !this.visible.has(cached.slideIndex));
             if (!oldest) break;
             this.cache.delete(oldest[0]);
           }

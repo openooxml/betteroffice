@@ -387,10 +387,26 @@ describe('session viewer', () => {
     run.start();
     await waitFor(() => expect(run.frame(0)).toBeDefined());
     run.didPaint(run.frame(0)!);
-    for (let index = 1; index < 40; index += 1) run.visibility(index, true);
-    await waitFor(() => expect(viewer.call.frame).toHaveBeenCalledTimes(40));
+    for (let index = 1; index < 40; index += 1) {
+      run.visibility(index, true);
+      await waitFor(() => expect(viewer.call.frame).toHaveBeenCalledTimes(index + 1));
+      if (index > 3) run.visibility(index - 3, false);
+    }
     expect(Array.from({ length: 40 }, (_, index) => run.frame(index)).filter(Boolean)).toHaveLength(25);
     expect(run.frame(0)).toBeDefined();
+    for (let index = 36; index < 40; index += 1) expect(run.frame(index)).toBeDefined();
+    run.dispose();
+  });
+
+  it('keeps every visible frame cached when visible rows exceed the cache bound', async () => {
+    const { viewer } = session(40);
+    const run = new ViewerSession(viewer, 1, () => {}, () => {}, () => {});
+    run.start();
+    await waitFor(() => expect(run.frame(0)).toBeDefined());
+    run.didPaint(run.frame(0)!);
+    for (let index = 1; index < 30; index += 1) run.visibility(index, true);
+    await waitFor(() => expect(viewer.call.frame).toHaveBeenCalledTimes(30));
+    for (let index = 0; index < 30; index += 1) expect(run.frame(index)).toBeDefined();
     run.dispose();
   });
 
