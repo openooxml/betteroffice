@@ -1039,6 +1039,7 @@ struct PaginationState {
     /// The pages the last pass placed afresh, within the range above.
     rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
     display_rebuilt_pages: BTreeSet<usize>,
+    display_layout_pending: bool,
     display_full_rebuild: bool,
     position_deltas: HashMap<String, i64>,
     last_incremental: bool,
@@ -1051,8 +1052,47 @@ struct PaginationState {
 }
 
 impl PaginationState {
+    fn pending_display_pages(&self) -> impl Iterator<Item = usize> + '_ {
+        let fallback = (self.display_layout_pending && self.rebuilt_page_ranges.is_empty())
+            .then_some(self.rebuilt_page_start..self.rebuilt_page_end);
+        self.display_rebuilt_pages.iter().copied().chain(
+            fallback
+                .into_iter()
+                .chain(
+                    self.rebuilt_page_ranges
+                        .iter()
+                        .filter(|_| self.display_layout_pending)
+                        .cloned(),
+                )
+                .flatten(),
+        )
+    }
+
+    fn has_display_damage(&self) -> bool {
+        self.display_layout_pending
+            || self.display_full_rebuild
+            || !self.display_rebuilt_pages.is_empty()
+            || !self.position_deltas.is_empty()
+            || !self.note_changed_pages.is_empty()
+            || self
+                .restamped_pages
+                .as_ref()
+                .is_none_or(|pages| !pages.is_empty())
+    }
+
+    fn limit_display_damage(&mut self) {
+        if self.display_full_rebuild
+            || self.display_rebuilt_pages.len() > MAX_RETAINED_DISPLAY_REBUILT_PAGES
+        {
+            self.display_full_rebuild = true;
+            self.display_rebuilt_pages.clear();
+            self.position_deltas.clear();
+        }
+    }
+
     fn clear_display_damage(&mut self) {
         self.display_rebuilt_pages.clear();
+        self.display_layout_pending = false;
         self.display_full_rebuild = false;
         self.position_deltas.clear();
         self.note_changed_pages.clear();
@@ -2348,6 +2388,7 @@ const MAX_RETAINED_REGION_UNSHARED_PAGES: usize = 16;
 const MAX_RETAINED_REGION_PLACEMENTS: usize = 8;
 const MAX_RETAINED_REGION_ENTRIES: usize = 1024;
 const MAX_RETAINED_REGION_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+const MAX_RETAINED_DISPLAY_REBUILT_PAGES: usize = 256;
 
 struct RegionPlacementPasses {
     previous: Vec<RegionPlacementState>,
@@ -5359,20 +5400,19 @@ impl EngineSession {
             pagination.revision_preview_key = key;
             pagination.revision_preview = preview.clone();
         }
-        pagination.rebuilt_page_start = run.rebuilt_page_start;
-        pagination.rebuilt_page_end = run.rebuilt_page_end;
-        pagination.rebuilt_page_ranges = rebuilt_page_ranges;
         pagination.display_full_rebuild |= !incremental || !same_page_count;
         if !pagination.display_full_rebuild {
             let state = &mut *pagination;
-            if state.rebuilt_page_ranges.is_empty() {
-                state
-                    .display_rebuilt_pages
-                    .extend(run.rebuilt_page_start..run.rebuilt_page_end);
-            } else {
-                state
-                    .display_rebuilt_pages
-                    .extend(state.rebuilt_page_ranges.iter().flat_map(Clone::clone));
+            if state.display_layout_pending {
+                if state.rebuilt_page_ranges.is_empty() {
+                    state
+                        .display_rebuilt_pages
+                        .extend(state.rebuilt_page_start..state.rebuilt_page_end);
+                } else {
+                    state
+                        .display_rebuilt_pages
+                        .extend(state.rebuilt_page_ranges.iter().flat_map(Clone::clone));
+                }
             }
             for (key, delta) in deltas {
                 let pending = state.position_deltas.entry(key).or_default();
@@ -5385,6 +5425,11 @@ impl EngineSession {
                 }
             }
         }
+        pagination.limit_display_damage();
+        pagination.rebuilt_page_start = run.rebuilt_page_start;
+        pagination.rebuilt_page_end = run.rebuilt_page_end;
+        pagination.rebuilt_page_ranges = rebuilt_page_ranges;
+        pagination.display_layout_pending = true;
         pagination.last_incremental = incremental;
         if !incremental || !same_page_count {
             pagination.restamped_pages = None;
@@ -6298,9 +6343,9 @@ impl EngineSession {
                 // references the edit moved, and retained pages whose section or
                 // numbering stamps changed are rebuilt too.
                 let first = pagination
-                    .display_rebuilt_pages
-                    .first()
-                    .map(|&index| index..index + 1)
+                    .pending_display_pages()
+                    .min()
+                    .map(|index| index..index + 1)
                     .unwrap_or(0..0);
                 let restamped = match &pagination.restamped_pages {
                     Some(pages) => pages
@@ -6324,9 +6369,7 @@ impl EngineSession {
                         .unwrap_or_default(),
                 };
                 let note_pages: Vec<usize> = pagination
-                    .display_rebuilt_pages
-                    .iter()
-                    .copied()
+                    .pending_display_pages()
                     .chain(pagination.note_changed_pages.iter().copied())
                     .chain(restamped)
                     .filter(|&index| !first.contains(&index))
@@ -6597,6 +6640,16 @@ impl EngineSession {
         changed_pages: &[usize],
         expected_frame_epoch: u64,
     ) -> Result<Vec<u8>, String> {
+        let layout_epoch = {
+            let mut pagination = self.pagination.borrow_mut();
+            if pagination.has_display_damage() && !pagination.display_full_rebuild {
+                pagination
+                    .display_rebuilt_pages
+                    .extend(changed_pages.iter().copied());
+                pagination.limit_display_damage();
+            }
+            pagination.layout_epoch
+        };
         let mut display = self.display.borrow_mut();
         display.frame_epoch = display
             .frame_epoch
@@ -6609,7 +6662,7 @@ impl EngineSession {
             || binary_frame_epoch == 0;
         let epochs = FrameEpochs {
             doc_epoch: self.doc_epoch(),
-            layout_epoch: self.pagination.borrow().layout_epoch,
+            layout_epoch,
             frame_epoch,
             base_frame_epoch: binary_frame_epoch,
         };

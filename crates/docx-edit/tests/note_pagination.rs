@@ -4,8 +4,10 @@ mod fixture;
 
 use std::collections::BTreeMap;
 
+use docx_edit::frame_delta::{FRAME_HEADER_LEN, PAGE_OP_LEN};
 use docx_edit::{
     EditCtx, EngineSession, FormatPolicy, ParaAttrDelta, ParaSelector, Position, StoryRange,
+    UndoSession,
 };
 use serde_json::{Value, json};
 
@@ -264,6 +266,173 @@ fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
         serde_json::to_vec(&actual).unwrap(),
         serde_json::to_vec(&expected).unwrap()
     );
+}
+
+#[test]
+fn an_intermediate_page_build_before_undo_preserves_display_positions() {
+    let body: String = (1..=7)
+        .map(|page| {
+            let mut content = if page == 1 {
+                String::new()
+            } else {
+                "<w:pPr><w:pageBreakBefore/></w:pPr>".to_owned()
+            };
+            content += &fixture::r(&format!("Page {page}"));
+            if page == 4 {
+                content += r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#;
+            }
+            fixture::p(&format!("{:08X}", 0x7100_0000 + page), &content)
+        })
+        .collect();
+    let bytes = fixture::with_body_and_note(
+        &small_page(&body),
+        &fixture::p("71000100", &fixture::r("Note")),
+    );
+    let (engine, request) = fixture::laid_out(&bytes, 9323);
+    engine.set_display_window(Some(0..6));
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    let initial = display(&engine);
+    assert_eq!(initial["pages"].as_array().unwrap().len(), 7);
+    assert_eq!(initial["pages"][6]["unbuilt"], true);
+    let undo = UndoSession::new();
+    undo.track(engine.doc());
+    let before = engine.stats();
+
+    engine
+        .doc()
+        .insert_text(
+            &EditCtx::local("", ""),
+            engine.doc().paragraph_mark_position("71000002").unwrap(),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    assert_eq!(
+        pages(&engine.layout_document_with_regions_json(&request).unwrap()),
+        7
+    );
+    engine
+        .build_display_pages_frame(&[6], before.frame_epoch)
+        .unwrap();
+    let intermediate = display(&engine);
+    assert_ne!(intermediate["pages"][6]["unbuilt"], true);
+
+    assert!(undo.undo());
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&layout), 7);
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(engine.stats().pagination_calls, before.pagination_calls + 2);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + 2
+    );
+    let frame = engine
+        .build_display_list_frame(&extras(&request), engine.stats().frame_epoch)
+        .unwrap();
+    let operations = u32::from_le_bytes(frame[52..56].try_into().unwrap()) as usize;
+    assert!((0..operations).any(|operation| {
+        let index = FRAME_HEADER_LEN + operation * PAGE_OP_LEN + 4;
+        u32::from_le_bytes(frame[index..index + 4].try_into().unwrap()) == 6
+    }));
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds + 1
+    );
+    let actual = display(&engine);
+    let (expected_layout, expected) = fresh(&engine, &request, 9324);
+    assert_eq!(layout, expected_layout);
+    assert_ne!(intermediate["pages"][6], expected["pages"][6]);
+    assert_eq!(
+        serde_json::to_vec(&actual).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+}
+
+#[test]
+fn accumulated_display_damage_is_bounded_without_changing_single_layout_builds() {
+    let page_count = 258;
+    let body: String = (1..=page_count)
+        .map(|page| {
+            let content = format!(
+                "{}{}",
+                if page == 1 {
+                    ""
+                } else {
+                    "<w:pPr><w:pageBreakBefore/></w:pPr>"
+                },
+                fixture::r(&format!("Page {page} A"))
+            );
+            fixture::p(&format!("{:08X}", 0x7200_0000 + page), &content)
+        })
+        .collect();
+    let (engine, request) = fixture::laid_out(&fixture::with_body(&small_page(&body)), 9325);
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    assert_eq!(display(&engine)["pages"].as_array().unwrap().len(), page_count);
+    let replace = |page, text| {
+        let mark = engine
+            .doc()
+            .paragraph_mark_position(&format!("{:08X}", 0x7200_0000 + page))
+            .unwrap();
+        engine
+            .doc()
+            .replace_range(
+                &EditCtx::local("", ""),
+                StoryRange::new("body", mark.index - 1, mark.index),
+                text,
+            )
+            .unwrap();
+    };
+    let before = engine.stats();
+    for page in 1..=page_count {
+        replace(page, "B");
+    }
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&layout), page_count);
+    engine
+        .build_display_list_frame(&extras(&request), before.frame_epoch)
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds + 1
+    );
+    assert_eq!(
+        engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
+        page_count as u64
+    );
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9326));
+
+    let before = engine.stats();
+    let mut layout = String::new();
+    for page in 1..=page_count {
+        replace(page, "C");
+        layout = engine.layout_document_with_regions_json(&request).unwrap();
+        assert_eq!(pages(&layout), page_count);
+    }
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(
+        engine.stats().pagination_calls,
+        before.pagination_calls + page_count as u64
+    );
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + page_count as u64
+    );
+    engine
+        .build_display_list_frame(&extras(&request), before.frame_epoch)
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds
+    );
+    assert_eq!(
+        engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
+        page_count as u64
+    );
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9327));
 }
 
 #[test]
