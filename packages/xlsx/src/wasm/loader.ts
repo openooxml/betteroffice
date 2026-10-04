@@ -864,6 +864,9 @@ export function openWorkbook(
       return parsed.ranges;
     },
     visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[] {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
       const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
         (doc as XlsxDocument & { visibleMergedRangesJson(sheet: number, viewport: string): string })
           .visibleMergedRangesJson(sheet, JSON.stringify(viewport))

@@ -483,6 +483,16 @@ describe('workbook sessions', () => {
     }
   });
 
+  test('rejects invalid sheet indices on direct handle view reads', () => {
+    const main = openWorkbook(fixture);
+    try {
+      for (const sheet of [-1, 0.5, main.sheetCount(), 2 ** 32, NaN]) {
+        expect(() => main.visibleMergedRanges(sheet, viewport)).toThrow(RangeError);
+        expect(() => main.sheetInfoFor(sheet)).toThrow(RangeError);
+      }
+    } finally { main.dispose(); }
+  });
+
   test('rejects invalid viewports and sheet indices without changing the session', async () => {
     const worker = await session();
     try {
