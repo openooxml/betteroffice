@@ -102,6 +102,47 @@ pub struct StoryParser<'a, 'limits> {
     pub part: &'a str,
 }
 
+pub const PREVIEW_MIN_BLOCKS: usize = 32;
+
+pub(crate) struct LegacyBodyCut {
+    limit: usize,
+    blocks: usize,
+    open_fields: usize,
+    stopped: bool,
+}
+
+impl LegacyBodyCut {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            blocks: 0,
+            open_fields: 0,
+            stopped: false,
+        }
+    }
+
+    pub(crate) fn read_child(&mut self, name: &str) {
+        if is_story_block_name(name) {
+            self.stopped |= self.blocks >= self.limit && self.open_fields == 0;
+            self.blocks = self.blocks.saturating_add(1);
+        }
+    }
+
+    pub(crate) fn finish_block(&mut self, external_ends: usize, unmatched_fields: usize) {
+        if !self.stopped {
+            // Unparsed field openings can only overestimate the fields the dispatcher retains.
+            self.open_fields = self
+                .open_fields
+                .saturating_sub(external_ends)
+                .saturating_add(unmatched_fields);
+        }
+    }
+
+    pub(crate) fn is_partial(&self) -> bool {
+        self.stopped
+    }
+}
+
 impl StoryParser<'_, '_> {
     pub fn parse_blocks(
         &mut self,
@@ -123,9 +164,19 @@ impl StoryParser<'_, '_> {
         in_header_footer: bool,
         limit: Option<usize>,
     ) -> Result<(Vec<BlockContent>, usize), ParseError> {
-        self.parse_blocks_until_with_read_limit(parent, depth, in_header_footer, limit, None)
+        self.parse_blocks_until_with_read_limit(
+            parent,
+            depth,
+            in_header_footer,
+            limit,
+            None,
+            None,
+            None,
+        )
+        .map(|(content, read, _)| (content, read))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn parse_blocks_until_with_read_limit(
         &mut self,
         parent: &XmlElement,
@@ -133,27 +184,76 @@ impl StoryParser<'_, '_> {
         in_header_footer: bool,
         limit: Option<usize>,
         read_limit: Option<usize>,
-    ) -> Result<(Vec<BlockContent>, usize), ParseError> {
+        paragraph_budget: Option<usize>,
+        mut legacy_partial: Option<bool>,
+    ) -> Result<(Vec<BlockContent>, usize, bool), ParseError> {
         self.budget.check_nesting_depth(depth, self.part)?;
         let mut content = Vec::new();
         let mut records: Vec<FieldRecord> = Vec::new();
         let mut open_fields: Vec<OpenField> = Vec::new();
         let mut read = 0;
+        let mut weight = 0usize;
+        let mut budget_stopped = false;
+        let mut legacy_cut = paragraph_budget
+            .filter(|_| legacy_partial.is_none())
+            .and_then(|_| limit.map(LegacyBodyCut::new));
 
-        for child in transparent_children(parent, false) {
-            if read_limit.is_some_and(|limit| read >= limit)
-                || (limit.is_some_and(|limit| content.len() >= limit) && open_fields.is_empty())
+        let children = transparent_children(parent, false);
+        for child in &children {
+            if read_limit.is_some_and(|limit| read >= limit) {
+                break;
+            }
+            let budget_reached = paragraph_budget.is_some_and(|budget| weight >= budget)
+                && content.len() >= PREVIEW_MIN_BLOCKS
+                && is_story_block(child)
+                && open_fields.is_empty()
+                && *legacy_partial.get_or_insert_with(|| {
+                    let Some(mut cut) = legacy_cut.take() else {
+                        return false;
+                    };
+                    for child in children
+                        .iter()
+                        .take(read_limit.unwrap_or(children.len()))
+                        .skip(read)
+                    {
+                        cut.read_child(&child.name);
+                        if cut.is_partial() {
+                            return true;
+                        }
+                        if typed_block(child) {
+                            let events = scan_field_block_events(child);
+                            cut.finish_block(events.external_ends, events.unmatched_modes.len());
+                        }
+                    }
+                    false
+                });
+            if open_fields.is_empty()
+                && (limit.is_some_and(|limit| content.len() >= limit) || budget_reached)
             {
+                budget_stopped = budget_reached;
                 break;
             }
             read += 1;
+            if let Some(cut) = &mut legacy_cut {
+                cut.read_child(&child.name);
+            }
+            let paragraphs_before = self.budget.paragraph_count();
             if !typed_block(child) {
                 if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
                     content.push(BlockContent::RawXml(Arc::new(raw)));
+                    weight = weight.saturating_add(
+                        self.budget
+                            .paragraph_count()
+                            .saturating_sub(paragraphs_before)
+                            .max(1),
+                    );
                 }
                 continue;
             }
             let events = scan_field_block_events(child);
+            if let Some(cut) = &mut legacy_cut {
+                cut.finish_block(events.external_ends, events.unmatched_modes.len());
+            }
             if events.external_separates > 0
                 && let Some(open) = open_fields.last_mut()
             {
@@ -216,6 +316,12 @@ impl StoryParser<'_, '_> {
                 }
             }
             content.push(parsed);
+            weight = weight.saturating_add(
+                self.budget
+                    .paragraph_count()
+                    .saturating_sub(paragraphs_before)
+                    .max(1),
+            );
 
             if !events.unmatched_modes.is_empty() {
                 let candidates = top_level_complex_field_indices(&content[parsed_index]);
@@ -240,7 +346,7 @@ impl StoryParser<'_, '_> {
         }
 
         attach_recorded_field_blocks(&mut content, records);
-        Ok((content, read))
+        Ok((content, read, budget_stopped))
     }
 
     fn parse_block_sdt(
@@ -501,8 +607,12 @@ fn visit_transparent_children<'a>(
 
 /// Whether the story dispatcher reads `element` as a typed block.
 fn typed_block(element: &XmlElement) -> bool {
+    typed_block_name(&element.name)
+}
+
+pub(crate) fn typed_block_name(name: &str) -> bool {
     matches!(
-        element.local_name(),
+        crate::xml::local_name(name),
         "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
     )
 }
@@ -510,7 +620,11 @@ fn typed_block(element: &XmlElement) -> bool {
 /// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
 /// keeps as a raw block.
 fn is_story_block(element: &XmlElement) -> bool {
-    typed_block(element) || crate::inline::is_foreign(element)
+    is_story_block_name(&element.name)
+}
+
+fn is_story_block_name(name: &str) -> bool {
+    typed_block_name(name) || crate::inline::is_foreign_name(name)
 }
 
 /// The elements [`StoryParser::parse_blocks`] reads as blocks from `parent`, in order, each with

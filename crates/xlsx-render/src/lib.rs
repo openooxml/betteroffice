@@ -314,6 +314,22 @@ where
     build_frame(wb, sheet, viewport, ghosts, resolver, None)
 }
 
+#[doc(hidden)]
+pub fn build_display_list_with_geometry<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
+    geometry: &GridGeometry,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    build_frame_with_geometry(wb, sheet, viewport, ghosts, resolver, None, Some(geometry))
+}
+
 pub fn build_print_display_list_with_charts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
@@ -341,8 +357,38 @@ fn build_frame<F, R>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    resolver: F,
+    print: Option<(&PrintMetrics, bool)>,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
+{
+    let geometry = wb.sheet(sheet).map(|sheet| {
+        print.map_or_else(
+            || GridGeometry::new(sheet, &wb.styles),
+            |(metrics, _)| GridGeometry::for_print(sheet, &wb.styles, metrics),
+        )
+    });
+    build_frame_with_geometry(
+        wb,
+        sheet,
+        viewport,
+        ghosts,
+        resolver,
+        print,
+        geometry.as_ref(),
+    )
+}
+
+fn build_frame_with_geometry<F, R>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
     mut resolver: F,
     print: Option<(&PrintMetrics, bool)>,
+    geometry: Option<&GridGeometry>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<R, RenderError>,
@@ -384,10 +430,7 @@ where
     let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
     let mut fx = FrameStyles::new(styles);
-    let geom = print.map_or_else(
-        || GridGeometry::new(sheet_ref, styles),
-        |(metrics, _)| GridGeometry::for_print(sheet_ref, styles, metrics),
-    );
+    let geom = geometry.expect("sheet geometry initialized");
     let (frozen_rows, frozen_cols) = if print.is_some() {
         (0, 0)
     } else {
@@ -508,7 +551,7 @@ where
             commands.extend(grid_commands.iter().cloned());
         }
         for merge in &sheet_ref.merges {
-            if let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, merge.start) {
+            if let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, merge.start) {
                 let inset = 96.0 / metrics.dpi / 2.0;
                 commands.push(DrawCmd::FillRect {
                     x: cell_box.x + inset,
@@ -532,7 +575,7 @@ where
         else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let clip = cell_box.clip;
@@ -588,7 +631,7 @@ where
         };
         emit_borders(
             &mut commands,
-            &geom,
+            geom,
             &rows,
             &cols,
             sheet_ref,
@@ -622,7 +665,7 @@ where
             color
         };
 
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let font = xf.font.as_ref();
@@ -649,7 +692,7 @@ where
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
         let clip = spill_clip(
-            &geom,
+            geom,
             &cols,
             sheet_ref,
             &link_index,
@@ -693,7 +736,7 @@ where
         let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(cell_box) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let size = print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt);
@@ -735,7 +778,7 @@ where
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
         };
-        let Some(bx) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
+        let Some(bx) = cell_box(geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let align = resolve_align(xf.h, &ghost.alignment_value);
@@ -745,7 +788,7 @@ where
     let mut charts = Vec::new();
     chart::render_charts(
         sheet_ref,
-        &geom,
+        geom,
         viewport,
         frozen_rows,
         frozen_cols,

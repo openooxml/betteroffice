@@ -344,7 +344,7 @@ export class ResidentEngineWorkerClient {
   async openPreview(
     bytes: Uint8Array,
     blocks: number,
-    options: { heapLimitBytes?: number } = {}
+    options: { heapLimitBytes?: number; paragraphBudget?: number } = {}
   ): Promise<ResidentEngineWorkerOpened | null> {
     if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
@@ -359,6 +359,9 @@ export class ResidentEngineWorkerClient {
           type: 'open',
           bytes: copy.buffer,
           previewBlocks: blocks,
+          ...(options.paragraphBudget !== undefined
+            ? { previewParagraphBudget: options.paragraphBudget }
+            : {}),
           ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
         },
         [copy.buffer]

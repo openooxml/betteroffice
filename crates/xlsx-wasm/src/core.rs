@@ -1086,6 +1086,25 @@ mod tests {
     }
 
     #[test]
+    fn opening_and_painting_preserve_source_bytes() {
+        let source = formula_xlsx();
+        for session in [
+            Session::open(&source, Some(45000.25)).unwrap(),
+            Session::open_collaborative(&source, 706, Some(45000.25)).unwrap(),
+        ] {
+            assert_eq!(
+                session.workbook.model().sheets[0]
+                    .cell(CellRef::parse_a1("B1").unwrap())
+                    .unwrap()
+                    .value,
+                CellValue::Number { value: 15.0 },
+            );
+            text_command(&display_value(&session), "15");
+            assert_eq!(session.save().unwrap(), source);
+        }
+    }
+
+    #[test]
     fn edits_recalculate_undo_and_save() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         session
