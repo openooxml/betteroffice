@@ -12025,7 +12025,10 @@ mod tests {
             engine
                 .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
                 .unwrap();
-            assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Interactive);
+            assert_eq!(
+                engine.pending_relayout_trigger(),
+                RelayoutTrigger::Interactive
+            );
             if resident {
                 let epoch = engine.display.borrow().binary_frame_epoch;
                 engine.apply_and_layout("body", epoch).unwrap();
@@ -12085,7 +12088,10 @@ mod tests {
         engine
             .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
             .unwrap();
-        assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Interactive);
+        assert_eq!(
+            engine.pending_relayout_trigger(),
+            RelayoutTrigger::Interactive
+        );
         engine
             .layout_document_with_regions_retained_json(&request)
             .unwrap();
@@ -19806,19 +19812,28 @@ mod tests {
                 .any(|page| page.section_id.as_deref() == Some("second"))
         );
         let paragraph = engine.doc().paragraphs("body").unwrap().pop().unwrap();
-        let position = engine
-            .doc()
-            .paragraph_mark_position(&paragraph.para_id)
-            .unwrap();
-        engine
-            .doc()
-            .insert_text(
-                &crate::EditCtx::local("", ""),
-                position,
-                "x",
-                crate::FormatPolicy::Inherit,
-            )
-            .unwrap();
+        let batch: crate::EditRequest = serde_json::from_value(json!({
+            "expectVersion": engine.doc().version(),
+            "history": "none",
+            "steps": [{"op": "insertText", "at": "end", "text": "x", "target": {
+                "kind": "paragraph", "story": "body", "paraId": paragraph.para_id
+            }}]
+        }))
+        .unwrap();
+        assert!(
+            engine
+                .doc()
+                .apply_edits(&batch, &crate::UndoSession::new())
+                .unwrap()
+                .unwrap()
+                .applied
+        );
+        assert_eq!(
+            engine
+                .region_relayout_trigger(&request.to_string())
+                .unwrap(),
+            RelayoutTrigger::Bulk
+        );
         let before = engine.stats();
         let meta = engine
             .layout_document_with_regions_retained_meta(&request.to_string())
@@ -21706,8 +21721,16 @@ mod tests {
     fn retained_preview_global_environment_changes_keep_full_placement() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let floating_body = preview_pagination_body(&[(45, "ins", "1")]).replace(
+            &preview_fixture::run("Paragraph 8"),
+            &format!(
+                "{}{}",
+                preview_fixture::run("Paragraph 8"),
+                preview_pagination_anchor()
+            ),
+        );
         for (bytes, floats) in [
-            (preview_fixture::drawings(), true),
+            (preview_fixture::document(&floating_body), true),
             (
                 preview_fixture::document(&preview_pagination_body(&[(45, "ins", "1")])),
                 false,
@@ -21716,6 +21739,7 @@ mod tests {
             let mut request = preview_pagination_request(font);
             let engine = preview_pagination_engine(&bytes, &request);
             preview_pagination_prime(&engine, &request);
+            assert_eq!(engine.pagination.borrow().measured_with_floats, floats);
             request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
             request["renderEnv"]["showHiddenText"] = json!(true);
             engine.set_relayout_trigger(RelayoutTrigger::Bulk);
@@ -21744,6 +21768,31 @@ mod tests {
             );
         }
         docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_drawing_decisions_after_global_change_keep_full_placement() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
+        let bytes = preview_fixture::drawings();
+        let mut request = preview_pagination_request(font);
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+        request["renderEnv"]["showHiddenText"] = json!(true);
+        engine.set_relayout_trigger(RelayoutTrigger::Bulk);
+        assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+        assert!(!engine.pagination.borrow().last_incremental);
+        request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+        assert_eq!(
+            engine
+                .region_relayout_trigger(&request.to_string())
+                .unwrap(),
+            RelayoutTrigger::Preview
+        );
+        assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+        assert!(!engine.pagination.borrow().last_incremental);
     }
 
     #[test]
