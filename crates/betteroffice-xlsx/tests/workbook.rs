@@ -5055,10 +5055,11 @@ fn no_edit_save_drops_conflicting_duplicate_members() {
         .unwrap();
     parts.push(last_sheet.clone());
     let source = stored_zip_with_duplicate_members(&parts);
-    assert_eq!(
-        ooxml_opc::SourceContainer::new(source.clone()).declared_member_count(),
-        Some(parts.len())
-    );
+    let unique: Vec<&str> = parts[..parts.len() - 1]
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(!ooxml_opc::SourceContainer::new(source.clone()).holds_exactly(unique.clone()));
     assert_eq!(
         ooxml_opc::unzip_parts(&source).unwrap().len(),
         parts.len() - 1
@@ -5072,10 +5073,7 @@ fn no_edit_save_drops_conflicting_duplicate_members() {
     assert_ne!(saved, source);
     let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
     assert_eq!(saved_parts.len(), parts.len() - 1);
-    assert_eq!(
-        ooxml_opc::SourceContainer::new(saved).declared_member_count(),
-        Some(saved_parts.len())
-    );
+    assert!(ooxml_opc::SourceContainer::new(saved).holds_exactly(unique));
     let sheets: Vec<_> = saved_parts
         .iter()
         .filter(|(name, _)| name == "xl/worksheets/sheet1.xml")
