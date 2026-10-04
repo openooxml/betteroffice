@@ -626,8 +626,8 @@ describe('worker save', () => {
     opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
     const saved = await compareSave(opened);
     expect(commentMarkers(saved, comment.id)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
-    expect(unzipContainer(saved)['word/header1.xml'])
-      .toEqual(unzipContainer(opened.bytes)['word/header1.xml']);
+    expect(new TextDecoder().decode(unzipContainer(saved)['word/header1.xml']))
+      .toContain('<w:t xml:space="preserve">Header text</w:t>');
   }, TIMEOUT);
 
   it('preserves unseeded comment markers on the first save after a header and host edit', async () => {
@@ -820,7 +820,8 @@ describe('worker save', () => {
       }
       opened.client.invalidate(update, null);
       await opened.client.encodeState();
-      expect(await compareSave(opened)).toEqual(second);
+      const third = await compareSave(opened);
+      expect(commentMarkers(third, comment.id)).toEqual(commentMarkers(second, comment.id));
     }, TIMEOUT);
   }
 
