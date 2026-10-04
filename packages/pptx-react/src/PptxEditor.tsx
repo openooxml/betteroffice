@@ -133,6 +133,7 @@ import {
   wordBoundary,
 } from './textSelection';
 import type { CaretLine, TextSelectionGranularity } from './textSelection';
+import { PptxSessionViewer } from './viewer/PptxSessionViewer';
 
 const THUMBNAIL_SLICE_MS = 12;
 
@@ -192,6 +193,19 @@ export interface PptxEditorApi {
   applyEdits: (request: PptxEditRequest) => Promise<PptxEditResult>;
 }
 
+/** @experimental */
+export interface PptxWorkerViewerApi extends Omit<
+  PptxEditorApi, 'handle' | 'save' | 'getPositionAtPoint' | 'selectText'
+> {
+  handle: null;
+  save: () => null;
+  getPositionAtPoint: (clientX: number, clientY: number) => null;
+  selectText: (target: PptxTextSelectionTarget) => false;
+  saveAsync: () => Promise<Uint8Array>;
+  /** Accepts a 1-based slide number; resolves after painting. */
+  goToSlideAsync: (slide: number) => Promise<boolean>;
+}
+
 export interface PptxEditorCollaborationOptions {
   clientId: number;
   initialUpdate?: Uint8Array;
@@ -230,6 +244,20 @@ export interface PptxEditorProps extends PptxEditorPluginProps {
   /** Shows the toolbar region; defaults to true. */
   showToolbar?: boolean;
 }
+
+/** @experimental */
+export type PptxWorkerViewerProps = Omit<
+  PptxEditorProps, 'onReady' | 'readOnly'
+> & {
+  readOnly: true;
+  /** @experimental Opt-in worker opening currently applies to read-only editors. */
+  experimentalWorkerOpen: true;
+  onReady?: (api: PptxWorkerViewerApi) => void;
+};
+
+type PptxEditorDispatchProps = PptxWorkerViewerProps | (PptxEditorProps & (
+  { experimentalWorkerOpen?: false } | { readOnly?: false; experimentalWorkerOpen?: boolean }
+));
 
 interface PictureOrigin {
   handle: PresentationHandle;
@@ -450,10 +478,14 @@ const initialStyle: EffectiveTextStyle = {
 export function PptxEditor({
   i18n,
   ...props
-}: PptxEditorProps) {
+}: PptxEditorDispatchProps) {
   return (
     <LocaleProvider i18n={i18n}>
-      <PptxEditorContent {...props} i18n={i18n} />
+      {props.experimentalWorkerOpen && props.readOnly ? (
+        <PptxSessionViewer {...props} i18n={i18n} />
+      ) : (
+        <PptxEditorContent {...props as PptxEditorProps} i18n={i18n} />
+      )}
     </LocaleProvider>
   );
 }
