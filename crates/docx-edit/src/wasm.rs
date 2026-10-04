@@ -2484,7 +2484,7 @@ impl EditSession {
         } else {
             EditingDoc::new(1)
                 .apply_update_v1(state)
-                .map_err(|error| js_err(&error.to_string()))?;
+                .map_err(|error| js_err(error.to_string()))?;
             Some(Arc::from(state))
         };
         self.engine.doc().set_note_separator_state(state);

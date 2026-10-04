@@ -166,7 +166,11 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** @internal */
-export function wrapSession(session: EditSession, clientId: number): YrsSession {
+export function wrapSession(
+  session: EditSession,
+  clientId: number,
+  opened?: { source: Uint8Array; host: YrsDocxHost }
+): YrsSession {
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -205,8 +209,10 @@ export function wrapSession(session: EditSession, clientId: number): YrsSession 
   };
   let residentFontsRevision = 0;
   let residentFontsClearRevision = 0;
-  let docxSource: Uint8Array | null = null;
-  let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = null;
+  let docxSource: Uint8Array | null = opened?.source ?? null;
+  let docxSourceKeys: ReturnType<typeof editorSaveKeys> | null = opened
+    ? editorSaveKeys(opened.host.document)
+    : null;
 
   const invalidateReadCaches = (): void => {
     cachedSelection = undefined;
@@ -1371,4 +1377,16 @@ export function wrapSession(session: EditSession, clientId: number): YrsSession 
   });
 
   return facade;
+}
+
+/** Borrows an opened edit session for saving; never destroy the facade. @internal */
+export function wrapOpenedEditSession(
+  session: EditSession,
+  clientId: number,
+  source: Uint8Array,
+  hostJson: string
+): { session: YrsSession; host: YrsDocxHost } {
+  const exact = docxSourceBuffer(source) === source.buffer ? source : source.slice();
+  const host = decodeDocxHost(hostJson, exact);
+  return { session: wrapSession(session, clientId, { source: exact, host }), host };
 }

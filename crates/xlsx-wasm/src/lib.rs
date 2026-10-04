@@ -198,6 +198,18 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// @experimental
+    #[wasm_bindgen(js_name = displayListForJson)]
+    pub fn display_list_for_json(
+        &self,
+        sheet: u32,
+        viewport_json: &str,
+    ) -> Result<String, JsValue> {
+        self.session
+            .display_list_for_json(sheet, viewport_json)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = displayListProfiledJson)]
     pub fn display_list_profiled_json(&self, viewport_json: &str) -> Result<String, JsValue> {
         self.session

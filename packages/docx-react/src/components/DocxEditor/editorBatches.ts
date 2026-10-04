@@ -6,6 +6,7 @@ import type {
   DocxProposalResult,
   YrsSession,
 } from '@betteroffice/docx/yrs';
+import { proposalProjectionStories } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
 import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
@@ -209,12 +210,7 @@ export async function applyProposalCall(
   const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
   const result = call(session);
   if (!result.ok) return result;
-  const stories = new Set([
-    ...result.snapshot.proposals
-      .filter((proposal) => proposal.changed && !known.has(proposal.id))
-      .map((proposal) => proposal.paragraph.story),
-    ...session.storiesChangedSince(since).stories,
-  ]);
+  const stories = proposalProjectionStories(known, result, session.storiesChangedSince(since).stories);
   if (stories.size > 0) {
     try {
       flushed.editor.syncYrsInputState(true, [...stories], { inWorker: true });

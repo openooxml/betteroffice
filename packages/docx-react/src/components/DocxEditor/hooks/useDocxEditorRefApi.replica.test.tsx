@@ -88,7 +88,7 @@ function apiFor(
       pagedEditorRef,
       handleSave: async () => {
         events.push('save');
-        return new TextEncoder().encode(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n')).buffer;
+        return new ArrayBuffer(0);
       },
       zoom: 1,
       setZoom: () => {},
@@ -243,7 +243,7 @@ test('every public ref API is classified for replica access', async () => {
   ].sort());
 });
 
-test('async reads, save, exports and write refusals wait for the main replica', async () => {
+test('async reads, exports and write refusals wait for the main replica while save stays independent', async () => {
   const { api, events, session, replica, release, opens } = await pendingReplica();
   const search = { text: 'Page', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
   const edits = { expectVersion: 'before-ready', steps: [] };
@@ -272,7 +272,7 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   await act(async () => {});
   expect(completed.value).toBe(false);
   expect(session.storyIds()).toEqual([]);
-  expect(events).toEqual([]);
+  expect(events).toEqual(['save']);
   expect(opens).toEqual([]);
   let values!: Awaited<typeof pending>;
   await act(async () => {
@@ -288,9 +288,17 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   for (const result of values.slice(5, 10)) {
     expect(result).toMatchObject({ ok: false, version: session.version(), failure: { code: 'read-only' } });
   }
-  expect(new TextDecoder().decode(values[10]!)).toBe(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n'));
+  expect(new TextDecoder().decode(values[10]!)).toBe('');
   expect(values[12]).toMatchObject({ ok: false, version: session.version(), failure: { code: 'layout-unavailable' } });
   expect(values[13]).toBe(0);
+});
+
+test.each(['viewing', 'editing'] as const)('ref save in %s mode leaves an on-demand replica pending', async (mode) => {
+  const { api, events, replica, opens } = await pendingReplica(mode, false, true);
+  expect(await api.save()).toBeInstanceOf(ArrayBuffer);
+  expect(events).toEqual(['save']);
+  expect(replica.started).toBe(false);
+  expect(opens).toEqual([]);
 });
 
 test('synchronous reads finish the main open without changing their return types', async () => {

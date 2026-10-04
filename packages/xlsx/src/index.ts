@@ -11,6 +11,8 @@ export { openWorkbookSession } from './session/client';
 export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
 /** @experimental */
 export type {
+  WorkbookFrame,
+  WorkbookFrameOptions,
   WorkbookSessionEvents,
   WorkbookSessionMethods,
   WorkbookSessionOpenOptions,
