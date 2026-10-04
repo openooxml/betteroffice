@@ -139,6 +139,28 @@ function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.')): Uint8Arr
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
+async function customXmlNote(): Promise<Uint8Array> {
+  const parts: PartsMap = new Map(Object.entries(unzipContainer(synthetic(
+    '<w:p w14:paraId="0000B001"><w:r><w:t>Body text</w:t></w:r>' +
+    '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
+  ))));
+  const text = (name: string) => new TextDecoder().decode(parts.get(name)!);
+  parts.set('[Content_Types].xml', toBytes(text('[Content_Types].xml').replace(
+    '</Types>', `<Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.wordprocessingml.footnotes+xml"/></Types>`
+  )));
+  parts.set('word/_rels/document.xml.rels', toBytes(text('word/_rels/document.xml.rels').replace(
+    '</Relationships>', `<Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`
+  )));
+  parts.set('word/footnotes.xml', toBytes(
+    `<w:footnotes ${NS}><w:footnote w:id="1">` +
+    '<w:bookmarkStart w:id="7" w:name="note"/><w:customXml w:element="note" w:uri="urn:example">' +
+    paragraph('0000F001', 'Untouched note text') +
+    '</w:customXml><w:bookmarkEnd w:id="7"/></w:footnote></w:footnotes>'
+  ));
+  const source = await repackDocx(await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false }));
+  return new Uint8Array(source);
+}
+
 interface Opened {
   bytes: Uint8Array;
   worker: InProcessResidentWorker;
@@ -459,26 +481,19 @@ describe('worker save', () => {
     await compareSave(opened);
   }, TIMEOUT);
 
+  it('matches the editor on first and repeated saves of an untouched custom-XML note', async () => {
+    const opened = await open(await customXmlNote());
+    expect(opened.replica.session.materializeDocx()?.package.footnotes
+      ?.find((note) => note.id === 1)?.verbatimXml).toContain('<w:customXml');
+    expect(opened.replica.session.storyIds()).toContain('fn:1');
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    await compareSave(opened);
+    await compareSave(opened);
+  }, TIMEOUT);
+
   it('keeps untouched note XML across a full save after a body edit', async () => {
-    const parts: PartsMap = new Map(Object.entries(unzipContainer(synthetic(
-      '<w:p w14:paraId="0000B001"><w:r><w:t>Body text</w:t></w:r>' +
-      '<w:r><w:footnoteReference w:id="1"/></w:r></w:p>'
-    ))));
-    const text = (name: string) => new TextDecoder().decode(parts.get(name)!);
-    parts.set('[Content_Types].xml', toBytes(text('[Content_Types].xml').replace(
-      '</Types>', `<Override PartName="/word/footnotes.xml" ContentType="${OFFICE}.wordprocessingml.footnotes+xml"/></Types>`
-    )));
-    parts.set('word/_rels/document.xml.rels', toBytes(text('word/_rels/document.xml.rels').replace(
-      '</Relationships>', `<Relationship Id="rIdFn" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`
-    )));
-    parts.set('word/footnotes.xml', toBytes(
-      `<w:footnotes ${NS}><w:footnote w:id="1">` +
-      '<w:bookmarkStart w:id="7" w:name="note"/><w:customXml w:element="note" w:uri="urn:example">' +
-      paragraph('0000F001', 'Untouched note text') +
-      '</w:customXml><w:bookmarkEnd w:id="7"/></w:footnote></w:footnotes>'
-    ));
-    const source = await repackDocx(await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false }));
-    const opened = await open(new Uint8Array(source));
+    const opened = await open(await customXmlNote());
     expect(opened.replica.session.materializeDocx()?.package.footnotes
       ?.find((note) => note.id === 1)?.verbatimXml).toContain('<w:customXml');
     expect(opened.replica.session.storyIds()).toContain('fn:1');
@@ -543,7 +558,7 @@ describe('worker save', () => {
     expect(commentMarkers(second, id)).toEqual(['Reference']);
   }, TIMEOUT);
 
-  for (const operation of ['add', 'delete'] as const) {
+  for (const operation of ['add', 'delete', 'delete with unchanged host comments'] as const) {
     it(`projects the body after a peer comment ${operation} when another story changed`, async () => {
       const opened = await open(synthetic());
       const body = opened.host.package.document;
@@ -569,13 +584,13 @@ describe('worker save', () => {
         opened.host.package.document.comments = [comment];
         opened.replica.dirtyStories.add('body');
       };
-      if (operation === 'delete') {
+      if (operation !== 'add') {
         addComment();
         opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
       }
       const first = await compareSave(opened);
       expect(commentMarkers(first, comment.id)).toEqual(
-        operation === 'delete' ? ['RangeStart', 'RangeEnd', 'Reference'] : []
+        operation === 'add' ? [] : ['RangeStart', 'RangeEnd', 'Reference']
       );
       const header = 'hf:rIdH1';
       expect(peer.applyEdits({
@@ -589,7 +604,7 @@ describe('worker save', () => {
         addComment();
       } else {
         peer.applyRawOps('body', [{ op: 'removeComment', id: String(comment.id) }]);
-        opened.host.package.document.comments = [];
+        if (operation === 'delete') opened.host.package.document.comments = [];
         opened.replica.dirtyStories.add('body');
       }
       const update = peer.encodeStateAsUpdate(opened.client.remoteStateVector()!);
@@ -597,8 +612,14 @@ describe('worker save', () => {
       await opened.client.encodeState();
       const second = await compareSave(opened);
       expect(commentMarkers(second, comment.id)).toEqual(
-        operation === 'delete' ? [] : ['RangeStart', 'RangeEnd', 'Reference']
+        operation === 'add' ? ['RangeStart', 'RangeEnd', 'Reference'] : []
       );
+      if (operation === 'delete with unchanged host comments') {
+        expect(hostComments(opened)).toEqual([comment]);
+        const savedComments = unzipContainer(second)['word/comments.xml'];
+        expect(savedComments).toEqual(unzipContainer(first)['word/comments.xml']);
+        expect(new TextDecoder().decode(savedComments)).toMatch(/<w:comment\b[^>]*\bw:id="1"/);
+      }
       opened.client.invalidate(update, null);
       await opened.client.encodeState();
       expect(await compareSave(opened)).toEqual(second);

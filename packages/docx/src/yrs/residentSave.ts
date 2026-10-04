@@ -43,10 +43,10 @@ export async function saveResidentDocument(
       ? []
       : storiesChangedSince(record.revision).stories.map(dirtyProjectionStory)
   );
-  const commentIds = new Set(comments.map((comment) => String(comment.id)));
-  const previousCommentIds = record.commentIds;
-  if (record.revision !== undefined && (
-    !previousCommentIds ||
+  const commentIds = new Set(opened.session.listComments().map((comment) => comment.id));
+  const previousCommentIds = record.commentIds ??
+    new Set((opened.host.document.package.document.comments ?? []).map((comment) => String(comment.id)));
+  if (storyIds.size > 0 && (
     commentIds.size !== previousCommentIds.size ||
     [...commentIds].some((id) => !previousCommentIds.has(id))
   )) {
