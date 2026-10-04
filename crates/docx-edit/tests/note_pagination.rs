@@ -371,7 +371,10 @@ fn accumulated_display_damage_is_bounded_without_changing_single_layout_builds()
     engine
         .build_display_list_frame(&extras(&request), 0)
         .unwrap();
-    assert_eq!(display(&engine)["pages"].as_array().unwrap().len(), page_count);
+    assert_eq!(
+        display(&engine)["pages"].as_array().unwrap().len(),
+        page_count
+    );
     let replace = |page, text| {
         let mark = engine
             .doc()
