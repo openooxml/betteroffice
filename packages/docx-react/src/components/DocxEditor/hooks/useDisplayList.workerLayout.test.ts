@@ -2501,9 +2501,11 @@ test.each([true, false])('viewer=%s selects the reply mode across decisions and 
   }
 });
 
-test.each(['ok', 'stale'] as const)('an unknown meta version requests JSON and handles %s', async (status) => {
+test.each([
+  ['ok', 'an editor'], ['stale', 'an editor'], ['ok', 'a viewer'], ['stale', 'a viewer'],
+] as const)('an unknown meta version requests JSON and handles %s for %s', async (status, session) => {
   const { native, engine, layoutJson, frame } = setup(9402);
-  const viewerRef = { current: true };
+  const viewerRef = { current: session === 'a viewer' };
   const hook = renderHook(
     ({ layout, source }) => useRustDisplayList(
       layout, undefined, undefined, undefined, source,
@@ -2531,8 +2533,10 @@ test.each(['ok', 'stale'] as const)('an unknown meta version requests JSON and h
       id: worker.requestAt(2).id, ok: true, layoutJsonStatus: status,
       ...(status === 'ok' ? { layoutJson } : {}),
     });
-    if (status === 'stale') {
+    if (status === 'stale' && session === 'a viewer') {
       await expect(act(() => pass)).rejects.toBeInstanceOf(SupersededPreviewError);
+    } else if (status === 'stale') {
+      expect(await act(() => pass)).toBeNull();
     } else {
       const adopted = await act(() => pass);
       expect(adopted!.layout.summaryOnly).toBeUndefined();
