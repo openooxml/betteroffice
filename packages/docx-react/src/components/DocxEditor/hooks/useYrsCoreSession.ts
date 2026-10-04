@@ -407,6 +407,7 @@ export function useYrsCoreSession(
       abandoned ||
       callbacksRef.current?.isCurrentLoad?.(seedGeneration) === false;
     const previewFirstPage = previewFirstPageRef.current;
+    const eagerReplica = !hydrateOnDemandRef.current;
     // A media-token load keeps its full open on the main thread.
     const openWorker = mediaTokensRef.current ? undefined : openInWorker;
     // A failed full open takes the preview down with it, as a failed open
@@ -622,7 +623,7 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
-            const gate = { reached: false, wanted: false };
+            const gate = { reached: false, wanted: eagerReplica };
             const request = (): void => {
               gate.wanted = true;
               if (gate.reached) startReplicaRef.current?.();

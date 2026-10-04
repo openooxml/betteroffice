@@ -495,13 +495,15 @@ const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes
 async function openingEditor(workerPreview = true, viewer = false, options: {
   delayQueries?: boolean;
   source?: Uint8Array;
+  residentInput?: boolean;
+  holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
   onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
 } = {}) {
   const isFullOpen = (request: ResidentEngineWorkerRequest) =>
     request.type === 'open' && request.previewBlocks === undefined;
   const worker = installWorker(workerPreview
-    ? { holdReply: isFullOpen, holdState: true }
-    : { holdOpen: true, holdState: true });
+    ? { holdReply: (request) => isFullOpen(request) || options.holdReply?.(request) === true, holdState: true }
+    : { holdOpen: true, holdState: true, holdReply: options.holdReply });
   const frames = holdFrames();
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
     value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
@@ -542,8 +544,8 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
   const props = { ...initialProps, source: options.source ?? longBytes, previewFirstPage: true, workerPreview,
     hydrateOnDemand: viewer, workerProposals: viewer, readOnly: viewer };
   const selections: Array<ReturnType<YrsSession['cellSelection']>> = [];
-  function Editable({ source, generation, readOnly = viewer }: Pick<HarnessProps, 'source' | 'generation' | 'readOnly'>) {
-    harness = useHarness({ ...props, source, generation, readOnly });
+  function Editable({ source, generation, readOnly = viewer, hydrateOnDemand = viewer }: Pick<HarnessProps, 'source' | 'generation' | 'readOnly' | 'hydrateOnDemand'>) {
+    harness = useHarness({ ...props, source, generation, readOnly, hydrateOnDemand });
     return <>
       <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
       <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
@@ -552,6 +554,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
+        applyResidentInput={options.residentInput ? harness.renderer.applyInput : undefined}
         canvasHostRef={canvasHost} displayListQueries={queriesReleased ? harness.renderer.queries : null}
         inputQueries={viewer ? undefined : inputQueries(harness.renderer.inputQueries)}
         onYrsSelectionChange={() => selections.push(harness.core.session!.cellSelection())} />
@@ -621,11 +624,12 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       expect(harness.core.replicaReady).toBe(false);
       return harness.core.session!;
     };
-    const presentFull = async (full: YrsSession) => {
+    const presentFull = async (full: YrsSession, startPeer = true) => {
       act(() => harness.pipeline.runLayoutPipeline());
       await waitFor(() => expect(harness.renderer.presentedEngine).toBe(full));
       act(() => harness.presentFrame());
       expect(harness.core.opening).toBe(false);
+      if (!startPeer) return;
       act(() => frames.run());
       act(() => frames.run());
       await waitFor(() => expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(true));
@@ -646,8 +650,8 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
       },
       get harness() { return harness; },
       get pendingQueries() { return previousInputQueries; },
-      setReadOnly(readOnly: boolean) {
-        view.rerender(<Editable {...props} readOnly={readOnly} />);
+      setReadOnly(readOnly: boolean, hydrateOnDemand = viewer) {
+        view.rerender(<Editable {...props} readOnly={readOnly} hydrateOnDemand={hydrateOnDemand} />);
       },
       async replace() {
         view.rerender(<Editable source={props.source.slice()} generation={2} />);
@@ -907,7 +911,45 @@ test('clicks interleaved with held and hydrating input keep their original posit
   }
 });
 
-test('a click awaiting geometry keeps its position when the full frame replaces the preview', async () => {
+test('a ready click binds its position before an outstanding resident edit reply', async () => {
+  const zip = await JSZip.loadAsync(await longFixture(1));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('First paragraph', 'abcdef'));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const opened = await openingEditor(true, false, {
+    source, residentInput: true,
+    holdReply: (request) => request.type === 'applyInput' && request.text === 'X',
+  });
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('abcdef');
+    opened.click(1);
+    opened.type('X');
+    const request = await opened.received('applyInput');
+    expect(request).toMatchObject({ text: 'X', selection: { head: { offset: 0 } } });
+    expect(opened.replies.has(request.id)).toBe(true);
+    expect(opened.responses.get(request)).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer) });
+    expect(full.paragraphs('body')[0].text).toBe('abcdef');
+    expect(opened.harness.renderer.queries!.isReady()).toBe(true);
+    opened.click(4);
+    opened.type('Y');
+    expect(full.selection()?.head.offset).toBe(0);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      opened.reply(request);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(full.paragraphs('body')[0].text).toBe('XabcYdef');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a click awaiting replacement geometry keeps its paragraph after the canvas moves', async () => {
   const opened = await openingEditor(true, false, { delayQueries: true });
   try {
     const queries = opened.pendingQueries!;
@@ -916,6 +958,12 @@ test('a click awaiting geometry keeps its position when the full frame replaces 
     expect(queries.hitTestRegions(0, point.clientX, point.clientY)).toBeNull();
     opened.click(6);
     opened.type('Q');
+    const nextCaret = opened.harness.renderer.queries!.caretRect(18)!;
+    const size = queries.pageSize(0)!;
+    const top = point.clientY - nextCaret.y - nextCaret.height / 2;
+    const canvas = opened.view.container.querySelector('.canvas-page')!;
+    canvas.getBoundingClientRect = () => ({ left: 0, top, right: size.width,
+      bottom: top + size.height, ...size }) as DOMRect;
     const full = await opened.switchToFull();
     await opened.presentFull(full);
     expect(opened.pendingQueries).not.toBe(queries);
@@ -924,8 +972,11 @@ test('a click awaiting geometry keeps its position when the full frame replaces 
     await queries.whenReady();
     expect(queries.isReady()).toBe(true);
     expect(queries.hitTestRegions(0, point.clientX, point.clientY)).toBeNull();
+    await opened.pendingQueries!.whenReady();
+    expect(opened.pendingQueries!.hitTestRegions(0, point.clientX, point.clientY - top)?.pos).toBeGreaterThan(16);
     await opened.loadPeer(full);
     expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+    expect(full.paragraphs('body')[1].text).toBe('Paragraph 1');
     expect(full.selection()?.head.offset).toBe(6);
     expect(opened.editor.current!.hasPendingInput()).toBe(false);
     expect(opened.harness.errors).toEqual([]);
@@ -1012,22 +1063,57 @@ test.each(['held keys', 'held composition'] as const)(
   }
 );
 
-test('a queued drag keeps extending after selection replay while the mouse is held', async () => {
+test('switching to viewing before eager hydration settles transferred input and its flush', async () => {
+  const opened = await openingEditor();
+  try {
+    opened.click(1);
+    opened.type('Q');
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    let flushed = false;
+    const flush = opened.editor.current!.flushPendingInput().then(() => { flushed = true; });
+    opened.setReadOnly(true, true);
+    expect(opened.harness.core.hydrateOnDemand).toBe(true);
+    expect((opened.view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(flushed).toBe(false);
+    act(() => opened.frames.run());
+    act(() => opened.frames.run());
+    await waitFor(() => expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => {
+      opened.workers.at(-1)!.release();
+      await flush;
+    });
+    expect(flushed).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(full.paragraphs('body')[0].text).toBe('QFirst paragraph');
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a queued drag extends from its resolved anchor after an earlier insertion', async () => {
   const opened = await openingEditor(true, false, { delayQueries: true });
   try {
+    opened.click(1);
+    opened.type('Q');
     opened.mouseDown(6);
     opened.mouseMove(9);
     const full = await opened.switchToFull();
     await opened.presentFull(full);
     opened.releaseInputQueries();
     await opened.loadPeer(full);
-    expect(full.selection()?.anchor.offset).toBe(5);
-    expect(full.selection()?.head.offset).toBe(8);
+    expect(full.paragraphs('body')[0].text).toBe('QFirst paragraph');
+    expect(full.selection()?.anchor.offset).toBe(6);
+    expect(full.selection()?.head.offset).toBe(9);
     opened.mouseMove(12);
     act(() => opened.frames.run());
     opened.mouseUp(12);
     await act(async () => { await opened.editor.current!.flushPendingInput(); });
-    expect(full.selection()?.anchor.offset).toBe(5);
+    expect(full.selection()?.anchor.offset).toBe(6);
     expect(full.selection()?.head.offset).toBe(11);
     expect(opened.editor.current!.hasPendingInput()).toBe(false);
     expect(opened.harness.errors).toEqual([]);
