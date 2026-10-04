@@ -623,7 +623,7 @@ for (const entry of ['prop', 'loadDocument'] as const) {
       await waitFor(() => expect(result.current.core.sessionGeneration).toBe(generation + 1));
       const opens = posted.filter((request) => request.type === 'open');
       expect(opens).toHaveLength(2);
-      expect(opens.map((request) => new Uint8Array(request.bytes))).toEqual([bytes, replacement]);
+      expect(opens.map((request): Uint8Array => new Uint8Array(request.bytes))).toEqual([bytes, replacement]);
       expect(writer.mock.calls).toEqual([[first], [second]]);
       expect(result.current.core.session).not.toBe(session);
       expect(workerOpenDocumentHeld(result.current.core.session!)).toBe(true);
