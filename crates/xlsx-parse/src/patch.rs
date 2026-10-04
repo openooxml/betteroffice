@@ -127,7 +127,10 @@ where
         let source_ordered = self.source.is_none_or(|previous| previous < source_key);
         let current_ordered = self.current.is_none_or(|previous| previous < current_key);
         self.source = Some(self.source.map_or(source_key, |last| last.max(source_key)));
-        self.current = Some(self.current.map_or(current_key, |last| last.max(current_key)));
+        self.current = Some(
+            self.current
+                .map_or(current_key, |last| last.max(current_key)),
+        );
         let original = if source_ordered {
             while self
                 .cells
@@ -605,10 +608,7 @@ impl SheetPatch<'_> {
                 return self.changed_source_cells_by_lookup();
             }
             previous = Some(key);
-            while cells
-                .peek()
-                .is_some_and(|(at, _)| (at.row, at.col) < key)
-            {
+            while cells.peek().is_some_and(|(at, _)| (at.row, at.col) < key) {
                 let (at, _) = cells.next().expect("peeked");
                 if !self.record_unmatched_source(at, &mut changed) {
                     return self.changed_source_cells_by_lookup();

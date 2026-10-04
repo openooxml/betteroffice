@@ -38,7 +38,11 @@ fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, Pars
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
-pub(super) fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String, Vec<u8>)> {
+pub(super) fn package(
+    worksheet_body: &str,
+    shared: &[&str],
+    date1904: bool,
+) -> Vec<(String, Vec<u8>)> {
     let pr = if date1904 {
         r#"<workbookPr date1904="1"/>"#
     } else {

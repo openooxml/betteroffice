@@ -122,7 +122,9 @@ impl SheetPatch<'_> {
                     body.extend_from_slice(&data[source_cell.before.clone()]);
                     self.emit_cell_oracle(&mut body, at, cell)?;
                 }
-                None => self.emit_cell_oracle(&mut body, at, model_cell.expect("one side is present"))?,
+                None => {
+                    self.emit_cell_oracle(&mut body, at, model_cell.expect("one side is present"))?
+                }
             }
             columns = Some(match columns {
                 Some((min, max)) => (min, max.max(col + 1)),
@@ -235,7 +237,12 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn emit_cell_oracle(&self, out: &mut Vec<u8>, at: CellRef, cell: &Cell) -> Result<(), ParseError> {
+    fn emit_cell_oracle(
+        &self,
+        out: &mut Vec<u8>,
+        at: CellRef,
+        cell: &Cell,
+    ) -> Result<(), ParseError> {
         let retained = shared_string_index(
             cell,
             at,

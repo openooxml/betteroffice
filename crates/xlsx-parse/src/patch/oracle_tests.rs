@@ -124,7 +124,10 @@ impl Case {
 
     fn edit(&mut self, address: &str, edit: impl FnOnce(&mut Cell)) {
         let at = CellRef::parse_a1(address).unwrap();
-        let mut cell = self.workbook.sheets[0].cell(at).cloned().unwrap_or_default();
+        let mut cell = self.workbook.sheets[0]
+            .cell(at)
+            .cloned()
+            .unwrap_or_default();
         edit(&mut cell);
         self.workbook.sheets[0].set_cell(at, cell);
     }
@@ -187,9 +190,7 @@ fn number(value: f64) -> Cell {
 fn constructed_cells_and_edits_match_oracle() {
     let mut case = Case::mixed();
     case.compare();
-    for address in [
-        "A1", "C1", "D1", "G1", "H1", "J1", "A2", "B4", "C2", "Z12",
-    ] {
+    for address in ["A1", "C1", "D1", "G1", "H1", "J1", "A2", "B4", "C2", "Z12"] {
         case.edit(address, |cell| *cell = Cell::default());
         case.compare();
     }
@@ -304,11 +305,15 @@ fn detector_records_source_changes_without_coordinate_dirtiness() {
     let mut case = Case::new(source);
     case.shift(true, true, 0, 1);
     case.shift(false, true, 1, 1);
-    case.with_patch(true, |patch| assert!(patch.changed_source_cells().is_empty()));
+    case.with_patch(true, |patch| {
+        assert!(patch.changed_source_cells().is_empty())
+    });
     case.compare();
     for address in ["A1", "B2"] {
         case.edit(address, |cell| *cell = number(7.0));
-        case.with_patch(true, |patch| assert!(patch.changed_source_cells().is_empty()));
+        case.with_patch(true, |patch| {
+            assert!(patch.changed_source_cells().is_empty())
+        });
         case.compare();
     }
     case.edit("C3", |cell| *cell = number(8.0));
@@ -318,7 +323,10 @@ fn detector_records_source_changes_without_coordinate_dirtiness() {
     case.compare();
     case.shift(true, false, 1, 1);
     case.with_patch(true, |patch| {
-        assert_eq!(patch.changed_source_cells(), BTreeSet::from([(0, 0), (1, 1)]));
+        assert_eq!(
+            patch.changed_source_cells(),
+            BTreeSet::from([(0, 0), (1, 1)])
+        );
     });
     case.compare();
     case.edit("D3", |cell| *cell = Cell::default());
@@ -467,8 +475,18 @@ fn row_emission_uses_point_lookups_for_backward_and_duplicate_cells() {
             case.edit("B1", |cell| cell.style = Some(2));
         }
         for addresses in [
-            vec![("C1", Some(3)), ("A1", Some(1)), ("B1", Some(2)), ("E1", None)],
-            vec![("A1", Some(1)), ("A1", Some(1)), ("C1", Some(3)), ("E1", None)],
+            vec![
+                ("C1", Some(3)),
+                ("A1", Some(1)),
+                ("B1", Some(2)),
+                ("E1", None),
+            ],
+            vec![
+                ("A1", Some(1)),
+                ("A1", Some(1)),
+                ("C1", Some(3)),
+                ("E1", None),
+            ],
         ] {
             let (data, row) = source_row(&addresses);
             case.with_patch(true, |patch| {
@@ -493,14 +511,8 @@ fn row_emission_uses_point_lookups_for_backward_and_duplicate_cells() {
                 assert!(EMISSION_LOOKUPS.with(|count| count.get()) >= 2);
                 let mut current = patch.sheet.iter_cells().peekable();
                 let mut oracle = Vec::new();
-                let expected = patch.emit_source_row_oracle(
-                    &mut oracle,
-                    &data,
-                    &row,
-                    0,
-                    &mut current,
-                    &dirty,
-                );
+                let expected =
+                    patch.emit_source_row_oracle(&mut oracle, &data, &row, 0, &mut current, &dirty);
                 assert_eq!(result, expected);
                 assert_eq!(actual, oracle);
             });
@@ -529,7 +541,9 @@ fn seeded_random_edits_match_oracle_after_every_step() {
         let address = at.to_a1();
         match random.next() % 15 {
             0 => case.edit(&address, |cell| *cell = Cell::default()),
-            1 => case.edit(&address, |cell| *cell = number(f64::from(random.next() % 101))),
+            1 => case.edit(&address, |cell| {
+                *cell = number(f64::from(random.next() % 101))
+            }),
             2 => {
                 let values = ["Dup", "other", "Rich inline", "new", ""];
                 let value = values[(random.next() % 5) as usize];
@@ -541,7 +555,7 @@ fn seeded_random_edits_match_oracle_after_every_step() {
             }
             3 => case.edit(&address, |cell| {
                 cell.value = CellValue::Bool {
-                    value: random.next() % 2 == 0,
+                    value: random.next().is_multiple_of(2),
                 };
             }),
             4 => case.edit(&address, |cell| {
@@ -550,7 +564,9 @@ fn seeded_random_edits_match_oracle_after_every_step() {
                 };
             }),
             5 => case.edit(&address, |cell| cell.style = Some(random.next() % 6)),
-            6 => case.edit(&address, |cell| cell.formula = Some("SUM(A1:C3)".to_owned())),
+            6 => case.edit(&address, |cell| {
+                cell.formula = Some("SUM(A1:C3)".to_owned())
+            }),
             7 => case.edit(&address, |cell| cell.formula = None),
             8 => case.shift(true, true, at.row, 1 + random.next() % 2),
             9 => case.shift(true, false, at.row, 1 + random.next() % 2),
