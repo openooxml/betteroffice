@@ -485,12 +485,15 @@ export class ResidentEngineWorkerClient {
     comments: Comment[];
     host?: Document;
     stateVector?: Uint8Array;
+    /** @internal */
+    stories?: readonly string[];
   }): Promise<{ bytes: ArrayBuffer; updates: Uint8Array[]; version: string }> {
     const response = await this.request({
       type: 'save',
       comments: request.comments,
       ...(request.host === undefined ? {} : { host: request.host }),
       ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
+      ...(request.stories === undefined ? {} : { stories: [...request.stories] }),
     });
     if (
       !(response.saved instanceof ArrayBuffer) ||

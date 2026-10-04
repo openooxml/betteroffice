@@ -161,6 +161,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       proposalEngine: { version: () => 'v' },
+      markProjectionStories(_stories: readonly string[]) {},
       loadState(state: Uint8Array) {
         harness.loadedStates.push(state);
       },
@@ -3638,7 +3639,7 @@ describe('resident worker opening', () => {
       expect(metadata).toBe(host);
       expect(comments).toEqual([]);
       if (records.at(-1) !== record) {
-        expect(record).toEqual({ full: false, revision: 0 });
+        expect(record).toEqual({ full: false });
         records.push(record);
       } else {
         expect(record.full).toBe(true);
@@ -3690,6 +3691,21 @@ describe('resident worker opening', () => {
     encodeStateAsUpdate.mockClear();
     expect(await w.send({ type: 'save', comments: [] })).toMatchObject({ ok: true, updates: [] });
     expect(encodeStateAsUpdate).not.toHaveBeenCalled();
+  });
+
+  test('save forwards the peer story set, including an empty set, without reading revisions', async () => {
+    const { w } = openingWorker();
+    const save = mock(async (..._args: Parameters<ResidentEngineSession['save']>) => new ArrayBuffer(4));
+    const storiesChangedSince = mock(() => { throw new Error('save must not read revisions'); });
+    Object.assign(w.harness.session, { save, storiesChangedSince });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    for (const stories of [['hf:rIdH1'], []]) {
+      expect((await w.send({ type: 'save', comments: [], stories })).ok).toBe(true);
+      expect(save.mock.calls.at(-1)![5]).toEqual(stories);
+    }
+    expect((await w.send({ type: 'save', comments: [] })).ok).toBe(true);
+    expect(save.mock.calls.at(-1)![5]).toBeUndefined();
+    expect(storiesChangedSince).not.toHaveBeenCalled();
   });
 
   test('a preview rejects save as still opening', async () => {

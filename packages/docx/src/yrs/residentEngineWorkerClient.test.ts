@@ -167,15 +167,17 @@ test('save posts comments and optional host metadata and returns the saved buffe
   client.destroy();
 });
 
-test('save copies an optional peer state vector and omits it when absent', async () => {
+test('save copies peer stories and state vector and omits them when absent', async () => {
   const { worker, client } = setup();
   const stateVector = new Uint8Array([1, 2, 3]);
-  const pending = client.save({ comments: [], stateVector });
+  const stories = ['hf:rIdH1'];
+  const pending = client.save({ comments: [], stateVector, stories });
   const request = worker.requestAt(0);
-  expect(request).toEqual({ id: worker.lastId(), type: 'save', comments: [], stateVector });
+  expect(request).toEqual({ id: worker.lastId(), type: 'save', comments: [], stateVector, stories });
   if (request.type !== 'save') throw new Error('Expected a save request');
   expect(request.stateVector).not.toBe(stateVector);
   expect(request.stateVector!.buffer).not.toBe(stateVector.buffer);
+  expect(request.stories).not.toBe(stories);
   const saved = new ArrayBuffer(4);
   worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
   await pending;
@@ -183,6 +185,10 @@ test('save copies an optional peer state vector and omits it when absent', async
   expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
   worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
   await withoutVector;
+  const empty = client.save({ comments: [], stories: [] });
+  expect(worker.requestAt(2)).toEqual({ id: worker.lastId(), type: 'save', comments: [], stories: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await empty;
   client.destroy();
 });
 

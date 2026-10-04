@@ -19,6 +19,7 @@ import { computeProposalGeometryMirror, resolveNavigationTarget } from './propos
 import { findBodyMatches } from './findMatches';
 import { readResidentSearch, residentBodyPositions } from './residentSearch';
 import type { ResidentSaveRecord } from './residentSave';
+import { proposalProjectionStories } from './dirtyProjectionStories';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
@@ -380,7 +381,6 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     previewing = request.previewBlocks !== undefined;
     if (!previewing) {
       openedSource = { bytes: request.bytes, hostJson };
-      editorSaves.revision = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
     }
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
@@ -485,7 +485,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
         openedSource.hostJson,
         request.host,
         request.comments,
-        editorSaves
+        editorSaves,
+        request.stories
       );
       const bytes = saved.slice(0);
       // What the editor copy lacks: the paragraph IDs this save recorded and repairs its updates caused.
@@ -530,8 +531,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const previousVersion = session.proposalEngine.version();
+      const known = new Set(registry.snapshot().proposals.map((proposal) => proposal.id));
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       let result: DocxProposalResult | undefined;
+      let projectionStories: string[] = [];
       switch (request.operation.kind) {
         case 'propose':
           result = registry.propose(request.operation.request);
@@ -544,12 +547,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           break;
         case 'removeComment':
           try {
-            session.applyRawOps('body', [{ op: 'removeComment', id: request.operation.id }]);
+            const story = session.selection()?.head.story ?? 'body';
+            session.applyRawOps(story, [{ op: 'removeComment', id: request.operation.id }]);
+            projectionStories = [story];
           } catch {}
           break;
       }
       committed = request.operation.kind !== 'snapshot';
       const changedStories = session.storiesChangedSince(since).stories;
+      if (result?.ok) {
+        projectionStories = [...proposalProjectionStories(known, result, changedStories)];
+      }
+      session.markProjectionStories(projectionStories);
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
@@ -597,6 +606,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
             ...(result === undefined ? {} : { result }),
             mirror: { version, proposals: registry.exportState() },
             changedStories,
+            projectionStories,
             updates,
             stateVector,
             geometry,

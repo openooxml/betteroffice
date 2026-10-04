@@ -6,6 +6,7 @@ import { useCallback, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import * as yrs from '@betteroffice/docx/yrs';
 import {
   createYrsSession,
   ResidentEngineWorkerClient,
@@ -302,8 +303,10 @@ test('an editor flushes its loaded peer and posts its diff immediately before sa
   opened.flush.mockImplementation(async () => {
     const first = opened.session.paragraphs('body')[0]!;
     opened.session.insertText({ story: 'body', paraId: first.paraId, offset: 0 }, 'Peer edit ');
+    opened.hook.result.current.core.publishDirectInput('body');
   });
   const posted = opened.worker.requests.length;
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
   const buffer = await opened.hook.result.current.io.handleSave();
   expect(buffer).toBeInstanceOf(ArrayBuffer);
   expect(opened.worker.requests.slice(posted)).toEqual(['applyUpdate', 'save']);
@@ -312,6 +315,56 @@ test('an editor flushes its loaded peer and posts its diff immediately before sa
   expect(opened.flush).toHaveBeenCalledTimes(1);
   expect(opened.project).not.toHaveBeenCalled();
   expect(opened.errors).toEqual([]);
+  expect(save.mock.calls[0]![0].stories).toEqual(['body']);
+  opened.flush.mockImplementation(async () => {});
+  await opened.hook.result.current.io.handleSave();
+  expect(save.mock.calls[1]![0].stories).toEqual([]);
+  save.mockRestore();
+});
+
+test('an unavailable worker save preserves peer stories for the main-thread fallback', async () => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  opened.hook.result.current.core.publishDirectInput('body');
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save')
+    .mockRejectedValue(new ResidentWorkerSaveUnavailableError('No source package'));
+  const project = spyOn(yrs, 'yrsToDocument');
+  try {
+    expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
+    expect(save.mock.calls[0]![0].stories).toEqual(['body']);
+    expect(project.mock.calls[0]![2]?.storyIds).toEqual(new Set(['body']));
+    expect(opened.errors).toEqual([]);
+  } finally {
+    save.mockRestore();
+    project.mockRestore();
+  }
+});
+
+test('a worker save retains peer edits marked while its response is pending', async () => {
+  const opened = await workerOpened(false);
+  await act(async () => { await requestWorkerOpenReplica(opened.session); });
+  const core = opened.hook.result.current.core;
+  core.publishDirectInput('body');
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  const saver = workerOpenSave(opened.session)!;
+  opened.worker.hold();
+  const pending = saver.save([], opened.session);
+  try {
+    await waitFor(() => expect(opened.worker.requests).toContain('save'));
+    const paragraph = opened.session.paragraphs('body')[0]!;
+    opened.session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Later edit ');
+    core.publishDirectInput('body');
+    opened.worker.release();
+    await pending;
+    const buffer = await saver.save([], opened.session);
+    expect(save.mock.calls[1]![0].stories).toEqual(['body']);
+    expect(await (await JSZip.loadAsync(buffer)).file('word/document.xml')!.async('string')).toContain('Later edit ');
+    await saver.save([], opened.session);
+    expect(save.mock.calls[2]![0].stories).toEqual([]);
+  } finally {
+    opened.worker.release();
+    save.mockRestore();
+  }
 });
 
 test('an editor integrates saved paragraph ID claims before later worker proposals', async () => {
@@ -326,6 +379,7 @@ test('an editor integrates saved paragraph ID claims before later worker proposa
     const first = opened.session.paragraphs('body')[0]!;
     paraId = opened.session.splitParagraph({ story: 'body', paraId: first.paraId, offset: 0 }).secondParaId;
     opened.session.insertText({ story: 'body', paraId, offset: 0 }, 'Peer claim ');
+    opened.hook.result.current.core.publishDirectInput('body');
     beforeSave = opened.session.encodeStateVector();
     unsubscribe = opened.session.onUpdate((_update, origin) => origins.push(origin));
   });

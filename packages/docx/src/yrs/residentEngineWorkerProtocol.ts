@@ -59,6 +59,7 @@ export interface ResidentProposalResponse {
   result?: DocxProposalResult;
   mirror: { version: string; proposals: DocxProposalRegistryState };
   changedStories: string[];
+  projectionStories?: string[];
   updates: ArrayBuffer[];
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
@@ -176,7 +177,15 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
-  | { id: number; type: 'save'; comments: Comment[]; host?: Document; stateVector?: Uint8Array }
+  | {
+      id: number;
+      type: 'save';
+      comments: Comment[];
+      host?: Document;
+      stateVector?: Uint8Array;
+      /** The editor peer's marked stories. @internal */
+      stories?: readonly string[];
+    }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | {

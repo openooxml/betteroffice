@@ -150,6 +150,7 @@ export function registerWorkerProposalAuthority(
     handedOver(version: string): void;
     /** A worker proposal changed document content. */
     contentChanged(): void;
+    projectionChanged?(stories: readonly string[]): void;
   }
 ): WorkerProposalAuthority {
   let tail: Promise<unknown> = Promise.resolve();
@@ -249,6 +250,7 @@ export function registerWorkerProposalAuthority(
       JSON.stringify(previous.proposals) !== JSON.stringify(reply.mirror.proposals) ||
       (op.kind === 'setStates' && reply.result?.ok)
     ) holdsState = true;
+    hooks.projectionChanged?.(reply.projectionStories ?? []);
     store(reply);
     if (
       reply.changedStories.length > 0 ||

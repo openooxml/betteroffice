@@ -8,7 +8,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { dirtyProjectionStory, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import { DirtyProjectionStories, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -319,7 +319,7 @@ export function useYrsCoreSession(
   const mediaTokensRef = useRef(options?.mediaTokens);
   mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
-  const projectionStoriesRef = useRef(new Set<string>());
+  const projectionStoriesRef = useRef(new DirtyProjectionStories());
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
@@ -642,10 +642,17 @@ export function useYrsCoreSession(
             const source = bytes;
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: (comments, peer) => {
-                if (stale()) return Promise.reject(new Error('The document changed while saving'));
+              save: async (comments, peer) => {
+                if (stale()) throw new Error('The document changed while saving');
                 const currentHost = documentRef.current ?? host?.document;
-                return worker.save({ comments, ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}) }, peer);
+                const dirty = peer ? projectionStoriesRef.current.capture() : undefined;
+                const saved = await worker.save({
+                  comments,
+                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                  ...(dirty ? { stories: dirty.stories } : {}),
+                }, peer);
+                dirty?.clear();
+                return saved;
               },
             });
             const gate = { reached: false, wanted: false };
@@ -716,6 +723,9 @@ export function useYrsCoreSession(
                 current: () => !stale(),
                 laidOut: () => laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: (stories) => {
+                  for (const story of stories) projectionStoriesRef.current.add(story);
+                },
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);
                   worker.mirrorReady();
@@ -1074,7 +1084,7 @@ export function useYrsCoreSession(
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
+        dirtyStories.projectionOptions()
       );
       dirtyStories.clear();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
@@ -1095,7 +1105,7 @@ export function useYrsCoreSession(
         : typeof stories === 'string'
           ? [stories]
           : stories;
-    for (const story of dirty) projectionStoriesRef.current.add(dirtyProjectionStory(story));
+    for (const story of dirty) projectionStoriesRef.current.add(story);
   }, []);
 
   return {

@@ -6,9 +6,12 @@ import type { Comment } from '../types/content';
 import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../types/document';
 import { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
+import { dirtyProjectionStory } from './dirtyProjectionStories';
 import { captureSessionSave, writeSessionSave, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
+
+export { DirtyProjectionStories, dirtyProjectionStory, proposalProjectionStories } from './dirtyProjectionStories';
 
 /** What the editor's earlier saves of a session leave for its next save. @internal */
 export interface EditorSaveRecord {
@@ -122,13 +125,6 @@ export function hostSaveMetadata(host: Document): Document {
       },
     },
   };
-}
-
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. @internal */
-export function dirtyProjectionStory(activeStory: string): string {
-  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory.split(':', 2).join(':')
-    : 'body';
 }
 
 /** Writes the editor's document, through the session save when it has one. */
