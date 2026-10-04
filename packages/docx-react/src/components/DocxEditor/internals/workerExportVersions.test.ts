@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { ResidentWorkerFailureError, type YrsSession } from '@betteroffice/docx/yrs';
 import { workerExportVersions } from './workerExportVersions';
-import type { WorkerPageExportResult } from './workerOpenExport';
+import { registerWorkerOpenExport, retireWorkerOpenExport, workerOpenExport, type WorkerPageExportResult } from './workerOpenExport';
 
 function exported(worker: string, serial: number): WorkerPageExportResult {
   return {
@@ -32,6 +32,19 @@ test('layout associations are scoped to the peer, worker owner and load', () => 
   expect(workerExportVersions({} as YrsSession, owner, 1).workerLayoutVersion('P:7')).toBe('P:7');
   expect(workerExportVersions(peer, {}, 1).workerLayoutVersion('P:7')).toBe('P:7');
   expect(workerExportVersions(peer, owner, 2).workerLayoutVersion('P:7')).toBe('P:7');
+});
+
+test('retiring a worker export drops its registration and layout associations', () => {
+  const peer = {} as YrsSession;
+  const owner = {};
+  const adapter = workerExportVersions(peer, owner, 1);
+  adapter.adapt(exported('W', 7), 'P', 'W');
+  registerWorkerOpenExport(peer, { export: async () => exported('W', 7) });
+  expect(workerOpenExport(peer)).not.toBeNull();
+  retireWorkerOpenExport(peer);
+  expect(workerOpenExport(peer)).toBeNull();
+  expect(workerExportVersions(peer, owner, 1)).not.toBe(adapter);
+  expect(workerExportVersions(peer, owner, 1).workerLayoutVersion('P:7')).toBe('P:7');
 });
 
 test('refusals use the captured peer version and mismatched reads cannot be relabeled', () => {

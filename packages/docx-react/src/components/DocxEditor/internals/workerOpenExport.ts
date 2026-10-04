@@ -8,7 +8,7 @@ import type {
 } from '@betteroffice/docx/yrs';
 import { ResidentWorkerFailureError } from '@betteroffice/docx/yrs';
 import { awaitWorkerOpenReplica } from './workerOpenReplica';
-import type { WorkerExportVersions } from './workerExportVersions';
+import { clearWorkerExportVersions, type WorkerExportVersions } from './workerExportVersions';
 
 export const LAYOUT_WAIT_MS = 2_000;
 export const VIEWER_LAYOUT_WAIT_MS = 60_000;
@@ -43,6 +43,11 @@ export function workerOpenExport(session: YrsSession): WorkerOpenExport | null {
   return exporters.get(session) ?? null;
 }
 
+export function retireWorkerOpenExport(session: YrsSession): void {
+  exporters.delete(session);
+  clearWorkerExportVersions(session);
+}
+
 export async function exportWorkerOpenPages(
   peer: YrsSession,
   options: DocxPageExportOptions,
@@ -63,7 +68,21 @@ export async function exportWorkerOpenPages(
     ok: false, version, failure: { code, target: null, message },
   });
   assertCurrent();
-  await awaitWorkerOpenReplica(peer, { passive: true });
+  const ready = awaitWorkerOpenReplica(peer, { passive: true });
+  if (ready) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let hydrated: boolean;
+    try {
+      hydrated = await Promise.race([
+        ready.then(() => true),
+        new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), VIEWER_LAYOUT_WAIT_MS); }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    assertCurrent();
+    if (!hydrated) return refusal(peer.version(), 'layout-unavailable', 'The document is not laid out yet.');
+  }
   assertCurrent();
   await context.flush();
   assertCurrent();

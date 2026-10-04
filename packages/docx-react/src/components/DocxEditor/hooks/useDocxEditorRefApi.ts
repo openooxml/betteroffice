@@ -821,7 +821,7 @@ export function useDocxEditorRefApi({
           return operation.export(options, {
             current: () => pagedEditorRef.current?.getYrsSession() === peer && workerOpenExport(peer) === operation,
             flush: () => editor().flushPendingInput(),
-            request: () => editor().readLayoutRequest(),
+            request: async () => editor().getLayoutRequest(),
             settleLayout: async (timeoutMs, requestLayout) => {
               if (requestLayout) editor().relayout();
               await settledDisplayList?.(null, timeoutMs, 'window');

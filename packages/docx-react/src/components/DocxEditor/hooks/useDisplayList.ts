@@ -90,7 +90,7 @@ import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindo
 import { sameLayoutInput } from '../internals/layoutInput';
 import { SupersededPreviewError } from '../internals/supersededPreview';
 import { stateVectorAhead } from '../internals/stateVector';
-import { exportWorkerOpenPages, type WorkerOpenExport } from '../internals/workerOpenExport';
+import { exportWorkerOpenPages, retireWorkerOpenExport, type WorkerOpenExport } from '../internals/workerOpenExport';
 import { workerExportVersions } from '../internals/workerExportVersions';
 import {
   failWorkerProposalAuthority,
@@ -970,6 +970,7 @@ export function useRustDisplayList(
       setSnapshot(fallbackSnapshot);
       endOpenLines(false);
       workerFallbackEngineRef.current = hostEngine;
+      retireWorkerOpenExport(hostEngine);
       mainFrameRef.current = null;
     },
     [endOpenLines, failWorkerDocument, queryEpochGate, setMainFrameDisplayWindow]

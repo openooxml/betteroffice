@@ -36,6 +36,10 @@ export class WorkerExportVersions {
 
 const versions = new WeakMap<YrsSession, { owner: object; load: number; adapter: WorkerExportVersions }>();
 
+export function clearWorkerExportVersions(peer: YrsSession): void {
+  versions.delete(peer);
+}
+
 export function workerExportVersions(peer: YrsSession, owner: object, load: number): WorkerExportVersions {
   const current = versions.get(peer);
   if (current?.owner === owner && current.load === load) return current.adapter;

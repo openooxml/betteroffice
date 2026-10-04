@@ -9,6 +9,7 @@ import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   createYrsSession,
   preloadResidentEngineWorker,
+  ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   proposalRevisionPreview,
   createYrsPositionProjection,
@@ -35,6 +36,7 @@ import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { isLayoutQueued, markPresented, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
 import { workerOpenSave } from '../internals/workerOpenSave';
+import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -496,6 +498,92 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+test('a hydrated editor exports ordinary and pinned pages through the real layout request path', async () => {
+  const { posted } = installWorker();
+  const { result } = renderHook(useHarness, { initialProps: { ...initialProps, hydrateOnDemand: false } });
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  act(() => result.current.presentFrame());
+  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+  await act(async () => { await result.current.renderer.settledDisplayList(null, 3000, 'window'); });
+  expect(await result.current.pipeline.readLayoutRequest()).toBeNull();
+  expect(result.current.pipeline.getLayoutRequest()).not.toBeNull();
+  const session = result.current.core.session!;
+  const peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+  try {
+    let first!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => { first = await result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' }); });
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(first.version).toBe(session.version());
+    const options = { revisionView: 'markup' as const, expectLayoutVersion: first.content.layout.layoutVersion };
+    const beforePinned = posted.length;
+    let pinned!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => {
+      pinned = await result.current.ref.current!.exportStructuredWithPages(options);
+    });
+    expect(pinned).toEqual(first);
+    expect(posted.slice(beforePinned).filter((request) => request.type === 'documentRead' && request.read.kind === 'exportStructuredWithPages')).toHaveLength(1);
+    expect(posted.slice(beforePinned).some(({ type }) => type === 'bootstrap' || type === 'sync' || type === 'completeLayout')).toBe(false);
+    expect(peerExport).not.toHaveBeenCalled();
+  } finally {
+    peerExport.mockRestore();
+  }
+});
+
+test('main-thread takeover retires worker exports while an in-flight export still rejects', async () => {
+  let holdReads = false;
+  const { workers, posted, received } = installWorker({ holdReply: (request) => holdReads && request.type === 'documentRead' });
+  const source = await longFixture(1);
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source, hydrateOnDemand: false },
+  });
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
+  try {
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    await act(async () => { await result.current.renderer.settledDisplayList(null, 3000, 'window'); });
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    let first!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => { first = await api.exportStructuredWithPages({ revisionView: 'markup' }); });
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(workerOpenExport(session)).not.toBeNull();
+    const request = result.current.pipeline.getLayoutRequest()!;
+    session.layoutDocumentWithRegionsRetainedJson(request);
+    session.buildDisplayListFrame('{}', 0);
+    session.setSelection({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 });
+    peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+    const previousId = posted.at(-1)!.id;
+    holdReads = true;
+    const exporting = api.exportStructuredWithPages({ revisionView: 'markup', expectLayoutVersion: first.content.layout.layoutVersion });
+    const rejected = expect(exporting).rejects.toThrow(ResidentWorkerFailureError);
+    await act(async () => { await received('documentRead', previousId); });
+    workers[0]!.hold();
+    let input!: ReturnType<typeof result.current.renderer.applyInput>;
+    act(() => { input = result.current.renderer.applyInput('Recovered '); });
+    await waitFor(() => expect(posted.some((request) => request.type === 'applyInput')).toBe(true));
+    await act(async () => {
+      workers[0]!.onerror?.({ message: 'worker crashed' } as ErrorEvent);
+      await input;
+      await rejected;
+    });
+    expect(workerOpenExport(session)).toBeNull();
+    expect(peerExport).not.toHaveBeenCalled();
+    let exported!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => { exported = await api.exportStructuredWithPages({ revisionView: 'markup' }); });
+    if (!exported.ok) throw new Error(exported.failure.message);
+    expect(exported.version).toBe(session.version());
+    expect(JSON.stringify(exported.content.structured)).toContain('Recovered ');
+    expect(peerExport).toHaveBeenCalled();
+    expect(workers).toHaveLength(1);
+  } finally {
+    unmount();
+    peerExport?.mockRestore();
+    errorLog.mockRestore();
+  }
+});
 
 test('registered editor export reconciles worker repairs without echoing updates to the worker', async () => {
   const { workers, posted } = installWorker();

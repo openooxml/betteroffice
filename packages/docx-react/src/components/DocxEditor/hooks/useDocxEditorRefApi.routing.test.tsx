@@ -26,7 +26,7 @@ import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProve
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
 import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
-import { exportWorkerOpenPages, registerWorkerOpenExport } from '../internals/workerOpenExport';
+import { exportWorkerOpenPages, registerWorkerOpenExport, VIEWER_LAYOUT_WAIT_MS } from '../internals/workerOpenExport';
 import { workerExportVersions } from '../internals/workerExportVersions';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
 import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
@@ -601,7 +601,8 @@ test('editor paged export flushes and reads the resident worker after hand-over'
   expect(result).toMatchObject({ ok: true, version: 'v', content: { layout: { documentVersion: 'v', layoutVersion: 'v:7' } } });
   expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
   expect(worker.read).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST }, 'worker-v');
-  expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(1);
+  expect(host.editor.getLayoutRequest).toHaveBeenCalledTimes(1);
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
   expect(worker.documentRead).not.toHaveBeenCalled();
   expect(host.events).toEqual(['flush', 'syncUpdate', 'worker export']);
 });
@@ -641,6 +642,29 @@ test('editor export waits for peer readiness without starting its load', async (
   expect(host.hydrate).toHaveBeenCalledTimes(1);
   expect(host.request).not.toHaveBeenCalled();
   expect(host.events).toEqual(['flush', 'syncUpdate', 'worker export']);
+});
+
+test('an editor export refuses after the passive readiness deadline when switched to viewing', async () => {
+  const host = apiFor(false, true);
+  const worker = editorWorkerFor(host);
+  host.modeRef.current = 'viewing';
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(((callback: () => void) => {
+    callback();
+    return 0;
+  }) as unknown as typeof setTimeout);
+  try {
+    expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual({
+      ok: false, version: 'v',
+      failure: { code: 'layout-unavailable', target: null, message: 'The document is not laid out yet.' },
+    });
+    expect(timeout).toHaveBeenCalledWith(expect.any(Function), VIEWER_LAYOUT_WAIT_MS);
+  } finally {
+    timeout.mockRestore();
+  }
+  expectNoReplica(host);
+  expect(worker.catchUp).not.toHaveBeenCalled();
+  expect(worker.read).not.toHaveBeenCalled();
+  expect(host.editor.relayout).not.toHaveBeenCalled();
 });
 
 test('editor export waits for acknowledgment before reading the worker', async () => {
@@ -723,7 +747,7 @@ test('a pinned editor export returns a superseded refusal with no relayout or re
 test('editor export does not retry an unsupported revision preview', async () => {
   const host = apiFor();
   const worker = editorWorkerFor(host);
-  host.editor.readLayoutRequest.mockResolvedValue(JSON.stringify({ renderEnv: { revisionPreview: { proposal: 'accept' } } }));
+  host.editor.getLayoutRequest.mockReturnValue(JSON.stringify({ renderEnv: { revisionPreview: { proposal: 'accept' } } }));
   const refusal = { ...PAGE_REFUSAL, failure: { ...PAGE_REFUSAL.failure, code: 'unsupported-revision-layout' as const } };
   worker.read.mockResolvedValue({ status: 'ok', version: 'worker-v', value: JSON.stringify(refusal) });
   expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual({ ...refusal, version: 'v' });
