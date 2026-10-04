@@ -9,6 +9,7 @@ import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   createYrsSession,
   preloadResidentEngineWorker,
+  ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   proposalRevisionPreview,
   createYrsPositionProjection,
@@ -35,6 +36,7 @@ import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { isLayoutQueued, markPresented, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
 import { workerOpenSave } from '../internals/workerOpenSave';
+import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -50,6 +52,9 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
+const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+const originalConsoleError = console.error;
 const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
@@ -101,6 +106,9 @@ afterEach(() => {
   cleanup();
   compileModule.mockRestore();
   globalThis.Worker = originalWorker;
+  globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+  globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+  console.error = originalConsoleError;
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
@@ -400,6 +408,8 @@ function useHarness(props: HarnessProps) {
     if (props.readOnly && core.session) relayout.current?.();
   }, [props.readOnly, core.session]);
   const pagedEditorRef = useRef<PagedEditorRef | null>(null);
+  const pipelineRef = useRef(pipeline);
+  pipelineRef.current = pipeline;
   const coreRef = useRef(core);
   coreRef.current = core;
   const searchReveals = useRef<number[]>([]);
@@ -408,6 +418,9 @@ function useHarness(props: HarnessProps) {
     getDocument: () => coreRef.current.documentFromYrs(),
     hasPendingInput: () => false,
     flushPendingInput: async () => {},
+    getLayoutRequest: () => pipelineRef.current.getLayoutRequest(),
+    readLayoutRequest: () => pipelineRef.current.readLayoutRequest(),
+    relayout: () => pipelineRef.current.runLayoutPipeline(),
     yrsLocToDisplayPosition: (loc: Parameters<PagedEditorRef['yrsLocToDisplayPosition']>[0]) => {
       const session = coreRef.current.session!;
       const projection = createYrsPositionProjection(session, 'body');
@@ -491,6 +504,137 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+test('a hydrated editor exports ordinary and pinned pages through the real layout request path', async () => {
+  const { posted } = installWorker();
+  const { result } = renderHook(useHarness, { initialProps: { ...initialProps, hydrateOnDemand: false } });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  act(() => result.current.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  act(() => result.current.presentFrame());
+  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+  await act(async () => { await result.current.renderer.settledDisplayList(null, 3000, 'window'); });
+  expect(await result.current.pipeline.readLayoutRequest()).toBeNull();
+  expect(result.current.pipeline.getLayoutRequest()).not.toBeNull();
+  const session = result.current.core.session!;
+  const peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+  try {
+    let first!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => { first = await result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' }); });
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(first.version).toBe(session.version());
+    const options = { revisionView: 'markup' as const, expectLayoutVersion: first.content.layout.layoutVersion };
+    const beforePinned = posted.length;
+    let pinned!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => {
+      pinned = await result.current.ref.current!.exportStructuredWithPages(options);
+    });
+    expect(pinned).toEqual(first);
+    expect(posted.slice(beforePinned).filter((request) => request.type === 'documentRead' && request.read.kind === 'exportStructuredWithPages')).toHaveLength(1);
+    expect(posted.slice(beforePinned).some(({ type }) => type === 'bootstrap' || type === 'sync' || type === 'completeLayout')).toBe(false);
+    expect(peerExport).not.toHaveBeenCalled();
+  } finally {
+    peerExport.mockRestore();
+  }
+});
+
+test('main-thread takeover retires worker exports while an in-flight export still rejects', async () => {
+  const source = await longFixture(1);
+  let holdReads = false;
+  const { workers, posted, replies } = installWorker({ holdReply: (request) => holdReads && request.type === 'documentRead' });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source, hydrateOnDemand: false },
+  });
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
+  try {
+    await frames.waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await frames.waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await frames.waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000, 'window'), 3000);
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const first = await frames.untilCommitted(api.exportStructuredWithPages({ revisionView: 'markup' }), 3000);
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(workerOpenExport(session)).not.toBeNull();
+    const request = result.current.pipeline.getLayoutRequest()!;
+    session.layoutDocumentWithRegionsRetainedJson(request);
+    session.buildDisplayListFrame('{}', 0);
+    session.setSelection({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 });
+    peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+    const previousId = posted.at(-1)!.id;
+    holdReads = true;
+    const exporting = api.exportStructuredWithPages({ revisionView: 'markup', expectLayoutVersion: first.content.layout.layoutVersion });
+    void exporting.catch(() => {});
+    await frames.waitFor(() => {
+      const request = posted.find((request) => request.type === 'documentRead' && request.id > previousId);
+      expect(request).toBeDefined();
+      expect(replies.has(request!.id)).toBe(true);
+    });
+    workers[0]!.hold();
+    let input!: ReturnType<typeof result.current.renderer.applyInput>;
+    act(() => { input = result.current.renderer.applyInput('Recovered '); });
+    await frames.waitFor(() => expect(posted.some((request) => request.type === 'applyInput')).toBe(true));
+    act(() => { workers[0]!.onerror?.({ message: 'worker crashed' } as ErrorEvent); });
+    await frames.untilCommitted(Promise.all([input, expect(exporting).rejects.toThrow(ResidentWorkerFailureError)]), 3000);
+    expect(workerOpenExport(session)).toBeNull();
+    expect(peerExport).not.toHaveBeenCalled();
+    const exported = await frames.untilCommitted(api.exportStructuredWithPages({ revisionView: 'markup' }), 3000);
+    if (!exported.ok) throw new Error(exported.failure.message);
+    expect(exported.version).toBe(session.version());
+    expect(JSON.stringify(exported.content.structured)).toContain('Recovered ');
+    expect(peerExport).toHaveBeenCalled();
+    expect(workers).toHaveLength(1);
+  } finally {
+    unmount();
+    peerExport?.mockRestore();
+    errorLog.mockRestore();
+    frames.restore();
+    globalThis.Worker = originalWorker;
+  }
+});
+
+test('registered editor export reconciles worker repairs without echoing updates to the worker', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, { initialProps: { ...initialProps, hydrateOnDemand: false } });
+  let applyLocal: ReturnType<typeof spyOn<YrsSession, 'applyLocalUpdate'>> | undefined;
+  let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
+  try {
+    await frames.waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await frames.waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await frames.waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000, 'window'), 3000);
+    const session = result.current.core.session!;
+    applyLocal = spyOn(session, 'applyLocalUpdate');
+    peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+    workers[0]!.sessions[0]!.applyRawOps('body', [{ op: 'insert', index: 0, text: 'Worker repair ' }]);
+    const before = posted.filter(({ type }) => type === 'applyUpdate').length;
+    const beforeExport = posted.length;
+    const exported = await frames.untilCommitted(result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' }), 3000);
+    if (!exported.ok) throw new Error(exported.failure.message);
+    expect(exported.version).toBe(session.version());
+    expect(exported.content.layout.documentVersion).toBe(session.version());
+    expect(JSON.stringify(exported.content.structured)).toContain('Worker repair ');
+    expect(session.paragraphs('body')[0]!.text).toStartWith('Worker repair ');
+    expect(applyLocal).toHaveBeenCalled();
+    expect(posted.filter(({ type }) => type === 'applyUpdate')).toHaveLength(before);
+    expect(posted.slice(beforeExport).some(({ type }) => type === 'syncUpdate')).toBe(true);
+    expect(posted.slice(beforeExport).some(({ type }) => type === 'sync')).toBe(true);
+    expect(peerExport).not.toHaveBeenCalled();
+  } finally {
+    unmount();
+    applyLocal?.mockRestore();
+    peerExport?.mockRestore();
+    frames.restore();
+    globalThis.Worker = originalWorker;
+  }
+});
 
 test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
   const { workers, posted } = installWorker({ holdState: true });
@@ -873,6 +1017,21 @@ function holdFrames() {
   };
   return {
     run,
+    async waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        try {
+          assertion();
+          return;
+        } catch (error) {
+          if (Date.now() >= deadline) throw error;
+        }
+        await act(async () => {
+          run();
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        });
+      }
+    },
     async until<T>(promise: Promise<T>): Promise<T> {
       let settled = false;
       void promise.then(() => { settled = true; }, () => { settled = true; });
@@ -882,10 +1041,12 @@ function holdFrames() {
       }
       return promise;
     },
-    async untilCommitted<T>(promise: Promise<T>): Promise<T> {
+    async untilCommitted<T>(promise: Promise<T>, timeoutMs?: number): Promise<T> {
       let settled = false;
       void promise.then(() => { settled = true; }, () => { settled = true; });
+      const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
       while (!settled) {
+        if (Date.now() >= deadline) throw new Error(`Operation did not settle within ${timeoutMs}ms`);
         await act(async () => {
           run();
           await new Promise<void>((resolve) => setImmediate(resolve));
