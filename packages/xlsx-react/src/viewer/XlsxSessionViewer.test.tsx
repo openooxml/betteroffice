@@ -240,9 +240,12 @@ describe('workbook session viewer', () => {
     const ready = mock((_api: XlsxWorkerViewerApi) => disposeReady);
     const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await opened();
+    const nextView = deferred<WorkbookSheetView>();
+    next.call.sheetView.mockImplementationOnce(() => nextView.promise);
     opener.mockResolvedValue(next.viewer);
     view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(next.call.sheetView).toHaveBeenCalled());
+    await act(async () => nextView.resolve(sheetView(0)));
     await tick();
     expect(old.viewer.dispose).toHaveBeenCalledTimes(1);
     expect(disposeReady).toHaveBeenCalledTimes(1);
@@ -464,8 +467,11 @@ describe('workbook session viewer', () => {
     open(viewer);
     const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen />);
     await opened();
+    const second = deferred<WorkbookSheetView>();
+    call.sheetView.mockImplementationOnce(() => second.promise);
     fireEvent.click(view.getByRole('tab', { name: 'Second' }));
-    await waitFor(() => expect(call.sheetView).toHaveBeenCalledWith(1));
+    expect(call.sheetView).toHaveBeenCalledWith(1);
+    await act(async () => second.resolve(sheetView(1)));
     await tick();
     await act(async () => old.resolve(frame(0, viewport)));
     expect(call.frame.mock.calls.map(([, options]) => options?.sheet)).toEqual([0, 1]);
