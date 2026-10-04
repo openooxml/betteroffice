@@ -13,6 +13,7 @@ import initWasmModule, {
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { wasmAssetUrl } from './asset';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
@@ -518,7 +519,7 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
 export function initWasm(
-  input: WasmInitInput = new URL('./generated/xlsx_wasm_bg.wasm', import.meta.url)
+  input: WasmInitInput = wasmAssetUrl()
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;

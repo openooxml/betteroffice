@@ -4,6 +4,7 @@ export const __externref_drop_slice: (a: number, b: number) => void;
 export const __externref_table_alloc: () => number;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbg_editsession_free: (a: number, b: number) => void;
+export const __wbg_retainedlayoutmeta_free: (a: number, b: number) => void;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
@@ -92,6 +93,7 @@ export const editsession_layout_document_with_regions_json: (a: number, b: numbe
 export const editsession_layout_document_with_regions_prefix_retained_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_retained: (a: number, b: number, c: number) => [number, number];
 export const editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_layout_document_with_regions_retained_meta: (a: number, b: number, c: number) => [number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_comments: (a: number) => [number, number, number, number];
 export const editsession_list_content_controls_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -140,6 +142,7 @@ export const editsession_resolve_sticky_position: (a: number, b: number, c: numb
 export const editsession_resume_region_layout: (a: number, b: number) => [number, number, number, number];
 export const editsession_retained_headers_footers_json: (a: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+export const editsession_retained_layout_json: (a: number) => [number, number, number, number];
 export const editsession_revision_stamps_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -225,6 +228,12 @@ export const register_substitute_measure_font: (a: number, b: number, c: number)
 export const render_docx_markdown_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const render_docx_markdown_with_pages_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const reset_wasm_peak_bytes: () => void;
+export const retainedlayoutmeta_layout_shell_json: (a: number) => [number, number];
+export const retainedlayoutmeta_notes_converged: (a: number) => number;
+export const retainedlayoutmeta_page_count: (a: number) => number;
+export const retainedlayoutmeta_page_sizes: (a: number) => [number, number];
+export const retainedlayoutmeta_partial: (a: number) => number;
+export const retainedlayoutmeta_provisional: (a: number) => number;
 export const serialize_docx_s10: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];

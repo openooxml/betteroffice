@@ -954,6 +954,20 @@ describe('session host and cloned transport', () => {
     expect(failures).toEqual([]);
   });
 
+  it('ignores wasm compile messages without replying or disposing', async () => {
+    const s = session();
+    const messages: unknown[] = [];
+    const off = s.pair.client.listen((message) => { messages.push(message); });
+    s.pair.client.post({ protocol: 1, kind: 'wasm-compile' });
+    s.pair.client.post({ protocol: 1, kind: 'wasm-compile' });
+    expect(await s.client.call.add(1, 2)).toBe(3);
+    expect(messages).toEqual([{ protocol: 1, kind: 'reply', id: 1, ok: true, value: 3 }]);
+    expect(s.client.failure).toBeUndefined();
+    expect(s.disposeCount).toBe(0);
+    off();
+    await s.client.dispose();
+  });
+
   it('makes malformed client messages terminal', async () => {
     const s = session();
     s.pair.client.post({ protocol: 2, kind: 'call', id: 1, method: 'echo', args: [] });

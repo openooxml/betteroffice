@@ -1,12 +1,9 @@
 import {
-  createSessionClient,
-  createWorkerTransport,
-  SessionFailure,
-  type MethodPolicy,
-  type Promisified,
-  type SessionClient,
-  type SessionTransport,
-} from '../../../../shared/office-session';
+  createSessionClient, requestWasmCompile, type SessionClient,
+} from '../../../../shared/office-session/client';
+import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
+import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenWorkbookOptions, Viewport } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -28,6 +25,7 @@ import {
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
+const wasmModules = new Map<string, WebAssembly.Module>();
 
 /**
  * Options for opening a workbook in a dedicated worker.
@@ -90,6 +88,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
     input.wasm = copyBytes(options.wasm as ArrayBuffer).buffer;
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -105,6 +104,9 @@ export async function openWorkbookSession(
     options.worker ? options.worker() :
       new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })
   );
+  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+    requestWasmCompile(transport);
+  }
   return createWorkbookSession(bytes, options, transport);
 }
 
@@ -121,6 +123,9 @@ export async function createWorkbookSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<Methods, Events>(transport, {
       methods: { ...WORKBOOK_SESSION_METHODS, ...WORKBOOK_INTERNAL_SESSION_METHODS },
+      onWasmModule: options.wasm === undefined && !options.worker ? (url, module) => {
+        if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
+      } : undefined,
     });
   } catch (error) {
     try { transport.close(); } catch {}
