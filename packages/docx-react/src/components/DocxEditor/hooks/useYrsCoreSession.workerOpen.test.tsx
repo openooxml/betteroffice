@@ -45,10 +45,14 @@ import { useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { flushEditorInput } from '../editorBatches';
+import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
+import type { DocxPlugin, DocxPluginContext, DocxPluginEvent } from '../../../plugins/types';
+import * as pluginHosts from '../../../plugins/useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
+const { DocxEditor } = await import('../../DocxEditor');
 const originalWorker = globalThis.Worker;
 const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
@@ -696,6 +700,246 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
     throw error;
   }
 }
+
+function pluginLoadGate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+function workerLoadRecorder(load?: () => Promise<void>) {
+  const events: DocxPluginEvent[] = [];
+  const contexts: DocxPluginContext<null>[] = [];
+  const plugin = defineDocxPlugin<null>({
+    id: 'test.worker-load',
+    createState: () => null,
+    onEvent(context, event) {
+      events.push(event);
+      if (event.type !== 'load') return;
+      contexts.push(context);
+      return load?.();
+    },
+    commands: [{
+      id: 'ready', label: 'Ready', mutatesDocument: false,
+      execute: () => ({ ok: true }),
+    }],
+  });
+  return {
+    plugin, contexts,
+    loads: () => events.filter((event) => event.type === 'load'),
+    changes: () => events.filter((event) => event.type === 'document-change'),
+  };
+}
+
+function openingPluginEditor(plugin: DocxPlugin, replay?: Promise<void>) {
+  const restores: Array<() => void> = [];
+  let view: ReturnType<typeof render> | undefined;
+  const close = () => {
+    try {
+      view?.unmount();
+    } finally {
+      for (const restore of [...restores].reverse()) restore();
+    }
+  };
+  try {
+    const previousWorker = globalThis.Worker;
+    const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+    restores.push(registerRestore(() => { globalThis.Worker = previousWorker; }));
+    restores.push(registerRestore(() => {
+      if (fonts) Object.defineProperty(document, 'fonts', fonts);
+      else Reflect.deleteProperty(document, 'fonts');
+    }));
+    const frames = holdFrames();
+    restores.push(frames.restore);
+    let editorRef: React.RefObject<PagedEditorRef | null> | undefined;
+    const bindPlugins = pluginHosts.useDocxPluginHost;
+    const captureEditor = spyOn(pluginHosts, 'useDocxPluginHost').mockImplementation((options) => {
+      editorRef = options.pagedEditorRef;
+      return bindPlugins(options);
+    });
+    restores.push(registerRestore(() => captureEditor.mockRestore()));
+    const peerReady = replicaHelpers.awaitWorkerOpenReplica;
+    if (replay) {
+      const wait = spyOn(replicaHelpers, 'awaitWorkerOpenReplica').mockImplementation((session) => {
+        const peer = peerReady(session);
+        return peer?.then(() => replay);
+      });
+      restores.push(registerRestore(() => wait.mockRestore()));
+    }
+    const fullOpen = (request: ResidentEngineWorkerRequest) =>
+      request.type === 'open' && request.previewBlocks === undefined;
+    const worker = installWorker({
+      holdReply: (request) => fullOpen(request) || request.type === 'encodeState',
+    });
+    if (!document.fonts) Object.defineProperty(document, 'fonts', {
+      value: {
+        addEventListener: () => {}, removeEventListener: () => {}, ready: Promise.resolve(),
+      },
+      configurable: true,
+    });
+    const ref = createRef<DocxEditorRef>();
+    const errors: unknown[] = [];
+    let painted = false;
+    const until = async (done: () => boolean) => {
+      await waitFor(() => {
+        act(() => { frames.run(); frames.runIdle(); });
+        if (errors.length) throw new AggregateError(errors, 'Worker-open editor failed');
+        expect(done()).toBe(true);
+      }, { timeout: 5_000 });
+    };
+    const settle = async <T,>(promise: Promise<T>): Promise<T> => {
+      let settled = false;
+      void promise.then(() => { settled = true; }, () => { settled = true; });
+      await until(() => settled);
+      return promise;
+    };
+    const editor = () => editorRef?.current ?? null;
+    const session = () => editor()?.getYrsSession() ?? null;
+    const ready = () => !!ref.current?.commands.getDescriptor('plugin:test.worker-load/ready');
+    const drain = async () => {
+      for (let turn = 0; turn < 4; turn += 1) {
+        await act(async () => {
+          frames.run();
+          frames.runIdle();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        });
+      }
+    };
+    view = render(<DocxEditor ref={ref}
+      documentBuffer={longBytes.slice().buffer as ArrayBuffer}
+      mode="editing" experimentalWorkerOpen previewFirstPage plugins={[plugin]}
+      measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+      onFirstPagePainted={() => { painted = true; }} onError={(error) => errors.push(error)}
+      onPluginError={(failure) => errors.push(failure.error)} />);
+    return {
+      ...worker, ref, view, until, settle, ready, drain, editor, session, close,
+      async preview() {
+        await until(() => painted && session()?.isDisplayOnly() === true);
+        await until(() => worker.posted.some((request) => fullOpen(request) && worker.replies.has(request.id)));
+        return session()!;
+      },
+      type(key: string) {
+        const textarea = view!.getByTestId('yrs-input');
+        fireEvent.keyDown(textarea, { key });
+        fireEvent.input(textarea, { target: { value: key } });
+      },
+      async open() {
+        const request = worker.posted.find(fullOpen)!;
+        act(() => worker.reply(request));
+        await until(() => session() !== null && session()?.isDisplayOnly() === false);
+        await until(() => worker.posted.some((request) =>
+          request.type === 'encodeState' && worker.replies.has(request.id)));
+        return session()!;
+      },
+      async hydrate(full: YrsSession) {
+        const request = worker.posted.find((request) => request.type === 'encodeState')!;
+        act(() => worker.reply(request));
+        const peer = peerReady(full);
+        if (!peer) throw new Error('The editor peer was not scheduled');
+        await settle(peer);
+        await until(() => !replicaHelpers.workerOpenReplicaPending(full));
+      },
+    };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+test('worker-open plugins retry load once when a held key replays during async load', async () => {
+  const replay = pluginLoadGate();
+  const load = pluginLoadGate();
+  const recorder = workerLoadRecorder(() => load.promise);
+  const opened = openingPluginEditor(recorder.plugin, replay.promise);
+  try {
+    const preview = await opened.preview();
+    const previewVersion = preview.version();
+    opened.type('A');
+    expect(opened.editor()!.hasPendingInput()).toBe(true);
+    expect(preview.version()).toBe(previewVersion);
+    expect(recorder.loads()).toEqual([]);
+    const full = await opened.open();
+    expect(full.storyIds()).toEqual([]);
+    await opened.hydrate(full);
+    await opened.until(() => recorder.loads().length === 1);
+    const initial = recorder.loads()[0]!;
+    expect(initial.reason).toBe('loaded');
+    expect(initial.version).toBe(full.version());
+    expect(recorder.contexts[0]!.signal.aborted).toBe(false);
+    expect(opened.ready()).toBe(false);
+    act(() => replay.release());
+    await opened.settle(opened.editor()!.flushPendingInput());
+    const editedVersion = full.version();
+    expect(editedVersion).not.toBe(initial.version);
+    expect(full.paragraphs('body')[0]!.text).toBe('AFirst paragraph');
+    expect(recorder.contexts[0]!.signal.aborted).toBe(true);
+    expect(recorder.loads()).toHaveLength(1);
+    act(() => load.release());
+    await opened.until(opened.ready);
+    await opened.drain();
+    expect(recorder.loads()).toEqual([
+      initial,
+      { type: 'load', generation: initial.generation, reason: 'loaded', version: editedVersion },
+    ]);
+    expect(recorder.contexts.map((context) => context.snapshot.version))
+      .toEqual([initial.version, editedVersion]);
+    expect(recorder.changes()).toEqual([]);
+  } finally {
+    replay.release();
+    load.release();
+    opened.close();
+  }
+}, 30_000);
+
+test('worker-open typing after plugin load settles emits one document-change and no further load', async () => {
+  const recorder = workerLoadRecorder();
+  const opened = openingPluginEditor(recorder.plugin);
+  try {
+    await opened.preview();
+    const full = await opened.open();
+    await opened.hydrate(full);
+    await opened.until(opened.ready);
+    expect(recorder.loads()).toHaveLength(1);
+    expect(recorder.changes()).toEqual([]);
+    const initial = recorder.loads()[0]!;
+    opened.type('B');
+    await opened.settle(opened.editor()!.flushPendingInput());
+    await opened.until(() => recorder.changes().length === 1);
+    await opened.drain();
+    expect(full.paragraphs('body')[0]!.text).toBe('BFirst paragraph');
+    expect(full.version()).not.toBe(initial.version);
+    expect(recorder.loads()).toEqual([initial]);
+    expect(recorder.changes()).toEqual([
+      { type: 'document-change', generation: initial.generation, version: full.version() },
+    ]);
+  } finally {
+    opened.close();
+  }
+}, 30_000);
+
+test('an eager worker-open editor peer becoming ready delivers only the initial plugin load', async () => {
+  const recorder = workerLoadRecorder();
+  const opened = openingPluginEditor(recorder.plugin);
+  try {
+    await opened.preview();
+    const full = await opened.open();
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(full.storyIds()).toEqual([]);
+    await opened.hydrate(full);
+    await opened.until(opened.ready);
+    await opened.drain();
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(false);
+    expect(full.paragraphs('body')[0]!.text).toBe('First paragraph');
+    expect(recorder.loads()).toEqual([
+      { type: 'load', generation: recorder.loads()[0]!.generation, reason: 'loaded', version: full.version() },
+    ]);
+    expect(recorder.contexts).toHaveLength(1);
+    expect(recorder.changes()).toEqual([]);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+  } finally {
+    opened.close();
+  }
+}, 30_000);
 
 test.each(['held keys', 'held composition'] as const)(
   'flush during opening waits for %s to land in the full session', async (kind) => {
