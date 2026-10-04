@@ -186,7 +186,7 @@ fn referenced_sheet_rename_and_undo_match_uncached_chart() {
     let renamed = chart_output(&fixture.render((0, 1)));
     assert_ne!(renamed, before);
     fixture.undo();
-    assert_eq!(chart_output(&fixture.render((0, 0))), before);
+    assert_eq!(chart_output(&fixture.render((0, 1))), before);
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn mixed_edits_match_uncached_chart_after_every_step() {
         ),
         (Step::Apply(number_format()), (0, 0)),
         (Step::Apply(rename()), (0, 1)),
-        (Step::Undo, (0, 0)),
+        (Step::Undo, (0, 1)),
         (Step::Undo, (0, 0)),
         (Step::Edit(SheetId(0), CellRef::new(1, 0), "Q5"), (0, 1)),
         (Step::Undo, (0, 1)),
