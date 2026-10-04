@@ -41,6 +41,7 @@ pub struct PptxRenderer {
 
 const LAYOUT_CACHE_CAPACITY: usize = 8;
 const LAYOUT_KEY_CACHE_CAPACITY: usize = 256;
+const PARENT_KEY_CACHE_CAPACITY: usize = 256;
 
 struct CachedSlide {
     key: String,
@@ -522,6 +523,9 @@ impl ParentKeys {
             .map(|part| part_key(&mut self.themes, &part.part_path, part))
             .transpose()?;
         let key = json_key(&(source, layout, master, theme))?;
+        if self.resolved.len() >= PARENT_KEY_CACHE_CAPACITY {
+            self.resolved.clear();
+        }
         self.resolved.insert(paths, key.clone());
         Ok(key)
     }
@@ -636,6 +640,26 @@ mod tests {
 
     const DECK: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    #[test]
+    fn parent_digests_stay_bounded_under_layout_path_churn() {
+        let document = PptxDocument::open_collaborative(DECK, 915.0).unwrap();
+        let session = document.session();
+        let scope = slide_scope(session, 0).unwrap();
+        let mut parents = ParentKeys::default();
+        let expected = parents.key(session.package(), &scope.slide).unwrap();
+        let mut slide = scope.slide.clone();
+        for n in 0..1_000 {
+            slide.layout_part_path = Some(format!("ppt/slideLayouts/missing-{n}.xml"));
+            parents.key(session.package(), &slide).unwrap();
+            assert!(parents.resolved.len() <= PARENT_KEY_CACHE_CAPACITY);
+        }
+        assert!(parents.layouts.len() <= session.package().layouts.len());
+        assert_eq!(
+            parents.key(session.package(), &scope.slide).unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn public_layout_prunes_keys_during_slide_churn() {
