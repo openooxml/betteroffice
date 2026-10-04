@@ -546,7 +546,7 @@ impl Workbook {
     ) -> Result<XlsxExportResult<XlsxStructuredContent>> {
         let version = self.version();
         Ok(
-            match walk::export(&self.export_source(), options, XlsxAnchorScope::Session) {
+            match walk::export(&self.export_source()?, options, XlsxAnchorScope::Session) {
                 Ok(content) => Ok(XlsxExport { version, content }),
                 Err(failure) => Err(XlsxExportRefusal { version, failure }),
             },
@@ -630,7 +630,7 @@ pub fn export_xlsx_structured(
 ) -> Result<XlsxStructuredContent> {
     let workbook = Workbook::open_for_read(bytes)?;
     walk::export(
-        &workbook.export_source(),
+        &workbook.export_source()?,
         options,
         XlsxAnchorScope::Snapshot,
     )

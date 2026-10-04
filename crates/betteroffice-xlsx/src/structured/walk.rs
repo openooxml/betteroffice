@@ -1571,7 +1571,7 @@ mod tests {
 
     fn export_with(workbook: &Workbook, budgets: Budgets) -> XlsxStructuredContent {
         export_within(
-            &workbook.export_source(),
+            &workbook.export_source().unwrap(),
             &XlsxExportOptions::default(),
             XlsxAnchorScope::Snapshot,
             budgets,

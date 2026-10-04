@@ -44,6 +44,7 @@ use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
+use crate::snapshot::package::PackageSlot;
 use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
@@ -307,7 +308,7 @@ pub struct Workbook {
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
-    source_package: Option<xlsx_parse::PreservedPackage>,
+    source_package: Option<PackageSlot>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -527,7 +528,7 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package,
+            source_package: source_package.map(PackageSlot::Present),
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -706,7 +707,12 @@ impl Workbook {
     /// an adopted snapshot are the same foreign bytes and get the same answer.
     fn gate_incoming(&self, model: &WorkbookModel) -> Result<()> {
         validate_model(model)?;
-        validate_chart_source(model, self.source_package.is_some())?;
+        validate_chart_source(
+            model,
+            self.source_package
+                .as_ref()
+                .is_some_and(|package| package.facts().source_present()),
+        )?;
         self.validate_incoming_anchors(model)
     }
 
@@ -894,6 +900,7 @@ impl Workbook {
         validate_chart_source(&self.model, self.source_package.is_some())?;
         match &self.source_package {
             Some(package) => {
+                let package = package.materialize()?;
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -928,20 +935,20 @@ impl Workbook {
     }
 
     fn has_uncached_source_formulas(&self) -> bool {
-        self.source_package.as_ref().is_some_and(|package| {
-            (0..package.source_sheet_count()).any(|index| {
-                package
-                    .source_cell_facts(index)
-                    .is_some_and(|facts| !facts.uncached_formulas.is_empty())
-            })
-        })
+        self.source_package
+            .as_ref()
+            .is_some_and(|package| package.facts().has_uncached_source_formulas())
     }
 
     /// The committed state a structured export reads.
-    pub(crate) fn export_source(&self) -> ExportSource<'_> {
-        ExportSource {
+    pub(crate) fn export_source(&self) -> Result<ExportSource<'_>> {
+        Ok(ExportSource {
             model: &self.model,
-            package: self.source_package.as_ref(),
+            package: self
+                .source_package
+                .as_ref()
+                .map(PackageSlot::materialize)
+                .transpose()?,
             origins: &self.preserved.origins,
             shared_string_cells: &self.preserved.shared_string_cells,
             axes: &self.preserved.axes,
@@ -950,11 +957,34 @@ impl Workbook {
             edited: self.edited_since_open || self.recalculated_since_open,
             part_hashes: &self.source_part_hashes,
             sheet_ids: self.sheet_keys(),
-        }
+        })
     }
 
     pub fn into_model(self) -> WorkbookModel {
         self.model
+    }
+
+    #[cfg(test)]
+    pub(crate) fn defer_source_package_for_test(&mut self) -> Result<()> {
+        let source = self
+            .source_container
+            .as_ref()
+            .ok_or_else(|| Error::Package("source container is unavailable".to_owned()))?;
+        let package = self
+            .source_package
+            .as_ref()
+            .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
+        let facts = xlsx_parse::PackageFacts::from_package(package.materialize()?);
+        self.source_package = Some(PackageSlot::deferred(source.clone(), facts));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_package_is_unmaterialized_for_test(&self) -> bool {
+        matches!(
+            &self.source_package,
+            Some(PackageSlot::Deferred { rebuilt, .. }) if rebuilt.get().is_none()
+        )
     }
 
     pub fn sheet(&self, sheet: SheetId) -> Result<&Sheet> {
@@ -2263,7 +2293,7 @@ impl Workbook {
     /// what the ops before it left behind rather than what the workbook opened
     /// with.
     fn ensure_references_stay_valid(&self, names: &[String], op: &Op) -> Result<()> {
-        let Some(package) = self.source_package.as_ref() else {
+        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
             return Ok(());
         };
         let at = |sheet: SheetId| {
@@ -2308,7 +2338,7 @@ impl Workbook {
     /// Whether an op moves cells a preserved part names and no save rewrites,
     /// which is what a save has to be told about.
     fn moves_referenced_cells(&self, names: &[String], op: &Op) -> bool {
-        let Some(package) = self.source_package.as_ref() else {
+        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
             return false;
         };
         let (sheet, at, by_rows) = match *op {
@@ -2342,7 +2372,7 @@ impl Workbook {
         if origin.is_some_and(|origin| {
             self.source_package
                 .as_ref()
-                .is_some_and(|package| !package.source_sheet_is_worksheet(origin))
+                .is_some_and(|package| !package.facts().source_sheet_is_worksheet(origin))
         }) {
             return Err(Error::InvalidOperation(format!(
                 "sheet {} is not an editable worksheet",
@@ -4010,10 +4040,11 @@ impl Workbook {
                 .as_ref()
                 .ok_or_else(|| RenderError::ChartSourceUnavailable {
                     part: chart.part.clone(),
-                })?;
+                })?
+                .facts();
         let bytes =
             package
-                .part_bytes(&chart.part)
+                .chart_part_bytes(&chart.part)
                 .ok_or_else(|| RenderError::ChartPartMissing {
                     part: chart.part.clone(),
                 })?;

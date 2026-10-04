@@ -28,6 +28,9 @@ use yrs::{
     StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod snapshot;
+
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
@@ -1440,12 +1443,31 @@ impl WorkbookAuthority {
                     sync_sheet(&sheet_map, &mut txn, sheet, &model.styles)?;
                 }
             }
-            for (key, at) in authored_cells {
+            let order_cells = |targets: HashSet<(String, CellRef)>| {
+                let mut targets = targets.into_iter().collect::<Vec<_>>();
+                targets.sort_unstable_by(|(left_key, left), (right_key, right)| {
+                    (left_key, left.row, left.col, left.abs_row, left.abs_col).cmp(&(
+                        right_key,
+                        right.row,
+                        right.col,
+                        right.abs_row,
+                        right.abs_col,
+                    ))
+                });
+                targets
+            };
+            let mut col_widths = col_widths.into_iter().collect::<Vec<_>>();
+            col_widths.sort_unstable();
+            let mut row_heights = row_heights.into_iter().collect::<Vec<_>>();
+            row_heights.sort_unstable();
+            let mut merges = merges.into_iter().collect::<Vec<_>>();
+            merges.sort_unstable();
+            for (key, at) in order_cells(authored_cells) {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_authored_cell(&sheet_map, &mut txn, sheet_model, at)?;
             }
-            for (key, at) in formatted_cells {
+            for (key, at) in order_cells(formatted_cells) {
                 let (sheet_map, sheet_model) =
                     sheet_parts_by_key(&sheets, &txn, &keys, model, &key)?;
                 sync_cell_format(&sheet_map, &mut txn, sheet_model, &model.styles, at)?;
@@ -3765,6 +3787,101 @@ fn hash_u64(hasher: &mut Sha256, value: u64) {
 mod tests {
     use super::*;
     use xlsx_model::Xf;
+
+    #[test]
+    fn multi_target_twins_emit_identical_updates() {
+        use std::sync::Mutex;
+
+        use crate::{CalculationOptions, Workbook};
+
+        let mut source_model = rich_model();
+        source_model.styles.fonts.push(xlsx_model::Font {
+            bold: true,
+            ..xlsx_model::Font::default()
+        });
+        source_model.styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        let parts = xlsx_parse::serialize_workbook(&source_model).unwrap();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        let open = || {
+            let mut workbook = Workbook::open_collaborative(&bytes, 71).unwrap();
+            workbook.set_rand_seed(Some(23));
+            workbook
+        };
+        let mut first = open();
+        let mut second = open();
+        let first_updates = Arc::new(Mutex::new(Vec::new()));
+        let second_updates = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&first_updates);
+        let _first_subscription = first
+            .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+            .unwrap();
+        let observed = Arc::clone(&second_updates);
+        let _second_subscription = second
+            .observe_update_v1(move |event| observed.lock().unwrap().push(event.update))
+            .unwrap();
+        let mut ops = Vec::new();
+        for sheet in [SheetId(1), SheetId(0)] {
+            for row in [7, 2, 5, 0] {
+                for col in [4, 0, 2] {
+                    ops.push(Op::SetCell {
+                        sheet,
+                        at: CellRef::new(row, col),
+                        cell: CellState {
+                            value: CellValue::Number {
+                                value: f64::from(row * 10 + col),
+                            },
+                            formula: (row == 7 && col == 4).then(|| "RAND()+NOW()".into()),
+                            style: Some(1),
+                        },
+                    });
+                }
+                ops.push(Op::SetRowHeight {
+                    sheet,
+                    row,
+                    height: Some(f64::from(row + 20)),
+                });
+            }
+            for col in [5, 0, 3] {
+                ops.push(Op::SetColWidth {
+                    sheet,
+                    col,
+                    width: Some(f64::from(col + 15)),
+                });
+            }
+        }
+        let options = CalculationOptions {
+            now_serial: Some(45_000.25),
+        };
+        assert_eq!(
+            first.apply_ops(ops.clone(), options).unwrap(),
+            second.apply_ops(ops.clone(), options).unwrap(),
+        );
+        assert!(!first_updates.lock().unwrap().is_empty());
+        assert_eq!(*first_updates.lock().unwrap(), *second_updates.lock().unwrap());
+        assert_eq!(first.encode_state_vector_v1(), second.encode_state_vector_v1());
+        assert_eq!(first.encode_state_as_update_v1(), second.encode_state_as_update_v1());
+        assert_eq!(first.save().unwrap(), second.save().unwrap());
+
+        let mut first = WorkbookAuthority::from_model_with_client_id(&source_model, 71).unwrap();
+        let mut second = WorkbookAuthority::from_model_with_client_id(&source_model, 71).unwrap();
+        ops.extend([
+            Op::MergeCells {
+                sheet: SheetId(1),
+                range: CellRange::new(CellRef::new(10, 0), CellRef::new(10, 2)),
+            },
+            Op::MergeCells {
+                sheet: SheetId(0),
+                range: CellRange::new(CellRef::new(12, 0), CellRef::new(12, 2)),
+            },
+        ]);
+        assert_eq!(
+            first.apply_ops(&ops, SyncOrigin::User, &source_model.styles).unwrap(),
+            second.apply_ops(&ops, SyncOrigin::User, &source_model.styles).unwrap(),
+        );
+    }
 
     fn rich_model() -> WorkbookModel {
         let mut first = Sheet::new("Data");
