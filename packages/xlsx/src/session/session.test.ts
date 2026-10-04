@@ -761,7 +761,33 @@ describe('workbook sessions', () => {
     const controller = new AbortController();
     const opening = createWorkbookSession(fixture, { signal: controller.signal }, transport);
     controller.abort();
-    await expect(opening).rejects.toThrow();
+    await expect(opening).rejects.toMatchObject({
+      name: 'SessionFailure', code: 'disposed', message: 'Session was disposed',
+    });
+    expect(closed).toBeGreaterThan(0);
+  });
+
+  test('an abort after the open reply rejects before returning the session', async () => {
+    const pair = createInProcessPair();
+    const controller = new AbortController();
+    let closed = 0;
+    const transport: SessionTransport = {
+      post: (message, transfer) => pair.client.post(message, transfer),
+      listen: (listener) => pair.client.listen((message) => {
+        listener(message);
+        if (isHostMessage(message) && message.kind === 'reply' && message.ok) controller.abort();
+      }),
+      onError: (listener) => pair.client.onError(listener),
+      close() { closed += 1; pair.client.close(); },
+    };
+    const opening = createWorkbookSession(fixture, { signal: controller.signal }, transport);
+    pair.host.post({
+      protocol: 1, kind: 'reply', id: 1, ok: true,
+      value: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, sheets: [], activeSheet: 0 },
+    });
+    await expect(opening).rejects.toMatchObject({
+      name: 'SessionFailure', code: 'disposed', message: 'Session was disposed',
+    });
     expect(closed).toBeGreaterThan(0);
   });
 });

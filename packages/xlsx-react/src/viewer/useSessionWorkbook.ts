@@ -1,10 +1,11 @@
-import { openWorkbookSession, selectionAt } from '@betteroffice/xlsx';
+import { openWorkbookSession, rangeRect, selectionAt } from '@betteroffice/xlsx';
 import type {
   Selection, Viewport, WorkbookFrame, WorkbookSession, WorkbookSheetView,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { XlsxEditorProps, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
 import type { XlsxCommandStore } from '../commands/types';
+import { expandRangeToMergedCells } from './sessionGeometry';
 
 export const workbookSessionOpener = { open: openWorkbookSession };
 
@@ -127,17 +128,26 @@ export class ViewerSession {
         contentHeight: Math.max(view.contentHeight, anchor.rect.y + anchor.rect.h, geometry.rect.y + geometry.rect.h),
       }, geometry.scrollPosition);
       if (!await painted || !this.current || navigation !== this.navigation) return false;
-      const request = this.painted?.request;
-      if (!request || !sameRequest(this.surface?.capture() ?? null, request)) return false;
+      const paintedFrame = this.painted;
+      if (!paintedFrame || !sameRequest(this.surface?.capture() ?? null, paintedFrame.request)) return false;
+      const { frame, request } = paintedFrame;
       const { viewport } = request;
-      const frozenCol = next.focus.col < view.frozenCols;
-      const frozenRow = next.focus.row < view.frozenRows;
-      const { rect } = geometry;
-      const x = rect.x - (frozenCol ? 0 : viewport.x);
-      const y = rect.y - (frozenRow ? 0 : viewport.y);
-      return rect.w > 0 && rect.h > 0 &&
-        x >= (frozenCol ? 0 : view.frozenWidth) && x + rect.w <= viewport.width &&
-        y >= (frozenRow ? 0 : view.frozenHeight) && y + rect.h <= viewport.height;
+      const focused = expandRangeToMergedCells({
+        top: next.focus.row, left: next.focus.col,
+        bottom: next.focus.row, right: next.focus.col,
+      }, frame.mergedRanges ?? []);
+      const rect = rangeRect(frame.displayList.grid, focused);
+      if (!rect || rect.w <= 0 || rect.h <= 0) return false;
+      const left = focused.left < view.frozenCols ? 0 : view.frozenWidth;
+      const top = focused.top < view.frozenRows ? 0 : view.frozenHeight;
+      const right = Math.min(viewport.width, frame.displayList.width,
+        focused.right < view.frozenCols ? view.frozenWidth : Infinity);
+      const bottom = Math.min(viewport.height, frame.displayList.height,
+        focused.bottom < view.frozenRows ? view.frozenHeight : Infinity);
+      const tolerance = 1 / request.zoom;
+      return right > left && bottom > top &&
+        Math.min(rect.x + rect.w, right + tolerance) > Math.max(rect.x, left - tolerance) &&
+        Math.min(rect.y + rect.h, bottom + tolerance) > Math.max(rect.y, top - tolerance);
     } catch {
       if (this.current && navigation === this.navigation) {
         if (this.view) this.schedule();

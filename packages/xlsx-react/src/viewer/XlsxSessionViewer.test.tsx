@@ -537,6 +537,88 @@ describe('workbook session viewer', () => {
     expect(outline.style.top).toBe('576px');
   });
 
+  it('accepts painted frozen-pane geometry after fractional zoom rounds the reveal scroll', async () => {
+    const { viewer, call } = session();
+    call.sheetView.mockResolvedValue({ ...sheetView(0),
+      frozenRows: 1, frozenCols: 1, frozenWidth: 96, frozenHeight: 24 });
+    call.cellGeometry.mockImplementation(async (sheet, row, col) => ({
+      sheet, version: 'v1', rect: { x: col * 96, y: row * 24, w: 96, h: 24 },
+      scrollPosition: { x: Math.max(0, col * 96 - 96), y: Math.max(0, row * 24 - 24) },
+    }));
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    await act(async () => { await api.commands.execute('zoom', { scale: 1.3 }); });
+    await tick();
+    const scroll = view.getByTestId('xlsx-scroll');
+    for (const property of ['scrollLeft', 'scrollTop']) {
+      let value = 0;
+      Object.defineProperty(scroll, property, {
+        configurable: true, get: () => value, set: (next: number) => { value = Math.round(next); },
+      });
+    }
+    call.frame.mockImplementation(async (viewport, options) => ({
+      ...frame(options?.sheet ?? 0, viewport),
+      displayList: { ...frame(options?.sheet ?? 0, viewport).displayList,
+        grid: { startRow: 0, startCol: 0, colIndices: [0, 2, 3],
+          rowOffsets: [0, 24, 48 - viewport.y, 72 - viewport.y, 96 - viewport.y],
+          colOffsets: [0, 96, 288 - viewport.x, 384 - viewport.x] } },
+    }));
+    let selected!: Promise<boolean>;
+    await act(async () => { selected = api.selectCellsAsync(0, xlsx.selectionAt({ row: 2, col: 2 })); });
+    expect(scroll.scrollLeft).toBe(125);
+    await tick();
+    expect(await selected).toBe(true);
+    expect(parseFloat((view.getByTestId('xlsx-selection') as HTMLElement).style.left)).toBeCloseTo(96 * 1.3);
+  });
+
+  it('accepts a painted target with a positive partial viewport intersection', async () => {
+    const { viewer, call } = session();
+    call.cellGeometry.mockResolvedValue({ sheet: 0, version: 'v1',
+      rect: { x: 0, y: 0, w: 900, h: 700 }, scrollPosition: { x: 0, y: 0 } });
+    call.frame.mockImplementation(async (viewport, options) => ({
+      ...frame(options?.sheet ?? 0, viewport),
+      displayList: { ...frame(options?.sheet ?? 0, viewport).displayList,
+        grid: { startRow: 0, startCol: 0, rowOffsets: [0, 700], colOffsets: [0, 900] } },
+    }));
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    let selected!: Promise<boolean>;
+    await act(async () => { selected = api.selectCellsAsync(0, xlsx.selectionAt({ row: 0, col: 0 })); });
+    await tick();
+    expect(await selected).toBe(true);
+    expect(view.getByTestId('xlsx-selection')).toBeDefined();
+  });
+
+  it('selects hidden B1 inside a visible A1:B1 merge after painting', async () => {
+    const { viewer, call } = session();
+    call.sheetView.mockResolvedValue({ ...sheetView(0), contentWidth: 96, contentHeight: 24 });
+    call.cellGeometry.mockResolvedValue({ sheet: 0, version: 'v1',
+      rect: { x: 96, y: 0, w: 0, h: 24 }, scrollPosition: { x: 96, y: 0 } });
+    call.frame.mockImplementation(async (viewport, options) => ({
+      ...frame(options?.sheet ?? 0, viewport),
+      mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 0, col: 1 } }],
+      displayList: { ...frame(options?.sheet ?? 0, viewport).displayList,
+        grid: { startRow: 0, startCol: 0, rowOffsets: [0, 24], colOffsets: [0, 96, 96] } },
+    }));
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    clampScrolling(scroll);
+    let selected!: Promise<boolean>;
+    await act(async () => { selected = api.selectCellsAsync(0, xlsx.selectionAt({ row: 0, col: 1 })); });
+    await tick();
+    expect(await selected).toBe(true);
+    const outline = view.getByTestId('xlsx-selection') as HTMLElement;
+    expect(outline.style.left).toBe('0px');
+    expect(outline.style.width).toBe('96px');
+  });
+
   it('returns false when a matching paint does not visibly contain the target geometry', async () => {
     const { viewer, call } = session();
     call.sheetView.mockResolvedValue({ ...sheetView(0), contentWidth: 96, contentHeight: 24 });

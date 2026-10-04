@@ -1,9 +1,9 @@
 import {
   createSessionClient,
   createWorkerTransport,
+  SessionFailure,
   type Promisified,
   type SessionClient,
-  type SessionFailure,
   type SessionTransport,
 } from '../../../../shared/office-session';
 import type { OpenWorkbookOptions, Viewport } from '../wasm/loader';
@@ -128,6 +128,7 @@ export async function createWorkbookSession(
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     state = await client.callWithTransfer('open', [document, input], transfer);
+    if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
   } catch (error) {
     await client.dispose();
     throw error;
