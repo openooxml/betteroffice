@@ -1251,12 +1251,25 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     else if (entry.kind === 'select-all') handlers.selectAll();
   }, []);
   const replayHeldBatch = useCallback((entries: HeldInput[]): void => {
+    let prepareFailure: { error: unknown } | undefined;
+    for (const entry of entries) {
+      if (entry.kind !== 'selection') continue;
+      const prepare = entry.prepare;
+      entry.prepare = async () => {
+        try {
+          return await prepare();
+        } catch (error) {
+          prepareFailure ??= { error };
+          return () => {};
+        }
+      };
+    }
     enqueueInputOperation(async () => {
       if (!session || readOnly) return;
       const batch: HeldReplayBatch = { operations: [], mutated: false, selectionChanged: false };
-      const captureMode = session.undoCaptureMode();
+      const autoCapture = session.undoCaptureMode() === 'auto';
       session.beginUndoCapture();
-      session.setUndoCaptureMode('manual');
+      session.addUndoBoundary();
       heldReplayBatchRef.current = batch;
       let previousTime: number | undefined;
       let previousStory = session.selection()?.head.story;
@@ -1264,7 +1277,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         for (const entry of entries) {
           const activeStory = ensureSelection()?.head.story;
           if (
-            (previousTime !== undefined && entry.inputTime! - previousTime >= UNDO_CAPTURE_TIMEOUT_MS) ||
+            (autoCapture && previousTime !== undefined && entry.inputTime! - previousTime >= UNDO_CAPTURE_TIMEOUT_MS) ||
             activeStory !== previousStory || entry.kind === 'selection' ||
             entry.kind === 'navigation' || entry.kind === 'select-all' ||
             entry.kind === 'composition' || entry.kind === 'undo-boundary'
@@ -1276,13 +1289,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
       } finally {
         heldReplayBatchRef.current = null;
-        session.setUndoCaptureMode(captureMode);
         if (batch.mutated) {
           onCaretInput?.();
           emitSelection(true, false, false, true);
         } else if (batch.selectionChanged) emitSelection(false);
       }
       await Promise.all(batch.operations);
+      if (prepareFailure) throw prepareFailure.error;
     }, 'mutation');
   }, [emitSelection, enqueueInputOperation, ensureSelection, onCaretInput, readOnly, replayHeldEntry, replicaReadyRef, session]);
   const heldReplayHandlersRef = useRef({ replayHeldBatch, replayHeldEntry, enqueueInputOperation });

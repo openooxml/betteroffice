@@ -269,6 +269,82 @@ test.each([100, 499, 500, 501, 650])(
   }
 );
 
+test.each([100, 600])(
+  'live input groups with the last worker replay edit after %i ms', async (gap) => {
+    const session = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const resident = mock(async (_text: string) => null);
+    const replicaReadyRef = { current: true };
+    let now = 1_000;
+    let undoNow = 10_000;
+    const clock = spyOn(performance, 'now').mockImplementation(() => now);
+    const undoClock = spyOn(Date, 'now').mockImplementation(() => undoNow);
+    const restore = registerRestore(() => {
+      undoClock.mockRestore();
+      clock.mockRestore();
+    });
+    const props = { inputScope: 1, replicaReadyRef };
+    try {
+      const view = render(inputFor(session, input, resident, undefined, { ...props, holdInput: true }));
+      const textarea = view.getByTestId('yrs-input');
+      fireEvent.input(textarea, { target: { value: 'A' } });
+      now += 650;
+      fireEvent.input(textarea, { target: { value: 'B' } });
+      now += 10_000;
+      view.rerender(inputFor(session, input, resident, undefined, props));
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(text(session)).toBe('SeedAB');
+      expect(resident).not.toHaveBeenCalled();
+      expect(session.undoCaptureMode()).toBe('auto');
+      undoNow += gap;
+      fireEvent.input(textarea, { target: { value: 'C' } });
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(text(session)).toBe('SeedABC');
+      expect(resident.mock.calls).toEqual([['C']]);
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe(gap < 500 ? 'SeedA' : 'SeedAB');
+      if (gap >= 500) {
+        expect(session.undo()).toBe(true);
+        expect(text(session)).toBe('SeedA');
+      }
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe('Seed');
+      expect(session.canUndo()).toBe(false);
+    } finally {
+      restore();
+    }
+  }
+);
+
+test('a rejected held click preserves every worker replay edit and reports its failure', async () => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const failure = new Error('selection preparation failed');
+  const reportError = spyOn(console, 'error').mockImplementation(() => {});
+  const restore = registerRestore(() => reportError.mockRestore());
+  const props = { inputScope: 1, replicaReadyRef };
+  try {
+    const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+    const textarea = view.getByTestId('yrs-input');
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    act(() => {
+      expect(input.current!.queueSelection!(async () => { throw failure; })).toBe(true);
+    });
+    fireEvent.input(textarea, { target: { value: 'B' } });
+    view.rerender(inputFor(session, input, undefined, undefined, props));
+    await act(async () => {
+      await expect(bounded(input.current!.flushPendingInput())).rejects.toBe(failure);
+    });
+    expect(text(session)).toBe('SeedAB');
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith('[YrsInput] queued input operation failed', failure);
+    expect(input.current!.hasPendingInput()).toBe(false);
+  } finally {
+    restore();
+  }
+});
+
 test.each(['navigation', 'click'] as const)(
   'a held %s separates undo without splitting the worker replay refresh', async (kind) => {
     const session = await seededSession();
