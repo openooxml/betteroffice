@@ -9,6 +9,7 @@ import type {
   DocxPagedStructuredContent,
   DocxProposalResult,
   DocxTextTarget,
+  ResidentEngineWorkerClient,
   YrsInlineFormatDelta,
   YrsLoc,
   YrsParagraph,
@@ -431,7 +432,7 @@ async function exportWithPages(
 async function exportWithPagesInWorker(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   session: YrsSession,
-  authority: WorkerProposalAuthority,
+  authority: Pick<WorkerProposalAuthority, 'exportStructuredWithPages'>,
   options: DocxPageExportOptions,
   settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
   experimentalWorkerOpen = false
@@ -580,6 +581,7 @@ export function useDocxEditorRefApi({
   allowHostProposalsRef,
   workerMemory = noWorkerMemory,
   settledDisplayList,
+  readWorkerDocument,
   awaitingDocument,
   experimentalWorkerOpen = false,
   viewerSession = false,
@@ -628,6 +630,7 @@ export function useDocxEditorRefApi({
   awaitingDocument?: () => boolean;
   experimentalWorkerOpen?: boolean;
   viewerSession?: boolean;
+  readWorkerDocument?: ResidentEngineWorkerClient['documentRead'];
   hostSearch: DocxHostSearch;
 }) {
   const proposalWarningRef = useRef(false);
@@ -804,7 +807,25 @@ export function useDocxEditorRefApi({
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
         const authority = session && workerOpenReplicaPending(session)
           ? registeredWorkerProposalAuthority(session)
-          : null;
+          : session && readWorkerDocument
+            ? {
+                exportStructuredWithPages: async (
+                  input: DocxPageExportOptions,
+                  currentRequest: () => Promise<string | null>
+                ) => {
+                  await mainSession();
+                  const request = await currentRequest();
+                  if (request === null) return {
+                    ok: false as const, version: session.version(),
+                    failure: { code: 'layout-unavailable' as const, target: null, message: 'The fonts this document uses are not loaded yet.' },
+                  };
+                  const read = await readWorkerDocument({
+                    kind: 'exportStructuredWithPages', options: input, currentRequest: request,
+                  });
+                  return JSON.parse(read.value) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
+                },
+              }
+            : null;
         return session && authority
           ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen)
           : held()
@@ -1141,6 +1162,7 @@ export function useDocxEditorRefApi({
       commands,
       workerMemory,
       settledDisplayList,
+      readWorkerDocument,
       awaitingDocument,
       experimentalWorkerOpen,
       viewerSession,

@@ -26,7 +26,7 @@ import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProve
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
 import * as workerOpenReplica from '../internals/workerOpenReplica';
 import { deferWorkerOpenReplica, holdWorkerOpenDocument, releaseWorkerOpenDocument, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
-import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
 import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
 import { DocxAsyncOnlyError, DocxReplicaNotReadyError, routeViewerRefAccess, useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -55,7 +55,7 @@ const CONTROLS: DocxContentControlsResult = {
   content: { schemaVersion: 1, anchorScope: 'session', includedStories: ['body'], controls: [], complete: true, diagnostics: [] },
 };
 
-function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false, viewerSession = false) {
+function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Parameters<typeof useDocxEditorRefApi>[0]['settledDisplayList'], bindCommands = false, viewerSession = false, readWorkerDocument?: ResidentEngineWorkerClient['documentRead']) {
   const events: string[] = [];
   const document = { package: {} } as Document;
   const state = { viewer, version: 'v' };
@@ -130,7 +130,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     } as unknown as DocxCommandInputs);
     useDocxEditorRefApi({
       ref, document, documentFromYrs: () => document, historyStateRef: { current: document }, pagedEditorRef,
-      experimentalWorkerOpen: pendingReplica, settledDisplayList, viewerSession,
+      experimentalWorkerOpen: pendingReplica, settledDisplayList, viewerSession, readWorkerDocument,
       handleSave: async () => null, zoom: 1, setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {}, loadBuffer: async () => {},
@@ -536,6 +536,26 @@ test('viewer paged export uses a main-thread copy that is already loaded', async
   expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledWith(PAGE_OPTIONS, PAGE_REQUEST);
   expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
   expect(worker.documentRead).not.toHaveBeenCalled();
+});
+
+test('a saved viewer exports the worker layout after proposal hand-over', async () => {
+  const read = mock(async (_request: ResidentDocumentRead) => ({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) }));
+  const host = apiFor(true, false, undefined, false, true, read as ResidentEngineWorkerClient['documentRead']);
+  const worker = workerFor(host);
+  await worker.authority.initialize();
+  const handover = await beginWorkerProposalHandover(host.session);
+  handover!.complete();
+  host.editor.getLayoutRequest.mockReturnValue(null);
+  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
+  expect(read).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST });
+  expect(worker.documentRead).not.toHaveBeenCalled();
+  expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
+  expect(host.editor.getLayoutRequest).not.toHaveBeenCalled();
+  expect(host.editor.relayout).not.toHaveBeenCalled();
+  expect(await host.api.listContentControls()).toEqual(CONTROLS);
+  expect(host.session.listContentControls).toHaveBeenCalledTimes(1);
+  expect(read).toHaveBeenCalledTimes(1);
+  expect(host.events).toEqual(['flush', 'flush']);
 });
 
 test('editor paged export still flushes and reads the main session layout', async () => {

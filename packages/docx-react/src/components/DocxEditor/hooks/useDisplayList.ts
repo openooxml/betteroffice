@@ -1646,7 +1646,8 @@ export function useRustDisplayList(
               continue;
             }
           } else if (
-            (stage === 'open' || isViewerSession(hostEngine)) &&
+            (stage === 'open' || (isViewerSession(hostEngine) &&
+              (stage !== 'render' || !holdsWorkerProposals(hostEngine) || owner?.client.hasFailed()))) &&
             !(error instanceof SupersededPreviewError) &&
             !(error instanceof WorkerPreviewRefusedError)
           ) {
@@ -1654,6 +1655,7 @@ export function useRustDisplayList(
             const outcome = replaceOutOfMemoryWorker(hostEngine, owner, cause, stage);
             if (outcome === 'retry') {
               registeredWorkerProposalAuthority(hostEngine)?.restart();
+              if (stage === 'render' && holdsWorkerProposals(hostEngine)) throw error;
               continue;
             }
             if (outcome === 'failed') throw workerFailureRef.current.get(hostEngine) ?? cause;

@@ -2023,6 +2023,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     allowHostProposalsRef,
     workerMemory: canvasRenderer.workerMemory,
     settledDisplayList: canvasRenderer.settledDisplayList,
+    readWorkerDocument: viewerSession ? canvasRenderer.readWorkerDocument : undefined,
     awaitingDocument,
     hostSearch: hostSearch.api,
   });

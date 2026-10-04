@@ -60,6 +60,7 @@ function apiFor(
     return base ? yrsToDocument(session, base) : null;
   };
   const editor = {
+    isWorkerViewer: () => viewerSession,
     getYrsSession: () => session,
     getDocument: project,
     flushPendingInput: async () => {

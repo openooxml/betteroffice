@@ -24,7 +24,7 @@ interface ViewerEditor {
   whenLayoutComplete(): Promise<number>;
   flushPendingInput(): Promise<void>;
   exportStructuredWithPages(options: { revisionView: 'markup'; stories: string[] }): Promise<
-    { ok: true; content: { layout: { pages: unknown[] } } } | { ok: false }
+    { ok: true; content: { layout: { pages: unknown[] } } } | { ok: false; failure: { code: string; message: string } }
   >;
   readSelectionInfo(): Promise<{ selectedText: string } | null>;
   listContentControls(): Promise<{ ok: boolean }>;
@@ -48,9 +48,9 @@ interface ViewerEditor {
   setProposalStates(request: {
     expectVersion: string;
     expectPreviewVersion: number;
-    changes: Array<{ id: string; state: 'accepted' | 'rejected' }>;
+    changes: Array<{ id: string; state: 'proposed' | 'accepted' | 'rejected' }>;
   }): Promise<ProposalResult>;
-  getProposals(): Promise<{ proposals: Array<{ id: string; state: string }> }>;
+  getProposals(): Promise<ProposalSnapshot & { proposals: Array<{ id: string; state: string }> }>;
 }
 
 interface DocumentLoads {
@@ -141,7 +141,10 @@ async function exportPages(page: Page) {
     const result = await (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.exportStructuredWithPages({
       revisionView: 'markup', stories: ['body'],
     });
-    return { ok: result.ok, pages: result.ok ? result.content.layout.pages.length : 0 };
+    return {
+      ok: result.ok, pages: result.ok ? result.content.layout.pages.length : 0,
+      failure: result.ok ? null : { code: result.failure.code, message: result.failure.message },
+    };
   });
 }
 
@@ -191,7 +194,7 @@ for (const kind of ['readOnly', 'viewing']) {
     await expect(page.locator('.docx-outline-nav').getByText('Page three heading', { exact: true })).toBeVisible();
     await expectNoCopy(page, wasm);
 
-    expect(await exportPages(page)).toEqual({ ok: true, pages: 3 });
+    expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
     expect(await page.evaluate(() =>
       (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.listContentControls()
     )).toMatchObject({ ok: true, content: { controls: [] } });
@@ -251,7 +254,26 @@ for (const kind of ['readOnly', 'viewing']) {
       return snapshot.proposals.map(({ id, state }) => ({ id, state }));
     });
     expect(decisions).toEqual([{ id: 'accept-one', state: 'accepted' }, { id: 'reject-one', state: 'rejected' }]);
+    expect(await exportPages(page)).toEqual({
+      ok: false, pages: 0,
+      failure: {
+        code: 'unsupported-revision-layout',
+        message: 'The retained layout previews revision decisions instead of their markup.',
+      },
+    });
     await expectNoCopy(page, wasm);
+    const markup = await page.evaluate(async () => {
+      const editor = (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!;
+      const snapshot = await editor.getProposals();
+      const result = await editor.setProposalStates({
+        expectVersion: snapshot.version,
+        expectPreviewVersion: snapshot.previewVersion,
+        changes: snapshot.proposals.map(({ id }) => ({ id, state: 'proposed' })),
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return (await editor.getProposals()).proposals.map(({ id, state }) => ({ id, state }));
+    });
+    expect(markup).toEqual([{ id: 'accept-one', state: 'proposed' }, { id: 'reject-one', state: 'proposed' }]);
     await page.waitForTimeout(7000);
     await expectNoCopy(page, wasm);
 
@@ -271,7 +293,7 @@ for (const kind of ['readOnly', 'viewing']) {
       await page.keyboard.press(key);
     }
     await page.evaluate(() => (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.flushPendingInput());
-    expect(await exportPages(page)).toEqual({ ok: true, pages: 3 });
+    expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
     await expectNoCopy(page, wasm);
   });
 }
@@ -290,7 +312,7 @@ test('viewer save is the only action that loads the main document and returns a 
   expect(saved.after.total).toBeGreaterThan(0);
   expect(saved.after.events.length).toBe(saved.after.total);
   for (const event of saved.after.events) expect(event.at).toBeGreaterThanOrEqual(saved.saveStarted);
-  expect(await exportPages(page)).toEqual({ ok: true, pages: 3 });
+  expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
   expect(await page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.listContentControls()
   )).toMatchObject({ ok: true });
@@ -317,7 +339,7 @@ async function crashAndRecover(page: Page) {
   await expect.poll(() => page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.workersOpened()
   )).toBeGreaterThan(opened);
-  await expect.poll(() => exportPages(page)).toEqual({ ok: true, pages: 3 });
+  await expect.poll(() => exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
   await expect(page.locator('canvas[data-page-index="0"]')).toBeVisible();
   await expect(page.getByTestId('canvas-renderer-error')).toHaveCount(0);
 }

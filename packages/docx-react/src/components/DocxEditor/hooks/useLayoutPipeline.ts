@@ -489,7 +489,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           ) as ResidentFontRequirement[];
           measurement = residentMeasurementConfig(requirements);
         } catch (error) {
-          console.error('[PagedEditor] Resident font preflight error:', error);
+          if (!isViewerSession(session)) console.error('[PagedEditor] Resident font preflight error:', error);
           markLayoutQueued(session, false);
           releaseWorkerPrewarm(session);
           reportLayoutError(session, error);
@@ -680,7 +680,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               syncCoordinator.onLayoutComplete(currentEpoch);
               return;
             }
-            console.error('[PagedEditor] Resident worker layout could not start:', error);
+            if (!isViewerSession(session)) console.error('[PagedEditor] Resident worker layout could not start:', error);
             if (isViewerSession(session) || registeredWorkerProposalAuthority(session)?.holdsWorkerState()) {
               reportLayoutError(session, error);
               syncCoordinator.onLayoutComplete(currentEpoch);
@@ -780,7 +780,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                 if (isViewerSession(session) && !session.isDisplayOnly?.()) queueWorkerPass(session);
                 return;
               }
-              console.error('[PagedEditor] Layout pipeline error:', error);
+              if (!isViewerSession(session)) console.error('[PagedEditor] Layout pipeline error:', error);
               reportLayoutError(session, error);
             }
           )

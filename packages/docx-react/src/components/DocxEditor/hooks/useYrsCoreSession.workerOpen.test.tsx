@@ -43,7 +43,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import { createCommentIdAllocator } from '../commentFactories';
-import { DocxAsyncOnlyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { flushEditorInput } from '../editorBatches';
@@ -606,7 +606,8 @@ test('a viewer command preserves select-all while its worker read is pending', a
     const command = bridge.current!.runAfterPendingInput(operation);
     await waitFor(() => expect(operation).toHaveBeenCalledTimes(1));
     let selected!: string | null;
-    await act(async () => { reply(unit); selected = await command; });
+    await act(async () => { reply(unit); });
+    selected = await command;
     expect(selected).toBe('First paragraph\nTail paragraph');
     expect(workerOpenDocumentHeld(session)).toBe(true);
     expect(harness.core.replicaReady).toBe(false);
@@ -2125,18 +2126,19 @@ test('a worker open without a frame or error starts the replica after the bounde
   expect(result.current.core.replicaReady).toBe(true);
 }, 15_000);
 
-test('a failed fallback reports the same document error as a normal open', async () => {
+test('a failed worker open reports its typed error without parsing a main fallback', async () => {
   const invalid = Uint8Array.of(1, 2, 3);
-  const direct = await createYrsSession();
-  sessions.push(direct);
-  let expected = '';
-  try { direct.openDocx(invalid, true); }
-  catch (error) { expected = error instanceof Error ? error.message : String(error); }
-  expect(expected).not.toBe('');
-  installWorker({ failOpen: true });
+  const { workers, posted } = installWorker({ failOpen: true });
   const { result } = renderHook(useHarness, { initialProps: { ...initialProps, source: invalid } });
   await waitFor(() => expect(result.current.errors).toHaveLength(1));
-  expect(result.current.errors[0].message).toBe(expected);
+  const failure = result.current.errors[0] as DocxWorkerError;
+  expect(failure).toBeInstanceOf(DocxWorkerError);
+  expect(failure.stage).toBe('open');
+  expect(failure.cause).toEqual(new Error('open failed'));
+  expect(result.current.renderer.error).toBe(failure);
+  expect(workers).toHaveLength(2);
+  expect(posted.filter((request) => request.type === 'open')).toHaveLength(2);
+  expect(result.current.mainOpens).toEqual([]);
   expect(result.current.core.session).toBeNull();
 });
 
@@ -3261,10 +3263,11 @@ test.each([true, false])(
     let completionReplied = false;
     const asked: boolean[] = [];
     const onWorkerRevisions = mock(() => {});
-    const { workers, posted } = installWorker({
+    const { workers, posted, received } = installWorker({
       holdState: true,
       holdBootstrap: true,
       holdCompletion: true,
+      holdReply: () => false,
       revisionCount: 1,
       onRevisionCount: () => asked.push(completionReplied),
     });
@@ -3277,6 +3280,7 @@ test.each([true, false])(
     };
     const { result, unmount } = renderHook(useHarness, { initialProps: props });
     try {
+      await act(async () => { await received('open'); });
       await waitFor(() => expect(result.current.host).not.toBeNull());
       const session = result.current.core.session!;
       const receive = workers[0].onmessage;
@@ -3533,13 +3537,13 @@ test('worker proposals reach the registry before hydration and survive hand-over
   }
 });
 
-test('a sync ref call during the first in-flight proposal keeps the worker\'s proposals', async () => {
+test.each([false, true])('a sync ref call during the first in-flight proposal keeps the worker\'s proposals with viewer=%s', async (viewer) => {
   const { workers, posted, received, reply } = installWorker({
     holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
   });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: workerProposalProps,
+    initialProps: { ...workerProposalProps, viewer },
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -3566,7 +3570,7 @@ test('a sync ref call during the first in-flight proposal keeps the worker\'s pr
       let proposal!: ResidentEngineWorkerRequest;
       await act(async () => { proposal = await received('proposal', snapshot.id); });
       expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
-      act(() => { expect(() => api().getDocument()).toThrow(DocxAsyncOnlyError); });
+      act(() => { expect(() => api().getDocument()).toThrow(viewer ? DocxAsyncOnlyError : DocxReplicaNotReadyError); });
       await act(async () => {});
       expect(authority.holdsWorkerState()).toBe(true);
       expect(workerProposalAuthority(session)).toBe(authority);
@@ -3579,11 +3583,12 @@ test('a sync ref call during the first in-flight proposal keeps the worker\'s pr
       await act(async () => {
         reply(proposal);
         expect(await proposed).toMatchObject({ ok: true });
+        if (!viewer) await awaitWorkerOpenReplica(session);
       });
-      expect(result.current.core.replicaReady).toBe(false);
-      expect(workerOpenDocumentHeld(session)).toBe(true);
-      expect(result.current.mainOpens).toEqual([]);
-      expect(session.workerDocumentMirrored()).toBe(true);
+      expect(result.current.core.replicaReady).toBe(!viewer);
+      expect(workerOpenDocumentHeld(session)).toBe(viewer);
+      expect(result.current.mainOpens).toEqual(viewer ? [] : [false]);
+      expect(session.workerDocumentMirrored()).toBe(viewer);
       const mirrored = await api().getProposals();
       expect(mirrored.proposals.map((proposal) => proposal.id)).toEqual(['in-flight-proposal']);
       await act(async () => {
@@ -3664,6 +3669,39 @@ test('a failed first proposal leaves an editor replica fallback available', asyn
   } finally {
     unmount();
     frames.restore();
+  }
+});
+
+test('a refused viewer proposal keeps its live worker and held document', async () => {
+  const { workers, posted } = installWorker({ failProposal: true });
+  const { result, unmount } = await openWorkerProposals({ ...workerProposalProps, source: bytes });
+  try {
+    const api = result.current.ref.current!;
+    const session = result.current.core.session!;
+    const identities = await api.getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const initial = await api.getProposals();
+    await act(async () => {
+      await expect(api.proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'refused-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Refused ',
+        }],
+      })).rejects.toThrow('proposal failed');
+    });
+    expect(await api.getProposals()).toEqual(initial);
+    expect(workerOpenDocumentHeld(session)).toBe(true);
+    expect(workerProposalAuthority(session)!.holdsWorkerState()).toBe(false);
+    expect(workers).toHaveLength(1);
+    expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.error).toBeNull();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
   }
 });
 
