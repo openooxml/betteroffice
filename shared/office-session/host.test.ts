@@ -371,12 +371,14 @@ describe('session host and cloned transport', () => {
     }
   });
 
-  it('replies to throwing policy functions without failing the session', async () => {
+  it('replies to throwing policy functions and fails the session on terminal ones', async () => {
     type Methods = { read(value: string): string; echo(): string };
-    for (const error of [
-      new Error('policy'), new WebAssembly.RuntimeError('policy'),
-      new SessionFailure('out-of-memory', 'policy'),
-    ]) {
+    const cases: Array<[Error, string | undefined]> = [
+      [new Error('policy'), undefined],
+      [new WebAssembly.RuntimeError('policy'), 'trap'],
+      [new SessionFailure('out-of-memory', 'policy'), 'out-of-memory'],
+    ];
+    for (const [error, code] of cases) {
       const pair = createInProcessPair();
       const args: string[] = [];
       let calls = 0;
@@ -394,13 +396,19 @@ describe('session host and cloned transport', () => {
       const client = createSessionClient<Methods, {}>(pair.client, {
         methods: { read: true, echo: true },
       });
-      const reply = await client.call.read('read').catch((error) => error);
-      expect(reply.name).toBe(error.name);
-      expect(reply.message).toBe(error.message);
+      const reply = await client.call.read('read').catch((reason) => reason);
       expect(args).toEqual(['read']);
       expect(calls).toBe(0);
-      expect(client.failure).toBeUndefined();
-      expect(await client.call.echo()).toBe('value');
+      if (code === undefined) {
+        expect(reply.name).toBe(error.name);
+        expect(reply.message).toBe(error.message);
+        expect(client.failure).toBeUndefined();
+        expect(await client.call.echo()).toBe('value');
+      } else {
+        expect(reply).toBeInstanceOf(SessionFailure);
+        expect(client.failure?.code).toBe(code);
+        await expect(client.call.echo()).rejects.toBeInstanceOf(SessionFailure);
+      }
       await client.dispose();
     }
   });
