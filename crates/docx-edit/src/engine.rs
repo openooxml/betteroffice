@@ -2455,25 +2455,37 @@ impl RegionPlacementState {
             .checkpoints
             .first()
             .and_then(|checkpoint| checkpoint.flow.footnote_reserved_heights.clone());
+        let mut verified_reservations = HashSet::new();
         let mut checkpoints = Vec::new();
         for (index, (checkpoint, base)) in self
             .checkpoints
-            .iter()
+            .iter_mut()
             .zip(&primary.checkpoints)
             .enumerate()
         {
             if match (&checkpoint.flow.footnote_reserved_heights, &reservations) {
                 (Some(left), Some(right)) => {
-                    !Arc::ptr_eq(left, right) && format!("{left:?}") != format!("{right:?}")
+                    !Arc::ptr_eq(left, right)
+                        && verified_reservations.insert(Arc::as_ptr(left))
+                        && (left.len() != right.len()
+                            || !left.iter().zip(right.iter()).all(
+                                |((left_key, left_height), (right_key, right_height))| {
+                                    left_key == right_key
+                                        && left_height.to_bits() == right_height.to_bits()
+                                },
+                            ))
                 }
                 (None, None) => false,
                 _ => true,
             } {
                 return false;
             }
+            let checkpoint_reservations = checkpoint.flow.footnote_reserved_heights.take();
             let mut base = base.clone();
-            base.flow.footnote_reserved_heights = reservations.clone();
-            if *checkpoint != base || format!("{checkpoint:?}") != format!("{base:?}") {
+            base.flow.footnote_reserved_heights = None;
+            let differs = *checkpoint != base || format!("{checkpoint:?}") != format!("{base:?}");
+            checkpoint.flow.footnote_reserved_heights = checkpoint_reservations;
+            if differs {
                 checkpoints.push((index, checkpoint.clone()));
                 if checkpoints.len() > MAX_RETAINED_REGION_ENTRIES {
                     return false;
@@ -8125,6 +8137,83 @@ mod tests {
         assert!(retained_counts[0] > 0);
         assert_eq!(retained_counts[0], retained_counts[1]);
         docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_region_compaction_preserves_float_bits() {
+        let mut input: LayoutInput = serde_json::from_value(note_area_layout_request()).unwrap();
+        let run = docx_layout::place::layout_document_checkpointed(&mut input).unwrap();
+        let mut primary = PaginationState {
+            layout: Some(run.layout),
+            checkpoints: run.checkpoints,
+            ..Default::default()
+        };
+        primary.checkpoints = vec![primary.checkpoints[0].clone(); 2];
+        let make_pass = || {
+            let mut checkpoints = primary.checkpoints.clone();
+            for checkpoint in &mut checkpoints {
+                checkpoint.flow.footnote_reserved_heights = Some(Arc::new(BTreeMap::from([
+                    ("1".to_owned(), 0.0),
+                    ("2".to_owned(), f64::from_bits(0x7ff8_0000_0000_0001)),
+                ])));
+            }
+            RegionPlacementState {
+                phase: RegionPlacementPhase::Body,
+                options: json!({}),
+                layout: primary.layout.as_ref().unwrap().clone(),
+                fragment_pages: Vec::new(),
+                shared_fragment_pages: Vec::new(),
+                checkpoints,
+                fingerprints: Vec::new(),
+                coupled_blocks: Vec::new(),
+                incremental: false,
+                rebuilt_page_start: 0,
+                rebuilt_page_end: 0,
+                rebuilt_page_ranges: Vec::new(),
+                compact: None,
+            }
+        };
+
+        let mut pass = make_pass();
+        assert!(pass.compact(&primary));
+        assert!(pass.compact.as_ref().unwrap().checkpoints.is_empty());
+        pass.restore_metadata(&primary);
+        assert_eq!(
+            pass.checkpoints[1]
+                .flow
+                .footnote_reserved_heights
+                .as_ref()
+                .unwrap()["2"]
+                .to_bits(),
+            0x7ff8_0000_0000_0001
+        );
+
+        let mut pass = make_pass();
+        pass.checkpoints[1].flow.leading_spacing_spent = -0.0;
+        assert_eq!(primary.checkpoints[1].flow.leading_spacing_spent, 0.0);
+        assert!(pass.compact(&primary));
+        let checkpoints = &pass.compact.as_ref().unwrap().checkpoints;
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].0, 1);
+        pass.restore_metadata(&primary);
+        assert_eq!(
+            pass.checkpoints[1].flow.leading_spacing_spent.to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        for (key, height) in [("1", -0.0), ("2", f64::from_bits(0x7ff8_0000_0000_0002))] {
+            let mut pass = make_pass();
+            Arc::make_mut(
+                pass.checkpoints[1]
+                    .flow
+                    .footnote_reserved_heights
+                    .as_mut()
+                    .unwrap(),
+            )
+            .insert(key.to_owned(), height);
+            assert!(!pass.compact(&primary));
+            assert!(pass.compact.is_none());
+        }
     }
 
     /// A laid-out note is reachable through the resident hit test: the point
