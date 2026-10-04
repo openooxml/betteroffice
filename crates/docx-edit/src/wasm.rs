@@ -1489,7 +1489,8 @@ impl EditSession {
             return Ok(None);
         };
         let host_envelope = thin_docx_envelope(&envelope);
-        let whole_body = !budget_stopped && envelope.document.package.document.content.len() < blocks;
+        let whole_body =
+            !budget_stopped && envelope.document.package.document.content.len() < blocks;
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
@@ -6081,7 +6082,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                host.get("wholeBody").is_some(), whole,
+                host.get("wholeBody").is_some(),
+                whole,
                 "{count} tables, {tail} paragraphs, budget={paragraph_budget:?}"
             );
         }
