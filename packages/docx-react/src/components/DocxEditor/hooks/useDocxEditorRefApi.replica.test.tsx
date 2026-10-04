@@ -534,7 +534,7 @@ const SYNC_REPLICA_CALLS = [
     paraId: '00000001', search: 'map', replaceWith: 'plan', author: 'Agent',
   }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toBe(true)],
   ['applyFormatting', [{
-    paraId: '00000001', search: 'map', marks: { bold: true },
+    paraId: '00000001', search: 'map', marks: { italic: true },
   }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toBe(true)],
   ['setParagraphStyle', [{
     paraId: '00000001', styleId: 'Normal',

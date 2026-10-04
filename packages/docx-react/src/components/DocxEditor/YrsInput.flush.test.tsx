@@ -405,7 +405,8 @@ test('worker replay preserves story-switch and explicit undo boundaries in manua
     session.paragraphs(story).map((paragraph) => ({ paraId: paragraph.paraId, length: paragraph.text.length })));
   view.rerender(cloneElement(inputFor(session, input, undefined, undefined, props), {
     inputPositionMap: map,
-    locToDisplayPosition: (loc) => yrsLocToDisplayPosition(map(loc.story), loc),
+    locToDisplayPosition: (loc: Parameters<typeof yrsLocToDisplayPosition>[1]) =>
+      yrsLocToDisplayPosition(map(loc.story), loc),
   }));
   await act(async () => { await bounded(input.current!.flushPendingInput()); });
   expect(text(session)).toBe('SeedAB');

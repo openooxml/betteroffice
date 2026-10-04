@@ -1240,8 +1240,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection });
   inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection };
-  const replayHeldEntry = useCallback((entry: HeldInput): void => {
-    const handlers = inputHandlersRef.current;
+  const replayHeldEntry = useCallback((entry: HeldInput, handlers = inputHandlersRef.current): void => {
     if (entry.kind === 'selection') handlers.replaySelection(entry);
     else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
     else if (entry.kind === 'text' || entry.kind === 'composition') handlers.insertText(entry.text);
@@ -1251,6 +1250,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     else if (entry.kind === 'select-all') handlers.selectAll();
   }, []);
   const replayHeldBatch = useCallback((entries: HeldInput[]): void => {
+    const handlers = inputHandlersRef.current;
     let prepareFailure: { error: unknown } | undefined;
     for (const entry of entries) {
       if (entry.kind !== 'selection') continue;
@@ -1282,7 +1282,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             entry.kind === 'navigation' || entry.kind === 'select-all' ||
             entry.kind === 'composition' || entry.kind === 'undo-boundary'
           ) session.addUndoBoundary();
-          replayHeldEntry(entry);
+          replayHeldEntry(entry, handlers);
           if (entry.kind === 'composition') session.addUndoBoundary();
           previousTime = entry.inputTime;
           previousStory = activeStory;

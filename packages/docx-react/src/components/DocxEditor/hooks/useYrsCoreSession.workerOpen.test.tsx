@@ -525,6 +525,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
   delayQueries?: boolean;
   source?: Uint8Array;
   residentInput?: boolean;
+  publishLayout?: boolean;
   holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
   onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
 } = {}) {
@@ -583,6 +584,7 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={options.publishLayout ? harness.renderer.onLayoutComputed : undefined}
         applyResidentInput={options.residentInput ? harness.renderer.applyInput : undefined}
         canvasHostRef={canvasHost} displayListQueries={queriesReleased ? harness.renderer.queries : null}
         inputQueries={viewer ? undefined : inputQueries(harness.renderer.inputQueries)}
@@ -1185,7 +1187,7 @@ async function openingReplayEditor() {
     else Reflect.deleteProperty(document, 'fonts');
   });
   try {
-    const opened = await openingEditor(true, false, { residentInput: true });
+    const opened = await openingEditor(true, false, { residentInput: true, publishLayout: true });
     return {
       ...opened,
       get harness() { return opened.harness; },
