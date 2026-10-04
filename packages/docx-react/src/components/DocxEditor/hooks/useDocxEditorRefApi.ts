@@ -140,11 +140,6 @@ export const DOCX_REF_REPLICA_LOADING_ANSWERS = {
   getEditorRef: null,
   getSelectionInfo: null,
   getPageContent: null,
-  addComment: null,
-  proposeChange: false,
-  applyFormatting: false,
-  setParagraphStyle: false,
-  insertBreak: false,
   scrollToParaId: false,
   scrollToCommentId: false,
   scrollToChangeId: false,
@@ -152,6 +147,10 @@ export const DOCX_REF_REPLICA_LOADING_ANSWERS = {
 } satisfies Partial<{
   [Member in keyof DocxEditorRef]: DocxEditorRef[Member] extends (...args: never[]) => infer Result ? Result : never;
 }>;
+
+export const DOCX_REF_REPLICA_LOADING_MUTATIONS: ReadonlySet<keyof DocxEditorRef> = new Set([
+  'proposeChange', 'applyFormatting', 'setParagraphStyle', 'insertBreak', 'addComment',
+]);
 
 /**
  * Synchronous APIs that an on-demand replica still loading answers without loading it at once:
@@ -170,14 +169,19 @@ const ON_DEMAND_SYNC_ACCESS: Partial<Record<keyof DocxEditorRef, 'direct' | 'uns
 };
 
 /**
- * @deprecated No longer thrown: until the document is ready, synchronous members answer as they do
- * while it opens (`null`, `false` or `[]`).
+ * Thrown by synchronous mutations proposeChange, applyFormatting, setParagraphStyle, insertBreak
+ * and addComment while the editor's main-thread copy is loading. Await flushPendingInput() and
+ * call it again, or use the member's async counterpart.
  */
 export class DocxReplicaNotReadyError extends Error {
   constructor(readonly member: string) {
+    const twin = member in DOCX_REF_ASYNC_TWINS
+      ? DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS]
+      : undefined;
     super(
       `${member} needs the document on the main thread, which is still loading; ` +
-        'await flushPendingInput() and call it again'
+        'await flushPendingInput() and call it again' +
+        (twin ? `, or use ${typeof twin === 'string' ? twin : twin.join(' or ')}` : '')
     );
     this.name = 'DocxReplicaNotReadyError';
   }
@@ -317,9 +321,15 @@ function gateReplicaAccess(
               requestOnDemandWorkerOpenReplica(session);
               return null;
             }
-            if (workerOpenReplicaPending(session) && key in DOCX_REF_REPLICA_LOADING_ANSWERS) {
-              const answer = DOCX_REF_REPLICA_LOADING_ANSWERS[key as keyof typeof DOCX_REF_REPLICA_LOADING_ANSWERS];
-              return Array.isArray(answer) ? answer.slice() : answer;
+            if (workerOpenReplicaPending(session)) {
+              if (DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key)) {
+                if (isWorkerViewer(pagedEditorRef.current)) return key === 'addComment' ? null : false;
+                throw new DocxReplicaNotReadyError(key);
+              }
+              if (key in DOCX_REF_REPLICA_LOADING_ANSWERS) {
+                const answer = DOCX_REF_REPLICA_LOADING_ANSWERS[key as keyof typeof DOCX_REF_REPLICA_LOADING_ANSWERS];
+                return Array.isArray(answer) ? answer.slice() : answer;
+              }
             }
           } else {
             if (key === 'whenLayoutComplete' && workerOpenReplicaOnDemand(session)) {

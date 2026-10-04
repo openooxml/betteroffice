@@ -24,7 +24,14 @@ import { createCommentIdAllocator } from '../commentFactories';
 import { deferWorkerOpenReplica, workerOpenReplicaOnDemand } from '../internals/workerOpenReplica';
 import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
-import { DOCX_REF_REPLICA_ACCESS, DOCX_REF_REPLICA_LOADING_ANSWERS, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import {
+  DOCX_REF_ASYNC_TWINS,
+  DOCX_REF_REPLICA_ACCESS,
+  DOCX_REF_REPLICA_LOADING_ANSWERS,
+  DOCX_REF_REPLICA_LOADING_MUTATIONS,
+  DocxReplicaNotReadyError,
+  useDocxEditorRefApi,
+} from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -245,7 +252,10 @@ test('every public ref API is classified for replica access', async () => {
   const direct = new Set([
     'focus', 'scrollToPosition', 'openPrintPreview', 'print', 'highlightRange', 'getPositionAtPoint',
   ]);
-  expect(Object.keys(DOCX_REF_REPLICA_LOADING_ANSWERS).sort()).toEqual(
+  const loadingAnswers = Object.keys(DOCX_REF_REPLICA_LOADING_ANSWERS);
+  const loadingMutations = [...DOCX_REF_REPLICA_LOADING_MUTATIONS];
+  expect(loadingMutations.some((member) => member in DOCX_REF_REPLICA_LOADING_ANSWERS)).toBe(false);
+  expect([...loadingAnswers, ...loadingMutations].sort()).toEqual(
     Object.entries(DOCX_REF_REPLICA_ACCESS)
       .filter(([member, access]) => access === 'sync' && !direct.has(member))
       .map(([member]) => member).sort()
@@ -330,7 +340,7 @@ test('synchronous reads return loading answers until the owner opens the editor 
   expect(fallbackReasons).toEqual([]);
 });
 
-test('editor document access and paragraph styling return loading answers until the peer is ready', async () => {
+test('editor document access returns loading answers and paragraph styling throws until the peer is ready', async () => {
   const { api, session, replica, release, opens, fallbackReasons, pagedEditorRef } = await pendingReplica('editing');
   const getDocument = spyOn(pagedEditorRef.current!, 'getDocument');
   const paragraphs = spyOn(session, 'paragraphs');
@@ -340,7 +350,7 @@ test('editor document access and paragraph styling return loading answers until 
   const options = { paraId: '00000001', styleId: 'Normal' };
   expect(api.getDocument()).toBeNull();
   expect(api.getEditorRef()).toBeNull();
-  expect(api.setParagraphStyle(options)).toBe(false);
+  expect(() => api.setParagraphStyle(options)).toThrow(DocxReplicaNotReadyError);
   await act(async () => {});
   expect(replica.started).toBe(false);
   expect(getDocument).not.toHaveBeenCalled();
@@ -382,11 +392,11 @@ test('a batch chained from an early read edits the hydrated document', async () 
   expect(session.paragraphs('body')[0]!.text).toBe('Written after opening');
 });
 
-test('a synchronous write during an in-flight editor handoff returns false until readiness', async () => {
+test('a synchronous write during an in-flight editor handoff throws until readiness', async () => {
   const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing');
   replica.start();
   await act(async () => {});
-  act(() => expect(api.insertBreak({ paraId: '00000001', type: 'page' })).toBe(false));
+  act(() => expect(() => api.insertBreak({ paraId: '00000001', type: 'page' })).toThrow(DocxReplicaNotReadyError));
   expect(opens).toEqual([]);
   expect(session.storyIds()).toEqual([]);
   await act(async () => { release(); await replica.ready; });
@@ -519,20 +529,59 @@ const SYNC_REPLICA_CALLS = [
   })],
   ['addComment', [{
     paraId: '00000001', search: 'map', text: 'Check', author: 'Ann',
-  }], null, (result: unknown) => expect(result).toEqual(expect.any(Number))],
+  }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toEqual(expect.any(Number))],
   ['proposeChange', [{
     paraId: '00000001', search: 'map', replaceWith: 'plan', author: 'Agent',
-  }], false, (result: unknown) => expect(result).toBe(true)],
+  }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toBe(true)],
   ['applyFormatting', [{
     paraId: '00000001', search: 'map', marks: { bold: true },
-  }], false, (result: unknown) => expect(result).toBe(true)],
+  }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toBe(true)],
   ['setParagraphStyle', [{
     paraId: '00000001', styleId: 'Normal',
-  }], false, (result: unknown) => expect(result).toBe(true)],
+  }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toBe(true)],
   ['insertBreak', [{
     paraId: '00000001', type: 'page',
-  }], false, (result: unknown) => expect(result).toBe(true)],
+  }], DocxReplicaNotReadyError, (result: unknown) => expect(result).toBe(true)],
 ] as const;
+
+test.each(SYNC_REPLICA_CALLS.filter(([member]) => DOCX_REF_REPLICA_LOADING_MUTATIONS.has(member)))(
+  '%s throws DocxReplicaNotReadyError while loading and applies after readiness',
+  async (member, args, _loading, check) => {
+    const { api, session, replica, release, opens, fallbackReasons, events } = await pendingReplica('editing');
+    const warning = spyOn(console, 'warn').mockImplementation(() => {});
+    const version = session.version();
+    let caught: unknown;
+    try { Reflect.apply(api[member], api, args); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(DocxReplicaNotReadyError);
+    expect((caught as DocxReplicaNotReadyError).member).toBe(member);
+    expect((caught as Error).message).toContain(member);
+    expect((caught as Error).message).toContain('flushPendingInput()');
+    if (member in DOCX_REF_ASYNC_TWINS) {
+      const twin = DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS];
+      expect((caught as Error).message).toContain(typeof twin === 'string' ? twin : twin.join(' or '));
+    } else {
+      expect((caught as Error).message).not.toContain(', or use ');
+    }
+    await act(async () => {});
+    expect(session.version()).toBe(version);
+    expect(session.storyIds()).toEqual([]);
+    expect(replica.started).toBe(false);
+    expect(replica.pending).toBe(true);
+    expect(opens).toEqual([]);
+    expect(events).toEqual([]);
+    expect(fallbackReasons).toEqual([]);
+    expect(warning).not.toHaveBeenCalled();
+    replica.start();
+    await act(async () => { release(); await replica.ready; });
+    const readyVersion = session.version();
+    act(() => { check(Reflect.apply(api[member], api, args)); });
+    expect(session.version()).not.toBe(readyVersion);
+    expect(replica.pending).toBe(false);
+    expect(opens).toEqual([false]);
+    expect(fallbackReasons).toEqual([]);
+    expect(warning).not.toHaveBeenCalled();
+  }
+);
 
 function prepareSyncRead(editor: PagedEditorRef) {
   editor.getLayout = () => ({
@@ -545,12 +594,13 @@ function prepareSyncRead(editor: PagedEditorRef) {
 
 for (const onDemand of [false, true]) {
   test.each(SYNC_REPLICA_CALLS)(
-    `%s returns its loading answer without opening an ${onDemand ? 'on-demand' : 'editor'} replica`,
+    `%s preserves replica state during an ${onDemand ? 'on-demand' : 'editor'} replica load`,
     async (method, args, loading, check) => {
       const { api, opens, replica, release, session, fallbackReasons, pagedEditorRef } =
         await pendingReplica('editing', false, onDemand);
       prepareSyncRead(pagedEditorRef.current!);
-      expect(Reflect.apply(api[method], api, args)).toEqual(loading);
+      if (loading === DocxReplicaNotReadyError) expect(() => Reflect.apply(api[method], api, args)).toThrow(loading);
+      else expect(Reflect.apply(api[method], api, args)).toEqual(loading);
       await act(async () => {});
       expect(opens).toEqual([]);
       expect(fallbackReasons).toEqual([]);
@@ -570,11 +620,12 @@ for (const onDemand of [false, true]) {
 }
 
 test.each(SYNC_REPLICA_CALLS)(
-  '%s returns its loading answer without requesting worker proposal hand-over', async (method, args, loading, check) => {
+  '%s leaves worker proposal hand-over to the replica owner', async (method, args, loading, check) => {
     const { api, opens, replica, release, session, pagedEditorRef, authority, transport, fallbackReasons } =
       await pendingWorkerProposalReplica('editing', false);
     prepareSyncRead(pagedEditorRef.current!);
-    expect(Reflect.apply(api[method], api, args)).toEqual(loading);
+    if (loading === DocxReplicaNotReadyError) expect(() => Reflect.apply(api[method], api, args)).toThrow(loading);
+    else expect(Reflect.apply(api[method], api, args)).toEqual(loading);
     await act(async () => {});
     expect(opens).toEqual([]);
     expect(fallbackReasons).toEqual([]);
