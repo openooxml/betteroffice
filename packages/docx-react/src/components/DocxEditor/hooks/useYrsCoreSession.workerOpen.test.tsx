@@ -739,6 +739,62 @@ test('saved paragraph ID claims refresh editor point geometry without another ed
   expect(harness.errors).toEqual([]);
 }, 20_000);
 
+test("a worker save's own paragraph ID claims leave no story dirty for the next save", async () => {
+  const { posted } = installWorker();
+  const savedStories = () => posted.filter((request) => request.type === 'save').map((request) => request.stories);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const beforeSave = session.encodeStateVector();
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(session.encodeStateVector()).not.toEqual(beforeSave);
+  expect(savedStories()).toEqual([['body']]);
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(savedStories()).toEqual([['body'], []]);
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 2 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(savedStories()).toEqual([['body'], [], ['body']]);
+  expect(harness.errors).toEqual([]);
+}, 20_000);
+
 test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   if (!document.fonts) Object.defineProperty(document, 'fonts', {

@@ -344,7 +344,7 @@ export class ResidentEngineWorkerClient {
   async openPreview(
     bytes: Uint8Array,
     blocks: number,
-    options: { heapLimitBytes?: number } = {}
+    options: { heapLimitBytes?: number; paragraphBudget?: number } = {}
   ): Promise<ResidentEngineWorkerOpened | null> {
     if (this.openedHeapLimit || this.bootstrapped) {
       throw new ResidentWorkerFailureError('Resident engine worker already holds a document');
@@ -359,6 +359,9 @@ export class ResidentEngineWorkerClient {
           type: 'open',
           bytes: copy.buffer,
           previewBlocks: blocks,
+          ...(options.paragraphBudget !== undefined
+            ? { previewParagraphBudget: options.paragraphBudget }
+            : {}),
           ...(options.heapLimitBytes !== undefined ? { heapLimitBytes: options.heapLimitBytes } : {}),
         },
         [copy.buffer]
@@ -485,12 +488,15 @@ export class ResidentEngineWorkerClient {
     comments: Comment[];
     host?: Document;
     stateVector?: Uint8Array;
+    /** @internal */
+    stories?: readonly string[];
   }): Promise<{ bytes: ArrayBuffer; updates: Uint8Array[]; version: string }> {
     const response = await this.request({
       type: 'save',
       comments: request.comments,
       ...(request.host === undefined ? {} : { host: request.host }),
       ...(request.stateVector === undefined ? {} : { stateVector: request.stateVector.slice() }),
+      ...(request.stories === undefined ? {} : { stories: [...request.stories] }),
     });
     if (
       !(response.saved instanceof ArrayBuffer) ||

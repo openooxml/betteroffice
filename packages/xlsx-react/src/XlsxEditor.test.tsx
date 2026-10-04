@@ -279,6 +279,28 @@ async function selectChart(
 }
 
 describe('XlsxEditor grid pointer handling', () => {
+  it('saves source bytes through the API after mounting and painting', async () => {
+    const source = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../xlsx/test-fixtures/no-edit-save.xlsx'
+    )));
+    let api: XlsxEditorApi | undefined;
+    let changes = 0;
+    const view = render(
+      <XlsxEditor
+        file={source.slice()}
+        onChange={() => changes++}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    await waitFor(() => expect(view.getAllByRole('gridcell').length).toBeGreaterThan(0));
+    expect(api!.save()).toEqual(source);
+    expect(changes).toBe(0);
+  });
+
   it('commits the open editor and moves the selection when another cell is clicked', async () => {
     const view = await mountEditor();
 

@@ -702,6 +702,7 @@ export class EditSession {
      * refuses, which opens with [`EditSession::open_docx`] instead.
      */
     open_docx_preview(bytes: Uint8Array, blocks: number): string | undefined;
+    open_docx_preview_with_budget(bytes: Uint8Array, blocks: number, paragraph_budget?: number | null): string | undefined;
     /**
      * One glyph outline from this session's resident font store:
      * `{"upem":n,"cmds":[{"t":"M"|"L"|"Q"|"C"|"Z", …}]}` — commands in font
@@ -1633,6 +1634,7 @@ export interface InitOutput {
     readonly editsession_note_separators_state: (a: number) => [number, number, number, number];
     readonly editsession_open_docx: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_open_docx_preview: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_open_docx_preview_with_budget: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_outline_glyph_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_paragraph_id_count: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly editsession_paragraph_identities: (a: number) => [number, number, number, number];

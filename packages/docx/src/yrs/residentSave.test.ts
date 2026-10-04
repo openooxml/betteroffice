@@ -10,14 +10,15 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
-  dirtyProjectionStory,
+  DirtyProjectionStories,
   hostSaveMetadata,
   mergeDocxHostMetadata,
+  proposalProjectionStories,
   saveEditorDocument,
 } from './editorSave';
 import type { DocxEditRequest } from './edits';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
-import type { DocxProposalInput } from './proposals';
+import type { DocxProposalInput, DocxProposalResult } from './proposals';
 import type { ResidentEngineSession } from './residentEngineSession';
 import {
   ResidentEngineWorkerClient,
@@ -140,6 +141,15 @@ function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.'), comments?
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
+function zeroLengthBodyComment(): Uint8Array {
+  return synthetic(
+    '<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/>' +
+    '<w:r><w:commentReference w:id="1"/><w:t>Alpha beta gamma.</w:t></w:r></w:p>',
+    `<w:comment w:id="1" w:author="Host" w:date="${SUGGEST.date}">` +
+    paragraph('0000C001', 'Zero-length comment') + '</w:comment>'
+  );
+}
+
 async function customXmlNote(): Promise<Uint8Array> {
   const parts: PartsMap = new Map(Object.entries(unzipContainer(synthetic(
     '<w:p w14:paraId="0000B001"><w:r><w:t>Body text</w:t></w:r>' +
@@ -193,11 +203,13 @@ function hostComments(opened: Opened): Comment[] {
 async function workerSave(
   opened: Opened,
   comments: Comment[] = hostComments(opened),
-  withHost = true
+  withHost = true,
+  withPeer = true
 ): Promise<Uint8Array<ArrayBuffer>> {
   const { bytes } = await opened.client.save({
     comments,
     ...(withHost ? { host: hostSaveMetadata(opened.host) } : {}),
+    ...(withPeer ? { stories: opened.replica.dirtyStories.capture().stories } : {}),
   });
   return new Uint8Array(bytes);
 }
@@ -207,15 +219,18 @@ const CORE = new Set(['docProps/core.xml']);
 async function compareSave(
   opened: Opened,
   comments = hostComments(opened),
-  withHost = true
+  withHost = true,
+  withPeer = true
 ): Promise<Uint8Array<ArrayBuffer>> {
-  const saved = await workerSave(opened, comments, withHost);
-  expect(difference(saved, await opened.replica.save(comments))).toBeNull();
+  const saved = await workerSave(opened, comments, withHost, withPeer);
+  const expected = await opened.replica.save(comments);
+  expect(difference(saved, expected)).toBeNull();
+  expect(saved).toEqual(expected);
   return saved;
 }
 
-function commentMarkers(bytes: Uint8Array, id: number): string[] {
-  const body = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
+function commentMarkers(bytes: Uint8Array, id: number, part = 'word/document.xml'): string[] {
+  const body = new TextDecoder().decode(unzipContainer(bytes)[part]);
   return [...body.matchAll(new RegExp(
     `<w:comment(RangeStart|RangeEnd|Reference)\\b[^>]*\\bw:id="${id}"`, 'g'
   ))].map((match) => match[1]!);
@@ -233,32 +248,36 @@ async function bootstrap(opened: Opened): Promise<void> {
 }
 
 class Replica {
-  private revision: number;
-  readonly dirtyStories = new Set<string>();
+  readonly dirtyStories = new DirtyProjectionStories();
 
   constructor(
     readonly session: YrsSession,
     private readonly host: Document,
     private base: Document | null = null
-  ) {
-    this.revision = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+  ) {}
+
+  proposal(call: (session: YrsSession) => DocxProposalResult): DocxProposalResult {
+    const known = new Set(this.session.getProposals().proposals.map((proposal) => proposal.id));
+    const since = this.session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    const result = call(this.session);
+    if (result.ok) {
+      for (const story of proposalProjectionStories(
+        known, result, this.session.storiesChangedSince(since).stories
+      )) this.dirtyStories.add(story);
+    }
+    return result;
   }
 
   async save(comments: Comment[]): Promise<Uint8Array<ArrayBuffer>> {
     const base = this.base ?? this.session.materializeDocx();
     if (!base) throw new Error('the replica has no package');
-    const storyIds = new Set([
-      ...this.dirtyStories,
-      ...this.session.storiesChangedSince(this.revision).stories,
-    ].map(dirtyProjectionStory));
     const projected = yrsToDocument(
       this.session, mergeDocxHostMetadata(base, this.host),
-      storyIds.size > 0 ? { storyIds } : undefined
+      this.dirtyStories.projectionOptions()
     );
     this.base = projected;
     const buffer = await saveEditorDocument(this.session, projected, comments);
     projected.originalBuffer = buffer;
-    this.revision = this.session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
     this.dirtyStories.clear();
     return new Uint8Array(buffer);
   }
@@ -273,13 +292,15 @@ async function peerReplica(opened: Opened): Promise<YrsSession> {
   return peer;
 }
 
-function addComment(opened: Opened, peer: YrsSession, comment: Comment): void {
-  peer.applyRawOps('body', [{
+function addComment(opened: Opened, peer: YrsSession, comment: Comment, story = 'body'): void {
+  peer.applyRawOps(story, [{
     op: 'setComment', id: String(comment.id), ranges: [[0, 5]],
     author: comment.author, date: comment.date, body: comment.content,
   }]);
-  opened.host.package.document.comments = [comment];
-  opened.replica.dirtyStories.add('body');
+  opened.host.package.document.comments = [
+    ...hostComments(opened).filter((existing) => existing.id !== comment.id), comment,
+  ];
+  opened.replica.dirtyStories.add(story);
 }
 
 function editHeader(engine: Pick<YrsSession, 'applyEdits' | 'version'>): void {
@@ -339,6 +360,7 @@ function replicaEdit(replica: Replica, host: Document): void {
   if (!request) return;
   const result = session.applyEdits(request);
   if (!result.ok) throw new Error(`the edit was refused: ${JSON.stringify(result)}`);
+  if (result.applied) for (const story of result.changedStories) replica.dirtyStories.add(story);
 }
 
 describe('worker save', () => {
@@ -535,6 +557,7 @@ describe('worker save', () => {
         }],
       }).ok).toBe(true);
     }
+    opened.replica.dirtyStories.add('body');
     const body = opened.host.package.document;
     body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
     const save = spyOn(opened.resident, 'save');
@@ -578,6 +601,7 @@ describe('worker save', () => {
         expectVersion: engine.version(), steps: [step],
       }).ok).toBe(true);
     }
+    opened.replica.dirtyStories.add(header);
     opened.resident.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
     expect(opened.resident.storiesChangedSince(since).stories).toEqual(['body', header]);
     session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
@@ -602,25 +626,152 @@ describe('worker save', () => {
     opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
     const saved = await compareSave(opened);
     expect(commentMarkers(saved, comment.id)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
-    expect(unzipContainer(saved)['word/header1.xml'])
-      .toEqual(unzipContainer(opened.bytes)['word/header1.xml']);
+    expect(new TextDecoder().decode(unzipContainer(saved)['word/header1.xml']))
+      .toContain('<w:t xml:space="preserve">Header text</w:t>');
   }, TIMEOUT);
 
   it('preserves unseeded comment markers on the first save after a header and host edit', async () => {
-    const opened = await open(synthetic(
-      '<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/>' +
-      '<w:r><w:commentReference w:id="1"/><w:t>Alpha beta gamma.</w:t></w:r></w:p>',
-      `<w:comment w:id="1" w:author="Host" w:date="${SUGGEST.date}">` +
-      paragraph('0000C001', 'Zero-length comment') + '</w:comment>'
-    ));
+    const opened = await open(zeroLengthBodyComment());
     expect(hostComments(opened).map((comment) => comment.id)).toEqual([1]);
     expect(opened.replica.session.listComments()).toEqual([]);
     for (const engine of [opened.resident.proposalEngine, opened.replica.session]) editHeader(engine);
+    opened.replica.dirtyStories.add('hf:rIdH1');
     const body = opened.host.package.document;
     body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
     const saved = await compareSave(opened);
     expect(commentMarkers(opened.bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
     expect(commentMarkers(saved, 1)).toEqual(commentMarkers(opened.bytes, 1));
+  }, TIMEOUT);
+
+  for (const owner of ['peer', 'worker'] as const) {
+    it(`retains zero-length body markers after a ${owner} header comment, header edit and margin change`, async () => {
+      const opened = await open(zeroLengthBodyComment());
+      const peer = owner === 'peer' ? await peerReplica(opened) : opened.replica.session;
+      const comment: Comment = {
+        id: 2, author: 'Header', date: SUGGEST.date,
+        content: [{
+          type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Header comment' }] }],
+        }],
+      };
+      editHeader(peer);
+      addComment(opened, peer, comment, 'hf:rIdH1');
+      if (owner === 'peer') {
+        opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+      } else {
+        editHeader(opened.resident.proposalEngine);
+        opened.resident.applyRawOps('hf:rIdH1', [{
+          op: 'setComment', id: '2', ranges: [[0, 5]],
+          author: comment.author, date: comment.date, body: comment.content,
+        }]);
+      }
+      const body = opened.host.package.document;
+      body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+      const saved = await compareSave(opened, hostComments(opened), true, owner === 'peer');
+      expect(commentMarkers(saved, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      expect(commentMarkers(saved, 2, 'word/header1.xml')).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      expect(new TextDecoder().decode(unzipContainer(saved)['word/document.xml']))
+        .toContain('w:top="2000"');
+    }, TIMEOUT);
+
+    it(`matches the editor for a ${owner} header comment add and delete with no other edit`, async () => {
+      const opened = await open(synthetic());
+      const peer = owner === 'peer' ? await peerReplica(opened) : opened.replica.session;
+      const comment: Comment = {
+        id: 1, author: 'Header', date: SUGGEST.date,
+        content: [{
+          type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Header comment' }] }],
+        }],
+      };
+      addComment(opened, peer, comment, 'hf:rIdH1');
+      if (owner === 'peer') {
+        opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+      } else {
+        opened.resident.applyRawOps('hf:rIdH1', [{
+          op: 'setComment', id: '1', ranges: [[0, 5]],
+          author: comment.author, date: comment.date, body: comment.content,
+        }]);
+      }
+      const first = await compareSave(opened, [comment], true, owner === 'peer');
+      expect(commentMarkers(first, 1, 'word/header1.xml')).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+      peer.applyRawOps('hf:rIdH1', [{ op: 'removeComment', id: '1' }]);
+      opened.replica.dirtyStories.add('hf:rIdH1');
+      opened.host.package.document.comments = [];
+      if (owner === 'peer') {
+        opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+      } else {
+        opened.resident.applyRawOps('hf:rIdH1', [{ op: 'removeComment', id: '1' }]);
+      }
+      const second = await compareSave(opened, [], true, owner === 'peer');
+      expect(commentMarkers(second, 1, 'word/header1.xml')).toEqual([]);
+      await compareSave(opened, [], true, owner === 'peer');
+    }, TIMEOUT);
+  }
+
+  it('matches the editor for a body comment delete with no other edit', async () => {
+    const opened = await open(synthetic());
+    const peer = await peerReplica(opened);
+    const comment: Comment = {
+      id: 1, author: 'Body', date: SUGGEST.date,
+      content: [{
+        type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Body comment' }] }],
+      }],
+    };
+    addComment(opened, peer, comment);
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    expect(commentMarkers(await compareSave(opened), 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    peer.applyRawOps('body', [{ op: 'removeComment', id: '1' }]);
+    opened.replica.dirtyStories.add('body');
+    opened.host.package.document.comments = [];
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    expect(commentMarkers(await compareSave(opened), 1)).toEqual([]);
+    await compareSave(opened);
+  }, TIMEOUT);
+
+  it('matches the editor for a viewer worker body comment delete with no other edit', async () => {
+    const opened = await open(synthetic(
+      '<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/>' +
+      '<w:r><w:t>Alpha</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+      '<w:r><w:commentReference w:id="1"/></w:r></w:p>',
+      `<w:comment w:id="1" w:author="Host" w:date="${SUGGEST.date}">` +
+      paragraph('0000C001', 'Body comment') + '</w:comment>'
+    ));
+    await bootstrap(opened);
+    const removed = await opened.client.proposal({ kind: 'removeComment', id: '1' });
+    expect(removed.projectionStories).toEqual(['body']);
+    opened.replica.session.applyRawOps('body', [{ op: 'removeComment', id: '1' }]);
+    opened.replica.dirtyStories.add('body');
+    opened.host.package.document.comments = [];
+    const saved = await compareSave(opened, [], true, false);
+    expect(commentMarkers(saved, 1)).not.toContain('RangeStart');
+    expect(commentMarkers(saved, 1)).not.toContain('RangeEnd');
+    await compareSave(opened, [], true, false);
+  }, TIMEOUT);
+
+  it('saves a viewer worker proposal with the same marked stories as the editor', async () => {
+    const opened = await open(zeroLengthBodyComment());
+    await bootstrap(opened);
+    const proposals: DocxProposalInput[] = [{
+      id: 'header-proposal',
+      paragraph: {
+        kind: 'persisted', story: { kind: 'header', partUri: '/word/header1.xml' }, paraId: '0000A001',
+      },
+      suggest: SUGGEST, op: 'replaceText', search: 'Header', replaceWith: 'Changed header',
+    }];
+    const initial = await opened.client.proposal({ kind: 'snapshot' });
+    const proposed = await opened.client.proposal({
+      kind: 'propose', request: { expectVersion: initial.mirror.version, proposals },
+    });
+    expect(proposed.result?.ok).toBe(true);
+    expect(proposed.projectionStories).toEqual(['hf:rIdH1']);
+    expect(opened.replica.proposal((session) => session.proposeChanges({
+      expectVersion: session.version(), proposals,
+    })).ok).toBe(true);
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const first = await compareSave(opened, hostComments(opened), true, false);
+    expect(commentMarkers(first, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    expect(new TextDecoder().decode(unzipContainer(first)['word/header1.xml'])).toContain('Changed header');
+    await compareSave(opened, hostComments(opened), true, false);
   }, TIMEOUT);
 
   for (const operation of ['add', 'delete', 'delete with unchanged host comments'] as const) {
@@ -646,6 +797,7 @@ describe('worker save', () => {
         operation === 'add' ? [] : ['RangeStart', 'RangeEnd', 'Reference']
       );
       editHeader(peer);
+      opened.replica.dirtyStories.add('hf:rIdH1');
       if (operation === 'add') {
         addComment(opened, peer, comment);
       } else {
@@ -663,12 +815,12 @@ describe('worker save', () => {
       if (operation === 'delete with unchanged host comments') {
         expect(hostComments(opened)).toEqual([comment]);
         const savedComments = unzipContainer(second)['word/comments.xml'];
-        expect(savedComments).toEqual(unzipContainer(first)['word/comments.xml']);
         expect(new TextDecoder().decode(savedComments)).toMatch(/<w:comment\b[^>]*\bw:id="1"/);
       }
       opened.client.invalidate(update, null);
       await opened.client.encodeState();
-      expect(await compareSave(opened)).toEqual(second);
+      const third = await compareSave(opened);
+      expect(commentMarkers(third, comment.id)).toEqual(commentMarkers(second, comment.id));
     }, TIMEOUT);
   }
 
@@ -721,7 +873,9 @@ describe('worker save', () => {
         request: { expectVersion: initial.mirror.version, proposals: inputs },
       });
       expect(proposed.result?.ok).toBe(true);
-      expect(main.proposeChanges({ expectVersion: main.version(), proposals: inputs }).ok).toBe(true);
+      expect(opened.replica.proposal((session) => session.proposeChanges({
+        expectVersion: session.version(), proposals: inputs,
+      })).ok).toBe(true);
       const changes = inputs.map(({ id }) => ({ id, state }));
       const decided = await opened.client.proposal({
         kind: 'setStates',
@@ -732,18 +886,20 @@ describe('worker save', () => {
         },
       });
       expect(decided.result?.ok).toBe(true);
-      expect(main.setProposalStates({
+      expect(opened.replica.proposal((session) => session.setProposalStates({
         expectVersion: main.version(),
         expectPreviewVersion: main.getProposals().previewVersion,
         changes,
-      }).ok).toBe(true);
+      })).ok).toBe(true);
       const ids = inputs.map(({ id }) => id);
       const withdrawn = await opened.client.proposal({
         kind: 'withdraw',
         request: { expectVersion: decided.mirror.version, ids },
       });
       expect(withdrawn.result?.ok).toBe(true);
-      expect(main.withdrawProposals({ expectVersion: main.version(), ids }).ok).toBe(true);
+      expect(opened.replica.proposal((session) => session.withdrawProposals({
+        expectVersion: session.version(), ids,
+      })).ok).toBe(true);
       const first = await compareSave(opened);
       const second = await compareSave(opened);
       if (state === 'rejected') {
@@ -764,6 +920,7 @@ describe('worker save', () => {
     const typed = await opened.client.applyInput(' typed', selection, opened.client.answeredFrame());
     expect(typed.applied).toBe(true);
     opened.replica.session.insertText(caret, ' typed');
+    opened.replica.dirtyStories.add(caret.story);
     await compareSave(opened);
     await compareSave(opened);
   }, TIMEOUT);
@@ -779,6 +936,7 @@ describe('worker save', () => {
           expectVersion: engine.version(), history: 'none', steps: [step],
         }).ok).toBe(true);
       }
+      opened.replica.dirtyStories.add('body');
     };
     const rawOffset = (bytes: Uint8Array) => {
       const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);

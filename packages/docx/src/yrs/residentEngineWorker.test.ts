@@ -5,6 +5,7 @@ import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/p
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { ResidentSaveRecord } from './residentSave';
+import { syntheticDocx } from './__fixtures__/previewChain';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
@@ -161,6 +162,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       proposalEngine: { version: () => 'v' },
+      markProjectionStories(_stories: readonly string[]) {},
       loadState(state: Uint8Array) {
         harness.loadedStates.push(state);
       },
@@ -3551,6 +3553,61 @@ describe('worker proposals during sliced completion', () => {
 });
 
 describe('resident worker opening', () => {
+  test.each([undefined, 256])('forwards the optional preview paragraph budget %s', async (paragraphBudget) => {
+    await preloadEditWasm(new Uint8Array(readFileSync(resolve(
+      import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm'
+    ))));
+    const bytes = syntheticDocx('plain', 44, 17, {
+      tableDense: true,
+      blocks: 40,
+      trailingShortParagraphs: 170,
+    });
+    const engine = await createResidentEngineSession();
+    const w = worker();
+    const forwarded: Array<number | undefined> = [];
+    Object.assign(w.harness.session, engine, {
+      openDocxPreview: (source: Uint8Array, blocks: number, budget?: number) => {
+        forwarded.push(budget);
+        return engine.openDocxPreview(source, blocks, budget);
+      },
+    });
+    try {
+      const reply = await w.send({
+        type: 'open',
+        bytes: bytes.buffer as ArrayBuffer,
+        previewBlocks: 200,
+        ...(paragraphBudget === undefined ? {} : { previewParagraphBudget: paragraphBudget }),
+      });
+      expect(reply.ok).toBe(true);
+      expect(reply.ok && reply.hostJson).toBeDefined();
+      expect(forwarded).toEqual([paragraphBudget]);
+      const expected = await createResidentEngineSession();
+      try {
+        const hostJson = expected.openDocxPreview(bytes, 200, paragraphBudget);
+        expect(reply.ok && reply.hostJson).toBe(hostJson ?? undefined);
+        expect(engine.paragraphIdentities().paragraphs.length).toBe(
+          expected.paragraphIdentities().paragraphs.length
+        );
+        const blockCount = await createResidentEngineSession();
+        try {
+          blockCount.openDocxPreview(bytes, 200);
+          const count = blockCount.paragraphIdentities().paragraphs.length;
+          if (paragraphBudget === undefined) {
+            expect(engine.paragraphIdentities().paragraphs.length).toBe(count);
+          } else {
+            expect(engine.paragraphIdentities().paragraphs.length).toBeLessThan(count);
+          }
+        } finally {
+          blockCount.destroy();
+        }
+      } finally {
+        expected.destroy();
+      }
+    } finally {
+      engine.destroy();
+    }
+  });
+
   const provisional = '{"layout":{"pages":[1]},"notesConverged":true,"provisional":true}';
   const full = '{"layout":{"pages":[1,2]},"notesConverged":true}';
   const snapshot = {
@@ -3638,7 +3695,7 @@ describe('resident worker opening', () => {
       expect(metadata).toBe(host);
       expect(comments).toEqual([]);
       if (records.at(-1) !== record) {
-        expect(record).toEqual({ full: false, revision: 0 });
+        expect(record).toEqual({ full: false });
         records.push(record);
       } else {
         expect(record.full).toBe(true);
@@ -3748,6 +3805,21 @@ describe('resident worker opening', () => {
     expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([1]), stateVector: new Uint8Array([0]) })).toMatchObject({
       ok: false, terminal: true,
     });
+  });
+
+  test('save forwards the peer story set, including an empty set, without reading revisions', async () => {
+    const { w } = openingWorker();
+    const save = mock(async (..._args: Parameters<ResidentEngineSession['save']>) => new ArrayBuffer(4));
+    const storiesChangedSince = mock(() => { throw new Error('save must not read revisions'); });
+    Object.assign(w.harness.session, { save, storiesChangedSince });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    for (const stories of [['hf:rIdH1'], []]) {
+      expect((await w.send({ type: 'save', comments: [], stories })).ok).toBe(true);
+      expect(save.mock.calls.at(-1)![5]).toEqual(stories);
+    }
+    expect((await w.send({ type: 'save', comments: [] })).ok).toBe(true);
+    expect(save.mock.calls.at(-1)![5]).toBeUndefined();
+    expect(storiesChangedSince).not.toHaveBeenCalled();
   });
 
   test('a preview rejects save as still opening', async () => {

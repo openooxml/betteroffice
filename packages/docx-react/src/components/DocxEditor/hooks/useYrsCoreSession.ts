@@ -8,7 +8,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { dirtyProjectionStory, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import { EditorDirtyStories, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -126,6 +126,8 @@ export interface YrsCoreSessionOptions {
 
 /** Body blocks a first-page preview parses. */
 const PREVIEW_BODY_BLOCKS = 200;
+/** Paragraph weight budget for a first-page preview. */
+const PREVIEW_PARAGRAPH_BUDGET = 256;
 /** How long the full open waits for the preview's pages to paint. */
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
@@ -149,7 +151,7 @@ async function openPreview(
 ): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
   const session = await yrs.createYrsSession({ clientId });
   try {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     if (host) return { session, host };
     session.destroy();
     return null;
@@ -176,14 +178,14 @@ async function openWorkerPreview(
   session.markDisplayOnly();
   // A cut that holds the whole body lays out like the whole document.
   const loadHere = (): void => {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     if (!host) throw new Error('The first-page preview cannot open');
     if (host.wholeBody) session.setPartialDocument(false);
   };
   let release = (): void => {};
   deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
   try {
-    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS);
+    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     onPosted();
     const opened = await pending;
     if (opened) {
@@ -320,7 +322,10 @@ export function useYrsCoreSession(
   const mediaTokensRef = useRef(options?.mediaTokens);
   mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
-  const projectionStoriesRef = useRef(new Set<string>());
+  const dirtyStoriesRef = useRef(new EditorDirtyStories());
+  const markProjectionStories = useCallback((stories: readonly string[]): void => {
+    for (const story of stories) dirtyStoriesRef.current.add(story);
+  }, []);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
@@ -413,7 +418,7 @@ export function useYrsCoreSession(
     let unregisterSave: (() => void) | null = null;
     let unregisterExport: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
-    projectionStoriesRef.current.clear();
+    dirtyStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
     let abandoned = false;
@@ -650,10 +655,17 @@ export function useYrsCoreSession(
             });
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: (comments, peer) => {
-                if (stale()) return Promise.reject(new Error('The document changed while saving'));
+              save: async (comments, peer) => {
+                if (stale()) throw new Error('The document changed while saving');
                 const currentHost = documentRef.current ?? host?.document;
-                return worker.save({ comments, ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}) }, peer);
+                const dirty = peer ? dirtyStoriesRef.current.captureWorkerSave() : undefined;
+                const saved = await worker.save({
+                  comments,
+                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                  ...(dirty ? { stories: dirty.stories } : {}),
+                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+                dirty?.clear();
+                return saved;
               },
             });
             const gate = { reached: false, wanted: false };
@@ -724,6 +736,7 @@ export function useYrsCoreSession(
                 current: () => !stale(),
                 laidOut: () => laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: markProjectionStories,
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);
                   worker.mirrorReady();
@@ -802,7 +815,7 @@ export function useYrsCoreSession(
         if (opened) {
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
-          projectionStoriesRef.current.clear();
+          dirtyStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
           previewingRef.current = false;
           retiringRef.current = opened.session;
@@ -848,7 +861,7 @@ export function useYrsCoreSession(
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
-      projectionStoriesRef.current.clear();
+      dirtyStoriesRef.current.clear();
     };
   }, [
     enabled,
@@ -858,6 +871,7 @@ export function useYrsCoreSession(
     collaborationClientId,
     collaborationInitialUpdate,
     openInWorker,
+    markProjectionStories,
     retire,
     retirePreview,
   ]);
@@ -1079,13 +1093,13 @@ export function useYrsCoreSession(
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
-      const dirtyStories = projectionStoriesRef.current;
+      const dirtyStories = dirtyStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
+        dirtyStories.projection.projectionOptions()
       );
-      dirtyStories.clear();
+      dirtyStories.projected();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {
@@ -1104,8 +1118,8 @@ export function useYrsCoreSession(
         : typeof stories === 'string'
           ? [stories]
           : stories;
-    for (const story of dirty) projectionStoriesRef.current.add(dirtyProjectionStory(story));
-  }, []);
+    markProjectionStories(dirty);
+  }, [markProjectionStories]);
 
   return {
     session,

@@ -106,7 +106,11 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
   canSave(): boolean;
-  save(request: Parameters<ResidentEngineWorkerClient['save']>[0], peer?: YrsSession): Promise<ArrayBuffer>;
+  save(
+    request: Parameters<ResidentEngineWorkerClient['save']>[0],
+    peer?: YrsSession,
+    adopt?: (apply: () => void) => void
+  ): Promise<ArrayBuffer>;
   exportStructuredWithPages(peer: YrsSession, ...args: Parameters<WorkerOpenExport['export']>): ReturnType<WorkerOpenExport['export']>;
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
@@ -145,7 +149,8 @@ export interface WorkerOpenedPreview {
 export type OpenPreviewInWorker = (
   session: YrsSession,
   bytes: Uint8Array,
-  blocks: number
+  blocks: number,
+  paragraphBudget?: number
 ) => Promise<WorkerOpenedPreview | null>;
 
 export type FontRequirementsInWorker = (
@@ -578,6 +583,7 @@ export function useRustDisplayList(
     digest?: string;
     generation?: number;
     previewBlocks?: number;
+    previewParagraphBudget?: number;
   }>());
   // Display-only previews the worker opened and lays out; their load's whole document takes
   // their worker over.
@@ -1530,6 +1536,7 @@ export function useRustDisplayList(
               : owner.client
                   .openPreview(source.bytes, source.previewBlocks, {
                     heapLimitBytes: workerHeapLimitRef.current,
+                    paragraphBudget: source.previewParagraphBudget,
                   })
                   .then((opened) => {
                     if (!opened) throw new WorkerPreviewRefusedError();
@@ -1665,7 +1672,7 @@ export function useRustDisplayList(
             const owner = workerRef.current;
             return owner !== null && isCurrentWorker(hostEngine, owner) && !owner.client.hasFailed();
           },
-          save: (request, peer) => {
+          save: (request, peer, adopt) => {
             const owner = workerRef.current;
             const failure = workerFailureRef.current.get(hostEngine);
             if (failure) return Promise.reject(failure);
@@ -1684,7 +1691,10 @@ export function useRustDisplayList(
               if (peer) {
                 suppressWorkerInvalidationRef.current += 1;
                 try {
-                  for (const update of saved.updates) peer.applyUpdate(update);
+                  const apply = () => {
+                    for (const update of saved.updates) peer.applyUpdate(update);
+                  };
+                  adopt ? adopt(apply) : apply();
                 } finally {
                   suppressWorkerInvalidationRef.current -= 1;
                 }
@@ -1780,9 +1790,13 @@ export function useRustDisplayList(
   );
 
   const openPreviewInWorker = useCallback<OpenPreviewInWorker>(
-    async (hostEngine, bytes, blocks) => {
+    async (hostEngine, bytes, blocks, paragraphBudget) => {
       if (overrides?.build || !canUseResidentEngineWorker()) return null;
-      workerOpenSourcesRef.current.set(hostEngine, { bytes, previewBlocks: blocks });
+      workerOpenSourcesRef.current.set(hostEngine, {
+        bytes,
+        previewBlocks: blocks,
+        previewParagraphBudget: paragraphBudget,
+      });
       workerPreviewEnginesRef.current.add(hostEngine);
       let owner: NonNullable<typeof workerRef.current> | null = null;
       try {
