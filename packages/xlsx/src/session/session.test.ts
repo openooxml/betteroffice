@@ -18,7 +18,7 @@ import {
 } from './methods';
 
 let fixture: Uint8Array;
-let wasmBytes: Uint8Array;
+let wasmBytes: Uint8Array<ArrayBuffer>;
 
 beforeAll(async () => {
   const [wasm, xlsx] = await Promise.all([
