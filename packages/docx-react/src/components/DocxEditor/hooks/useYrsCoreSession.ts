@@ -644,11 +644,11 @@ export function useYrsCoreSession(
                 const handover = beginWorkerProposalHandover(next);
                 const handedOver = handover ? await handover : null;
                 const update = handedOver ? handedOver.state : await worker.encodeState();
-                return () => {
-                  next.openDocx(source, false);
-                  next.loadState(update);
-                  handedOver?.complete();
-                };
+                return [
+                  () => { next.openDocx(source, false); },
+                  () => next.loadState(update),
+                  () => handedOver?.complete(),
+                ];
               },
               () => {
                 if (registeredWorkerProposalAuthority(next)?.holdsWorkerState()) {
@@ -665,7 +665,12 @@ export function useYrsCoreSession(
                 worker.replicaReady();
                 setReplicaReady(true);
               },
-              { active: () => hydrateOnDemandRef.current, request }
+              { active: () => hydrateOnDemandRef.current, request },
+              {
+                current: () => !stale() && sessionRef.current === next &&
+                  pendingReplicaRef.current === pending,
+                cancel: () => worker.destroy(),
+              }
             );
             if (workerOpenRef.current?.workerProposals) {
               let laidOut = new Promise<void>((resolve) => {
@@ -728,7 +733,7 @@ export function useYrsCoreSession(
             replicaReadyRef.current = false;
             setReplicaReady(false);
             void pending.ready.catch((error: unknown) => {
-              if (!stale()) {
+              if (!stale() && sessionRef.current === next && pendingReplicaRef.current === pending) {
                 const onError = callbacksRef.current?.onReplicaError ?? callbacksRef.current?.onError;
                 onError?.(
                   error instanceof Error ? error : new Error(String(error)),

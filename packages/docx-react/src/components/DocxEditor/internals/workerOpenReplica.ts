@@ -1,4 +1,5 @@
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import { yieldToMainThread } from './yieldToMainThread';
 
 interface PendingReplica {
   ready: Promise<void>;
@@ -28,42 +29,86 @@ const replicas = new WeakMap<YrsSession, PendingReplica>();
 
 export function deferWorkerOpenReplica(
   session: YrsSession,
-  hydrate: () => Promise<() => void>,
+  hydrate: () => Promise<(() => void) | readonly (() => void)[]>,
   fallback: () => void,
   onReady: () => void,
-  onDemand?: WorkerOpenReplicaDemand
+  onDemand?: WorkerOpenReplicaDemand,
+  lifecycle?: { current(): boolean; cancel(): void }
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
   let started = false;
   let finishing = false;
   let failure: unknown;
+  let steps: readonly (() => void)[] | null = null;
+  let nextStep = 0;
+  const controller = new AbortController();
   const ready = new Promise<void>((yes, no) => {
     resolve = yes;
     reject = no;
   });
   void ready.catch(() => {});
+  const current = (): boolean => {
+    if (!replica.pending || controller.signal.aborted) return false;
+    if (lifecycle?.current() !== false) return true;
+    replica.cancel();
+    return false;
+  };
   const finish = (load: () => void, handoff = false): void => {
-    if (!replica.pending || finishing) return;
+    if (!current() || finishing) return;
     finishing = true;
     try {
       try {
         load();
+        if (!current()) return;
         if (handoff) replica.readyVersion = session.version();
       } catch (error) {
         if (!handoff) throw error;
+        if (!current()) return;
         fallback();
       }
+      if (!current()) return;
       replica.loadedVersion = session.version();
       replica.pending = false;
+      steps = null;
+      controller.abort();
       onReady();
       resolve();
     } catch (error) {
       failure = error;
       replica.pending = false;
+      steps = null;
+      controller.abort();
       reject(error);
     } finally {
       finishing = false;
+    }
+  };
+  const loadRemaining = (): void => {
+    while (steps && nextStep < steps.length && current()) steps[nextStep++]!();
+  };
+  const hydrateInTasks = async (load: (() => void) | readonly (() => void)[]): Promise<void> => {
+    if (!current()) return;
+    const plan = typeof load === 'function' ? [load] : load;
+    steps = plan;
+    try {
+      while (nextStep < plan.length) {
+        if (!current()) return;
+        finishing = true;
+        try {
+          plan[nextStep++]!();
+        } finally {
+          finishing = false;
+        }
+        if (!current()) return;
+        if (nextStep < plan.length) {
+          await yieldToMainThread();
+          if (!current()) return;
+        }
+      }
+      finish(() => {}, true);
+    } catch (error) {
+      finish(() => { throw error; }, true);
     }
   };
   const replica: PendingReplica = {
@@ -78,20 +123,24 @@ export function deferWorkerOpenReplica(
       if (started || !replica.pending) return;
       started = true;
       void hydrate().then(
-        (load) => finish(load, true),
+        hydrateInTasks,
         () => finish(fallback)
       );
     },
     ensure() {
-      finish(fallback);
+      finish(steps ? loadRemaining : fallback, steps !== null);
       if (failure !== undefined) throw failure;
     },
     cancel() {
+      if (!replica.pending) return;
       replica.fail(new Error('The document changed while opening the replica'));
+      lifecycle?.cancel();
     },
     fail(error) {
       if (!replica.pending) return;
       replica.pending = false;
+      steps = null;
+      controller.abort();
       failure = error;
       reject(error);
     },

@@ -32,6 +32,7 @@ import {
   SIDEBAR_ANCHOR_STALE_MS,
 } from './internals/sidebarAnchorProjection';
 import { EMPTY_TRACKED_CHANGES_RESULT, type ViewerCommentRanges } from './internals/viewerSidebarReads';
+import { yieldToMainThread } from './internals/yieldToMainThread';
 import { ViewerInput } from './ViewerInput';
 import type { ViewerSelectionChange } from './internals/viewerSelectionController';
 import { CanvasSelectionOverlay } from './overlays/CanvasSelectionOverlay';
@@ -914,6 +915,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, []);
 
     const yrsProjectionVersionRef = useRef(0);
+    const [overlayProjectionSession, setOverlayProjectionSession] = useState<YrsSession | null>(null);
+    useEffect(() => {
+      if (!yrsCore.experimentalWorkerOpen || !yrsCore.replicaReady || !yrsCore.session) return;
+      const controller = new AbortController();
+      const session = yrsCore.session;
+      void yieldToMainThread().then(() => {
+        if (!controller.signal.aborted) setOverlayProjectionSession(session);
+      });
+      return () => controller.abort();
+    }, [yrsCore.experimentalWorkerOpen, yrsCore.replicaReady, yrsCore.session]);
+    const overlayProjectionReady = !yrsCore.experimentalWorkerOpen ||
+      (yrsCore.replicaReady && overlayProjectionSession === yrsCore.session);
     const projectionReplicaReadyRef = useRef(yrsCore.replicaReady);
     if (
       yrsCore.experimentalWorkerOpen &&
@@ -2290,7 +2303,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
               session={viewerDocumentRead ? null : yrsCore.session}
-              positionProjection={getYrsPositionProjection('body')}
+              positionProjection={overlayProjectionReady ? getYrsPositionProjection('body') : null}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
               displayListQueries={displayListQueries}
@@ -2324,7 +2337,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
               displayListQueries={displayListQueries}
-              positionProjection={getYrsPositionProjection('body')}
+              positionProjection={overlayProjectionReady ? getYrsPositionProjection('body') : null}
               applyYrsCommand={applyYrsCommand}
               readOnly={readOnly}
               sidebarOpen={commentsSidebarOpen}

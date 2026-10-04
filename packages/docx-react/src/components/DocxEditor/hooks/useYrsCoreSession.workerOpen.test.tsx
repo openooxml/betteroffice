@@ -1702,6 +1702,28 @@ function holdIdle() {
   };
 }
 
+function holdHydrationTasks() {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
+  const tasks: Array<() => void> = [];
+  Object.defineProperty(globalThis, 'scheduler', {
+    configurable: true,
+    value: { yield: () => new Promise<void>((resolve) => tasks.push(resolve)) },
+  });
+  return {
+    tasks,
+    async run() {
+      const task = tasks.shift();
+      if (!task) throw new Error('No pending hydration task');
+      task();
+      await Promise.resolve();
+    },
+    restore: registerRestore(() => {
+      if (descriptor) Object.defineProperty(globalThis, 'scheduler', descriptor);
+      else Reflect.deleteProperty(globalThis, 'scheduler');
+    }),
+  };
+}
+
 function holdPeerFallback() {
   const schedule = globalThis.setTimeout;
   const unschedule = globalThis.clearTimeout;
@@ -1806,6 +1828,287 @@ function stubDocumentVisibility(initial: 'visible' | 'hidden') {
     }),
   };
 }
+
+test('worker hydration opens and loads in separate tasks before publishing readiness', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    let ready = false;
+    const pending = requestWorkerOpenReplica(session)!;
+    void pending.then(() => { ready = true; });
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(ready).toBe(false);
+    expect(replicas).toEqual([]);
+    await act(async () => tasks.run());
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(ready).toBe(false);
+    expect(replicas).toEqual([]);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(ready).toBe(true);
+    expect(replicas).toEqual([session]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each(['replace', 'unmount'] as const)('a document %s between hydration tasks stops the stale peer', async (action) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const props = { ...initialProps,
+      collaboration: { onReplica: (session: unknown) => replicas.push(session as YrsSession | null) },
+    };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const errors = result.current.errors;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(result.current.mainOpens).toEqual([false]);
+    if (action === 'replace') {
+      rerender({ ...props, source: bytes.slice(), generation: 2 });
+      await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+      expect(result.current.core.session).not.toBe(session);
+    } else {
+      unmount();
+    }
+    await act(async () => tasks.run());
+    await expect(pending).rejects.toThrow('The document changed');
+    expect(load).not.toHaveBeenCalled();
+    expect(replicas).toEqual([]);
+    expect(errors).toEqual([]);
+    if (action === 'replace') {
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    }
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test('overlay projection builds in a task after replica readiness', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const restoreFonts = registerRestore(() => {
+    if (fonts) Object.defineProperty(document, 'fonts', fonts);
+    else Reflect.deleteProperty(document, 'fonts');
+  });
+  let restoreSegments = () => {};
+  try {
+    if (!document.fonts) Object.defineProperty(document, 'fonts', {
+      value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+    });
+    const { result } = renderHook(useHarness, { initialProps });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.queries?.isReady()).toBe(true));
+    const segments = spyOn(session, 'storySegments');
+    restoreSegments = registerRestore(() => segments.mockRestore());
+    const target = document.createElement('div');
+    const host = createRef<HTMLDivElement>();
+    const editor = () => <PagedEditor document={result.current.host!.document}
+      yrsCore={{ ...result.current.core, hydrateOnDemand: true }} readOnly
+      canvasOverlayTarget={target} canvasHostRef={host}
+      displayListQueries={result.current.renderer.queries}
+      measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+      fontRequirementsInWorker={result.current.renderer.fontRequirementsInWorker}
+      layoutInWorker={result.current.renderer.layoutInWorker} />;
+    const view = render(editor());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    await act(async () => tasks.run());
+    expect(segments).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    view.rerender(editor());
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(segments).not.toHaveBeenCalled();
+    expect(tasks.tasks).toHaveLength(1);
+    await act(async () => tasks.run());
+    expect(segments).toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreSegments();
+      restoreFonts();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yield %s once', async (boundary) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    if (boundary === 2) await act(async () => tasks.run());
+    act(() => {
+      ensureWorkerOpenReplica(session);
+      expect(session.hasStory('body')).toBe(true);
+      expect(result.current.core.replicaReadyRef?.current).toBe(true);
+      expect(load).toHaveBeenCalledTimes(1);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each([false, true])('a loadState error after yielding preserves replica fallback with failure=%s', async (fails) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames();
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  let restoreOpen = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const loadError = new Error('State load failed');
+    const fallbackError = new Error('Replica fallback failed');
+    const load = spyOn(session, 'loadState').mockImplementation(() => { throw loadError; });
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const originalOpen = session.openDocx.bind(session);
+    const fallbackSeeds: boolean[] = [];
+    const open = spyOn(session, 'openDocx').mockImplementation((source, seed, options) => {
+      fallbackSeeds.push(seed);
+      if (fails && seed) throw fallbackError;
+      return originalOpen(source, seed, options);
+    });
+    restoreOpen = registerRestore(() => open.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    await act(async () => {
+      await tasks.run();
+      if (fails) await expect(pending).rejects.toBe(fallbackError);
+      else await pending;
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(fallbackSeeds).toEqual([false, true]);
+    expect(result.current.core.replicaReady).toBe(!fails);
+    expect(result.current.core.replicaReadyRef?.current).toBe(!fails);
+    expect(replicas).toEqual(fails ? [] : [session]);
+    expect(result.current.errors).toEqual(fails ? [fallbackError] : []);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreOpen();
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
 
 test('a hidden document starts the editor peer immediately without layout or idle', async () => {
   const { workers, posted } = installWorker({ holdState: true });
