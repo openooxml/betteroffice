@@ -9,6 +9,7 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
   EditorDirtyStories,
+  dirtyProjectionStory,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
@@ -53,7 +54,7 @@ type Story = (typeof STORIES)[number];
 type Topology = 'A/editor' | 'B/viewer';
 type Action =
   | 'insert' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
-  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo';
+  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save';
 interface Operation {
   action: Action;
   story: Story;
@@ -237,6 +238,10 @@ interface Arms {
   main: MainArm;
   editorStories: EditorDirtyStories;
   peer?: YrsSession;
+  unsubscribe?: () => void;
+  adoptingWorkerSaveUpdates: boolean;
+  handbackRemoteUpdates: number;
+  otherRemoteUpdates: number;
   mirror?: ResidentProposalReply['mirror'];
   commentStories: Map<number, Story>;
   nextComment: number;
@@ -270,16 +275,29 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
       throw new Error('The foreign inline run was not retained as raw XML');
     }
     const editorStories = new EditorDirtyStories();
-    return {
+    const arms: Arms = {
       worker, client, log,
       workerHost: decodeDocxHostJson(hostJson, source).document,
       main: new MainArm(session, host, topology === 'A/editor'
         ? (story) => editorStories.add(story) : undefined),
       editorStories,
+      adoptingWorkerSaveUpdates: false, handbackRemoteUpdates: 0, otherRemoteUpdates: 0,
       ...(topology === 'A/editor' ? { peer: session } : {}),
       commentStories: new Map<number, Story>([[1, 'body'], [2, 'hf:rIdH1']]),
       nextComment: 3, nextProposal: 1,
     };
+    if (topology === 'A/editor') {
+      const session = arms.main.session;
+      // PagedEditor remote listener -> publishDirectInput(undefined).
+      arms.unsubscribe = session.onUpdate((_update, origin) => {
+        if (origin !== 'remote') return;
+        if (arms.adoptingWorkerSaveUpdates) arms.handbackRemoteUpdates += 1;
+        else arms.otherRemoteUpdates += 1;
+        if (!session.hasStory('body')) return;
+        editorStories.add(dirtyProjectionStory(session.selection()?.head.story ?? 'body'));
+      });
+    }
+    return arms;
   } catch (error) {
     client.destroy();
     session?.destroy();
@@ -570,11 +588,12 @@ function operations(topology: Topology, random: Random): Operation[] {
       { action: 'project', story: 'body' },
       { action: 'insert', story: 'hf:rIdH1' },
     ],
-    group(random.pick(STORIES), ['insert', 'undo', 'redo'])
+    group(random.pick(STORIES), ['insert', 'undo', 'redo']),
+    group(random.pick(STORIES), ['save', 'save'])
   );
   const required = random.shuffle(groups).flat();
   const weighted: Action[] = ['insert', 'insert', 'delete', 'delete', 'addComment', 'addComment',
-    'reply', 'reply', 'deleteComment', 'workerDeleteComment', 'proposal', 'decide', 'withdraw', 'flush',
+    'reply', 'reply', 'deleteComment', 'workerDeleteComment', 'proposal', 'decide', 'withdraw', 'flush', 'save',
     ...(topology === 'A/editor' ? ['project', 'undo', 'redo'] as const : [])];
   while (required.length < OPS) {
     const action = random.pick(weighted);
@@ -611,27 +630,81 @@ function partDifferences(worker: Uint8Array, main: Uint8Array): Array<{ part: st
   return differences;
 }
 
-function danglingRangeMarkers(parts: Record<string, Uint8Array>, part: string): string[] {
-  const text = (name: string) => parts[name] ? new TextDecoder().decode(parts[name]) : '';
-  const ids = new Set(
-    [...text('word/comments.xml').matchAll(/<w:comment\b[^>]*\bw:id="([^"]+)"/g)].map((match) => match[1]!)
+function liveCommentIds(parts: Record<string, Uint8Array>): ReadonlySet<string> {
+  const xml = parts['word/comments.xml'] ? new TextDecoder().decode(parts['word/comments.xml']) : '';
+  return new Set(
+    [...xml.matchAll(/<w:comment\b[^>]*\bw:id="([^"]+)"/g)].map((match) => match[1]!)
   );
-  return [...text(part).matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
+}
+
+function danglingRangeMarkers(parts: Record<string, Uint8Array>, part: string): string[] {
+  const xml = parts[part] ? new TextDecoder().decode(parts[part]) : '';
+  const ids = liveCommentIds(parts);
+  return [...xml.matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
     .map((match) => match[1]!)
     .filter((id) => !ids.has(id));
 }
 
-// Deferred: after a host projection, the main-thread save keeps the range markers of a comment
-// deleted outside the selection's story; the worker writes the story as it is.
-function staleMainCommentMarkers(worker: Uint8Array, main: Uint8Array, parts: readonly string[]): boolean {
-  const actual = unzipContainer(worker);
-  const expected = unzipContainer(main);
-  return parts.length > 0 && parts.every((part) =>
-    /^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) &&
-    danglingRangeMarkers(actual, part).length === 0 &&
-    danglingRangeMarkers(expected, part).length > 0
+const COMMENT_RANGE_MARKER = /<w:commentRange(?:Start|End)\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>/g;
+const COMMENT_REFERENCE_RUN =
+  /<w:r\b[^<>]*>\s*(?:<w:rPr\b[^<>]*>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>\s*)?<w:commentReference\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>\s*<\/w:r>/g;
+
+function withoutStaleCommentMarkers(xml: string, liveIds: ReadonlySet<string>): string {
+  return [COMMENT_REFERENCE_RUN, COMMENT_RANGE_MARKER].reduce((text, pattern) =>
+    text.replace(pattern, (marker, id: string) => liveIds.has(id) ? marker : ''), xml
   );
 }
+
+// Deferred: after a host projection, the main-thread save keeps the range markers of a comment
+// deleted outside the selection's story; the worker writes the story as it is.
+function staleMainCommentMarkers(
+  worker: Uint8Array, main: Uint8Array, parts: readonly string[], log: string[]
+): boolean {
+  const actual = unzipContainer(worker);
+  const expected = unzipContainer(main);
+  const liveIds = liveCommentIds(expected);
+  const matches = parts.length > 0 && parts.every((part) =>
+    /^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) &&
+    danglingRangeMarkers(actual, part).length === 0 &&
+    danglingRangeMarkers(expected, part).length > 0 &&
+    actual[part] !== undefined && expected[part] !== undefined &&
+    withoutStaleCommentMarkers(new TextDecoder().decode(expected[part]), liveIds) ===
+      new TextDecoder().decode(actual[part])
+  );
+  if (matches) {
+    for (const part of parts) {
+      const xml = new TextDecoder().decode(expected[part]);
+      const ids = [COMMENT_RANGE_MARKER, COMMENT_REFERENCE_RUN].flatMap((pattern) =>
+        [...xml.matchAll(pattern)].map((match) => match[1]!).filter((id) => !liveIds.has(id))
+      );
+      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...new Set(ids)])}`);
+    }
+  }
+  return matches;
+}
+
+test('the stale comment marker exemption removes only dangling markers', () => {
+  const worker = '<w:p><w:r><w:t>text</w:t></w:r></w:p>';
+  const range = '<w:commentRangeStart w:id="7"/><w:commentRangeEnd w:id="7"/>';
+  const reference = '<w:r><w:commentReference w:id="7"/></w:r>';
+  const formattedReference = '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr>' +
+    '<w:commentReference w:id="7"/></w:r>';
+  const main = worker.replace('</w:p>', `${range}${reference}${formattedReference}</w:p>`);
+  const liveIds = new Set<string>();
+  expect(withoutStaleCommentMarkers(main, liveIds)).toBe(worker);
+  expect(withoutStaleCommentMarkers(main.replace('text', 'text!'), liveIds)).not.toBe(worker);
+  expect(withoutStaleCommentMarkers(main.replace('</w:p>', '<x:foreign/></w:p>'), liveIds))
+    .not.toBe(worker);
+  expect(withoutStaleCommentMarkers(main, new Set(['7']))).toBe(main);
+  const mixed = '<w:r><w:commentReference w:id="7"/><w:t>keep</w:t></w:r>';
+  expect(withoutStaleCommentMarkers(mixed, liveIds)).toBe(mixed);
+  const foreign = reference.replace('</w:r>', '<x:foreign/></w:r>');
+  expect(withoutStaleCommentMarkers(foreign, liveIds)).toBe(foreign);
+  const mixedMarkers = `<w:r>${range}<w:commentReference w:id="7"/></w:r>`;
+  expect(withoutStaleCommentMarkers(mixedMarkers, liveIds)).toBe(reference);
+  const bare = '<w:commentReference w:id="7"/>';
+  expect(withoutStaleCommentMarkers(bare, liveIds)).toBe(bare);
+});
 
 test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => {
   const mismatchingSeeds = new Set<number>();
@@ -641,6 +714,8 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   let erroredSeeds = 0;
   let seedsRun = 0;
   let savesCompared = 0;
+  let handbackRemoteUpdates = 0;
+  let otherRemoteUpdates = 0;
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const random = new Random(seed);
     const topology: Topology = random.int(2) === 0 ? 'A/editor' : 'B/viewer';
@@ -662,10 +737,12 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         const differences = partDifferences(new Uint8Array(actual.bytes), expected);
         if (differences.length > 0) {
           const parts = differences.map(({ part }) => part);
-          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts)) {
+          const exemptions: string[] = [];
+          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, exemptions)) {
             staleMainSeeds.add(seed);
             staleMainSaves += 1;
-            log.push(`stale main-thread comment markers in ${parts.join(', ')}`);
+            log.push(...exemptions);
+            console.log(exemptions.map((line) => `seed=${seed} save=${saveNumber} ${line}`).join('\n'));
           } else {
             mismatchingSeeds.add(seed);
             failures.push(
@@ -676,7 +753,14 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         }
         if (current.peer) {
           if (actual.updates.length !== 1) throw new Error('Editor save did not return exactly one diff');
-          for (const update of actual.updates) current.peer.applyUpdate(update);
+          current.adoptingWorkerSaveUpdates = true;
+          try {
+            current.editorStories.adoptWorkerSaveUpdates(() => {
+              for (const update of actual.updates) current.peer!.applyUpdate(update);
+            });
+          } finally {
+            current.adoptingWorkerSaveUpdates = false;
+          }
         } else if (actual.updates.length !== 0) {
           throw new Error('Viewer save returned peer updates without a peer');
         }
@@ -688,7 +772,13 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       const forcedSave = random.int(planned.length);
       for (let index = 0; index < planned.length; index += 1) {
         log.push(`op ${index + 1}/${planned.length}: ${JSON.stringify(planned[index])}`);
-        await applyOperation(current, planned[index]!, random);
+        const operation = planned[index]!;
+        if (operation.action === 'save') {
+          focus(current, operation.story, random);
+          await compareSave();
+        } else {
+          await applyOperation(current, operation, random);
+        }
         if (current.peer && random.int(4) === 0) await flushPeer(current);
         if (index === forcedSave || random.int(6) === 0) {
           await compareSave();
@@ -709,6 +799,9 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         (error instanceof Error ? error.stack : String(error))
       );
     } finally {
+      arms?.unsubscribe?.();
+      handbackRemoteUpdates += arms?.handbackRemoteUpdates ?? 0;
+      otherRemoteUpdates += arms?.otherRemoteUpdates ?? 0;
       arms?.client.destroy();
       arms?.main.session.destroy();
     }
@@ -717,7 +810,8 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
     `resident save differential: seeds run=${seedsRun}, saves compared=${savesCompared}, ` +
     `mismatching seeds=${mismatchingSeeds.size}, errored seeds=${erroredSeeds}, ` +
     `stale main-thread comment markers: ${staleMainSaves} saves in ${staleMainSeeds.size} seeds ` +
-    `[${[...staleMainSeeds].join(',')}]`
+    `[${[...staleMainSeeds].join(',')}], ` +
+    `handback remote updates=${handbackRemoteUpdates}, other remote updates=${otherRemoteUpdates}`
   );
   if (failures.length > 0) console.error(failures.join('\n\n'));
   expect(failures.length).toBe(0);
