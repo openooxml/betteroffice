@@ -593,7 +593,7 @@ test('saved paragraph ID claims refresh editor point geometry without another ed
   const session = harness.core.session!;
   act(() => {
     session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
-    editor.current!.syncYrsInputState(true, 'body');
+    editor.current!.syncYrsInputState(true, ['body']);
   });
   await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
   await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
