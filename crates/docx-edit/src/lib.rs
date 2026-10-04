@@ -980,10 +980,10 @@ impl EditingDoc {
         let mut media = self.media.lock().unwrap();
         if media.is_none() {
             let bytes = match self.source.lock().unwrap().as_ref()? {
-                identity::SourcePackage::Pending(bytes, _) => Arc::clone(bytes),
+                identity::SourcePackage::Pending(bytes, _) => bytes.clone(),
                 identity::SourcePackage::Ready(index) => index.bytes(),
             };
-            let package = ooxml_opc::RetainedPackage::new(bytes).ok()?;
+            let package = ooxml_opc::RetainedPackage::from_bytes(bytes).ok()?;
             *media = Some(Arc::new(docx_parse::media::MediaTable::new(package).ok()?));
         }
         media.clone()
@@ -993,6 +993,7 @@ impl EditingDoc {
     /// a replica hydrated from state resolves source and persisted anchors and
     /// reserves the package's paragraph IDs. Indexed on first identity use.
     pub fn retain_source_docx(&self, bytes: impl Into<Arc<[u8]>>) {
+        let bytes: Arc<[u8]> = bytes.into();
         self.retain_source(identity::SourcePackage::Pending(bytes.into(), None));
     }
 
@@ -1023,7 +1024,7 @@ impl EditingDoc {
         let index = match source.as_ref()? {
             identity::SourcePackage::Ready(index) => return Some(Arc::clone(index)),
             identity::SourcePackage::Pending(bytes, digest) => {
-                seed::source_index(Arc::clone(bytes), digest.clone())
+                seed::source_index(bytes.clone(), digest.clone())
                     .ok()
                     .map(Arc::new)
             }

@@ -360,12 +360,13 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
 
   const binding = useMemo<DocxCommandBinding>(() => {
     const bridge = () => latest.current.bridgeRef.current;
+    const viewer = () => latest.current.viewerSession || latest.current.pagedEditorRef.current?.isWorkerViewer?.() === true;
 
     const environment = (executing: boolean): DocxCommandEnvironment => {
       const current = latest.current;
       const editor = bridge();
       const authoritySession = current.session;
-      const session = current.viewerSession ? null : authoritySession;
+      const session = viewer() ? null : authoritySession;
       const t = translationRef.current;
       const status: DocxCommandEnvironment['status'] = current.isLoading
         ? 'loading'
@@ -376,7 +377,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
             : 'ready';
       let toolbar: YrsToolbarSelection | null | undefined;
       const readToolbar = () => {
-        if (current.viewerSession) return null;
+        if (viewer()) return null;
         if (toolbar === undefined) toolbar = editor?.toolbarSelection(executing) ?? null;
         return toolbar;
       };
@@ -414,7 +415,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
           const read = status === 'ready' ? readToolbar() : null;
           selectionMemo = read
             ? selectionEnvironment(read, current)
-            : !current.viewerSession && status === 'ready' && editor?.hasSelection()
+            : !viewer() && status === 'ready' && editor?.hasSelection()
               ? 'unsupported'
               : null;
           return selectionMemo;
@@ -429,7 +430,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
         },
         get image() {
           if (imageMemo !== undefined) return imageMemo;
-          const selected = !current.viewerSession && status === 'ready' ? (editor?.selectedImage() ?? null) : null;
+          const selected = !viewer() && status === 'ready' ? (editor?.selectedImage() ?? null) : null;
           imageMemo = selected ? { wrap: imageWrapTarget(selected.attrs) } : null;
           return imageMemo;
         },
@@ -714,7 +715,7 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
             try {
               if (!editor || !session) throw new DocxCommandAdmissionError('editor-unavailable');
               // A replica still to load has no input to wait for; the pages print as shown.
-              if (!workerOpenReplicaOnDemand(session)) await editor.runAfterPendingInput(() => undefined);
+              if (!viewer() && !workerOpenReplicaOnDemand(session)) await editor.runAfterPendingInput(() => undefined);
               const displayList = await latest.current.renderedDisplayList();
               assertCurrent();
               await job.prepare(displayList);
@@ -775,11 +776,12 @@ export function useDocxCommandBinding(inputs: DocxCommandInputs): DocxCommandsHa
     };
 
     return {
+      isViewer: viewer,
       environment,
       ordered: (id, args) => {
         if (
-          (id === 'reviewAccept' || id === 'reviewReject') &&
-          latest.current.pagedEditorRef.current?.isWorkerViewer() === true
+          (id === 'reviewAccept' || id === 'reviewReject' || id === 'reviewNext' || id === 'reviewPrevious') &&
+          viewer()
         ) return false;
         const session = latest.current.session;
         if (
