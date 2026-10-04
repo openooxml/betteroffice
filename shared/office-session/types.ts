@@ -1,4 +1,9 @@
-import type { TransferResult } from './protocol';
+import type { DeferredReply, TransferResult } from './protocol';
+import type { ResidentScheduler } from './scheduler';
+
+export const SESSION_SUPERSEDED = 'SessionSuperseded';
+export type SessionScheduler = Pick<ResidentScheduler,
+  'schedule' | 'dispatch' | 'bump' | 'budget' | 'pending' | 'version' | 'generation'>;
 
 /** Format-owned, structured-cloneable methods. */
 export type SessionMethods = Record<string, (...args: any[]) => unknown>;
@@ -14,7 +19,9 @@ export type MethodHandlers<M extends SessionMethods, C> = {
   ) =>
     | Awaited<ReturnType<M[K]>>
     | TransferResult<Awaited<ReturnType<M[K]>>>
-    | Promise<Awaited<ReturnType<M[K]>> | TransferResult<Awaited<ReturnType<M[K]>>>>;
+    | DeferredReply<Awaited<ReturnType<M[K]>>>
+    | Promise<Awaited<ReturnType<M[K]>> | TransferResult<Awaited<ReturnType<M[K]>>> |
+        DeferredReply<Awaited<ReturnType<M[K]>>>>;
 };
 
 export interface MethodPolicy {
@@ -23,6 +30,9 @@ export interface MethodPolicy {
   reframes?: boolean;
   reorderable?: boolean;
   key?: string;
+  replaceableBy?: string;
+  userInput?: boolean;
+  holdsIdleTasks?: boolean;
 }
 
 export type MethodPolicies<M extends SessionMethods> = { [K in keyof M]: MethodPolicy };

@@ -12,7 +12,11 @@ export function createInProcessPair(): { client: SessionTransport; host: Session
       const cloned = structuredClone(message, { transfer });
       const timer = setTimeout(() => {
         timers.delete(timer);
-        if (!closed) for (const listener of [...listeners[1 - side]!]) listener(cloned);
+        const receiving = listeners[1 - side]!;
+        for (const listener of [...receiving]) {
+          if (closed) break;
+          if (receiving.has(listener)) listener(cloned);
+        }
       }, 0);
       timers.add(timer);
     },
