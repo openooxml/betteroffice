@@ -10,7 +10,7 @@ if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 
 // The second session a load creates is the full one, after its preview.
 const real = await import('@betteroffice/docx/yrs');
@@ -308,7 +308,56 @@ test('an untaken worker session whose render and open fail reports the error onc
   }
 }, 30_000);
 
-test('a stale worker open failure keeps the replacement preview read-only', async () => {
+test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only while opening with %s', async (mode) => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  workerOpen = mock(async () => { await held; return null; });
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const view = render(<DocxEditor ref={ref} previewFirstPage experimentalWorkerOpen
+    readOnly={mode === 'readOnly'} mode={mode === 'viewing' ? 'viewing' : 'editing'}
+    documentBuffer={documentBuffer()} onError={(error) => errors.push(error)} />);
+  try {
+    await waitFor(() => {
+      expect(renderer!.displayList).not.toBeNull();
+      expect((renderer!.presentedEngine as YrsSession).isDisplayOnly()).toBe(true);
+      expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
+    }, { timeout: 10_000 });
+    const preview = renderer!.presentedEngine as YrsSession;
+    const version = preview.version();
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(true);
+    expect(ref.current!.getDocument()).toBeNull();
+    fireEvent.input(textarea, { target: { value: 'ignored' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    fireEvent.paste(textarea, { clipboardData: { getData: () => 'ignored paste' } });
+    await act(async () => {});
+    expect(ref.current!.getEditorRef()!.hasPendingInput()).toBe(false);
+    expect(preview.version()).toBe(version);
+    const before = preview.paragraphs('body').map((paragraph) => paragraph.text);
+    await act(async () => release());
+    await waitFor(() => {
+      expect(renderer!.presentedEngine).toBe(fullSession);
+      expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
+    }, { timeout: 10_000 });
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((fullSession as YrsSession).paragraphs('body').slice(0, before.length)
+      .map((paragraph) => paragraph.text)).toEqual(before);
+    expect(ref.current!.getEditorRef()!.hasPendingInput()).toBe(false);
+    expect(errors).toEqual([]);
+  } finally {
+    view.unmount();
+    release();
+  }
+}, 30_000);
+
+test('a stale worker open failure keeps the replacement preview accepting input', async () => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -356,14 +405,14 @@ test('a stale worker open failure keeps the replacement preview read-only', asyn
     expect(openInWorker.mock.calls[1][0] as unknown).toBe(fullSession);
     expect(preview).not.toBe(fullSession);
     expect(preview.isDisplayOnly()).toBe(true);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
     expect(ref.current!.getDocument()).toBeNull();
 
     await act(async () => {
       releaseA();
       await new Promise((done) => setTimeout(done, 200));
     });
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
     expect(ref.current!.getDocument()).toBeNull();
     expect(errors).toEqual([]);
     expect(renderer!.layoutEngine).toBe(preview);
@@ -402,7 +451,7 @@ test('a load whose full session fails to render fails, and leaves no session beh
   await expectWaitRejects(ref);
 }, 30_000);
 
-test('a full session whose canvas replay rejects during preview handover fails the load once', async () => {
+test.each([false, true])('a full session whose canvas replay rejects during preview handover fails the load once with workerOpen=%s', async (experimentalWorkerOpen) => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -412,7 +461,7 @@ test('a full session whose canvas replay rejects during preview handover fails t
   const ref = createRef<Editor>();
   const errors: Error[] = [];
   const replayError = new Error('full canvas replay failed');
-  const view = render(load(documentBuffer(), (error) => errors.push(error), ref));
+  const view = render(load(documentBuffer(), (error) => errors.push(error), ref, experimentalWorkerOpen));
   const replay = await currentCanvasReplay();
 
   expect(created).toBe(2);
@@ -421,7 +470,7 @@ test('a full session whose canvas replay rejects during preview handover fails t
   expect(renderer!.presentedEngine).toBe(fullSession);
   expect(renderer!.displayList).toBe(replay.displayList);
   expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
-  expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+  expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
   expect(ref.current!.getDocument()).toBeNull();
   expect(errors).toEqual([]);
 
@@ -446,7 +495,7 @@ test('a full session whose canvas replay rejects during preview handover fails t
   await expectWaitRejects(ref);
 }, 30_000);
 
-test('a preview whose canvas replay rejects during full-session handover does not fail the load', async () => {
+test.each([false, true])('a preview whose canvas replay rejects during full-session handover does not fail the load with workerOpen=%s', async (experimentalWorkerOpen) => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -460,7 +509,7 @@ test('a preview whose canvas replay rejects during full-session handover does no
     const ref = createRef<Editor>();
     const errors: Error[] = [];
     const replayError = new Error('preview canvas replay failed');
-    const view = render(load(documentBuffer(), (error) => errors.push(error), ref));
+    const view = render(load(documentBuffer(), (error) => errors.push(error), ref, experimentalWorkerOpen));
     await waitFor(
       () => {
         expect(fullSession).not.toBeNull();
@@ -478,7 +527,7 @@ test('a preview whose canvas replay rejects during full-session handover does no
     expect(renderer!.layoutEngine).toBe(fullSession);
     expect(renderer!.displayList).toBe(replay.displayList);
     expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
     expect(ref.current!.getDocument()).toBeNull();
     expect(errors).toEqual([]);
 
@@ -495,7 +544,7 @@ test('a preview whose canvas replay rejects during full-session handover does no
     expect(renderer!.layoutEngine).toBe(fullSession);
     expect(renderer!.presentedEngine).toBe(previewEngine);
     expect(renderer!.displayList).toBe(replay.displayList);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
     expect(ref.current!.getDocument()).toBeNull();
 
     holdCanvasReplay = 'full';
@@ -506,7 +555,7 @@ test('a preview whose canvas replay rejects during full-session handover does no
     expect(fullReplay.displayList).not.toBe(replay.displayList);
     expect(renderer!.displayList).toBe(fullReplay.displayList);
     expect(isPresented(renderer!.canvasHostRef.current, fullReplay.displayList)).toBe(false);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
     expect(ref.current!.getDocument()).toBeNull();
 
     await act(async () => {

@@ -82,6 +82,8 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  holdInput,
+  inputScope,
   viewerDocumentRead,
   showHiddenText = false,
   onYrsContentChange,
@@ -169,6 +171,8 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
   /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
   viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
   showHiddenText?: boolean;
@@ -466,6 +470,8 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        holdInput={holdInput}
+        inputScope={inputScope}
         viewerDocumentRead={viewerDocumentRead}
         showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}

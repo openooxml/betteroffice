@@ -225,6 +225,8 @@ export interface PagedEditorProps {
   firstPageFooterContent?: HeaderFooter | null;
   /** Whether the editor is read-only. */
   readOnly?: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
   /**
    * A viewer session's reads of the document the resident worker holds. The session holds no
    * document on this thread: selection, copy and point reads go to the worker.
@@ -541,6 +543,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       firstPageHeaderContent,
       firstPageFooterContent,
       readOnly = false,
+      holdInput = false,
+      inputScope,
       viewerDocumentRead: viewerDocumentReadProp,
       onViewerCommentRangesChange,
       viewerSidebarActive = true,
@@ -1627,13 +1631,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       getYrsPositionProjection,
       applyYrsCommand,
       syncYrsInputState,
-      readOnly,
+      readOnly: readOnly && !holdInput,
+      inputScope,
       replicaPending: viewerDocumentRead
         ? undefined
         : () =>
-            !!yrsCore.experimentalWorkerOpen &&
-            !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady),
-      replicaReady: viewerDocumentRead ? true : yrsCore.replicaReady,
+            holdInput ||
+            (!!yrsCore.experimentalWorkerOpen &&
+              !(yrsCore.replicaReadyRef?.current ?? yrsCore.replicaReady)),
+      replicaReady: holdInput ? false : viewerDocumentRead ? true : yrsCore.replicaReady,
       partEdit,
       displayListQueries,
       canvasHostRef,
@@ -2193,11 +2199,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           <YrsInput
             ref={yrsInputRef}
             enabled
-            readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
+            readOnly={(readOnly && !holdInput) || (!!partEdit && activeYrsRootStory === 'body')}
+            holdInput={holdInput}
+            inputScope={inputScope}
             replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}
-            seedSelection={!yrsCore.hydrateOnDemand}
+            seedSelection={!yrsCore.hydrateOnDemand && !holdInput}
             session={yrsCore.session}
             story={activeYrsRootStory}
             isSuggesting={isSuggesting}

@@ -490,6 +490,278 @@ function useHarness(props: HarnessProps) {
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
 
+async function openingEditor(workerPreview = true, viewer = false) {
+  const isFullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  const worker = installWorker(workerPreview
+    ? { holdReply: isFullOpen, holdState: true }
+    : { holdOpen: true, holdState: true });
+  const frames = holdFrames();
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  const props = { ...initialProps, source: longBytes, previewFirstPage: true, workerPreview,
+    hydrateOnDemand: viewer, workerProposals: viewer, readOnly: viewer };
+  function Editable({ source, generation }: Pick<HarnessProps, 'source' | 'generation'>) {
+    harness = useHarness({ ...props, source, generation });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        readOnly={viewer || harness.core.opening} holdInput={!viewer && harness.core.opening} inputScope={generation}
+        viewerDocumentRead={viewer ? harness.renderer.readWorkerDocument : undefined}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  const view = render(<Editable {...props} />);
+  const waitForPreview = async (generation = 1) => {
+    await waitFor(() => {
+      expect(harness.core.previewing).toBe(true);
+      expect(harness.core.sessionGeneration).toBe(generation);
+    });
+    const preview = harness.core.session!;
+    act(() => harness.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(harness.renderer.presentedEngine).toBe(preview));
+    act(() => harness.presentFrame());
+    return preview;
+  };
+  try {
+    const preview = await waitForPreview();
+    await waitFor(() => expect(worker.posted.some(isFullOpen)).toBe(true));
+    const click = (position: number) => {
+      const queries = harness.renderer.queries!;
+      const caret = queries.caretRect(position)!;
+      const size = queries.pageSize(0)!;
+      const canvas = canvasHost.current!.firstElementChild!;
+      canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
+        bottom: size.height, ...size }) as DOMRect;
+      const point = { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 };
+      fireEvent.mouseDown(canvas, point);
+      fireEvent.mouseUp(window, point);
+      fireEvent.click(canvas, point);
+    };
+    const switchToFull = async () => {
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(worker.posted.some(isFullOpen)).toBe(true));
+      const request = worker.posted.filter(isFullOpen).at(-1)!;
+      if (workerPreview) await waitFor(() => expect(worker.replies.has(request.id)).toBe(true));
+      await act(async () => {
+        if (workerPreview) worker.reply(request);
+        else worker.workers.at(-1)!.release();
+      });
+      await waitFor(() => expect(harness.core.previewing).toBe(false));
+      expect(harness.core.opening).toBe(true);
+      expect(harness.core.replicaReady).toBe(false);
+      return harness.core.session!;
+    };
+    const presentFull = async (full: YrsSession) => {
+      act(() => harness.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(harness.renderer.presentedEngine).toBe(full));
+      act(() => harness.presentFrame());
+      expect(harness.core.opening).toBe(false);
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(true));
+    };
+    const loadPeer = async (full: YrsSession) => {
+      await act(async () => {
+        worker.workers.at(-1)!.release();
+        await awaitWorkerOpenReplica(full);
+        await editor.current!.flushPendingInput();
+      });
+    };
+    return {
+      ...worker, frames, editor, view, preview, click, switchToFull, presentFull, loadPeer,
+      get harness() { return harness; },
+      async replace() {
+        view.rerender(<Editable source={longBytes.slice()} generation={2} />);
+        const replacement = await waitForPreview(2);
+        await waitFor(() => expect(worker.workers).toHaveLength(2));
+        return replacement;
+      },
+      close() {
+        view.unmount();
+        frames.restore();
+      },
+    };
+  } catch (error) {
+    view.unmount();
+    frames.restore();
+    throw error;
+  }
+}
+
+test('keys typed during opening land in order, none dropped', async () => {
+  const opened = await openingEditor();
+  const insert = spyOn(opened.preview, 'insertText');
+  const split = spyOn(opened.preview, 'splitParagraph');
+  const remove = spyOn(opened.preview, 'deleteRange');
+  const select = spyOn(opened.preview, 'setSelection');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    const version = opened.preview.version();
+    expect(opened.preview.storyIds()).toEqual([]);
+    expect(textarea.readOnly).toBe(false);
+    opened.click(6);
+    expect(document.activeElement).toBe(textarea);
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.input(textarea, { target: { value: 'BC' } });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    let clipboard = 'P\r\nQ';
+    fireEvent.paste(textarea, { clipboardData: { getData: () => clipboard } });
+    clipboard = 'invalidated';
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.preview.version()).toBe(version);
+    expect(insert).not.toHaveBeenCalled();
+    expect(split).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    try {
+      expect(full.storyIds()).toEqual([]);
+      await opened.presentFull(full);
+      fireEvent.input(textarea, { target: { value: 'R' } });
+      expect(load).not.toHaveBeenCalled();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body').slice(0, 3).map((paragraph) => paragraph.text))
+        .toEqual(['FirstA', 'BP', 'QR paragraph']);
+      expect(full.selection()?.head).toEqual({
+        story: 'body', paraId: full.paragraphs('body')[2].paraId, offset: 2,
+      });
+      act(() => opened.harness.presentFrame());
+      act(() => opened.frames.run());
+      act(() => opened.frames.run());
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body').slice(0, 3).map((paragraph) => paragraph.text))
+        .toEqual(['FirstA', 'BP', 'QR paragraph']);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(opened.harness.mainOpens).toEqual([false]);
+      expect(insert).not.toHaveBeenCalled();
+      expect(split).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('');
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    insert.mockRestore();
+    split.mockRestore();
+    remove.mockRestore();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
+test('a composition started during opening commits exactly once after the switch', async () => {
+  const opened = await openingEditor();
+  const insert = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    opened.click(6);
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    fireEvent.compositionStart(textarea);
+    fireEvent.compositionUpdate(textarea, { data: '日本' });
+    textarea.value = '日本';
+    const full = await opened.switchToFull();
+    expect(opened.view.getByTestId('yrs-input')).toBe(textarea);
+    expect(textarea.value).toBe('日本');
+    await opened.presentFull(full);
+    fireEvent.compositionEnd(textarea, { data: '日本' });
+    fireEvent(textarea, new InputEvent('textInput', { bubbles: true, data: '日本' }));
+    fireEvent.input(textarea);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.input(textarea);
+    const load = spyOn(full, 'loadState');
+    try {
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('FirstA日本 paragraph');
+      expect(full.selection()?.head.offset).toBe(8);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(insert).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('');
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    insert.mockRestore();
+    opened.close();
+  }
+});
+
+test('input held during opening is discarded when another document replaces it', async () => {
+  const opened = await openingEditor(false);
+  const insert = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    opened.click(6);
+    fireEvent.input(textarea, { target: { value: 'discard' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.paste(textarea, { clipboardData: { getData: () => 'old paste' } });
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const replacement = await opened.replace();
+    expect(replacement).not.toBe(opened.preview);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.view.getByTestId('yrs-input')).toBe(textarea);
+    fireEvent.input(textarea, { target: { value: 'C' } });
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')).toHaveLength(205);
+    expect(full.paragraphs('body')[0].text).toBe('CFirst paragraph');
+    expect(full.selection()?.head.offset).toBe(1);
+    expect(insert).not.toHaveBeenCalled();
+    expect(opened.harness.errors).toEqual([]);
+    expect(opened.harness.mainOpens).toEqual([false]);
+  } finally {
+    insert.mockRestore();
+    opened.close();
+  }
+});
+
+test('viewer sessions stay read-only while opening', async () => {
+  const opened = await openingEditor(true, true);
+  const insert = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    const version = opened.preview.version();
+    expect(textarea.readOnly).toBe(true);
+    opened.click(6);
+    fireEvent.input(textarea, { target: { value: 'ignored' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    fireEvent.paste(textarea, { clipboardData: { getData: () => 'ignored paste' } });
+    await act(async () => {});
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.preview.version()).toBe(version);
+    expect(opened.preview.storyIds()).toEqual([]);
+    const full = await opened.switchToFull();
+    act(() => opened.harness.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(opened.harness.renderer.presentedEngine).toBe(full));
+    act(() => opened.harness.presentFrame());
+    act(() => opened.frames.run());
+    act(() => opened.frames.run());
+    expect((opened.view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(full.storyIds()).toEqual([]);
+    expect(insert).not.toHaveBeenCalled();
+    expect(opened.harness.mainOpens).toEqual([]);
+  } finally {
+    insert.mockRestore();
+    opened.close();
+  }
+});
+
 test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   if (!document.fonts) Object.defineProperty(document, 'fonts', {

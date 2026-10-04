@@ -6,6 +6,7 @@ import React, {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
@@ -104,6 +105,8 @@ export interface YrsStoredFormatting {
 export interface YrsInputProps {
   enabled: boolean;
   readOnly: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
   replicaReadyRef?: React.RefObject<boolean>;
   /** Advances on input that supersedes input still waiting for the replica. */
   inputEpoch?: () => number;
@@ -171,6 +174,13 @@ const BASE_STYLE: CSSProperties = {
   caretColor: 'transparent',
 };
 
+type HeldInput =
+  | { kind: 'text'; text: string }
+  | { kind: 'split' }
+  | { kind: 'delete'; direction: 'backward' | 'forward' }
+  | { kind: 'delete-selection' }
+  | { kind: 'select-all' };
+
 function previousCodePointOffset(text: string, offset: number): number {
   if (offset <= 0) return 0;
   const last = text.charCodeAt(offset - 1);
@@ -230,6 +240,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   {
     enabled,
     readOnly,
+    holdInput = false,
+    inputScope,
     replicaReadyRef,
     inputEpoch,
     applyPendingSelection,
@@ -267,7 +279,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
+  const compositionHeldRef = useRef(false);
+  const discardedCompositionRef = useRef(false);
   const compositionWaitersRef = useRef(new Set<() => void>());
+  const heldInputRef = useRef({ scope: inputScope, entries: [] as HeldInput[] });
+  if (heldInputRef.current.scope !== inputScope) {
+    if (compositionHeldRef.current && composingRef.current) discardedCompositionRef.current = true;
+    heldInputRef.current = { scope: inputScope, entries: [] };
+  }
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
@@ -280,6 +299,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const onPendingInputChangeRef = useRef(onPendingInputChange);
   onPendingInputChangeRef.current = onPendingInputChange;
+  const holdOperation = useCallback(
+    (entry: HeldInput): boolean => {
+      if (!holdInput) return false;
+      if (!readOnly) {
+        heldInputRef.current.entries.push(entry);
+        onPendingInputChangeRef.current?.(true);
+      }
+      return true;
+    },
+    [holdInput, readOnly]
+  );
   const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
@@ -457,12 +487,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [inputPositionMap, readSelection, session, story]);
 
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
+    if (holdInput) return null;
     const current = seedSelection ? ensureSelection() : readSelection();
     if (!current) return null;
     const anchor = locToDisplayPosition(current.anchor);
     const head = locToDisplayPosition(current.head);
     return anchor == null || head == null ? null : { anchor, head };
-  }, [ensureSelection, locToDisplayPosition, readSelection, seedSelection]);
+  }, [ensureSelection, holdInput, locToDisplayPosition, readSelection, seedSelection]);
 
   const emitSelection = useCallback(
     (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false): void => {
@@ -606,6 +637,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (text: string): void => {
       verticalCaretGoalRef.current.reset();
       if (!session || readOnly || text.length === 0) return;
+      if (holdOperation({ kind: 'text', text })) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -724,6 +756,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       ensureSelection,
       finishMutation,
       finishResidentMutation,
+      holdOperation,
       inputPositionMap,
       isCurrentInput,
       isSuggesting,
@@ -836,6 +869,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Deletes queued behind busy input join one batch, applied with one layout.
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
+      if (holdOperation({ kind: 'delete', direction })) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
       const pending = pendingResidentDeleteRef.current;
@@ -850,10 +884,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }, 'mutation');
       pendingResidentDeleteRef.current = batch;
     },
-    [deleteUnits, dispatchCaretInput, enqueueInputOperation]
+    [deleteUnits, dispatchCaretInput, enqueueInputOperation, holdOperation]
   );
 
   const splitParagraph = useCallback((): void => {
+    if (holdOperation({ kind: 'split' })) return;
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
     enqueueInputOperation(() => {
@@ -904,6 +939,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     enqueueInputOperation,
     ensureSelection,
     finishMutation,
+    holdOperation,
     nextParagraphStyleId,
     readOnly,
     replicaReadyRef,
@@ -1045,6 +1081,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const selectAll = useCallback((): void => {
+    if (holdOperation({ kind: 'select-all' })) return;
     enqueueInputOperation(() => {
       verticalCaretGoalRef.current.reset();
       const current = ensureSelection();
@@ -1059,7 +1096,46 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         { story: activeStory, paraId: last.paraId, offset: last.length }
       );
     });
-  }, [enqueueInputOperation, ensureSelection, inputPositionMap, readOnly, session, setSelection, story]);
+  }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
+
+  const deleteSelection = useCallback(
+    (queued = false): void => {
+      if (holdOperation({ kind: 'delete-selection' })) return;
+      const apply = (): void => {
+        if (!readOnly && replicaReadyRef?.current !== false && deleteSelected()) {
+          advanceInteractionEpoch();
+          finishMutation();
+        }
+      };
+      if (queued) enqueueInputOperation(apply, 'mutation');
+      else apply();
+    },
+    [
+      advanceInteractionEpoch,
+      deleteSelected,
+      enqueueInputOperation,
+      finishMutation,
+      holdOperation,
+      readOnly,
+      replicaReadyRef,
+    ]
+  );
+
+  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll });
+  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll };
+  useLayoutEffect(() => {
+    if (holdInput || readOnly || !enabled || !session) return;
+    const entries = heldInputRef.current.entries;
+    heldInputRef.current.entries = [];
+    for (const entry of entries) {
+      const handlers = inputHandlersRef.current;
+      if (entry.kind === 'text') handlers.insertText(entry.text);
+      else if (entry.kind === 'split') handlers.splitParagraph();
+      else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
+      else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
+      else handlers.selectAll();
+    }
+  }, [enabled, holdInput, inputScope, readOnly, session]);
 
   const moveTableCell = useCallback(
     (backward: boolean): boolean => {
@@ -1114,6 +1190,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const handleBeforeInput = useCallback(
     (event: React.FormEvent<HTMLTextAreaElement>): void => {
       const native = event.nativeEvent as InputEvent;
+      if (discardedCompositionRef.current) {
+        event.preventDefault();
+        return;
+      }
       if (composingRef.current || native.isComposing) return;
       if (compositionPendingRef.current) {
         event.preventDefault();
@@ -1188,6 +1268,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
+      if (holdInput &&
+        ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab'].includes(event.key)) {
+        event.preventDefault();
+        return;
+      }
       if (mod && key === 'a') {
         event.preventDefault();
         selectAll();
@@ -1224,6 +1309,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [
       copyAfterReplica,
       deleteDirection,
+      holdInput,
       moveSelection,
       moveTableCell,
       primeCopy,
@@ -1237,17 +1323,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
       verticalCaretGoalRef.current.reset();
       composingRef.current = true;
+      discardedCompositionRef.current = false;
+      compositionHeldRef.current = holdInput;
       compositionPendingRef.current = false;
       compositionCommitRef.current = '';
       event.currentTarget.value = '';
       onCaretInterrupt?.();
       onPendingInputChangeRef.current?.(true);
     },
-    [onCaretInterrupt]
+    [holdInput, onCaretInterrupt]
   );
 
   const handleCompositionUpdate = useCallback(
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
+      if (discardedCompositionRef.current) return;
       compositionCommitRef.current = event.data;
     },
     []
@@ -1255,12 +1344,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCompositionEnd = useCallback(
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
+      if (discardedCompositionRef.current) {
+        event.currentTarget.value = '';
+        const scope = heldInputRef.current;
+        queueMicrotask(() => {
+          if (heldInputRef.current === scope) discardedCompositionRef.current = false;
+        });
+        return;
+      }
       composingRef.current = false;
       compositionPendingRef.current = true;
       compositionCommitRef.current =
         event.currentTarget.value || event.data || compositionCommitRef.current;
+      const scope = heldInputRef.current;
+      const heldComposition = compositionHeldRef.current;
       queueMicrotask(() => {
-        if (!compositionPendingRef.current || !isCurrentInput(session)) return;
+        const lifetime = inputLifetimeRef.current;
+        if (
+          !compositionPendingRef.current || !lifetime.mounted || !lifetime.enabled ||
+          heldInputRef.current !== scope ||
+          ((!heldComposition || inputScope === undefined) && !isCurrentInput(session))
+        ) return;
         const text = textareaRef.current?.value || compositionCommitRef.current;
         // Reset the browser model before applying the document op. A trailing
         // post-composition beforeinput therefore observes an empty model and
@@ -1268,17 +1372,25 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (textareaRef.current) textareaRef.current.value = '';
         compositionPendingRef.current = false;
         compositionCommitRef.current = '';
-        insertText(text);
+        compositionHeldRef.current = false;
+        if (heldComposition) inputHandlersRef.current.insertText(text);
+        else insertText(text);
         for (const resolve of compositionWaitersRef.current) resolve();
         compositionWaitersRef.current.clear();
-        onPendingInputChangeRef.current?.(inputOperationQueueRef.current?.hasPending() ?? false);
+        onPendingInputChangeRef.current?.(
+          heldInputRef.current.entries.length > 0 || (inputOperationQueueRef.current?.hasPending() ?? false)
+        );
       });
     },
-    [insertText, isCurrentInput, session]
+    [inputScope, insertText, isCurrentInput, session]
   );
 
   const handleInput = useCallback(
     (event: React.FormEvent<HTMLTextAreaElement>) => {
+      if (discardedCompositionRef.current) {
+        event.currentTarget.value = '';
+        return;
+      }
       if (composingRef.current || compositionPendingRef.current) return;
       // Mobile/browser fallback for input types whose beforeinput carried no
       // data. The textarea is otherwise always empty outside composition.
@@ -1365,6 +1477,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const hasPendingInput = useCallback(
     () =>
+      heldInputRef.current.entries.length > 0 ||
       pendingResidentTextRef.current !== null ||
       composingRef.current ||
       compositionPendingRef.current ||
@@ -1376,6 +1489,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     inputLifetimeRef.current.mounted = true;
     return () => {
       inputLifetimeRef.current.mounted = false;
+      heldInputRef.current.entries = [];
       readerScrollRef.current?.stop();
       readerScrollRef.current = null;
       for (const resolve of compositionWaitersRef.current) resolve();
@@ -1383,14 +1497,25 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     };
   }, []);
 
+  const compositionContextRef = useRef({ inputScope, holdInput, enabled });
   useEffect(() => {
+    const previous = compositionContextRef.current;
+    compositionContextRef.current = { inputScope, holdInput, enabled };
+    sealInputBatches();
+    if (
+      inputScope !== undefined && inputScope === previous.inputScope && enabled && previous.enabled &&
+      (holdInput || previous.holdInput || compositionHeldRef.current)
+    ) return;
+    if (inputScope !== previous.inputScope && (previous.holdInput || compositionHeldRef.current) && textareaRef.current) {
+      textareaRef.current.value = '';
+    }
     composingRef.current = false;
     compositionPendingRef.current = false;
     compositionCommitRef.current = '';
-    sealInputBatches();
+    compositionHeldRef.current = false;
     for (const resolve of compositionWaitersRef.current) resolve();
     compositionWaitersRef.current.clear();
-  }, [sealInputBatches, session, enabled]);
+  }, [enabled, holdInput, inputScope, sealInputBatches, session]);
 
   useImperativeHandle(
     ref,
@@ -1452,12 +1577,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       },
       storedFormatting,
       insertText,
-      deleteSelection() {
-        if (!readOnly && replicaReadyRef?.current !== false && deleteSelected()) {
-          advanceInteractionEpoch();
-          finishMutation();
-        }
-      },
+      deleteSelection,
       selectAll() {
         advanceInteractionEpoch();
         selectAll();
@@ -1469,13 +1589,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       displayPositionToLoc,
       displaySelection,
       ensureSelection,
-      finishMutation,
       flushPendingInput,
       hasPendingInput,
       insertText,
-      deleteSelected,
-      readOnly,
-      replicaReadyRef,
+      deleteSelection,
       runAfterPendingInput,
       selectAll,
       session,
@@ -1496,10 +1613,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [session, story]);
 
   useEffect(() => {
-    if (!enabled || !session || !replicaReady) return;
+    if (!enabled || !session || !replicaReady || holdInput) return;
     if (seedSelection) ensureSelection();
     emitSelection(false);
-  }, [emitSelection, enabled, ensureSelection, seedSelection, session, replicaReady]);
+  }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady]);
 
   useEffect(() => {
     if (!enabled || !session || readOnly) return;

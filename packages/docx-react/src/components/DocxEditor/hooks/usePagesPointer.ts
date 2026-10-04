@@ -67,6 +67,7 @@ export interface UsePagesPointerOptions {
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean) => boolean;
   readOnly: boolean;
+  inputScope?: number;
   replicaPending?: () => boolean;
   replicaReady?: boolean;
   /** the non-body part open for editing — the body is inert behind it */
@@ -197,6 +198,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     applyYrsCommand,
     syncYrsInputState,
     readOnly,
+    inputScope,
     replicaPending,
     replicaReady = true,
     partEdit = null,
@@ -283,12 +285,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       document.removeEventListener('wheel', onWheel, true);
     };
   }, [bumpInputEpoch, canvasHostRef, pagesContainerRef, yrsInputRef]);
+  const gestureScope = inputScope ?? yrsSession;
   useEffect(() => {
     clearPendingGesture();
     isDraggingRef.current = false;
     dragAnchorRef.current = null;
     return clearPendingGesture;
-  }, [clearPendingGesture, yrsSession]);
+  }, [clearPendingGesture, gestureScope]);
   const pendingPartCaretRef = useRef<{
     session: YrsSession;
     story: string;
@@ -417,7 +420,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const beginTextDrag = useCallback(
     (position: number): void => {
-      yrsCellDragAnchorRef.current = resolveTarget(position)?.cell ?? null;
+      yrsCellDragAnchorRef.current = replicaPending?.() ? null : resolveTarget(position)?.cell ?? null;
       yrsCellDraggingRef.current = false;
       isDraggingRef.current = true;
       dragAnchorRef.current = position;

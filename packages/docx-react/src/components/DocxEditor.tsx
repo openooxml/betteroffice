@@ -1298,6 +1298,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     [untakenWorkerSession, reportLayoutError]
   );
   const readOnly = modeReadOnly || opening;
+  const holdOpeningInput = Boolean(experimentalWorkerOpen) && opening && !modeReadOnly && !viewerSession;
   if (opening) writeModeRef.current = 'viewing';
   const openingRef = useRef(opening);
   openingRef.current = opening;
@@ -2630,6 +2631,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
               readOnly={readOnly}
+              holdInput={holdOpeningInput}
+              inputScope={yrsSeedGeneration}
               viewerDocumentRead={viewerSession ? canvasRenderer.readWorkerDocument : undefined}
               showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
