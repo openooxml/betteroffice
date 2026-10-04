@@ -346,7 +346,7 @@ for (const kind of ['readOnly', 'viewing']) {
   });
 }
 
-test('viewer save is the only action that loads the main document and returns a valid DOCX', async ({ page }) => {
+test('viewer save loads no main document and returns a valid DOCX', async ({ page }) => {
   await open(page);
   await page.waitForTimeout(7000);
   await expectNoCopy(page);
@@ -357,9 +357,8 @@ test('viewer save is the only action that loads the main document and returns a 
   expect(saved.byteLength).toBeGreaterThan(0);
   expect(saved.signature).toEqual([80, 75, 3, 4]);
   expect(saved.validDocument).toBe(true);
-  expect(saved.after.total).toBeGreaterThan(0);
-  expect(saved.after.events.length).toBe(saved.after.total);
-  for (const event of saved.after.events) expect(event.at).toBeGreaterThanOrEqual(saved.saveStarted);
+  expect(saved.after.total).toBe(0);
+  expect(saved.after.events).toEqual([]);
   expect(await exportPages(page)).toEqual({ ok: true, pages: 3, failure: null });
   expect(await page.evaluate(() =>
     (window as unknown as ViewerWindow).__viewerSidebarsProbe.editor!.listContentControls()
