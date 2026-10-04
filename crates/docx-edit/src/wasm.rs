@@ -6063,14 +6063,15 @@ mod tests {
     fn a_weighted_preview_reports_budget_cuts_and_genuine_exhaustion() {
         let p = "<w:p><w:r><w:t>Cell</w:t></w:r></w:p>";
         let table = format!("<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>", p.repeat(10));
-        for (count, paragraph_budget, whole) in [
-            (60, Some(256), false),
-            (60, None, true),
-            (20, Some(256), true),
-            (32, Some(256), true),
-            (40, Some(1000), true),
+        for (count, tail, paragraph_budget, whole) in [
+            (60, 170, Some(256), false),
+            (60, 170, None, false),
+            (60, 0, Some(256), true),
+            (20, 0, Some(256), true),
+            (32, 0, Some(256), true),
+            (40, 0, Some(1000), true),
         ] {
-            let bytes = script_fonts_docx(&table.repeat(count), "");
+            let bytes = script_fonts_docx(&(table.repeat(count) + &p.repeat(tail)), "");
             let preview = EditSession::new(83.0).unwrap();
             let host: Value = serde_json::from_str(
                 &preview
@@ -6081,7 +6082,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 host.get("wholeBody").is_some(), whole,
-                "{count} tables, budget={paragraph_budget:?}"
+                "{count} tables, {tail} paragraphs, budget={paragraph_budget:?}"
             );
         }
     }

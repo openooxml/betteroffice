@@ -122,8 +122,8 @@ impl LegacyBodyCut {
     }
 
     pub(crate) fn read_child(&mut self, name: &str) {
-        self.stopped |= self.blocks >= self.limit && self.open_fields == 0;
-        if is_story_block_name(name) && self.blocks <= self.limit {
+        if is_story_block_name(name) {
+            self.stopped |= self.blocks >= self.limit && self.open_fields == 0;
             self.blocks = self.blocks.saturating_add(1);
         }
     }
@@ -139,7 +139,7 @@ impl LegacyBodyCut {
     }
 
     pub(crate) fn is_partial(&self) -> bool {
-        self.stopped && self.blocks > self.limit
+        self.stopped
     }
 }
 

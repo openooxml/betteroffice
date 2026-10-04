@@ -437,26 +437,29 @@ fn the_budget_requires_strictly_more_than_the_block_limit() {
 fn fields_that_hold_the_legacy_cut_to_the_body_end_disable_the_budget() {
     for blocks in [210, 450] {
         for close in [false, true] {
-            let body = (0..blocks)
-                .map(|index| {
-                    if index < 40 {
-                        return table(1, 1, 10);
-                    }
-                    let runs = match index {
-                        190 => r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r>"#,
-                        191 => r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-                        index if close && index == blocks - 1 => r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
-                        _ => "",
-                    };
-                    paragraph(index, "", runs)
-                })
-                .collect::<String>();
-            let parts = package(&body);
-            let (preview, stopped) = preview_with_budget(&parts, 200, Some(256));
-            let (legacy, _) = preview_with_budget(&parts, 200, None);
-            assert!(!stopped);
-            assert_eq!(preview.document.package.document.content.len(), blocks);
-            assert_eq!(preview, legacy);
+            for end in ["", "<w:sectPr/>"] {
+                let mut body = (0..blocks)
+                    .map(|index| {
+                        if index < 40 {
+                            return table(1, 1, 10);
+                        }
+                        let runs = match index {
+                            190 => r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF 1 = 1 </w:instrText></w:r>"#,
+                            191 => r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                            index if close && index == blocks - 1 => r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+                            _ => "",
+                        };
+                        paragraph(index, "", runs)
+                    })
+                    .collect::<String>();
+                body.push_str(end);
+                let parts = package(&body);
+                let (preview, stopped) = preview_with_budget(&parts, 200, Some(256));
+                let (legacy, _) = preview_with_budget(&parts, 200, None);
+                assert!(!stopped);
+                assert_eq!(preview.document.package.document.content.len(), blocks);
+                assert_eq!(preview, legacy);
+            }
         }
     }
 }
