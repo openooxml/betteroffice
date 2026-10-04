@@ -12,6 +12,21 @@ import {
 
 const fakeSession = () => ({ version: () => 'v1' }) as unknown as YrsSession;
 
+test('passive readiness waits for the owner without requesting hydration', async () => {
+  const session = fakeSession();
+  const request = mock(() => {});
+  const hydrate = mock(async () => () => {});
+  const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, { active: () => true, request });
+  const ready = awaitWorkerOpenReplica(session, { passive: true });
+  expect(ready).toBe(replica.ready);
+  expect(request).not.toHaveBeenCalled();
+  expect(hydrate).not.toHaveBeenCalled();
+  replica.start();
+  await ready;
+  expect(hydrate).toHaveBeenCalledTimes(1);
+  expect(request).not.toHaveBeenCalled();
+});
+
 test('awaiting an on-demand replica asks its owner to start it and resolves when ready', async () => {
   const session = fakeSession();
   const load = mock(() => {});

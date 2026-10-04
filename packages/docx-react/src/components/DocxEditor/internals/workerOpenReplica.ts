@@ -124,9 +124,9 @@ export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | u
   return replica?.ready;
 }
 
-export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
+export function awaitWorkerOpenReplica(session: YrsSession, options?: { passive: boolean }): Promise<void> | undefined {
   const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+  if (!options?.passive && replica?.pending && replica.onDemand?.active() === true) replica.onDemand.request();
   return replica?.ready;
 }
 

@@ -27,6 +27,7 @@ import {
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
 import { registerWorkerOpenSave } from '../internals/workerOpenSave';
+import { registerWorkerOpenExport } from '../internals/workerOpenExport';
 
 export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
@@ -410,6 +411,7 @@ export function useYrsCoreSession(
     let cancelled = false;
     let openedWorker: WorkerOpenedDocument | null = null;
     let unregisterSave: (() => void) | null = null;
+    let unregisterExport: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
     projectionStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
@@ -640,6 +642,12 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            unregisterExport = registerWorkerOpenExport(next, {
+              export: (options, context) => {
+                if (stale()) return Promise.reject(new Error('The document changed while exporting'));
+                return worker.exportStructuredWithPages(next, options, context);
+              },
+            });
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
               save: (comments, peer) => {
@@ -816,6 +824,7 @@ export function useYrsCoreSession(
     return () => {
       cancelled = true;
       unregisterSave?.();
+      unregisterExport?.();
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;

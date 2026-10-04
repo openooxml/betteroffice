@@ -90,6 +90,8 @@ import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindo
 import { sameLayoutInput } from '../internals/layoutInput';
 import { SupersededPreviewError } from '../internals/supersededPreview';
 import { stateVectorAhead } from '../internals/stateVector';
+import { exportWorkerOpenPages, type WorkerOpenExport } from '../internals/workerOpenExport';
+import { workerExportVersions } from '../internals/workerExportVersions';
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
@@ -105,6 +107,7 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   handOver: ResidentEngineWorkerClient['handOver'];
   canSave(): boolean;
   save(request: Parameters<ResidentEngineWorkerClient['save']>[0], peer?: YrsSession): Promise<ArrayBuffer>;
+  exportStructuredWithPages(peer: YrsSession, ...args: Parameters<WorkerOpenExport['export']>): ReturnType<WorkerOpenExport['export']>;
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
@@ -1617,6 +1620,28 @@ export function useRustDisplayList(
           }
         }
       };
+      const catchUpPeer = async (
+        peer: YrsSession,
+        owner: NonNullable<typeof workerRef.current>,
+        assertCurrent: () => void
+      ): Promise<{ P: string; W: string; changed: boolean }> => {
+        assertCurrent();
+        const P = peer.version();
+        const stateVector = peer.encodeStateVector();
+        const remote = owner.client.remoteStateVector();
+        const reply = await owner.client.syncUpdate(peer.encodeStateAsUpdate(remote ?? undefined), stateVector);
+        assertCurrent();
+        const changed = peer.version() !== P;
+        if (reply.repair) {
+          suppressWorkerInvalidationRef.current += 1;
+          try {
+            peer.applyLocalUpdate(reply.repair);
+          } finally {
+            suppressWorkerInvalidationRef.current -= 1;
+          }
+        }
+        return { P: changed ? P : peer.version(), W: reply.version, changed };
+      };
       try {
         const opened = await requestOpenedWorker(hostEngine, (owner) => owner.opening!);
         return {
@@ -1663,6 +1688,28 @@ export function useRustDisplayList(
                 }
               }
               return saved.bytes;
+            });
+          },
+          exportStructuredWithPages: async (peer, options, context) => {
+            const owner = workerRef.current;
+            const source = workerOpenSourcesRef.current.get(hostEngine);
+            const assertCurrent = (): void => {
+              const failure = workerFailureRef.current.get(hostEngine) ?? outOfMemoryRef.current.get(hostEngine);
+              if (failure) throw failure;
+              if (!context.current() || !owner || !isCurrentWorker(hostEngine, owner) ||
+                workerOpenSourcesRef.current.get(hostEngine) !== source || peer !== hostEngine) {
+                throw new Error('The document changed while exporting');
+              }
+              if (owner.client.hasFailed()) throw new ResidentWorkerFailureError('The document worker failed while exporting');
+            };
+            assertCurrent();
+            if (!owner) return Promise.reject(new Error('No document worker'));
+            return exportWorkerOpenPages(peer, options, context, {
+              assertCurrent,
+              catchUp: () => catchUpPeer(peer, owner, assertCurrent),
+              read: (read, version) => owner.client.documentReadAt(read, version),
+              versions: workerExportVersions(peer, owner, owner.load),
+              serialize: (operation) => registeredWorkerProposalAuthority(peer)?.residentOperation(operation) ?? operation(),
             });
           },
           fallback: (reason = 'failure') => {

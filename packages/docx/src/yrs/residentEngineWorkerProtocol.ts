@@ -177,6 +177,7 @@ export type ResidentEngineWorkerRequest =
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
   | { id: number; type: 'save'; comments: Comment[]; host?: Document; stateVector?: Uint8Array }
+  | { id: number; type: 'syncUpdate'; update: Uint8Array; stateVector: Uint8Array }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | {
@@ -335,6 +336,7 @@ export type ResidentEngineWorkerResponse = (
       proposals?: DocxProposalRegistryState;
       /** @internal */
       version?: string;
+      repair?: ArrayBuffer | null;
       /** @internal */
       proposal?: ResidentProposalResponse;
       /** @internal */

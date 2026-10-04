@@ -400,6 +400,8 @@ function useHarness(props: HarnessProps) {
     if (props.readOnly && core.session) relayout.current?.();
   }, [props.readOnly, core.session]);
   const pagedEditorRef = useRef<PagedEditorRef | null>(null);
+  const pipelineRef = useRef(pipeline);
+  pipelineRef.current = pipeline;
   const coreRef = useRef(core);
   coreRef.current = core;
   const searchReveals = useRef<number[]>([]);
@@ -408,6 +410,9 @@ function useHarness(props: HarnessProps) {
     getDocument: () => coreRef.current.documentFromYrs(),
     hasPendingInput: () => false,
     flushPendingInput: async () => {},
+    getLayoutRequest: () => pipelineRef.current.getLayoutRequest(),
+    readLayoutRequest: () => pipelineRef.current.readLayoutRequest(),
+    relayout: () => pipelineRef.current.runLayoutPipeline(),
     yrsLocToDisplayPosition: (loc: Parameters<PagedEditorRef['yrsLocToDisplayPosition']>[0]) => {
       const session = coreRef.current.session!;
       const projection = createYrsPositionProjection(session, 'body');
@@ -491,6 +496,33 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+test('registered editor export reconciles worker repairs without echoing updates to the worker', async () => {
+  const { workers, posted } = installWorker();
+  const { result } = renderHook(useHarness, { initialProps: { ...initialProps, hydrateOnDemand: false } });
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  act(() => result.current.presentFrame());
+  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+  await act(async () => { await result.current.renderer.settledDisplayList(null, 3000, 'window'); });
+  const session = result.current.core.session!;
+  const applyLocal = spyOn(session, 'applyLocalUpdate');
+  const peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+  workers[0]!.sessions[0]!.applyRawOps('body', [{ op: 'insert', index: 0, text: 'Worker repair ' }]);
+  const before = posted.filter(({ type }) => type === 'applyUpdate').length;
+  let exported!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+  await act(async () => { exported = await result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' }); });
+  if (!exported.ok) throw new Error(exported.failure.message);
+  expect(exported.version).toBe(session.version());
+  expect(exported.content.layout.documentVersion).toBe(session.version());
+  expect(JSON.stringify(exported.content.structured)).toContain('Worker repair ');
+  expect(session.paragraphs('body')[0]!.text).toStartWith('Worker repair ');
+  expect(applyLocal).toHaveBeenCalled();
+  expect(posted.filter(({ type }) => type === 'applyUpdate')).toHaveLength(before);
+  expect(posted.some(({ type }) => type === 'syncUpdate')).toBe(true);
+  expect(peerExport).not.toHaveBeenCalled();
+  applyLocal.mockRestore();
+  peerExport.mockRestore();
+});
 
 test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
   const { workers, posted } = installWorker({ holdState: true });
