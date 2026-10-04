@@ -2296,7 +2296,11 @@ fn incremental_structure_eligible(previous: &PaginationState, next: &LayoutInput
             .measured
             .iter()
             .zip(&next.measured)
-            .all(|(previous, next)| resident_fragment_keys_match(&previous.block, &next.block))
+            .enumerate()
+            .all(|(index, (retained, next))| {
+                previous.moved_blocks.contains(&index)
+                    || resident_fragment_keys_match(&retained.block, &next.block)
+            })
 }
 
 fn placement_block_is_coupled(block: &LayoutBlock) -> bool {
@@ -2327,6 +2331,7 @@ struct RegionPlacementPasses {
     previous: Vec<RegionPlacementState>,
     next: Vec<RegionPlacementState>,
     eligible: bool,
+    allow_coupled: bool,
     placed_blocks: usize,
 }
 
@@ -2335,10 +2340,73 @@ struct RegionPlacementState {
     phase: RegionPlacementPhase,
     options: serde_json::Value,
     layout: Layout,
+    fragment_pages: Vec<Option<Rc<Vec<Fragment>>>>,
+    shared_fragment_pages: Vec<usize>,
     checkpoints: Vec<LayoutCheckpoint>,
     fingerprints: Vec<Fingerprint>,
     coupled_blocks: Vec<bool>,
     incremental: bool,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    rebuilt_page_ranges: Vec<std::ops::Range<usize>>,
+}
+
+impl RegionPlacementState {
+    fn restore_fragments(&mut self, retained: &Layout) -> Result<(), docx_layout::LayoutError> {
+        for (page, fragments) in self.layout.pages.iter_mut().zip(&mut self.fragment_pages) {
+            if let Some(fragments) = fragments.take() {
+                page.fragments = Rc::try_unwrap(fragments)
+                    .unwrap_or_else(|fragments| fragments.as_ref().clone());
+            }
+        }
+        for index in self.shared_fragment_pages.drain(..) {
+            self.layout.pages[index].fragments = retained
+                .pages
+                .get(index)
+                .ok_or_else(|| {
+                    docx_layout::LayoutError::Invalid("missing retained region page".to_owned())
+                })?
+                .fragments
+                .clone();
+        }
+        Ok(())
+    }
+}
+
+fn region_shape_offsets_match(left: &[Fragment], right: &[Fragment]) -> bool {
+    left.iter()
+        .zip(right)
+        .all(|(left, right)| match (left, right) {
+            (Fragment::Shape(left), Fragment::Shape(right)) => {
+                left.wrap_offset_x == right.wrap_offset_x
+            }
+            _ => true,
+        })
+}
+
+fn compact_region_placements(
+    passes: &mut [RegionPlacementState],
+    retained: &Layout,
+) -> Result<(), String> {
+    if passes.is_empty() {
+        return Ok(());
+    }
+    for (index, base) in retained.pages.iter().enumerate() {
+        let fragments = serde_json::to_vec(&base.fragments).map_err(|error| error.to_string())?;
+        for pass in passes.iter_mut() {
+            let Some(page) = pass.fragment_pages.get_mut(index).and_then(Option::as_mut) else {
+                continue;
+            };
+            if region_shape_offsets_match(page, &base.fragments)
+                && serde_json::to_vec(page.as_ref()).map_err(|error| error.to_string())?
+                    == fragments
+            {
+                pass.fragment_pages[index] = None;
+                pass.shared_fragment_pages.push(index);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn place_region_pass(
@@ -2346,6 +2414,7 @@ fn place_region_pass(
     fingerprints: &[Fingerprint],
     phase: RegionPlacementPhase,
     passes: &mut RegionPlacementPasses,
+    previous_layout: Option<&Layout>,
 ) -> Result<Layout, docx_layout::LayoutError> {
     let options = serde_json::to_value(&input.options)
         .map_err(|error| docx_layout::LayoutError::Invalid(error.to_string()))?;
@@ -2374,7 +2443,9 @@ fn place_region_pass(
             && pass.fingerprints.len() == fingerprints.len()
             && pass.fingerprints.iter().zip(fingerprints).enumerate().all(
                 |(index, (previous, next))| {
-                    previous == next || !(pass.coupled_blocks[index] || coupled_blocks[index])
+                    previous == next
+                        || passes.allow_coupled
+                        || !(pass.coupled_blocks[index] || coupled_blocks[index])
                 },
             )
     }) {
@@ -2384,13 +2455,16 @@ fn place_region_pass(
             .zip(fingerprints)
             .position(|(previous, next)| previous != next);
         if let Some(dirty) = dirty {
+            retained.restore_fragments(previous_layout.ok_or_else(|| {
+                docx_layout::LayoutError::Invalid("missing retained region layout".to_owned())
+            })?)?;
             let dirty = section_start_of_first_changed_break(
                 &input.measured,
                 &retained.fingerprints,
                 fingerprints,
                 dirty,
             );
-            match docx_layout::place::layout_document_incremental(
+            match docx_layout::place::layout_document_incremental_ranges(
                 input,
                 &mut retained.layout,
                 &retained.checkpoints,
@@ -2403,35 +2477,79 @@ fn place_region_pass(
                     run
                 }
                 Err(docx_layout::LayoutError::Unsupported(_)) => {
-                    docx_layout::place::layout_document_checkpointed(input)?
+                    full_pass(input).map_err(docx_layout::LayoutError::Invalid)?
                 }
                 Err(error) => return Err(error),
             }
         } else if from_current.is_some() {
+            retained.restore_fragments(previous_layout.ok_or_else(|| {
+                docx_layout::LayoutError::Invalid("missing retained region layout".to_owned())
+            })?)?;
             incremental = retained.incremental;
-            docx_layout::place::CheckpointedLayout {
-                layout: retained.layout,
-                checkpoints: retained.checkpoints,
-                placed_blocks: 0,
-                rebuilt_page_start: 0,
-                rebuilt_page_end: 0,
+            docx_layout::place::IncrementalLayout {
+                checkpointed: docx_layout::place::CheckpointedLayout {
+                    layout: retained.layout,
+                    checkpoints: retained.checkpoints,
+                    placed_blocks: 0,
+                    rebuilt_page_start: retained.rebuilt_page_start,
+                    rebuilt_page_end: retained.rebuilt_page_end,
+                },
+                rebuilt_page_ranges: retained.rebuilt_page_ranges,
             }
         } else {
-            docx_layout::place::layout_document_checkpointed(input)?
+            full_pass(input).map_err(docx_layout::LayoutError::Invalid)?
         }
     } else {
-        docx_layout::place::layout_document_checkpointed(input)?
+        full_pass(input).map_err(docx_layout::LayoutError::Invalid)?
     };
+    let docx_layout::place::IncrementalLayout {
+        checkpointed: run,
+        rebuilt_page_ranges,
+    } = run;
     passes.placed_blocks += run.placed_blocks;
-    let layout = run.layout;
+    let mut layout = run.layout;
+    let mut pages = std::mem::take(&mut layout.pages);
+    let mut retained_layout = layout.clone();
+    let mut fragment_pages = Vec::with_capacity(pages.len());
+    for (index, page) in pages.iter_mut().enumerate() {
+        let encoded = serde_json::to_vec(&page.fragments)
+            .map_err(|error| docx_layout::LayoutError::Invalid(error.to_string()))?;
+        let mut shared = None;
+        for pass in &passes.next {
+            let Some(Some(fragments)) = pass.fragment_pages.get(index) else {
+                continue;
+            };
+            if region_shape_offsets_match(fragments, &page.fragments)
+                && serde_json::to_vec(fragments.as_ref())
+                    .map_err(|error| docx_layout::LayoutError::Invalid(error.to_string()))?
+                    == encoded
+            {
+                shared = Some(Rc::clone(fragments));
+                break;
+            }
+        }
+        let fragments = std::mem::take(&mut page.fragments);
+        let snapshot = page.clone();
+        page.fragments = fragments;
+        fragment_pages.push(Some(
+            shared.unwrap_or_else(|| Rc::new(page.fragments.clone())),
+        ));
+        retained_layout.pages.push(snapshot);
+    }
+    layout.pages = pages;
     passes.next.push(RegionPlacementState {
         phase,
         options,
-        layout: layout.clone(),
+        layout: retained_layout,
+        fragment_pages,
+        shared_fragment_pages: Vec::new(),
         checkpoints: run.checkpoints,
         fingerprints: fingerprints.to_vec(),
         coupled_blocks,
         incremental,
+        rebuilt_page_start: run.rebuilt_page_start,
+        rebuilt_page_end: run.rebuilt_page_end,
+        rebuilt_page_ranges,
     });
     Ok(layout)
 }
@@ -3727,6 +3845,7 @@ impl EngineSession {
                 &fingerprints,
                 RegionPlacementPhase::Shape(phase),
                 passes,
+                self.pagination.borrow().layout.as_ref(),
             )
         })
     }
@@ -3790,6 +3909,11 @@ impl EngineSession {
             })) && incremental_structure_eligible(&self.pagination.borrow(), &input);
         let mut placement_passes = RegionPlacementPasses {
             eligible: passes_eligible,
+            allow_coupled: {
+                let previous = self.pagination.borrow();
+                previous.doc_epoch != self.doc_epoch()
+                    && previous.revision_preview_key == revision_preview_key
+            },
             previous: std::mem::take(&mut self.pagination.borrow_mut().region_placements),
             next: Vec::new(),
             placed_blocks: 0,
@@ -3868,6 +3992,7 @@ impl EngineSession {
                 &block_fingerprints,
                 RegionPlacementPhase::Body,
                 &mut placement_passes,
+                self.pagination.borrow().layout.as_ref(),
             )
             .map_err(layout_error_message)?;
             (layout, Some(input))
@@ -3898,21 +4023,13 @@ impl EngineSession {
                 input.options.note_separator_heights = Some(separator_heights.clone());
             }
         }
+        let mut final_arena = None;
         let stabilized = stabilize_note_layout(
             |reserved| {
-                let mut copy;
-                let pass = match (&base_input, arena.as_mut()) {
-                    (Some(base), _) => {
-                        copy = base.clone();
-                        &mut copy
-                    }
-                    (None, Some(arena)) => arena,
-                    (None, None) => {
-                        return Err(docx_layout::LayoutError::Invalid(
-                            "note passes without a body arena".to_owned(),
-                        ));
-                    }
-                };
+                let mut copy = base_input.clone();
+                let pass = copy.as_mut().or(arena.as_mut()).ok_or_else(|| {
+                    docx_layout::LayoutError::Invalid("note passes without a body arena".to_owned())
+                })?;
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
                 let reshaped = resident_body
                     && self.stabilize_region_shapes(
@@ -3941,8 +4058,12 @@ impl EngineSession {
                     &fingerprints,
                     RegionPlacementPhase::Body,
                     &mut placement_passes,
+                    self.pagination.borrow().layout.as_ref(),
                 )?;
                 apply_document_regions_tracked(&mut layout, &regions, &mut restamped_pages);
+                if copy.is_some() {
+                    final_arena = copy;
+                }
                 Ok(layout)
             },
             &refs,
@@ -3952,47 +4073,57 @@ impl EngineSession {
             &regions,
         )
         .map_err(layout_error_message)?;
+        drop(base_input);
+        placement_passes.previous.clear();
         let notes_converged = stabilized.converged;
-        if let Some(mut final_input) = base_input.or(arena) {
+        if let Some(mut final_input) = final_arena.or(arena) {
             final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
-            let reshaped = resident_body
-                && self
-                    .stabilize_region_shapes(
-                        &mut final_input,
-                        &regions,
-                        &measurement,
-                        (revision_preview_key, &revision_preview, main_body),
-                        &mut placement_passes,
-                    )
-                    .map_err(layout_error_message)?;
-            let fingerprints = if reshaped {
-                measured_fingerprints(&final_input)?
+            let options =
+                serde_json::to_value(&final_input.options).map_err(|error| error.to_string())?;
+            let pass = placement_passes
+                .next
+                .iter()
+                .rfind(|pass| pass.phase == RegionPlacementPhase::Body && pass.options == options);
+            let deltas = self
+                .pagination
+                .borrow()
+                .input
+                .as_ref()
+                .map(|previous| position_deltas(previous, &final_input))
+                .unwrap_or_default();
+            if let Some(pass) = pass {
+                self.retain_placement(
+                    final_input,
+                    pass.fingerprints.clone(),
+                    Some((revision_preview_key, &revision_preview, main_body)),
+                    cached_page_totals,
+                    docx_layout::place::IncrementalLayout {
+                        checkpointed: docx_layout::place::CheckpointedLayout {
+                            layout: stabilized.layout,
+                            checkpoints: pass.checkpoints.clone(),
+                            placed_blocks: placement_passes.placed_blocks,
+                            rebuilt_page_start: pass.rebuilt_page_start,
+                            rebuilt_page_end: pass.rebuilt_page_end,
+                        },
+                        rebuilt_page_ranges: pass.rebuilt_page_ranges.clone(),
+                    },
+                    (pass.incremental, deltas),
+                )?;
+                placement_passes.placed_blocks = 0;
             } else {
-                block_fingerprints
-            };
-            self.layout_document_value_with_fingerprints(
-                final_input,
-                fingerprints,
-                Some((revision_preview_key, &revision_preview, main_body)),
-                cached_page_totals,
-            )?;
-            restamped_pages.clear();
+                let fingerprints = measured_fingerprints(&final_input)?;
+                self.layout_document_value_with_fingerprints(
+                    final_input,
+                    fingerprints,
+                    Some((revision_preview_key, &revision_preview, main_body)),
+                    cached_page_totals,
+                )?;
+            }
         } else {
             self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
-        pagination.pagination_calls = pagination
-            .pagination_calls
-            .wrapping_add(placement_passes.next.len() as u64);
-        pagination.incremental_pagination_calls =
-            pagination.incremental_pagination_calls.wrapping_add(
-                placement_passes
-                    .next
-                    .iter()
-                    .filter(|pass| pass.incremental)
-                    .count() as u64,
-            );
         pagination.region_placements = placement_passes.next;
         pagination.pagination_blocks_placed = pagination
             .pagination_blocks_placed
@@ -4056,6 +4187,13 @@ impl EngineSession {
                     .map_err(|error| format!("serialize headers/footers: {error}"))
             })
             .transpose()?;
+        {
+            let state = &mut *pagination;
+            compact_region_placements(
+                &mut state.region_placements,
+                state.layout.as_ref().expect("retained region layout"),
+            )?;
+        }
         pagination.note_changed_pages = note_changed_pages;
         if let Some(pages) = &mut pagination.restamped_pages {
             pages.extend(restamped_pages);
@@ -4716,12 +4854,6 @@ impl EngineSession {
         self.resumable.replace(None);
         self.capture.borrow_mut().take();
         let input_options_fingerprint = options_fingerprint(&input)?;
-        let previous_page_count = self
-            .pagination
-            .borrow()
-            .layout
-            .as_ref()
-            .map(|layout| layout.pages.len());
         let mut incremental = false;
         let mut deltas = HashMap::new();
         let run = {
@@ -4747,19 +4879,22 @@ impl EngineSession {
                 });
             if let Some(dirty_index) = first_dirty
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
-                && previous
-                    .input
-                    .as_ref()
-                    .expect("eligibility checked input")
-                    .measured
-                    .iter()
-                    .zip(&input.measured)
-                    .zip(previous.block_fingerprints.iter().zip(&block_fingerprints))
-                    .all(|((previous, next), (previous_key, next_key))| {
-                        previous_key == next_key
-                            || !(placement_block_is_coupled(&previous.block)
-                                || placement_block_is_coupled(&next.block))
-                    })
+                && ((previous.doc_epoch != self.doc_epoch()
+                    && revision_preview
+                        .is_none_or(|(key, _, _)| key == previous.revision_preview_key))
+                    || previous
+                        .input
+                        .as_ref()
+                        .expect("eligibility checked input")
+                        .measured
+                        .iter()
+                        .zip(&input.measured)
+                        .zip(previous.block_fingerprints.iter().zip(&block_fingerprints))
+                        .all(|((previous, next), (previous_key, next_key))| {
+                            previous_key == next_key
+                                || !(placement_block_is_coupled(&previous.block)
+                                    || placement_block_is_coupled(&next.block))
+                        }))
             {
                 let previous = &mut *previous;
                 deltas = position_deltas(
@@ -4789,11 +4924,34 @@ impl EngineSession {
                 full_pass(&mut input)?
             }
         };
+        self.retain_placement(
+            input,
+            block_fingerprints,
+            revision_preview,
+            cached_page_totals,
+            run,
+            (incremental, deltas),
+        )
+    }
+
+    fn retain_placement(
+        &self,
+        input: LayoutInput,
+        block_fingerprints: Vec<Fingerprint>,
+        revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
+        cached_page_totals: bool,
+        run: docx_layout::place::IncrementalLayout,
+        (incremental, deltas): (bool, HashMap<String, i64>),
+    ) -> Result<(), String> {
+        self.resumable.replace(None);
+        self.capture.borrow_mut().take();
+        let input_options_fingerprint = options_fingerprint(&input)?;
         let docx_layout::place::IncrementalLayout {
             checkpointed: run,
             rebuilt_page_ranges,
         } = run;
         let mut pagination = self.pagination.borrow_mut();
+        let previous_page_count = pagination.layout.as_ref().map(|layout| layout.pages.len());
         pagination.input = Some(input);
         pagination.moved_blocks.clear();
         pagination.retain_matches.clear();
@@ -4802,6 +4960,7 @@ impl EngineSession {
         pagination.lowered_from = None;
         pagination.input_lowering = None;
         pagination.note_changed_pages.clear();
+        pagination.region_placements.clear();
         let mut layout = run.layout;
         // Every pass over part of a package, the resident edit paths' too.
         layout.partial = self.partial_document.get();
@@ -7364,6 +7523,10 @@ mod tests {
         assert_eq!(page["noteAreas"][0]["columns"], 2);
         assert_eq!(page["noteAreas"][0]["notes"][0]["displayLabel"], "III");
         assert_eq!(engine.stats().pagination_calls, 1);
+        let pagination = engine.pagination.borrow();
+        let settled = pagination.region_placements.last().unwrap();
+        assert_eq!(settled.shared_fragment_pages, [0]);
+        assert!(settled.layout.pages[0].fragments.is_empty());
     }
 
     /// A laid-out note is reachable through the resident hit test: the point
@@ -16808,12 +16971,25 @@ mod tests {
         {
             let retained = engine.pagination.borrow();
             let expected = fresh.pagination.borrow();
+            let restored = |pass: &RegionPlacementState, base: &Layout| {
+                let mut layout = pass.layout.clone();
+                for (page, fragments) in layout.pages.iter_mut().zip(&pass.fragment_pages) {
+                    if let Some(fragments) = fragments {
+                        page.fragments = fragments.as_ref().clone();
+                    }
+                }
+                for &index in &pass.shared_fragment_pages {
+                    assert!(layout.pages[index].fragments.is_empty());
+                    layout.pages[index].fragments = base.pages[index].fragments.clone();
+                }
+                serde_json::to_string(&layout).unwrap()
+            };
             assert_eq!(
                 retained.region_placements.len(),
                 expected.region_placements.len()
             );
             for pass in &retained.region_placements {
-                let expected = expected
+                let expected_pass = expected
                     .region_placements
                     .iter()
                     .find(|expected| {
@@ -16821,10 +16997,10 @@ mod tests {
                     })
                     .expect("fresh engine retained the same placement phase");
                 assert_eq!(
-                    serde_json::to_string(&pass.layout).unwrap(),
-                    serde_json::to_string(&expected.layout).unwrap()
+                    restored(pass, retained.layout.as_ref().unwrap()),
+                    restored(expected_pass, expected.layout.as_ref().unwrap())
                 );
-                assert_eq!(pass.checkpoints, expected.checkpoints);
+                assert_eq!(pass.checkpoints, expected_pass.checkpoints);
             }
         }
         assert_eq!(
@@ -17548,12 +17724,15 @@ mod tests {
             request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
             request["renderEnv"]["showHiddenText"] = json!(true);
             assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
-            assert!(!engine.pagination.borrow().last_incremental);
+            assert!(
+                !engine.pagination.borrow().last_incremental,
+                "global environment change must place afresh, floats={floats}"
+            );
             request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
             assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
             assert!(
                 engine.pagination.borrow().last_incremental,
-                "floats={floats}"
+                "local decision after the global change must resume, floats={floats}"
             );
         }
         docx_layout::clear_measure_fonts();
