@@ -69,6 +69,7 @@ export interface YrsInputRef {
    */
   runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
   hasPendingInput(): boolean;
+  hasHeldInput?(): boolean;
   setSelectionFromDisplay(anchor: number, head?: number, story?: string, gesture?: number): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -282,9 +283,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const compositionHeldRef = useRef(false);
   const discardedCompositionRef = useRef(false);
   const compositionWaitersRef = useRef(new Set<() => void>());
+  const heldInputWaitersRef = useRef(new Set<() => void>());
+  const holdInputRef = useRef(holdInput);
+  holdInputRef.current = holdInput;
   const heldInputRef = useRef({ scope: inputScope, entries: [] as HeldInput[] });
   if (heldInputRef.current.scope !== inputScope) {
-    if (compositionHeldRef.current && composingRef.current) discardedCompositionRef.current = true;
+    if (compositionHeldRef.current && (composingRef.current || compositionPendingRef.current)) {
+      discardedCompositionRef.current = true;
+    }
     heldInputRef.current = { scope: inputScope, entries: [] };
   }
   const inputLifetimeRef = useRef({ session, enabled, mounted: true });
@@ -1127,17 +1133,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll });
   inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll };
   useLayoutEffect(() => {
-    if (holdInput || readOnly || !enabled || !session) return;
-    const entries = heldInputRef.current.entries;
-    heldInputRef.current.entries = [];
-    for (const entry of entries) {
-      const handlers = inputHandlersRef.current;
-      if (entry.kind === 'text') handlers.insertText(entry.text);
-      else if (entry.kind === 'split') handlers.splitParagraph();
-      else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
-      else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
-      else handlers.selectAll();
+    if (!holdInput && !readOnly && enabled && session) {
+      const entries = heldInputRef.current.entries;
+      heldInputRef.current.entries = [];
+      for (const entry of entries) {
+        const handlers = inputHandlersRef.current;
+        if (entry.kind === 'text') handlers.insertText(entry.text);
+        else if (entry.kind === 'split') handlers.splitParagraph();
+        else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
+        else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
+        else handlers.selectAll();
+      }
     }
+    for (const notify of heldInputWaitersRef.current) notify();
   }, [enabled, holdInput, inputScope, readOnly, session]);
 
   const moveTableCell = useCallback(
@@ -1195,6 +1203,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const native = event.nativeEvent as InputEvent;
       if (discardedCompositionRef.current) {
         event.preventDefault();
+        event.currentTarget.value = '';
         return;
       }
       if (composingRef.current || native.isComposing) return;
@@ -1268,6 +1277,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
+      if (!event.nativeEvent.isComposing && event.key !== 'Process' && event.keyCode !== 229) {
+        discardedCompositionRef.current = false;
+      }
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
@@ -1349,10 +1361,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
       if (discardedCompositionRef.current) {
         event.currentTarget.value = '';
-        const scope = heldInputRef.current;
-        queueMicrotask(() => {
-          if (heldInputRef.current === scope) discardedCompositionRef.current = false;
-        });
         return;
       }
       composingRef.current = false;
@@ -1383,6 +1391,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         onPendingInputChangeRef.current?.(
           heldInputRef.current.entries.length > 0 || (inputOperationQueueRef.current?.hasPending() ?? false)
         );
+        for (const notify of heldInputWaitersRef.current) notify();
       });
     },
     [inputScope, insertText, isCurrentInput, session]
@@ -1425,7 +1434,41 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [insertText]
   );
 
+  const hasHeldInput = useCallback(
+    () => heldInputRef.current.entries.length > 0 ||
+      (compositionHeldRef.current && (composingRef.current || compositionPendingRef.current)),
+    []
+  );
+  const flushPendingInputRef = useRef<(() => Promise<void>) | null>(null);
   const flushPendingInput = useCallback(async (): Promise<void> => {
+    if (hasHeldInput()) {
+      const scope = heldInputRef.current;
+      let notify!: () => void;
+      let flushing = false;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          notify = () => {
+            const lifetime = inputLifetimeRef.current;
+            if (
+              !lifetime.mounted || !lifetime.enabled || !lifetime.session ||
+              heldInputRef.current !== scope ||
+              (inputScope === undefined && lifetime.session !== session)
+            ) {
+              reject(new Error('The document changed while flushing input'));
+              return;
+            }
+            if (flushing || holdInputRef.current || hasHeldInput()) return;
+            flushing = true;
+            flushPendingInputRef.current!().then(resolve, reject);
+          };
+          heldInputWaitersRef.current.add(notify);
+          notify();
+        });
+      } finally {
+        heldInputWaitersRef.current.delete(notify);
+      }
+      return;
+    }
     const queue = inputOperationQueueRef.current;
     const since = queue?.failureCheckpoint();
     const assertCurrent = () => {
@@ -1441,7 +1484,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     sealInputBatches();
     await queue?.flush(since);
     assertCurrent();
-  }, [isCurrentInput, sealInputBatches, session]);
+  }, [hasHeldInput, inputScope, isCurrentInput, sealInputBatches, session]);
+  flushPendingInputRef.current = flushPendingInput;
 
   const runAfterPendingInput = useCallback(
     <T,>(operation: () => T | Promise<T>): Promise<T> => {
@@ -1493,6 +1537,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     return () => {
       inputLifetimeRef.current.mounted = false;
       heldInputRef.current.entries = [];
+      for (const notify of heldInputWaitersRef.current) notify();
+      heldInputWaitersRef.current.clear();
       readerScrollRef.current?.stop();
       readerScrollRef.current = null;
       for (const resolve of compositionWaitersRef.current) resolve();
@@ -1529,6 +1575,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       flushPendingInput,
       runAfterPendingInput,
       hasPendingInput,
+      hasHeldInput,
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
@@ -1594,6 +1641,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       ensureSelection,
       flushPendingInput,
       hasPendingInput,
+      hasHeldInput,
       insertText,
       deleteSelection,
       runAfterPendingInput,

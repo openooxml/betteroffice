@@ -266,6 +266,10 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
       const session = yrsSessionRef.current;
       const input = yrsInputRef.current;
       if (!input || !session) throw new Error('The editor input is unavailable');
+      if (input.hasHeldInput?.()) {
+        await input.flushPendingInput();
+        return;
+      }
       const pending = input.flushPendingInput();
       const ready = workerOpenEnabledRef.current ? awaitWorkerOpenReplica(session) : undefined;
       await (ready ? Promise.all([pending, ready]) : pending);

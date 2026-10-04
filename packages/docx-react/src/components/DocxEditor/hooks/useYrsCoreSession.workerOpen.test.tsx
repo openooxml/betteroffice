@@ -597,6 +597,84 @@ async function openingEditor(workerPreview = true, viewer = false) {
   }
 }
 
+test.each(['held keys', 'held composition'] as const)(
+  'flush during opening waits for %s to land in the full session', async (kind) => {
+    const opened = await openingEditor();
+    try {
+      const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+      opened.click(6);
+      if (kind === 'held keys') fireEvent.input(textarea, { target: { value: 'A' } });
+      else {
+        fireEvent.compositionStart(textarea);
+        textarea.value = '日本';
+      }
+      let done = false;
+      let seen: string[] = [];
+      const flush = opened.editor.current!.flushPendingInput().then(() => {
+        seen = opened.editor.current!.getYrsSession()!.paragraphs('body').map((paragraph) => paragraph.text);
+        done = true;
+      });
+      await act(async () => { await Promise.resolve(); });
+      expect(done).toBe(false);
+      const full = await opened.switchToFull();
+      expect(done).toBe(false);
+      if (kind === 'held keys') fireEvent.input(textarea, { target: { value: 'B' } });
+      await opened.presentFull(full);
+      if (kind === 'held composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+      await act(async () => { await Promise.resolve(); });
+      expect(done).toBe(false);
+      expect(full.storyIds()).toEqual([]);
+      await opened.loadPeer(full);
+      await act(async () => { await flush; });
+      expect(done).toBe(true);
+      expect(seen[0]).toBe(kind === 'held keys' ? 'FirstAB paragraph' : 'First日本 paragraph');
+      expect(full.selection()?.head.offset).toBe(7);
+      expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(opened.harness.mainOpens).toEqual([false]);
+    } finally {
+      opened.close();
+    }
+  }
+);
+
+test('flush during opening rejects when another document replaces held input', async () => {
+  const opened = await openingEditor(false);
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    fireEvent.input(textarea, { target: { value: 'discard' } });
+    const flush = opened.editor.current!.flushPendingInput().catch((error) => error);
+    await opened.replace();
+    expect(await flush).toEqual(new Error('The document changed while flushing input'));
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+  } finally {
+    opened.close();
+  }
+});
+
+test('flush with nothing held during opening keeps preview and replica readiness behavior', async () => {
+  const opened = await openingEditor();
+  try {
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    await act(async () => { await opened.editor.current!.flushPendingInput(); });
+    expect(opened.harness.core.previewing).toBe(true);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    const full = await opened.switchToFull();
+    let done = false;
+    const flush = opened.editor.current!.flushPendingInput().then(() => { done = true; });
+    await act(async () => { await Promise.resolve(); });
+    expect(done).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    await opened.presentFull(full);
+    expect(done).toBe(false);
+    await opened.loadPeer(full);
+    await act(async () => { await flush; });
+    expect(done).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+  } finally {
+    opened.close();
+  }
+});
+
 test('keys typed during opening land in order, none dropped', async () => {
   const opened = await openingEditor();
   const insert = spyOn(opened.preview, 'insertText');

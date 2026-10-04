@@ -186,6 +186,102 @@ test('held selection deletion follows select-all on the full session', async () 
   expect(text(preview)).toBe('Seed');
 });
 
+test('a held-input flush waits for replay and the full-session operation queue', async () => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: false };
+  let release!: () => void;
+  const replica = deferWorkerOpenReplica(full,
+    () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+    () => {}, () => { replicaReadyRef.current = true; });
+  replica.start();
+  const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input');
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(input.current!.hasHeldInput!()).toBe(true);
+  let done = false;
+  const flush = input.current!.flushPendingInput().then(() => { done = true; });
+  await act(async () => { await Promise.resolve(); });
+  expect(done).toBe(false);
+  view.rerender(inputFor(full, input, undefined, undefined, {
+    holdInput: true, inputScope: 1, replicaReadyRef,
+  }));
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  await act(async () => { await Promise.resolve(); });
+  expect(done).toBe(false);
+  view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 1, replicaReadyRef }));
+  await act(async () => { await Promise.resolve(); });
+  expect(input.current!.hasHeldInput!()).toBe(false);
+  expect(done).toBe(false);
+  expect(text(preview)).toBe('Seed');
+  expect(text(full)).toBe('Seed');
+  await act(async () => { release(); await flush; });
+  expect(done).toBe(true);
+  expect(text(full)).toBe('SeedAB');
+  expect(full.selection()?.head.offset).toBe(6);
+  expect(text(preview)).toBe('Seed');
+});
+
+test.each([
+  ['held keys', 'scope change'],
+  ['held keys', 'unmount'],
+  ['active composition', 'scope change'],
+  ['active composition', 'unmount'],
+  ['pending composition', 'scope change'],
+  ['pending composition', 'unmount'],
+] as const)('a flush of %s rejects on %s before opening completes', async (kind, lifecycle) => {
+  const preview = await seededSession();
+  const replacement = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  if (kind === 'held keys') fireEvent.input(textarea, { target: { value: 'discard' } });
+  else {
+    fireEvent.compositionStart(textarea);
+    textarea.value = '日本';
+    if (kind === 'pending composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+  }
+  const flush = input.current!.flushPendingInput().catch((error) => error);
+  if (lifecycle === 'unmount') view.unmount();
+  else view.rerender(inputFor(replacement, input, undefined, undefined, { holdInput: true, inputScope: 2 }));
+  await act(async () => {
+    expect(await flush).toEqual(new Error('The document changed while flushing input'));
+  });
+  expect(text(preview)).toBe('Seed');
+  expect(text(replacement)).toBe('Seed');
+});
+
+test.each(['scope change', 'unmount'] as const)(
+  'a held-input flush rejects on %s while the replayed queue waits for the peer', async (lifecycle) => {
+    const preview = await seededSession();
+    const full = await seededSession();
+    const replacement = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const replicaReadyRef = { current: false };
+    let release!: () => void;
+    const replica = deferWorkerOpenReplica(full,
+      () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+      () => {}, () => { replicaReadyRef.current = true; });
+    replica.start();
+    const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+    fireEvent.input(view.getByTestId('yrs-input'), { target: { value: 'discard' } });
+    const flush = input.current!.flushPendingInput().catch((error) => error);
+    view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 1, replicaReadyRef }));
+    await act(async () => { await Promise.resolve(); });
+    expect(input.current!.hasHeldInput!()).toBe(false);
+    expect(input.current!.hasPendingInput()).toBe(true);
+    if (lifecycle === 'unmount') view.unmount();
+    else view.rerender(inputFor(replacement, input, undefined, undefined, { inputScope: 2 }));
+    expect(await flush).toEqual(new Error('The document changed while flushing input'));
+    replica.cancel();
+    await act(async () => { release(); await replica.ready.catch(() => {}); });
+    expect(text(preview)).toBe('Seed');
+    expect(text(full)).toBe('Seed');
+    expect(text(replacement)).toBe('Seed');
+  }
+);
+
 test.each(['held commit', 'pending commit', 'active composition'] as const)(
   'opening composition survives the same-scope session switch with %s', async (stage) => {
     const preview = await seededSession();
@@ -203,23 +299,28 @@ test.each(['held commit', 'pending commit', 'active composition'] as const)(
     const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
     fireEvent.compositionStart(textarea);
     textarea.value = '日本';
+    expect(input.current!.hasHeldInput!()).toBe(true);
+    let done = false;
+    const flush = input.current!.flushPendingInput().then(() => { done = true; });
     if (stage !== 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
     if (stage === 'held commit') await act(async () => { await Promise.resolve(); });
     view.rerender(inputFor(full, input, undefined, undefined, {
       holdInput: true, inputScope: 1, seedSelection: false, replicaReadyRef,
     }));
     expect(view.getByTestId('yrs-input')).toBe(textarea);
-    if (stage === 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
     view.rerender(inputFor(full, input, undefined, undefined, {
       holdInput: false, inputScope: 1, replicaReadyRef,
     }));
+    if (stage === 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
     fireEvent(textarea, new InputEvent('textInput', { bubbles: true, data: '日本' }));
     fireEvent.input(textarea);
     await act(async () => { await Promise.resolve(); });
     fireEvent.input(textarea);
+    expect(done).toBe(false);
     expect(text(full)).toBe('Seed');
     expect(text(preview)).toBe('Seed');
-    await act(async () => { release(); await input.current!.flushPendingInput(); });
+    await act(async () => { release(); await flush; });
+    expect(done).toBe(true);
     expect(text(full)).toBe('Seed日本');
     expect(full.selection()?.head.offset).toBe(6);
     expect(textarea.value).toBe('');
@@ -247,7 +348,12 @@ test.each(['scope change', 'unmount'] as const)('opening input is discarded on %
   expect(input.current!.hasPendingInput()).toBe(false);
 });
 
-test('an opening composition cannot commit into a replacement document', async () => {
+test.each([
+  ['active composition', 'key'],
+  ['active composition', 'composition'],
+  ['pending commit', 'key'],
+  ['pending commit', 'composition'],
+] as const)('discarded %s ignores delayed trailing events until a fresh %s', async (stage, boundary) => {
   const preview = await seededSession();
   const full = await seededSession();
   const input = createRef<YrsInputRef>();
@@ -255,15 +361,41 @@ test('an opening composition cannot commit into a replacement document', async (
   const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
   fireEvent.compositionStart(textarea);
   textarea.value = '日本';
+  if (stage === 'pending commit') fireEvent.compositionEnd(textarea, { data: '日本' });
   view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 2 }));
   fireEvent.compositionUpdate(textarea, { data: '日本' });
   fireEvent.input(textarea, { target: { value: '日本' }, isComposing: true });
-  fireEvent.compositionEnd(textarea, { data: '日本' });
+  if (stage === 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
   fireEvent.input(textarea, { target: { value: '日本' } });
-  await act(async () => { await input.current!.flushPendingInput(); });
-  expect(text(preview)).toBe('Seed');
-  expect(text(full)).toBe('Seed');
-  fireEvent.input(textarea, { target: { value: 'C' } });
+  for (const delay of ['microtask', 'macrotask'] as const) {
+    await act(async () => {
+      if (delay === 'microtask') await Promise.resolve();
+      else await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    fireEvent.keyDown(textarea, { key: 'a', isComposing: true });
+    fireEvent.keyDown(textarea, { key: 'Process' });
+    fireEvent.keyDown(textarea, { key: 'Unidentified', keyCode: 229 });
+    textarea.value = '日本';
+    const beforeInput = new InputEvent('textInput', {
+      bubbles: true, cancelable: true, inputType: 'insertText', data: '日本',
+    });
+    fireEvent(textarea, beforeInput);
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(textarea.value).toBe('');
+    fireEvent.input(textarea, { data: '日本', target: { value: '日本' } });
+    expect(textarea.value).toBe('');
+    await act(async () => { await input.current!.flushPendingInput(); });
+    expect(text(preview)).toBe('Seed');
+    expect(text(full)).toBe('Seed');
+  }
+  if (boundary === 'key') {
+    fireEvent.keyDown(textarea, { key: 'C' });
+    fireEvent.input(textarea, { target: { value: 'C' } });
+  } else {
+    fireEvent.compositionStart(textarea);
+    textarea.value = 'C';
+    fireEvent.compositionEnd(textarea, { data: 'C' });
+  }
   await act(async () => { await input.current!.flushPendingInput(); });
   expect(text(full)).toBe('SeedC');
 });
