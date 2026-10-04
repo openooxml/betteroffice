@@ -124,6 +124,8 @@ export interface YrsCoreSessionOptions {
 
 /** Body blocks a first-page preview parses. */
 const PREVIEW_BODY_BLOCKS = 200;
+/** Paragraph weight budget for a first-page preview. */
+const PREVIEW_PARAGRAPH_BUDGET = 256;
 /** How long the full open waits for the preview's pages to paint. */
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
@@ -147,7 +149,7 @@ async function openPreview(
 ): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
   const session = await yrs.createYrsSession({ clientId });
   try {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     if (host) return { session, host };
     session.destroy();
     return null;
@@ -174,14 +176,14 @@ async function openWorkerPreview(
   session.markDisplayOnly();
   // A cut that holds the whole body lays out like the whole document.
   const loadHere = (): void => {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     if (!host) throw new Error('The first-page preview cannot open');
     if (host.wholeBody) session.setPartialDocument(false);
   };
   let release = (): void => {};
   deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
   try {
-    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS);
+    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     onPosted();
     const opened = await pending;
     if (opened) {

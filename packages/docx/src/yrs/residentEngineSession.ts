@@ -98,8 +98,8 @@ export type ResidentEngineSession = Pick<
   directBatchesApplied(): number;
   /** Parses and seeds a DOCX; returns the host metadata JSON the main thread decodes. */
   openDocx(bytes: Uint8Array, digest?: string, generation?: string): string;
-  /** Opens a display-only preview of the first `blocks` body blocks; null when it refuses. */
-  openDocxPreview(bytes: Uint8Array, blocks: number): string | null;
+  /** Opens a display-only preview with a block limit and optional paragraph budget; null when refused. */
+  openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
   encodeState(): Uint8Array;
   /** Tracked changes in the document, leaving out the revisions in `excluding`. */
@@ -329,9 +329,12 @@ export async function createResidentEngineSession(
         (token) => (token.startsWith('media:') ? (session.media_data_url(token) ?? null) : null)
       );
     },
-    openDocxPreview: (bytes, blocks) => {
+    openDocxPreview: (bytes, blocks, paragraphBudget) => {
       geometryStories.clear();
-      const json = session.open_docx_preview(bytes, blocks);
+      const json =
+        paragraphBudget === undefined
+          ? session.open_docx_preview(bytes, blocks)
+          : session.open_docx_preview_with_budget(bytes, blocks, paragraphBudget);
       return json === undefined
         ? null
         : resolveHostJsonCommentMedia(

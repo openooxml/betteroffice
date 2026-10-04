@@ -23,6 +23,7 @@ import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
+import * as presenceRendering from './presence-rendering';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
 
@@ -68,6 +69,544 @@ describe('shortcut matching', () => {
     expect(matchesChord('Mod+B', press({ metaKey: true, ctrlKey: true }), true)).toBe(false);
     expect(matchesChord('Mod+B', press({ ctrlKey: true, altKey: true }), false)).toBe(false);
   });
+});
+
+describe('PptxEditor slide layout cache', () => {
+  function getContext(this: HTMLCanvasElement): CanvasRenderingContext2D {
+    return {
+      canvas: this,
+      fillStyle: '#000000',
+      save() {}, restore() {}, setTransform() {}, drawImage() {}, fillRect() {},
+    } as unknown as CanvasRenderingContext2D;
+  }
+
+  for (const scenario of [
+    { name: 'instant layouts', layoutMs: 0, failAt: undefined },
+    { name: 'layouts exceeding the budget', layoutMs: 13, failAt: undefined },
+    { name: 'a layout failure', layoutMs: 0, failAt: 3 },
+  ]) {
+    it(`batches deferred thumbnails with ${scenario.name} in a 50-slide deck`, async () => {
+      const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+      const originalOpen = pptx.openPresentation;
+      const peer = originalOpen(fixture, { clientId: 9440, fonts });
+      const calls: number[] = [];
+      const errors: Error[] = [];
+      const failure = new Error('layout failed');
+      let clock = 0;
+      let finishPaint!: () => void;
+      const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
+      const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
+      const restorers: Array<() => void> = [];
+      let api: PptxEditorApi | undefined;
+      let view: ReturnType<typeof render> | undefined;
+      try {
+        let count = peer.snapshot().slides.length;
+        while (count < 50) peer.insertSlide(count++);
+        const seed = peer.encodeStateAsUpdate();
+        const expected = peer.snapshot().slides.map((_slide, index) => peer.layoutSlide(index));
+        const now = spyOn(performance, 'now').mockImplementation(() => clock);
+        restorers.push(() => now.mockRestore());
+        const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+          const handle = originalOpen(bytes, options);
+          const originalLayout = handle.layoutSlide.bind(handle);
+          const layout = spyOn(handle, 'layoutSlide').mockImplementation((index) => {
+            calls.push(index);
+            clock += scenario.layoutMs;
+            if (index === scenario.failAt) throw failure;
+            return originalLayout(index);
+          });
+          restorers.push(() => layout.mockRestore());
+          return handle;
+        });
+        restorers.push(() => open.mockRestore());
+        const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame, _dpr, scale) => {
+          paintedFrames.set(ctx.canvas, frame);
+          return scale === 1 ? firstPaint : Promise.resolve();
+        });
+        restorers.push(() => paint.mockRestore());
+        const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+          getContext as unknown as HTMLCanvasElement['getContext']
+        );
+        restorers.push(() => context.mockRestore());
+        const presence = spyOn(presenceRendering, 'groupPresenceBySlide');
+        restorers.push(() => presence.mockRestore());
+        view = render(<PptxEditor file={fixture} fonts={fonts}
+          collaboration={{ clientId: 9441, initialUpdate: seed }}
+          onError={(error) => errors.push(error)}
+          onReady={(ready) => { api = ready; }} />);
+        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(paint).toHaveBeenCalled());
+        expect(calls).toEqual([0]);
+        expect(presence).toHaveBeenCalled();
+        const presenceCalls = presence.mock.calls.length;
+        const cache = (api!.handle as unknown as Record<symbol, {
+          activate(slideId: string, key: string): boolean;
+        }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
+        const batches: number[][] = [];
+        let batchStart = calls.length;
+        const originalActivate = cache.activate.bind(cache);
+        const activate = spyOn(cache, 'activate').mockImplementation((id, key) => {
+          batches.push(calls.slice(batchStart));
+          batchStart = calls.length;
+          return originalActivate(id, key);
+        });
+        restorers.push(() => activate.mockRestore());
+        expect(activate).not.toHaveBeenCalled();
+        await act(async () => { finishPaint(); await firstPaint; });
+        const completed = scenario.failAt ?? 50;
+        const attempted = scenario.failAt === undefined ? 50 : completed + 1;
+        await waitFor(() => {
+          const canvases = view!.container.querySelectorAll<HTMLCanvasElement>('aside canvas');
+          expect(canvases).toHaveLength(completed);
+          expected.slice(0, completed).forEach((frame, index) => {
+            expect(paintedFrames.get(canvases[index])).toEqual(frame);
+            expect(paint.mock.calls.filter(([ctx]) => ctx.canvas === canvases[index])).toHaveLength(1);
+          });
+          expect(calls).toHaveLength(attempted);
+          expect(errors).toEqual(scenario.failAt === undefined ? [] : [failure]);
+        }, { timeout: 15_000 });
+        if (scenario.failAt !== undefined) {
+          await act(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
+        }
+        if (scenario.layoutMs === 0) {
+          expect(batches).toEqual([Array.from({ length: attempted - 1 }, (_, index) => index + 1)]);
+        } else {
+          expect(batches).toEqual(Array.from({ length: 49 }, (_, index) => [index + 1]));
+        }
+        expect(activate).toHaveBeenCalledTimes(batches.length);
+        const activeId = api!.handle.snapshot().slides[0].id;
+        expect(activate.mock.calls.every(([id]) => id === activeId)).toBe(true);
+        expect(activate.mock.results.every((result) =>
+          result.type === 'return' && result.value === true)).toBe(true);
+        expect(calls).toEqual(Array.from({ length: attempted }, (_, index) => index));
+        expect(errors).toEqual(scenario.failAt === undefined ? [] : [failure]);
+        expect(presence).toHaveBeenCalledTimes(presenceCalls);
+      } finally {
+        finishPaint();
+        try {
+          view?.unmount();
+          peer.dispose();
+        } finally {
+          for (const restore of restorers.reverse()) restore();
+        }
+      }
+    }, 60_000);
+  }
+
+  it('refreshes an edited slide thumbnail after undo and redo from another slide', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
+    const restorers: Array<() => void> = [];
+    let api: PptxEditorApi | undefined;
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame) => {
+        paintedFrames.set(ctx.canvas, frame);
+        return Promise.resolve();
+      });
+      restorers.push(() => paint.mockRestore());
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
+      restorers.push(() => context.mockRestore());
+      view = render(<PptxEditor file={fixture} fonts={fonts}
+        collaboration={{ clientId: 9450 }}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const thumbnail = () => view!.container.querySelector<HTMLCanvasElement>('aside button:first-child canvas');
+      await waitFor(() => expect(paintedFrames.get(thumbnail()!)).toBeDefined());
+      const original = paintedFrames.get(thumbnail()!)!;
+      const slide = api!.handle.snapshot().slides[0];
+      const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+      const story = shape.textStories[0];
+      const originalStory = api!.handle.story(story.id);
+      await act(async () => {
+        expect(api!.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 })).toBe(true);
+        fireEvent.keyDown(view!.getByRole('application'), { key: 'X' });
+        await api!.flushPendingInput();
+      });
+      await waitFor(() => {
+        expect(paintedFrames.get(thumbnail()!)).toBeDefined();
+        expect(paintedFrames.get(thumbnail()!)).not.toEqual(original);
+      });
+      const editedStory = api!.handle.story(story.id);
+      expect(editedStory).not.toEqual(originalStory);
+      await act(async () => { expect(api!.goToSlide(2)).toBe(true); });
+      for (const direction of ['undo', 'redo'] as const) {
+        await act(async () => {
+          expect(await api!.commands.execute(direction, null)).toEqual({ ok: true, status: 'executed' });
+        });
+        expect(view!.container.querySelectorAll('aside button')[1].getAttribute('aria-current')).toBe('page');
+        expect(api!.handle.story(story.id)).toEqual(direction === 'undo' ? originalStory : editedStory);
+        const fresh = pptx.openPresentation(fixture, {
+          clientId: 9451, fonts, initialUpdate: api!.handle.encodeStateAsUpdate(),
+        });
+        try {
+          const expected = fresh.layoutSlide(0);
+          await waitFor(() => expect(paintedFrames.get(thumbnail()!)).toEqual(expected));
+        } finally {
+          fresh.dispose();
+        }
+      }
+    } finally {
+      try {
+        view?.unmount();
+      } finally {
+        for (const restore of restorers.reverse()) restore();
+      }
+    }
+  }, 30_000);
+
+  for (const scenario of ['ready navigation', 'undo restoration'] as const) {
+    it(`completes uncached thumbnails after ${scenario}`, async () => {
+      const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+      const peer = pptx.openPresentation(fixture, { clientId: 9420, fonts });
+      let count = peer.snapshot().slides.length;
+      while (count < 12) peer.insertSlide(count++);
+      const seed = peer.encodeStateAsUpdate();
+      const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
+      let finishPaint!: () => void;
+      const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
+      const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame, _dpr, scale) => {
+        paintedFrames.set(ctx.canvas, frame);
+        return scale === 1 ? firstPaint : Promise.resolve();
+      });
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
+      let api: PptxEditorApi | undefined;
+      let view: ReturnType<typeof render> | undefined;
+      try {
+        view = render(<PptxEditor file={fixture} fonts={fonts}
+          collaboration={{ clientId: 9421, initialUpdate: seed }}
+          onReady={(ready) => {
+            api = ready;
+            if (scenario === 'ready navigation') expect(ready.goToSlide(2)).toBe(true);
+          }} />);
+        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(paint).toHaveBeenCalled());
+        if (scenario === 'undo restoration') {
+          await act(async () => {
+            api!.handle.deleteSlide(api!.handle.snapshot().slides[11].id);
+            api!.refresh();
+            expect(await api!.commands.execute('undo', null)).toEqual({ ok: true, status: 'executed' });
+          });
+          expect(api!.handle.snapshot().slides).toHaveLength(12);
+        }
+        await act(async () => { finishPaint(); await firstPaint; });
+        const fresh = pptx.openPresentation(fixture, {
+          clientId: 9422, fonts, initialUpdate: api!.handle.encodeStateAsUpdate(),
+        });
+        try {
+          const expected = fresh.snapshot().slides.map((_slide, index) => fresh.layoutSlide(index));
+          await waitFor(() => {
+            const canvases = view!.container.querySelectorAll<HTMLCanvasElement>('aside canvas');
+            expect(canvases).toHaveLength(expected.length);
+            expected.forEach((frame, index) => expect(paintedFrames.get(canvases[index])).toEqual(frame));
+          }, { timeout: 15_000 });
+        } finally {
+          fresh.dispose();
+        }
+      } finally {
+        finishPaint();
+        view?.unmount();
+        peer.dispose();
+        paint.mockRestore();
+        context.mockRestore();
+      }
+    }, 30_000);
+  }
+
+  for (const action of ['typing', 'navigation'] as const) {
+    it(`completes every thumbnail after ${action} supersedes a running pass`, async () => {
+      const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+      const originalOpen = pptx.openPresentation;
+      const peer = originalOpen(fixture, { clientId: 9430, fonts });
+      let count = peer.snapshot().slides.length;
+      while (count < 12) peer.insertSlide(count++);
+      const seed = peer.encodeStateAsUpdate();
+      const calls: number[] = [];
+      let clock = 0;
+      const now = spyOn(performance, 'now').mockImplementation(() => clock);
+      let finishPaint!: () => void;
+      const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
+      let finishThumbnail!: () => void;
+      const firstThumbnail = new Promise<void>((resolve) => { finishThumbnail = resolve; });
+      const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+        const handle = originalOpen(bytes, options);
+        const layout = handle.layoutSlide.bind(handle);
+        handle.layoutSlide = (index) => {
+          const frame = layout(index);
+          calls.push(index);
+          clock += 13;
+          if (index === 1) finishThumbnail();
+          return frame;
+        };
+        return handle;
+      });
+      const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
+      const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame, _dpr, scale) => {
+        paintedFrames.set(ctx.canvas, frame);
+        return scale === 1 ? firstPaint : Promise.resolve();
+      });
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
+      let api: PptxEditorApi | undefined;
+      let view: ReturnType<typeof render> | undefined;
+      try {
+        view = render(<PptxEditor file={fixture} fonts={fonts}
+          collaboration={{ clientId: 9431, initialUpdate: seed }}
+          onReady={(ready) => { api = ready; }} />);
+        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(paint).toHaveBeenCalled());
+        expect(calls).toEqual([0]);
+        await act(async () => {
+          finishPaint();
+          await firstThumbnail;
+          expect(calls).toEqual([0, 1]);
+          if (action === 'typing') {
+            const slide = api!.handle.snapshot().slides[0];
+            const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+            const story = shape.textStories[0];
+            expect(api!.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 })).toBe(true);
+            fireEvent.keyDown(view!.getByRole('application'), { key: 'X' });
+            await api!.flushPendingInput();
+            expect(api!.handle.story(story.id).paragraphs[0].runs[0].text.startsWith('X')).toBe(true);
+          } else {
+            expect(api!.goToSlide(12)).toBe(true);
+            expect(calls[calls.length - 1]).toBe(11);
+          }
+        });
+        const fresh = originalOpen(fixture, {
+          clientId: 9432, fonts, initialUpdate: api!.handle.encodeStateAsUpdate(),
+        });
+        try {
+          const expected = fresh.snapshot().slides.map((_slide, index) => fresh.layoutSlide(index));
+          await waitFor(() => {
+            const canvases = view!.container.querySelectorAll<HTMLCanvasElement>('aside canvas');
+            expect(canvases).toHaveLength(expected.length);
+            expected.forEach((frame, index) => expect(paintedFrames.get(canvases[index])).toEqual(frame));
+          }, { timeout: 15_000 });
+        } finally {
+          fresh.dispose();
+        }
+      } finally {
+        finishPaint();
+        view?.unmount();
+        peer.dispose();
+        open.mockRestore();
+        paint.mockRestore();
+        context.mockRestore();
+        now.mockRestore();
+      }
+    }, 30_000);
+  }
+
+  it('computes one active key and at most one layout per typed character in a 50-slide deck', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const peer = pptx.openPresentation(fixture, { clientId: 9410, fonts });
+    let count = peer.snapshot().slides.length;
+    while (count < 50) peer.insertSlide(count++);
+    const seed = peer.encodeStateAsUpdate();
+    const paint = spyOn(pptx, 'paintSlide').mockResolvedValue(undefined);
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      getContext as unknown as HTMLCanvasElement['getContext']
+    );
+    let api: PptxEditorApi | undefined;
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      view = render(<PptxEditor file={fixture} fonts={fonts}
+        collaboration={{ clientId: 9411, initialUpdate: seed }}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(view!.container.querySelectorAll('aside canvas')).toHaveLength(50), {
+        timeout: 15_000,
+      });
+      const slide = api!.handle.snapshot().slides[0];
+      const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+      const story = shape.textStories[0];
+      await act(async () => {
+        expect(api!.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 })).toBe(true);
+      });
+      const cache = (api!.handle as unknown as Record<symbol, {
+        snapshot(): unknown;
+        key(index: number): string;
+      }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
+      const key = spyOn(cache, 'key');
+      const snapshot = spyOn(cache, 'snapshot');
+      const layout = spyOn(api!.handle, 'layoutSlide');
+      try {
+        for (const character of 'abcde') {
+          key.mockClear();
+          snapshot.mockClear();
+          layout.mockClear();
+          await act(async () => {
+            fireEvent.keyDown(view!.getByRole('application'), { key: character });
+            await api!.flushPendingInput();
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          });
+          expect(key.mock.calls.map((call) => call[0])).toEqual([0]);
+          expect(snapshot).not.toHaveBeenCalled();
+          expect(layout.mock.calls.length).toBeLessThanOrEqual(1);
+          expect(layout.mock.calls.map((call) => call[0])).toEqual([0]);
+          expect(view.container.querySelectorAll('aside canvas')).toHaveLength(50);
+        }
+        const text = api!.handle.story(story.id).paragraphs.flatMap((paragraph) =>
+          paragraph.runs.map((run) => run.text)).join('');
+        expect(text.startsWith('abcde')).toBe(true);
+      } finally {
+        layout.mockRestore();
+        snapshot.mockRestore();
+        key.mockRestore();
+      }
+    } finally {
+      view?.unmount();
+      peer.dispose();
+      paint.mockRestore();
+      context.mockRestore();
+    }
+  }, 60_000);
+
+  it('paints the active slide first and lays out only damaged slides in a 50-slide deck', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const originalOpen = pptx.openPresentation;
+    const peer = originalOpen(fixture, { clientId: 9400, fonts });
+    let count = peer.snapshot().slides.length;
+    while (count < 50) peer.insertSlide(count++);
+    const seed = peer.encodeStateAsUpdate();
+    const freshFrames = peer.snapshot().slides.map((_slide, index) => peer.layoutSlide(index));
+    const calls: number[] = [];
+    const frames: SlideDisplayList[] = [];
+    let api: PptxEditorApi | undefined;
+    let finishPaint!: () => void;
+    const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
+    let painted = false;
+    const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+      const handle = originalOpen(bytes, options);
+      const layout = handle.layoutSlide.bind(handle);
+      handle.layoutSlide = (index) => {
+        calls.push(index);
+        return layout(index);
+      };
+      return handle;
+    });
+    const paint = spyOn(pptx, 'paintSlide').mockImplementation((_ctx, frame, _dpr, scale) => {
+      if (scale === 1) frames.push(frame);
+      if (!painted) {
+        painted = true;
+        return firstPaint;
+      }
+      return Promise.resolve();
+    });
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+      getContext as unknown as HTMLCanvasElement['getContext']
+    );
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      view = render(<PptxEditor file={fixture} fonts={fonts}
+        collaboration={{ clientId: 9401, initialUpdate: seed }}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(painted).toBe(true));
+      expect(calls).toEqual([0]);
+      expect(frames[0]).toEqual(freshFrames[0]);
+      await act(async () => { finishPaint(); await firstPaint; });
+      const thumbnails = () => view!.container.querySelectorAll('aside canvas');
+      await waitFor(() => expect(thumbnails()).toHaveLength(50), { timeout: 15_000 });
+      expect(calls).toEqual(Array.from({ length: 50 }, (_, index) => index));
+      await waitFor(() => {
+        const paintedFrames = paint.mock.calls.map((call) => call[1]);
+        for (const frame of freshFrames) expect(paintedFrames).toContainEqual(frame);
+      });
+
+      const canvas = view.getByTestId('pptx-slide-canvas');
+      const frame = freshFrames[0];
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+      canvas.setPointerCapture = () => {};
+      calls.length = 0;
+      let point: { x: number; y: number } | undefined;
+      for (let y = 0; y < frame.height && !point; y += 16) {
+        for (let x = 0; x < frame.width; x += 16) {
+          if (api!.getPositionAtPoint(x, y)?.kind === 'text') { point = { x, y }; break; }
+        }
+      }
+      expect(point).toBeDefined();
+      expect(api!.getPositionAtPoint(point!.x, point!.y)).toEqual({
+        ...api!.handle.hitTest(point!.x, point!.y)!, slide: 1, slideId: peer.snapshot().slides[0].id,
+      });
+      fireEvent.pointerDown(canvas, {
+        isPrimary: true, button: 0, pointerId: 9, clientX: point!.x, clientY: point!.y,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 9, clientX: point!.x, clientY: point!.y });
+      expect(calls).toHaveLength(0);
+
+      const slide = peer.snapshot().slides[0];
+      const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+      const story = shape.textStories[0];
+      peer.insertText(story.id, 0, 'Remote ');
+      await act(async () => {
+        api!.handle.applyUpdate(peer.encodeDiff(api!.handle.encodeStateVector()));
+      });
+      await waitFor(() => expect(thumbnails()).toHaveLength(50));
+      expect(calls).toEqual([0]);
+      expect(frames[frames.length - 1]).toEqual(peer.layoutSlide(0));
+      api!.getPositionAtPoint(point!.x, point!.y);
+      expect(calls).toEqual([0]);
+
+      calls.length = 0;
+      const lastSlide = peer.snapshot().slides[49];
+      peer.addTextBox(lastSlide.id, {
+        name: 'Remote text', rect: { x: 100_000, y: 100_000, width: 1_000_000, height: 500_000 },
+        text: 'Thumbnail change',
+        style: {},
+      });
+      await act(async () => {
+        api!.handle.applyUpdate(peer.encodeDiff(api!.handle.encodeStateVector()));
+        expect(api!.goToSlide(1)).toBe(true);
+      });
+      await waitFor(() => expect(thumbnails()).toHaveLength(50));
+      expect(calls).toEqual([49]);
+      expect(frames[frames.length - 1]).toEqual(peer.layoutSlide(0));
+      const changedThumbnail = peer.layoutSlide(49);
+      await waitFor(() => expect(paint.mock.calls.map((call) => call[1])).toContainEqual(changedThumbnail));
+
+      calls.length = 0;
+      await act(async () => {
+        const result = await api!.applyEdits({
+          expectVersion: api!.handle.version(),
+          steps: [{ op: 'insertText', at: 'start', text: 'Host ', target: {
+            kind: 'range', slideId: slide.id, shapeId: shape.id, storyId: story.id, start: 0, end: 0,
+          } }],
+        });
+        expect(result).toMatchObject({ ok: true, applied: true });
+      });
+      await waitFor(() => expect(thumbnails()).toHaveLength(50));
+      expect(calls).toEqual([0]);
+      const fresh = originalOpen(fixture, {
+        clientId: 9402, fonts, initialUpdate: api!.handle.encodeStateAsUpdate(),
+      });
+      try { expect(frames[frames.length - 1]).toEqual(fresh.layoutSlide(0)); }
+      finally { fresh.dispose(); }
+      calls.length = 0;
+      await act(async () => { api!.refresh(); });
+      expect(calls).toHaveLength(0);
+      await act(async () => { api!.goToSlide(25); });
+      expect(calls).toEqual([24]);
+      api!.getPositionAtPoint(10, 10);
+      expect(calls).toEqual([24]);
+    } finally {
+      finishPaint();
+      view?.unmount();
+      peer.dispose();
+      open.mockRestore();
+      paint.mockRestore();
+      context.mockRestore();
+    }
+  }, 60_000);
 });
 
 describe('PptxEditor PNG export', () => {
@@ -1478,6 +2017,7 @@ describe('PptxEditor commands', () => {
             api.selectText({ slide: 2, shapeId: target!.id, storyId: story.id, start: 0, end: 0 })
           ).toBe(true);
         });
+        await waitFor(() => expect(view.container.querySelectorAll('aside canvas')).toHaveLength(before.slides.length));
         const handle = api.handle;
         const layoutSlide = handle.layoutSlide.bind(handle);
         const laidOut: number[] = [];
@@ -1489,8 +2029,9 @@ describe('PptxEditor commands', () => {
         await api.flushPendingInput();
         expect(added(0)).toEqual(['queued.png', name]);
         expect(added(1)).toEqual([]);
-        expect(laidOut.filter((index) => index === 0)).toHaveLength(2);
-        expect(new Set(laidOut)).toEqual(new Set([0, 1]));
+        await waitFor(() => expect(laidOut.filter((index) => index === 0).length).toBeGreaterThan(0));
+        expect(laidOut.filter((index) => index === 0).length).toBeLessThanOrEqual(2);
+        expect(new Set(laidOut)).toEqual(new Set([0]));
         fireEvent.keyDown(view.getByRole('application'), { key: 'Q' });
         expect(api.handle.story(story.id).paragraphs[0].runs[0].text.startsWith('Q')).toBe(true);
       } finally {

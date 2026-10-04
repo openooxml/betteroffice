@@ -2373,7 +2373,7 @@ fn a_refused_array_formula_saves_its_rectangle() {
     sheet.set_array_formula(cell("C20"), rectangle);
     model.sheets.push(sheet);
     let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
-    let workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
+    let mut workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
     assert!(
         workbook
             .last_calculation()
@@ -2381,6 +2381,26 @@ fn a_refused_array_formula_saves_its_rectangle() {
             .iter()
             .any(|address| address.cell == cell("C20"))
     );
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("C20")).unwrap().value,
+        CellValue::Error {
+            value: ErrorValue::Num
+        }
+    );
+    let saved = workbook.save().unwrap();
+    assert_eq!(saved, bytes);
+    let reopened = Workbook::open(&saved).unwrap();
+    let sheet = &reopened.model().sheets[0];
+    assert_eq!(sheet.array_formula(cell("C20")), Some(rectangle));
+    assert_eq!(sheet.cell(cell("C20")).unwrap().value, CellValue::Empty);
+    assert_eq!(
+        sheet.cell(cell("D25")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
+
+    workbook
+        .edit_cell(SheetId(0), cell("A12"), "4", CalculationOptions::default())
+        .unwrap();
     let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
     let sheet = &reopened.model().sheets[0];
     assert_eq!(sheet.array_formula(cell("C20")), Some(rectangle));
@@ -4951,9 +4971,208 @@ fn no_edit_round_trip_keeps_calculation_chain_and_source_parts() {
     let original = preservation_fixture();
     let before = ooxml_opc::unzip_parts(&original).unwrap();
     let saved = Workbook::open(&original).unwrap().save().unwrap();
+    assert_eq!(saved, original);
     let after = ooxml_opc::unzip_parts(&saved).unwrap();
     assert_eq!(after, before);
     assert!(package_map(&saved).contains_key("xl/calcChain.xml"));
+}
+
+fn stored_zip_with_duplicate_members(parts: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut directory = Vec::new();
+    for (name, contents) in parts {
+        let offset = u32::try_from(bytes.len()).unwrap();
+        let size = u32::try_from(contents.len()).unwrap();
+        let name_len = u16::try_from(name.len()).unwrap();
+        let mut crc = u32::MAX;
+        for &byte in contents {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xedb88320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        let crc = !crc;
+
+        let mut local = [0_u8; 30];
+        local[..4].copy_from_slice(&0x04034b50_u32.to_le_bytes());
+        local[4..6].copy_from_slice(&20_u16.to_le_bytes());
+        local[12..14].copy_from_slice(&0x0021_u16.to_le_bytes());
+        local[14..18].copy_from_slice(&crc.to_le_bytes());
+        local[18..22].copy_from_slice(&size.to_le_bytes());
+        local[22..26].copy_from_slice(&size.to_le_bytes());
+        local[26..28].copy_from_slice(&name_len.to_le_bytes());
+        bytes.extend_from_slice(&local);
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(contents);
+
+        let mut central = [0_u8; 46];
+        central[..4].copy_from_slice(&0x02014b50_u32.to_le_bytes());
+        central[4..6].copy_from_slice(&20_u16.to_le_bytes());
+        central[6..8].copy_from_slice(&20_u16.to_le_bytes());
+        central[14..16].copy_from_slice(&0x0021_u16.to_le_bytes());
+        central[16..20].copy_from_slice(&crc.to_le_bytes());
+        central[20..24].copy_from_slice(&size.to_le_bytes());
+        central[24..28].copy_from_slice(&size.to_le_bytes());
+        central[28..30].copy_from_slice(&name_len.to_le_bytes());
+        central[42..46].copy_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(&central);
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let mut end = [0_u8; 22];
+    let count = u16::try_from(parts.len()).unwrap();
+    end[..4].copy_from_slice(&0x06054b50_u32.to_le_bytes());
+    end[8..10].copy_from_slice(&count.to_le_bytes());
+    end[10..12].copy_from_slice(&count.to_le_bytes());
+    end[12..16].copy_from_slice(&u32::try_from(directory.len()).unwrap().to_le_bytes());
+    end[16..20].copy_from_slice(&u32::try_from(bytes.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&directory);
+    bytes.extend_from_slice(&end);
+    bytes
+}
+
+#[test]
+fn no_edit_save_drops_conflicting_duplicate_members() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    model.sheets[0].cell_mut(cell("A1")).unwrap().value = CellValue::Number { value: 2.0 };
+    let last_sheet = xlsx_parse::serialize_workbook(&model)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    parts.push(last_sheet.clone());
+    let source = stored_zip_with_duplicate_members(&parts);
+    let unique: Vec<&str> = parts[..parts.len() - 1]
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert!(!ooxml_opc::SourceContainer::new(source.clone()).holds_exactly(unique.clone()));
+    assert_eq!(
+        ooxml_opc::unzip_parts(&source).unwrap().len(),
+        parts.len() - 1
+    );
+    let workbook = Workbook::open_recalculated(&source, CalculationOptions::default()).unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 2.0 }
+    );
+    let saved = workbook.save().unwrap();
+    assert_ne!(saved, source);
+    let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(saved_parts.len(), parts.len() - 1);
+    assert!(ooxml_opc::SourceContainer::new(saved).holds_exactly(unique));
+    let sheets: Vec<_> = saved_parts
+        .iter()
+        .filter(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .collect();
+    assert_eq!(sheets.len(), 1);
+    assert_eq!(sheets[0], &last_sheet);
+}
+
+fn recalculation_fixture(formula: &str, cache: &str) -> Vec<u8> {
+    let mut parts = preservation_fixture_parts();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        format!(
+            r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s" s="0"><v>0</v></c></row><row r="2"><c r="B2" s="0"><f>{formula}</f>{cache}</c></row></sheetData></worksheet>"#,
+        )
+        .into_bytes(),
+    );
+    let mut bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let comment = b"source archive";
+    let end = bytes.len();
+    bytes[end - 2..].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(comment);
+    bytes
+}
+
+#[test]
+fn recalculated_values_leave_source_caches_and_container_unchanged() {
+    let options = CalculationOptions {
+        now_serial: Some(45000.25),
+    };
+    for (formula, cache, value) in [
+        ("1+2", "<v>999</v>", 3.0),
+        ("1+2", "", 3.0),
+        ("NOW()", "<v>1</v>", 45000.25),
+        ("TODAY()", "<v>1</v>", 45000.0),
+    ] {
+        let source = recalculation_fixture(formula, cache);
+        for mut workbook in [
+            Workbook::open_recalculated(&source, options).unwrap(),
+            Workbook::open_collaborative_recalculated(&source, 701, options).unwrap(),
+        ] {
+            assert_eq!(
+                workbook.model().sheets[0].cell(cell("B2")).unwrap().value,
+                CellValue::Number { value },
+            );
+            assert_eq!(workbook.save().unwrap(), source, "{formula} {cache}");
+            workbook.recalculate_all(options);
+            let saved = workbook.save().unwrap();
+            assert_ne!(saved, source, "{formula} {cache}");
+            assert_eq!(
+                Workbook::open(&saved).unwrap().model().sheets[0]
+                    .cell(cell("B2"))
+                    .unwrap()
+                    .value,
+                CellValue::Number { value },
+            );
+        }
+    }
+}
+
+#[test]
+fn edits_history_and_remote_updates_after_recalculation_are_saved() {
+    let source = recalculation_fixture("1+2", "<v>999</v>");
+    let options = CalculationOptions::default();
+    let saved_value = |workbook: &Workbook, value| {
+        let saved = workbook.save().unwrap();
+        assert_ne!(saved, source);
+        assert!(!package_map(&saved).contains_key("xl/calcChain.xml"));
+        assert_eq!(
+            Workbook::open(&saved).unwrap().model().sheets[0]
+                .cell(cell("B2"))
+                .unwrap()
+                .value,
+            CellValue::Number { value },
+        );
+    };
+    for mut workbook in [
+        Workbook::open_recalculated(&source, options).unwrap(),
+        Workbook::open_collaborative_recalculated(&source, 702, options).unwrap(),
+    ] {
+        workbook
+            .edit_cell(SheetId(0), cell("B2"), "7", options)
+            .unwrap();
+        saved_value(&workbook, 7.0);
+        workbook.undo(options).unwrap();
+        saved_value(&workbook, 3.0);
+        workbook.redo(options).unwrap();
+        saved_value(&workbook, 7.0);
+    }
+    let mut peer = Workbook::open_collaborative_recalculated(&source, 703, options).unwrap();
+    let mut writer = Workbook::open_collaborative_recalculated(&source, 704, options).unwrap();
+    let before = peer.encode_state_vector_v1();
+    writer
+        .edit_cell(SheetId(0), cell("B2"), "7", options)
+        .unwrap();
+    peer.apply_update_v1(&writer.encode_diff_v1(&before).unwrap(), options)
+        .unwrap();
+    saved_value(&peer, 7.0);
 }
 
 #[test]
@@ -7251,12 +7470,10 @@ fn an_unrecalculated_array_formula_round_trips_byte_identically() {
     assert_eq!(ooxml_opc::unzip_parts(&saved).unwrap(), before);
 }
 
-/// recalculating writes the whole rectangle, and the save projection carries
-/// exactly what the model holds.
 #[test]
-fn recalculation_spills_an_array_formula_into_the_saved_sheet() {
-    let workbook =
-        Workbook::open_recalculated(&spill_fixture(), CalculationOptions::default()).unwrap();
+fn an_edit_saves_recalculated_array_values() {
+    let source = spill_fixture();
+    let mut workbook = Workbook::open_recalculated(&source, CalculationOptions::default()).unwrap();
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();
     let value = |address: &str| {
         sheet
@@ -7267,6 +7484,10 @@ fn recalculation_spills_an_array_formula_into_the_saved_sheet() {
     assert_eq!(value("C2"), Some(CellValue::Number { value: 2.0 }));
     assert_eq!(value("C3"), Some(CellValue::Number { value: 3.0 }));
 
+    assert_eq!(workbook.save().unwrap(), source);
+    workbook
+        .edit_cell(SheetId(0), cell("A4"), "4", CalculationOptions::default())
+        .unwrap();
     let saved = workbook.save().unwrap();
     let reopened = Workbook::open(&saved).unwrap();
     let projected = reopened.model().sheet(SheetId(0)).unwrap();

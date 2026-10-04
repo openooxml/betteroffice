@@ -1368,6 +1368,18 @@ fn an_empty_formula_value_is_missing_only_where_the_file_stored_none() {
             "{a1}"
         );
     }
+    for workbook in [
+        Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 705, CalculationOptions::default())
+            .unwrap(),
+    ] {
+        let opened = workbook
+            .export_structured(&XlsxExportOptions::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(to_json(&opened.content), to_json(&calculated));
+        assert_eq!(workbook.save().unwrap(), bytes);
+    }
 }
 
 #[test]

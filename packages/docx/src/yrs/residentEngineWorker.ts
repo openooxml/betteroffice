@@ -353,7 +353,11 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       hostJson =
         request.previewBlocks === undefined
           ? opening.openDocx(new Uint8Array(request.bytes), request.digest, request.generation)
-          : opening.openDocxPreview(new Uint8Array(request.bytes), request.previewBlocks);
+          : opening.openDocxPreview(
+              new Uint8Array(request.bytes),
+              request.previewBlocks,
+              request.previewParagraphBudget
+            );
     } catch (error) {
       if (!(error instanceof WebAssembly.RuntimeError)) opening.destroy();
       throw error;

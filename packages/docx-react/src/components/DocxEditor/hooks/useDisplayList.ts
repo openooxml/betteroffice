@@ -139,7 +139,8 @@ export interface WorkerOpenedPreview {
 export type OpenPreviewInWorker = (
   session: YrsSession,
   bytes: Uint8Array,
-  blocks: number
+  blocks: number,
+  paragraphBudget?: number
 ) => Promise<WorkerOpenedPreview | null>;
 
 export type FontRequirementsInWorker = (
@@ -572,6 +573,7 @@ export function useRustDisplayList(
     digest?: string;
     generation?: number;
     previewBlocks?: number;
+    previewParagraphBudget?: number;
   }>());
   // Display-only previews the worker opened and lays out; their load's whole document takes
   // their worker over.
@@ -1522,6 +1524,7 @@ export function useRustDisplayList(
               : owner.client
                   .openPreview(source.bytes, source.previewBlocks, {
                     heapLimitBytes: workerHeapLimitRef.current,
+                    paragraphBudget: source.previewParagraphBudget,
                   })
                   .then((opened) => {
                     if (!opened) throw new WorkerPreviewRefusedError();
@@ -1697,9 +1700,13 @@ export function useRustDisplayList(
   );
 
   const openPreviewInWorker = useCallback<OpenPreviewInWorker>(
-    async (hostEngine, bytes, blocks) => {
+    async (hostEngine, bytes, blocks, paragraphBudget) => {
       if (overrides?.build || !canUseResidentEngineWorker()) return null;
-      workerOpenSourcesRef.current.set(hostEngine, { bytes, previewBlocks: blocks });
+      workerOpenSourcesRef.current.set(hostEngine, {
+        bytes,
+        previewBlocks: blocks,
+        previewParagraphBudget: paragraphBudget,
+      });
       workerPreviewEnginesRef.current.add(hostEngine);
       let owner: NonNullable<typeof workerRef.current> | null = null;
       try {
