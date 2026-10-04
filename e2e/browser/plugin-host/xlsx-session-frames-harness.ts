@@ -6,6 +6,7 @@ import {
   type Viewport,
   type WorkbookSession,
 } from '../../../packages/xlsx/src/index';
+import { compareCanvasPixels } from './xlsx-canvas-parity';
 
 export interface SessionFrameResult {
   name: string;
@@ -82,28 +83,9 @@ async function run(): Promise<SessionFrameResult[]> {
             const frame = await session.call.frame(viewport);
             paintDisplayList(mainContext, displayList, dpr * zoom);
             paintDisplayList(sessionContext, frame.displayList, dpr * zoom);
-            const a = mainContext.getImageData(0, 0, mainCanvas.width, mainCanvas.height).data;
-            const b = sessionContext.getImageData(
-              0,
-              0,
-              sessionCanvas.width,
-              sessionCanvas.height
-            ).data;
-            let differingPixels = 0;
-            let maxChannelDelta = 0;
-            for (let pixel = 0; pixel < a.length; pixel += 4) {
-              let differs = false;
-              for (let channel = 0; channel < 4; channel += 1) {
-                const delta = Math.abs(a[pixel + channel]! - b[pixel + channel]!);
-                if (delta !== 0) differs = true;
-                maxChannelDelta = Math.max(maxChannelDelta, delta);
-              }
-              if (differs) differingPixels += 1;
-            }
             results.push({
               name: `${fixture.name} ${name} dpr=${dpr} zoom=${zoom}`,
-              differingPixels,
-              maxChannelDelta,
+              ...compareCanvasPixels(mainCanvas, sessionCanvas),
               versionMatches: frame.version === (await session.call.version()),
             });
           }
