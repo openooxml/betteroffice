@@ -2785,7 +2785,9 @@ mod tests {
             let inserted = session.insert_slide(&context, 0, layout).unwrap();
             assert_metadata_matches_snapshot(&session);
             let last = session.slide_ids().unwrap().len() as u32 - 1;
-            session.move_slide(&context, &inserted.slide_id, last).unwrap();
+            session
+                .move_slide(&context, &inserted.slide_id, last)
+                .unwrap();
             assert_metadata_matches_snapshot(&session);
             session.delete_slide(&context, &inserted.slide_id).unwrap();
             assert_metadata_matches_snapshot(&session);
