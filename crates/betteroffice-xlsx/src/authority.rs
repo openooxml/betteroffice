@@ -3647,11 +3647,6 @@ fn model_with_legacy_dimensions(
 }
 
 #[cfg(test)]
-fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
-    fingerprint_model_for_schema(model, SCHEMA_VERSION)
-}
-
-#[cfg(test)]
 fn fingerprint_model_for_schema(
     model: &WorkbookModel,
     schema_version: i64,
