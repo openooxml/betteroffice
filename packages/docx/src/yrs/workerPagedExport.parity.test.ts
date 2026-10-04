@@ -373,10 +373,13 @@ test('editor-style worker export after hydration and peer edits strictly preserv
     sessions.push(seeded, peer);
     expect(compare(resident, peer, request, true)).toBeGreaterThan(0);
     const first = peer.paragraphs('body')[0]!;
+    expect(first.text).toBe('First paragraph');
+    expect(peer.storySegments('body').at(-1)).toMatchObject({ kind: 'embed', embedKind: 'pageBreak' });
     const edited = peer.applyEdits({ expectVersion: peer.version(), steps: [{
       op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: first.paraId }, at: 'end', text: ' Peer edit',
     }] });
     if (!edited.ok) throw new Error(edited.failure.message);
+    expect(peer.paragraphs('body')[0]!.text).toBe('First paragraph Peer edit');
     propose(peer, peer.paragraphIdentities(), peer.version(), (request) => peer.proposeChanges(request));
     const update = peer.encodeStateAsUpdate(client.remoteStateVector()!);
     const capturedVector = peer.encodeStateVector();
