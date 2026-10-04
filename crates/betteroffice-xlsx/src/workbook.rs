@@ -1009,6 +1009,44 @@ impl Workbook {
         ))
     }
 
+    pub fn sheet_info_for(&self, sheet: SheetId) -> Result<SheetInfo> {
+        if sheet == self.active_sheet {
+            return self.sheet_info();
+        }
+        let sheet_ref = self.sheet(sheet)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let content = sheet_content(sheet_ref.used_range(), sheet_ref.freeze_pane, &geometry);
+        Ok(SheetInfo {
+            sheet_ids: self.sheet_keys(),
+            sheet_names: self
+                .model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect(),
+            active_sheet: sheet,
+            content_width: content.width,
+            content_height: content.height,
+            frozen_rows: content.frozen_rows,
+            frozen_cols: content.frozen_cols,
+            initial_scroll_x: content.initial_scroll_x,
+            initial_scroll_y: content.initial_scroll_y,
+        })
+    }
+
+    pub fn cell_rect(&self, sheet: SheetId, cell: CellRef) -> Result<xlsx_render::Rect> {
+        validate_cell_ref(cell)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let x = geometry.col_x(cell.col);
+        let y = geometry.row_y(cell.row);
+        Ok(xlsx_render::Rect {
+            x,
+            y,
+            w: geometry.col_x(cell.col + 1) - x,
+            h: geometry.row_y(cell.row + 1) - y,
+        })
+    }
+
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;

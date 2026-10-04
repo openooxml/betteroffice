@@ -125,12 +125,14 @@ export async function createWorkbookSession(
   }
 
   const {
-    version, readCells, findText, validateEdits, applyEdits, frame, sheets, calculationStatus, save,
+    version, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry,
+    cellInputs, sheets, calculationStatus, save,
   } = client.call;
   return {
     get state() { return state; },
     call: {
-      version, readCells, findText, validateEdits, applyEdits, sheets, calculationStatus, save,
+      version, readCells, findText, validateEdits, applyEdits, sheetView, cellGeometry, cellInputs,
+      sheets, calculationStatus, save,
       frame: async (viewport, options) => decodeFrame(await frame(viewport, options)),
     },
     save: async () => new Uint8Array(await save()),

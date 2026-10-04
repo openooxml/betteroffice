@@ -5,8 +5,10 @@ import {
   type SessionHost,
   type SessionTransport,
 } from '../../../../shared/office-session';
+import type { DisplayList, GridMeta } from '../display-list/types';
 import {
-  initWasm, openWorkbook, workbookDisplayListJson, type SheetInfo, type WorkbookHandle,
+  initWasm, openWorkbook, workbookDisplayListJson,
+  type MergedRange, type SheetInfo, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_POLICIES,
@@ -19,6 +21,23 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
+}
+
+function frameMergedRanges(opened: WorkbookHandle, sheet: number, grid?: GridMeta): MergedRange[] {
+  const rows = (grid?.rowOffsets.length ?? 0) - 1;
+  const cols = (grid?.colOffsets.length ?? 0) - 1;
+  if (!grid || rows <= 0 || cols <= 0) return [];
+  const from = opened.cell(sheet,
+    grid.rowIndices?.[0] ?? grid.startRow, grid.colIndices?.[0] ?? grid.startCol
+  ).a1;
+  const to = opened.cell(sheet,
+    grid.rowIndices?.[rows - 1] ?? grid.startRow + rows - 1,
+    grid.colIndices?.[cols - 1] ?? grid.startCol + cols - 1
+  ).a1;
+  return opened.mergedRanges(sheet, `${from}:${to}`).filter(({ start, end }) =>
+    (!grid.rowIndices || grid.rowIndices.some((row) => row >= start.row && row <= end.row)) &&
+    (!grid.colIndices || grid.colIndices.some((col) => col >= start.col && col <= end.col))
+  );
 }
 
 export function createWorkbookSessionHost(
@@ -43,6 +62,12 @@ export function createWorkbookSessionHost(
     const opened = handle;
     handle = undefined;
     opened?.dispose();
+  }
+
+  function checkSheet(opened: WorkbookHandle, sheet: number): void {
+    if (!Number.isInteger(sheet) || sheet < 0 || sheet >= opened.sheetInfo().sheetIds.length) {
+      throw new RangeError('Sheet index is out of range');
+    }
   }
 
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
@@ -83,14 +108,41 @@ export function createWorkbookSessionHost(
       const opened = workbook();
       const info = opened.sheetInfo();
       const sheet = options.sheet === undefined ? info.activeSheet : options.sheet;
-      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= info.sheetIds.length) {
-        throw new RangeError('Sheet index is out of range');
-      }
-      const buffer = encoder.encode(workbookDisplayListJson(opened, viewport, options.sheet)).buffer;
+      checkSheet(opened, sheet);
+      const json = workbookDisplayListJson(opened, viewport, options.sheet);
+      const grid = (JSON.parse(json) as DisplayList).grid;
+      const mergedRanges = frameMergedRanges(opened, sheet, grid);
+      const buffer = encoder.encode(json).buffer;
       epoch += 1;
       return transferable({
-        displayList: buffer, version: opened.version(), epoch, sheet, viewport,
+        displayList: buffer, version: opened.version(), epoch, sheet, viewport, mergedRanges,
       }, [buffer]);
+    },
+    sheetView(_, sheet) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
+        opened.sheetInfoFor(sheet);
+      const edge = opened.cellRect(sheet, Math.max(0, frozenRows - 1), Math.max(0, frozenCols - 1));
+      return {
+        sheet, version: opened.version(), contentWidth, contentHeight, frozenRows, frozenCols,
+        initialScrollX, initialScrollY,
+        frozenWidth: frozenCols === 0 ? 0 : edge.x + edge.w,
+        frozenHeight: frozenRows === 0 ? 0 : edge.y + edge.h,
+      };
+    },
+    cellGeometry(_, sheet, row, col) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return {
+        sheet, version: opened.version(), rect: opened.cellRect(sheet, row, col),
+        scrollPosition: opened.cellPosition(sheet, row, col),
+      };
+    },
+    cellInputs(_, sheet, range) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      return { sheet, version: opened.version(), cells: opened.rangeCells(sheet, range) };
     },
     sheets: () => sheets(workbook().sheetInfo()),
     calculationStatus: () => workbook().calculationStatus(),

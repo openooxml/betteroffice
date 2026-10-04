@@ -259,6 +259,20 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = sheetInfoForJson)]
+    pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, JsValue> {
+        self.session
+            .sheet_info_for_json(sheet)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = cellRectJson)]
+    pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .cell_rect_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = calculationStatusJson)]
     pub fn calculation_status_json(&self) -> Result<String, JsValue> {
         self.session

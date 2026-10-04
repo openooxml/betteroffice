@@ -1263,6 +1263,68 @@ fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
 }
 
 #[test]
+fn sheet_view_reads_reuse_geometry_without_changing_the_workbook() {
+    let mut frozen = Sheet::new("Frozen");
+    frozen.freeze_pane = Some(FreezePane::new(2, 1, cell("D5")));
+    frozen.col_widths.insert(0, 12.5);
+    frozen.row_heights.insert(0, 33.0);
+    frozen.set_cell(
+        cell("D5"),
+        Cell {
+            value: CellValue::Text {
+                value: "body".into(),
+            },
+            ..Cell::default()
+        },
+    );
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("First"));
+    model.sheets.push(frozen);
+    let geometry = GridGeometry::new(&model.sheets[1], &model.styles);
+    let mut reference = Workbook::from_model(model.clone()).unwrap();
+    let mut workbook = Workbook::from_model(model).unwrap();
+    let saved = workbook.save().unwrap();
+    let version = workbook.version();
+    let active_info = workbook.sheet_info().unwrap();
+    reference.set_active_sheet(SheetId(1)).unwrap();
+    let info = workbook.sheet_info_for(SheetId(1)).unwrap();
+    assert_eq!(info, reference.sheet_info().unwrap());
+    assert_eq!((info.frozen_rows, info.frozen_cols), (2, 1));
+    for at in [cell("A1"), cell("D5"), cell("XFD1048576")] {
+        let rect = workbook.cell_rect(SheetId(1), at).unwrap();
+        assert_eq!(rect.x, geometry.col_x(at.col));
+        assert_eq!(rect.y, geometry.row_y(at.row));
+        assert_eq!(rect.w, geometry.col_x(at.col + 1) - rect.x);
+        assert_eq!(rect.h, geometry.row_y(at.row + 1) - rect.y);
+    }
+    assert!(workbook.sheet_info_for(SheetId(2)).is_err());
+    assert!(
+        workbook
+            .cell_rect(SheetId(1), CellRef::new(MAX_ROWS, 0))
+            .is_err()
+    );
+    assert_eq!(workbook.active_sheet(), SheetId(0));
+    assert_eq!(workbook.sheet_info().unwrap(), active_info);
+    assert_eq!(workbook.version(), version);
+    assert_eq!(workbook.save().unwrap(), saved);
+    let before = workbook.cell_rect(SheetId(1), cell("D5")).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::SetRowHeight {
+                sheet: SheetId(1),
+                row: 4,
+                height: Some(60.0),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_ne!(workbook.version(), version);
+    assert!(workbook.cell_rect(SheetId(1), cell("D5")).unwrap().h > before.h);
+    assert!(workbook.sheet_info_for(SheetId(1)).unwrap().content_height > info.content_height);
+    assert_eq!(workbook.active_sheet(), SheetId(0));
+}
+
+#[test]
 fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
     let mut sheet = Sheet::new("Data");
     sheet.set_cell(
