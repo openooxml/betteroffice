@@ -26,7 +26,8 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
+import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
@@ -493,6 +494,7 @@ const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes
 
 async function openingEditor(workerPreview = true, viewer = false, options: {
   delayQueries?: boolean;
+  source?: Uint8Array;
   onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
 } = {}) {
   const isFullOpen = (request: ResidentEngineWorkerRequest) =>
@@ -510,47 +512,72 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
   let releaseQueries = () => {};
   const queryReady = new Promise<void>((resolve) => { releaseQueries = resolve; });
   let queriesReleased = !options.delayQueries;
+  let previousInputQueries: DisplayListQueries | null = null;
   const inputQueryFacades = new WeakMap<DisplayListQueries, DisplayListQueries>();
   const inputQueries = (queries: DisplayListQueries | null | undefined) => {
     if (!queries || !options.delayQueries) return queries;
     let facade = inputQueryFacades.get(queries);
     if (!facade) {
-      facade = {
-        ...queries,
-        isReady: () => queriesReleased && queries.isReady(),
-        whenReady: async () => { await queryReady; await queries.whenReady(); },
-        hitTestRegions: (...args) => queriesReleased ? queries.hitTestRegions(...args) : null,
-      };
+      const loaded = spyOn(queryEngines, 'loadedRustDisplayListQueryEngine').mockReturnValue(null);
+      const loading = spyOn(queryEngines, 'loadRustDisplayListQueryEngine').mockImplementation(async () => {
+        await queryReady;
+        await queries.whenReady();
+        const engine: queryEngines.RustDisplayListQueryEngine = {
+          hitTestRegionsJson: (_list, pageIndex, x, y) => JSON.stringify(queries.hitTestRegions(pageIndex, x, y)),
+          rangeRectsJson: () => '[]',
+        };
+        return engine;
+      });
+      try {
+        facade = createDisplayListQueries(queries.displayList, undefined, previousInputQueries, harness.core.session);
+      } finally {
+        loaded.mockRestore();
+        loading.mockRestore();
+      }
+      previousInputQueries = facade;
       inputQueryFacades.set(queries, facade);
     }
     return facade;
   };
-  const props = { ...initialProps, source: longBytes, previewFirstPage: true, workerPreview,
+  const props = { ...initialProps, source: options.source ?? longBytes, previewFirstPage: true, workerPreview,
     hydrateOnDemand: viewer, workerProposals: viewer, readOnly: viewer };
-  function Editable({ source, generation }: Pick<HarnessProps, 'source' | 'generation'>) {
-    harness = useHarness({ ...props, source, generation });
+  const selections: Array<ReturnType<YrsSession['cellSelection']>> = [];
+  function Editable({ source, generation, readOnly = viewer }: Pick<HarnessProps, 'source' | 'generation' | 'readOnly'>) {
+    harness = useHarness({ ...props, source, generation, readOnly });
     return <>
       <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
       <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
-        readOnly={viewer || harness.core.opening} holdInput={!viewer && harness.core.opening} inputScope={generation}
+        readOnly={readOnly || harness.core.opening} holdInput={!readOnly && harness.core.opening} inputScope={generation}
         viewerDocumentRead={viewer ? harness.renderer.readWorkerDocument : undefined}
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
         canvasHostRef={canvasHost} displayListQueries={queriesReleased ? harness.renderer.queries : null}
-        inputQueries={viewer ? undefined : inputQueries(harness.renderer.inputQueries)} />
+        inputQueries={viewer ? undefined : inputQueries(harness.renderer.inputQueries)}
+        onYrsSelectionChange={() => selections.push(harness.core.session!.cellSelection())} />
     </>;
   }
   const view = render(<Editable {...props} />);
-  const click = (position: number) => {
+  const pointAt = (position: number) => {
     const queries = harness.renderer.queries!;
     const caret = queries.caretRect(position)!;
     const size = queries.pageSize(0)!;
     const canvas = canvasHost.current!.firstElementChild!;
     canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
       bottom: size.height, ...size }) as DOMRect;
-    const point = { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+    return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+  };
+  const mouseDown = (position: number) => {
+    const point = pointAt(position);
+    const canvas = canvasHost.current!.firstElementChild!;
     if (fireEvent.mouseDown(canvas, point)) (document.activeElement as HTMLElement | null)?.blur();
+  };
+  const mouseMove = (position: number) => fireEvent.mouseMove(canvasHost.current!.firstElementChild!, pointAt(position));
+  const mouseUp = (position: number) => fireEvent.mouseUp(window, pointAt(position));
+  const click = (position: number) => {
+    const point = pointAt(position);
+    const canvas = canvasHost.current!.firstElementChild!;
+    mouseDown(position);
     fireEvent.mouseUp(window, point);
     fireEvent.click(canvas, point);
   };
@@ -612,13 +639,18 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
     };
     return {
       ...worker, frames, editor, view, preview, click, type, switchToFull, presentFull, loadPeer,
+      mouseDown, mouseMove, mouseUp, pointAt, selections,
       releaseInputQueries() {
         queriesReleased = true;
         releaseQueries();
       },
       get harness() { return harness; },
+      get pendingQueries() { return previousInputQueries; },
+      setReadOnly(readOnly: boolean) {
+        view.rerender(<Editable {...props} readOnly={readOnly} />);
+      },
       async replace() {
-        view.rerender(<Editable source={longBytes.slice()} generation={2} />);
+        view.rerender(<Editable source={props.source.slice()} generation={2} />);
         const replacement = await waitForPreview(2);
         await waitFor(() => expect(worker.workers).toHaveLength(2));
         return replacement;
@@ -870,6 +902,135 @@ test('clicks interleaved with held and hydrating input keep their original posit
     expect(full.selection()?.head.offset).toBe(5);
     expect(opened.harness.errors).toEqual([]);
     expect(opened.harness.mainOpens).toEqual([false]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a click awaiting geometry keeps its position when the full frame replaces the preview', async () => {
+  const opened = await openingEditor(true, false, { delayQueries: true });
+  try {
+    const queries = opened.pendingQueries!;
+    const point = opened.pointAt(6);
+    expect(queries.isReady()).toBe(false);
+    expect(queries.hitTestRegions(0, point.clientX, point.clientY)).toBeNull();
+    opened.click(6);
+    opened.type('Q');
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    expect(opened.pendingQueries).not.toBe(queries);
+    expect(queries.isReady()).toBe(false);
+    opened.releaseInputQueries();
+    await queries.whenReady();
+    expect(queries.isReady()).toBe(true);
+    expect(queries.hitTestRegions(0, point.clientX, point.clientY)).toBeNull();
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+    expect(full.selection()?.head.offset).toBe(6);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a queued drag across cells in one table publishes the cell selection', async () => {
+  const zip = await JSZip.loadAsync(longBytes);
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const cells = ['Left', 'Right'].map((text) =>
+    `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`
+  ).join('');
+  zip.file('word/document.xml', xml.replace(
+    '<w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>',
+    `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${cells}</w:tr></w:tbl>`
+  ));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const direct = await createYrsSession();
+  sessions.push(direct);
+  direct.openDocx(source, false);
+  const projection = createYrsPositionProjection(direct, 'body')!;
+  const position = (story: string) => projection.positionForLoc({
+    story, paraId: direct.paragraphs(story)[0].paraId, offset: 1,
+  })!;
+  const anchorPosition = position('body:t0:r0c0');
+  const headPosition = position('body:t0:r0c1');
+  const anchorTarget = projection.targetAt(anchorPosition);
+  const headTarget = projection.targetAt(headPosition);
+  expect(anchorTarget.story).not.toBe(headTarget.story);
+  const range = { anchor: anchorTarget.cell!, head: headTarget.cell! };
+  const opened = await openingEditor(true, false, { source, delayQueries: true });
+  try {
+    opened.mouseDown(anchorPosition);
+    opened.mouseMove(headPosition);
+    opened.mouseUp(headPosition);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.releaseInputQueries();
+    await opened.loadPeer(full);
+    expect(full.cellSelection()).toEqual(range);
+    expect(full.selection()?.head.story).toBe(anchorTarget.story);
+    expect(opened.selections).toContainEqual(range);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test.each(['held keys', 'held composition'] as const)(
+  'becoming read-only during opening discards %s and rejects its flush', async (kind) => {
+    const opened = await openingEditor(true, false, { delayQueries: true });
+    try {
+      const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+      opened.click(6);
+      if (kind === 'held keys') opened.type('discard');
+      else {
+        fireEvent.compositionStart(textarea);
+        textarea.value = '日本';
+      }
+      const flush = opened.editor.current!.flushPendingInput().catch((error) => error);
+      expect(opened.editor.current!.hasPendingInput()).toBe(true);
+      opened.setReadOnly(true);
+      expect(opened.harness.core.session).toBe(opened.preview);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(await flush).toEqual(new Error('The document changed while flushing input'));
+      if (kind === 'held composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+      opened.setReadOnly(false);
+      const full = await opened.switchToFull();
+      await opened.presentFull(full);
+      opened.releaseInputQueries();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+      opened.type('C');
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body')[0].text).toBe('CFirst paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(opened.harness.errors).toEqual([]);
+    } finally {
+      opened.close();
+    }
+  }
+);
+
+test('a queued drag keeps extending after selection replay while the mouse is held', async () => {
+  const opened = await openingEditor(true, false, { delayQueries: true });
+  try {
+    opened.mouseDown(6);
+    opened.mouseMove(9);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.releaseInputQueries();
+    await opened.loadPeer(full);
+    expect(full.selection()?.anchor.offset).toBe(5);
+    expect(full.selection()?.head.offset).toBe(8);
+    opened.mouseMove(12);
+    act(() => opened.frames.run());
+    opened.mouseUp(12);
+    await act(async () => { await opened.editor.current!.flushPendingInput(); });
+    expect(full.selection()?.anchor.offset).toBe(5);
+    expect(full.selection()?.head.offset).toBe(11);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
   } finally {
     opened.close();
   }

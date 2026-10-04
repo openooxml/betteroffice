@@ -1180,7 +1180,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection });
   inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection };
   useLayoutEffect(() => {
-    if (!holdInput && !readOnly && enabled && session) {
+    if ((readOnly || !enabled || (!holdInput && !session)) &&
+      (heldInputRef.current.entries.length > 0 || pendingSelectionsRef.current.length > 0 || compositionHeldRef.current)) {
+      heldInputRef.current = { scope: inputScope, entries: [] };
+      pendingSelectionsRef.current = [];
+      if (compositionHeldRef.current) {
+        discardedCompositionRef.current = true;
+        composingRef.current = false;
+        compositionPendingRef.current = false;
+        compositionCommitRef.current = '';
+        compositionHeldRef.current = false;
+        if (textareaRef.current) textareaRef.current.value = '';
+        for (const resolve of compositionWaitersRef.current) resolve();
+        compositionWaitersRef.current.clear();
+      }
+      onPendingInputChangeRef.current?.(inputOperationQueueRef.current?.hasPending() ?? false);
+    } else if (!holdInput && !readOnly && enabled && session) {
       const entries = heldInputRef.current.entries;
       heldInputRef.current.entries = [];
       for (const entry of entries) {
