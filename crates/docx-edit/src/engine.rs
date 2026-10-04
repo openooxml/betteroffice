@@ -1254,11 +1254,13 @@ impl PaginationState {
     }
 
     fn clear_display_damage(&mut self) {
-        self.display_rebuilt_pages.clear();
-        self.display_layout_pending = false;
-        self.display_full_rebuild = false;
-        self.position_deltas.clear();
-        self.note_changed_pages.clear();
+        if self.display_uses_region_path {
+            self.display_rebuilt_pages.clear();
+            self.display_layout_pending = false;
+            self.display_full_rebuild = false;
+            self.position_deltas.clear();
+            self.note_changed_pages.clear();
+        }
         self.restamped_pages = Some(BTreeSet::new());
     }
 }
@@ -1395,6 +1397,14 @@ pub struct EngineSession {
     partial_document: Cell<bool>,
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
+}
+
+struct RelayoutTriggerReset<'a>(&'a EngineSession);
+
+impl Drop for RelayoutTriggerReset<'_> {
+    fn drop(&mut self) {
+        self.0.consume_relayout_trigger();
+    }
 }
 
 /// The font requirements of `blocks` that `measurement` gives no chain of registered fonts, so
@@ -4110,6 +4120,7 @@ impl EngineSession {
 
     /// Parses, paginates, and retains measured input and layout.
     pub fn layout_document_json(&self, input_json: &str) -> Result<String, String> {
+        let _trigger_reset = RelayoutTriggerReset(self);
         let input: LayoutInput = serde_json::from_str(input_json).map_err(|error| {
             self.consume_relayout_trigger();
             format!("parse: {error}")
@@ -4444,6 +4455,7 @@ impl EngineSession {
     /// measured; the layout equals the one-call pass's. Any other region layout,
     /// a document change or a font registration in between abandons it.
     pub fn begin_region_layout(&self, input_json: &str) -> Result<RegionLayoutProgress, String> {
+        let _trigger_reset = RelayoutTriggerReset(self);
         self.resumable.replace(None);
         let version = self.doc.version();
         let trigger = self.take_region_relayout_trigger(input_json)?;
@@ -4455,6 +4467,7 @@ impl EngineSession {
     /// Measures up to `blocks` more body blocks of the pass
     /// [`Self::begin_region_layout`] began, and finishes it once all are.
     pub fn resume_region_layout(&self, blocks: usize) -> Result<RegionLayoutProgress, String> {
+        let _trigger_reset = RelayoutTriggerReset(self);
         let pending = self
             .resumable
             .borrow_mut()
@@ -4583,6 +4596,7 @@ impl EngineSession {
         prefix_pages: Option<usize>,
         trigger: RelayoutTrigger,
     ) -> Result<RegionPass, String> {
+        let _trigger_reset = RelayoutTriggerReset(self);
         self.consume_relayout_trigger();
         self.resumable.replace(None);
         let mut prepared = self.prepare_region_layout(input_json, prefix_pages, trigger)?;
@@ -7473,6 +7487,7 @@ impl EngineSession {
         story: &str,
         expected_frame_epoch: u64,
     ) -> Result<Vec<u8>, String> {
+        let _trigger_reset = RelayoutTriggerReset(self);
         self.set_relayout_trigger(RelayoutTrigger::Interactive);
         if self.regions.borrow().is_some() {
             if !self.apply_and_layout_regions_resident(
@@ -7763,6 +7778,7 @@ impl EngineSession {
         expected_frame_epoch: u64,
         now: &mut impl FnMut() -> f64,
     ) -> Result<(Vec<u8>, EngineApplyProfile), String> {
+        let _trigger_reset = RelayoutTriggerReset(self);
         self.set_relayout_trigger(RelayoutTrigger::Interactive);
         let mut profile = EngineApplyProfile::default();
         let mut started = now();
@@ -8848,6 +8864,9 @@ mod tests {
     use serde_json::json;
     use yrs::Any;
     use yrs::types::Attrs;
+
+    #[cfg(test)]
+    mod interactive_layout_regression_tests;
 
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
