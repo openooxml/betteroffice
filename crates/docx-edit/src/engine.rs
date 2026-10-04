@@ -112,6 +112,8 @@ struct ResidentRegionState {
     /// [`layout_options_fingerprint`] of `request_json`.
     request_fingerprint: String,
     headers_footers: Option<serde_json::Value>,
+    notes_converged: bool,
+    provisional: bool,
     /// Inputs retained from the last full region pass so a plain body-text
     /// edit can relayout residently. `None` when the pass was not
     /// resident-body or the document shape rules the fast path out.
@@ -2733,6 +2735,20 @@ impl EngineSession {
         self.layout_regions_retained_json(input_json, None)
     }
 
+    pub fn retained_layout_json(&self) -> Result<String, String> {
+        let pass = {
+            let regions = self.regions.borrow();
+            let state = regions
+                .as_ref()
+                .ok_or("resident region layout is not built")?;
+            RegionPass {
+                notes_converged: state.notes_converged,
+                provisional: state.provisional,
+            }
+        };
+        self.retained_region_layout_json(&pass)
+    }
+
     /// [`Self::layout_document_with_regions_retained_json`] for a caller that
     /// reads only the retained state: the layout is not serialized.
     pub fn layout_document_with_regions_retained(&self, input_json: &str) -> Result<(), String> {
@@ -3411,6 +3427,8 @@ impl EngineSession {
             request_json: input_json,
             request_fingerprint,
             headers_footers,
+            notes_converged,
+            provisional,
             fast_path: regional.map(|(regional, render_env)| RegionFastPathState {
                 cached_page_totals,
                 regions: Rc::new(regions),

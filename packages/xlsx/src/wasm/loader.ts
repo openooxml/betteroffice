@@ -488,6 +488,18 @@ export interface WorkbookHandle extends CollaborationReplica {
 
 let initialized = false;
 let initialization: Promise<void> | undefined;
+const displayListJsonReaders = new WeakMap<
+  WorkbookHandle, (viewport: Viewport, sheet?: number) => string
+>();
+
+/** @experimental */
+export function workbookDisplayListJson(
+  handle: WorkbookHandle, viewport: Viewport, sheet?: number
+): string {
+  const read = displayListJsonReaders.get(handle);
+  if (!read) throw new Error('Workbook display list is unavailable');
+  return read(viewport, sheet);
+}
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
@@ -652,6 +664,11 @@ export function openWorkbook(
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
   }
 
+  function displayListJson(viewport: Viewport, sheet?: number): string {
+    const json = JSON.stringify(viewport);
+    return sheet === undefined ? doc.displayListJson(json) : doc.displayListForJson(sheet, json);
+  }
+
   function ensureUpdateObserver(): void {
     if (observerInstalled) return;
     wasmCall(() => doc.startUpdateObservation());
@@ -712,7 +729,7 @@ export function openWorkbook(
       });
     },
     displayList(viewport: Viewport): DisplayList {
-      return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
+      return parseJson(() => displayListJson(viewport));
     },
     displayListProfiled(viewport: Viewport): ProfiledDisplayList {
       return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
@@ -935,6 +952,7 @@ export function openWorkbook(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
   return handle;
 }
 
