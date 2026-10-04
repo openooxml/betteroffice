@@ -731,12 +731,14 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   let savesCompared = 0;
   let handbackRemoteUpdates = 0;
   let otherRemoteUpdates = 0;
+  let editorSeeds = 0;
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const random = new Random(seed);
     const topology: Topology = random.int(2) === 0 ? 'A/editor' : 'B/viewer';
     const log: string[] = [`open seed=${seed} topology=${topology}`];
     let arms: Arms | undefined;
     seedsRun += 1;
+    if (topology === 'A/editor') editorSeeds += 1;
     try {
       arms = await openArms(seed, topology, log);
       const current = arms;
@@ -830,4 +832,5 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   );
   if (failures.length > 0) console.error(failures.join('\n\n'));
   expect(failures.length).toBe(0);
+  if (editorSeeds > 0) expect(handbackRemoteUpdates).toBeGreaterThan(0);
 }, Math.max(120_000, SEEDS * OPS * 30));
