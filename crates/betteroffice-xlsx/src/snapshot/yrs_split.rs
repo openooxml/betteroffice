@@ -28,6 +28,22 @@ pub(crate) enum SplitError {
     RetainedDeletion,
 }
 
+impl SplitError {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn reason(self) -> &'static str {
+        match self {
+            Self::InvalidLimit => "invalid_limit",
+            Self::Malformed => "malformed",
+            Self::UnsupportedContent(_) => "unsupported_content",
+            Self::UnsupportedType(_) => "unsupported_type",
+            Self::UnsupportedMap => "multi_key_map",
+            Self::JsonLengthMismatch => "json_length_mismatch",
+            Self::MissingDependency => "missing_dependency",
+            Self::RetainedDeletion => "retained_deletion",
+        }
+    }
+}
+
 #[derive(Default)]
 struct Client {
     clock: u32,
@@ -191,6 +207,26 @@ pub(crate) fn split_update_v1(
         parts.push(last);
     }
     Ok(parts)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct SplitParts {
+    pub(crate) parts: Vec<Vec<u8>>,
+    pub(crate) fallback: Option<SplitError>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn split_or_whole_v1(update: &[u8], max_part_bytes: usize) -> SplitParts {
+    match split_update_v1(update, max_part_bytes) {
+        Ok(parts) => SplitParts {
+            parts,
+            fallback: None,
+        },
+        Err(error) => SplitParts {
+            parts: vec![update.to_vec()],
+            fallback: Some(error),
+        },
+    }
 }
 
 fn run_size(client: u64, clock: u32, count: u32) -> usize {
@@ -684,11 +720,94 @@ mod tests {
     };
     use xlsx_model::{CellFormat, NumberFormat};
     use yrs::encoding::write::Write;
+    use yrs::types::{AsPrelim, ToJson};
     use yrs::updates::decoder::Decode;
     use yrs::updates::encoder::{Encoder, EncoderV1};
-    use yrs::{Any, Doc, Map, MapPrelim, ReadTxn, StateVector, Transact, Update};
+    use yrs::{
+        Any, Array, Doc, GetString, In, Map, MapPrelim, Out, ReadTxn, StateVector, Transact,
+        Update,
+    };
 
     const LIMITS: [usize; 5] = [1, 64, 4096, 65536, usize::MAX];
+
+    fn ordinary_doc() -> Doc {
+        let doc = Doc::with_client_id(7);
+        let map = doc.get_or_insert_map("map");
+        let array = doc.get_or_insert_array("array");
+        {
+            let mut txn = doc.transact_mut();
+            for index in 0..50 {
+                map.insert(&mut txn, format!("key{index}"), format!("value{index}"));
+            }
+            array.insert_range(&mut txn, 0, 0..50);
+        }
+        doc
+    }
+
+    fn canonical_any(value: &Any, output: &mut String) {
+        match value {
+            Any::Map(entries) => {
+                let mut entries = entries.iter().collect::<Vec<_>>();
+                entries.sort_unstable_by_key(|(key, _)| *key);
+                output.push('{');
+                for (index, (key, value)) in entries.into_iter().enumerate() {
+                    if index != 0 {
+                        output.push(',');
+                    }
+                    output.push_str(&format!("{key:?}:"));
+                    canonical_any(value, output);
+                }
+                output.push('}');
+            }
+            Any::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        output.push(',');
+                    }
+                    canonical_any(value, output);
+                }
+                output.push(']');
+            }
+            _ => output.push_str(&format!("{value:?}")),
+        }
+    }
+
+    fn canonical_snapshot(doc: &Doc) -> String {
+        let txn = doc.transact();
+        let mut roots = txn.root_refs().collect::<Vec<_>>();
+        roots.sort_unstable_by_key(|(name, _)| *name);
+        let mut output = String::from("{");
+        for (index, (name, root)) in roots.into_iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            output.push_str(&format!("{name:?}:"));
+            let root = match root {
+                Out::UndefinedRef(branch) => {
+                    let text = yrs::TextRef::from(branch);
+                    if txn.get_map(name).unwrap().len(&txn) == 0
+                        && !text.get_string(&txn).is_empty()
+                    {
+                        Out::YText(text)
+                    } else {
+                        match root.as_prelim(&txn) {
+                            In::Map(_) => Out::YMap(branch.into()),
+                            In::Array(_) => Out::YArray(branch.into()),
+                            In::Text(_) => Out::YText(branch.into()),
+                            In::XmlElement(_) => Out::YXmlElement(branch.into()),
+                            In::XmlText(_) => Out::YXmlText(branch.into()),
+                            _ => unreachable!("unexpected inferred root type"),
+                        }
+                    }
+                }
+                root => root,
+            };
+            canonical_any(&root.to_json(&txn), &mut output);
+        }
+        output.push('}');
+        output
+    }
 
     fn small_model() -> WorkbookModel {
         let mut sheet = Sheet::new("Small");
@@ -863,6 +982,10 @@ mod tests {
             txn.encode_state_as_update_v1(&StateVector::default()),
             update
         );
+        drop(txn);
+        let source = Doc::with_client_id(client_id);
+        apply_part(&source, update);
+        assert_eq!(canonical_snapshot(&doc), canonical_snapshot(&source));
     }
 
     fn assert_workbook(workbook: &Workbook, allow_refusal: bool) {
@@ -1235,6 +1358,72 @@ mod tests {
                     Err(SplitError::UnsupportedMap)
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fallback_keeps_semantic_equality() {
+        let doc = ordinary_doc();
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        assert!(split_update_v1(&update, 64).unwrap().len() > 1);
+        let map = doc.get_or_insert_map("map");
+        let value = Any::Map(std::sync::Arc::new(HashMap::from([
+            ("a".into(), Any::Number(1.0)),
+            ("b".into(), Any::Number(2.0)),
+            ("c".into(), Any::from("x")),
+        ])));
+        {
+            let mut txn = doc.transact_mut();
+            map.insert(&mut txn, "value", value.clone());
+            map.insert(
+                &mut txn,
+                "nested",
+                Any::Array(std::sync::Arc::from([value])),
+            );
+        }
+        let txn = doc.transact();
+        let update = txn.encode_state_as_update_v1(&StateVector::default());
+        let vector = txn.state_vector();
+        drop(txn);
+        let content = canonical_snapshot(&doc);
+        for limit in LIMITS {
+            assert_eq!(
+                split_update_v1(&update, limit),
+                Err(SplitError::UnsupportedMap)
+            );
+            let split = split_or_whole_v1(&update, limit);
+            assert_eq!(split.parts, vec![update.clone()]);
+            assert_eq!(split.fallback, Some(SplitError::UnsupportedMap));
+            assert_eq!(split.fallback.unwrap().reason(), "multi_key_map");
+            let hydrated = Doc::with_client_id(doc.client_id().get());
+            hydrate_snapshot_part(&hydrated, &split.parts[0]).unwrap();
+            let txn = hydrated.transact();
+            assert!(txn.store().pending_update().is_none());
+            assert!(txn.store().pending_ds().is_none());
+            assert_eq!(txn.state_vector(), vector);
+            drop(txn);
+            assert_eq!(canonical_snapshot(&hydrated), content);
+        }
+    }
+
+    #[test]
+    fn split_or_whole_matches_split_without_maps() {
+        let doc = ordinary_doc();
+        let txn = doc.transact();
+        let update = txn.encode_state_as_update_v1(&StateVector::default());
+        let vector = vector_bytes(&txn.state_vector());
+        drop(txn);
+        for limit in LIMITS {
+            let parts = split_update_v1(&update, limit).unwrap();
+            let split = split_or_whole_v1(&update, limit);
+            assert_eq!(split.parts, parts);
+            assert_eq!(split.fallback, None);
+            if limit == 64 {
+                assert!(parts.len() > 1);
+            }
+            assert_parts(&update, &vector, doc.client_id().get(), limit, &parts);
         }
     }
 
