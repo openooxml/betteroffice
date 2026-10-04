@@ -153,8 +153,9 @@ pub use s8::{
 pub use s9::{
     BinaryPartWire, S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions,
     S9SectionWire, S9WireEnvelope, media_table_parts, media_table_parts_bytes,
-    parse_docx_s9_preview_from_parts, parse_docx_s9_preview_with_media_table, parse_docx_s9_wire,
-    parse_docx_s9_wire_parts_with_limits, parse_docx_s9_wire_with_limits,
+    parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_with_budget,
+    parse_docx_s9_preview_with_media_table, parse_docx_s9_preview_with_media_table_with_budget,
+    parse_docx_s9_wire, parse_docx_s9_wire_parts_with_limits, parse_docx_s9_wire_with_limits,
     parse_docx_s9_wire_with_media_table, parse_docx_s9_wire_with_media_table_bytes,
 };
 pub use scalars::{

@@ -41,7 +41,8 @@ import { useHistory } from '../../../hooks/useHistory';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
-import { isLayoutQueued, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { workerOpenSave } from '../internals/workerOpenSave';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -487,7 +488,7 @@ function useHarness(props: HarnessProps) {
     documentFromYrs: core.documentFromYrs,
     historyStateRef: { current: host?.document ?? null },
     pagedEditorRef,
-    handleSave: async () => core.documentFromYrs() ? new ArrayBuffer(0) : null,
+    handleSave: async () => new ArrayBuffer(0),
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -851,6 +852,183 @@ test('eager worker open preserves input and command order after first paint unti
   load.mockRestore();
   insert.mockRestore();
 });
+
+test('saved paragraph ID claims refresh editor point geometry without another edit', async () => {
+  installWorker();
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, viewer: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const point = () => {
+    const queries = harness.renderer.queries!;
+    const size = queries.pageSize(0)!;
+    canvasHost.current!.firstElementChild!.getBoundingClientRect = () => ({
+      left: 0, top: 0, right: size.width, bottom: size.height, ...size,
+    }) as DOMRect;
+    markPresented(canvasHost.current!, queries.displayList);
+    const caret = queries.caretRect(1)!;
+    return editor.current!.getPositionAtPoint(caret.x, caret.y + caret.height / 2);
+  };
+  expect(point()).not.toBeNull();
+  const beforeSave = session.encodeStateVector();
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(session.encodeStateVector()).not.toEqual(beforeSave);
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  expect(point()).not.toBeNull();
+  expect(harness.errors).toEqual([]);
+}, 20_000);
+
+test("a worker save's own paragraph ID claims leave no story dirty for the next save", async () => {
+  const { posted } = installWorker();
+  const savedStories = () => posted.filter((request) => request.type === 'save').map((request) => request.stories);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, viewer: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const beforeSave = session.encodeStateVector();
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(session.encodeStateVector()).not.toEqual(beforeSave);
+  expect(savedStories()).toEqual([['body']]);
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(savedStories()).toEqual([['body'], []]);
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 2 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(savedStories()).toEqual([['body'], [], ['body']]);
+  expect(harness.errors).toEqual([]);
+}, 20_000);
+
+test('overlapping editor worker saves capture their stories in call order', async () => {
+  const { workers, posted, received, reply } = installWorker({ holdReply: (request) => request.type === 'save' });
+  const savedStories = () => posted.filter((request) => request.type === 'save').map((request) => request.stories);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, viewer: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const events: string[] = [];
+  const worker = workers[0]!;
+  const postMessage = worker.postMessage.bind(worker);
+  const send = spyOn(worker, 'postMessage').mockImplementation((request, transfer) => {
+    if (request.type === 'save') events.push('request');
+    postMessage(request, transfer);
+  });
+  try {
+    await act(async () => {
+      const save = workerOpenSave(session)!;
+      const first = save.save([], session).then((bytes) => {
+        events.push('resolved');
+        return bytes;
+      });
+      const second = save.save([], session);
+      const firstRequest = await received('save');
+      expect(savedStories()).toEqual([['body']]);
+      expect(events).toEqual(['request']);
+      reply(firstRequest);
+      const secondRequest = await received('save', firstRequest.id);
+      expect(events).toEqual(['request', 'resolved', 'request']);
+      expect(savedStories()).toEqual([['body'], []]);
+      reply(secondRequest);
+      for (const bytes of await Promise.all([first, second])) {
+        expect(bytes).toBeInstanceOf(ArrayBuffer);
+        expect(bytes.byteLength).toBeGreaterThan(0);
+      }
+    });
+    expect(harness.errors).toEqual([]);
+  } finally {
+    send.mockRestore();
+  }
+}, 20_000);
 
 test('a viewer command preserves select-all while its worker read is pending', async () => {
   let heldUnit = false;
@@ -1324,7 +1502,7 @@ test.each(['refused', 'unavailable', 'failed'] as const)('a %s viewer preview sk
   }
 });
 
-test.each([false, true])('viewer save explicitly loads the held document and keeps worker rendering with proposals=%s', async (workerProposals) => {
+test.each([false, true])('viewer save keeps the document held and worker rendering with proposals=%s', async (workerProposals) => {
   const { posted } = installWorker();
   const { result, unmount } = renderHook(useHarness, {
     initialProps: { ...initialProps, viewer: true, readOnly: true, workerProposals },
@@ -1333,9 +1511,10 @@ test.each([false, true])('viewer save explicitly loads the held document and kee
   const session = result.current.core.session!;
   const saved: ArrayBuffer[] = [];
   const errors: Error[] = [];
-  const loads = spyOn(replicaHelpers, 'loadHeldDocumentForSave');
+  const release = spyOn(replicaHelpers, 'releaseWorkerOpenDocument');
   const io = renderHook(() => useFileIO({
     pagedEditorRef: result.current.pagedEditorRef,
+    viewerSession: true,
     resolveImage: () => null,
     comments: [],
     documentName: undefined,
@@ -1355,24 +1534,24 @@ test.each([false, true])('viewer save explicitly loads the held document and kee
     await act(async () => { await io.result.current.handleSave(); });
     expect(saved).toHaveLength(1);
     expect(errors).toEqual([]);
-    expect(loads).toHaveBeenCalledTimes(1);
-    expect(loads).toHaveBeenCalledWith(session);
-    expect(project).toHaveBeenCalledTimes(1);
-    expect(workerOpenDocumentHeld(session)).toBe(false);
-    expect(result.current.mainOpens).toEqual([false]);
-    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(project).not.toHaveBeenCalled();
+    expect(workerOpenDocumentHeld(session)).toBe(true);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(posted.filter((request) => request.type === 'save')).toHaveLength(1);
     expect(result.current.renderer.workerSurfacesActive).toBe(true);
     expect(result.current.renderer.status).toBe('ready');
     expect(result.current.renderer.layoutInWorker.isViewerSession?.(session)).toBe(true);
     if (workerProposals) {
-      expect(registeredWorkerProposalAuthority(session)!.geometry()).toBeNull();
-      expect(workerProposalAuthority(session)).toBeNull();
+      expect(registeredWorkerProposalAuthority(session)!.geometry()).not.toBeNull();
+      expect(workerProposalAuthority(session)).toBe(registeredWorkerProposalAuthority(session));
     }
   } finally {
     io.unmount();
     unmount();
     project.mockRestore();
-    loads.mockRestore();
+    release.mockRestore();
   }
 });
 
@@ -2366,7 +2545,7 @@ test('opening the comments sidebar keeps a viewer document held in the worker', 
   }
 });
 
-test('a first-layout font setup failure starts the replica for pending reads, save and commands', async () => {
+test('a first-layout font setup failure starts the replica for pending reads and commands', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -2376,7 +2555,6 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
   try {
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-      result.current.ref.current!.save(),
       result.current.bridgeRef.current!.runAfterPendingInput(() => true),
     ]);
     const completed = { value: false };
@@ -2395,8 +2573,7 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     await waitFor(() => expect(completed.value).toBe(true));
     const settled = await calls;
     expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-    expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
-    expect(settled[2]).toEqual({ status: 'fulfilled', value: true });
+    expect(settled[1]).toEqual({ status: 'fulfilled', value: true });
     expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.core.replicaReady).toBe(true);
     expect(result.current.renderer.frame).toBeNull();
@@ -2409,9 +2586,11 @@ test('a worker open without a frame or error starts the replica after the bounde
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
+  expect(await result.current.ref.current!.save()).toEqual(new ArrayBuffer(0));
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
   const calls = Promise.allSettled([
     result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-    result.current.ref.current!.save(),
   ]);
   const completed = { value: false };
   void calls.then(() => { completed.value = true; });
@@ -2425,7 +2604,6 @@ test('a worker open without a frame or error starts the replica after the bounde
   await waitFor(() => expect(completed.value).toBe(true));
   const settled = await calls;
   expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-  expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
   expect(result.current.mainOpens).toEqual([false]);
   expect(result.current.core.replicaReady).toBe(true);
 }, 15_000);
@@ -2489,14 +2667,13 @@ test('a replaced worker open never publishes its host or revives its replica', a
 });
 
 for (const stage of ['fontRequirements', 'bootstrap'] as const) {
-  test(`terminal OOM during ${stage} rejects pending reads, save and commands`, async () => {
+  test(`terminal OOM during ${stage} rejects pending reads and commands`, async () => {
     const { workers, posted } = installWorker({ oomStage: stage });
     const { result } = renderHook(useHarness, { initialProps });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-      result.current.ref.current!.save(),
       result.current.ref.current!.flushPendingInput(),
       result.current.bridgeRef.current!.runAfterPendingInput(() => true),
     ]);
@@ -2508,7 +2685,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
     const failure = result.current.renderer.error;
     expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     const settled: PromiseSettledResult<unknown>[] = await calls;
-    expect(settled).toEqual(Array.from({ length: 4 }, () => ({ status: 'rejected', reason: failure })));
+    expect(settled).toEqual(Array.from({ length: 3 }, () => ({ status: 'rejected', reason: failure })));
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.renderer.workerMemory()).toBeNull();
     expect(workers).toHaveLength(2);
@@ -2526,7 +2703,6 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       const session = result.current.core.session!;
       const pending = Promise.allSettled([
         result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-        result.current.ref.current!.save(),
         result.current.bridgeRef.current!.runAfterPendingInput(() => true),
       ]);
       const completed = { value: false };

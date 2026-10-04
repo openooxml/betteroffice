@@ -22,6 +22,8 @@ import type { ResidentSearchResult } from './residentSearch';
 import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import type {
   DocxProposalRegistryState,
   DocxProposalRequest,
@@ -57,6 +59,7 @@ export interface ResidentProposalResponse {
   result?: DocxProposalResult;
   mirror: { version: string; proposals: DocxProposalRegistryState };
   changedStories: string[];
+  projectionStories?: string[];
   updates: ArrayBuffer[];
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
@@ -171,9 +174,20 @@ export type ResidentEngineWorkerRequest =
        * `open` of the whole document replaces it.
        */
       previewBlocks?: number;
+      /** Optional paragraph weight budget for the display-only body cut. */
+      previewParagraphBudget?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'encodeState' }
+  | {
+      id: number;
+      type: 'save';
+      comments: Comment[];
+      host?: Document;
+      stateVector?: Uint8Array;
+      /** The editor peer's marked stories. @internal */
+      stories?: readonly string[];
+    }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | {
@@ -325,6 +339,8 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      /** @internal */
+      saved?: ArrayBuffer;
       revisionCount?: number;
       /** @internal */
       proposals?: DocxProposalRegistryState;
@@ -339,6 +355,8 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: false;
       error: string;
+      /** @internal */
+      code?: 'save-unavailable';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

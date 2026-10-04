@@ -323,11 +323,16 @@ impl Session {
     }
 
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, String> {
+        self.display_list_for_json(self.workbook.active_sheet().0, viewport_json)
+    }
+
+    /// @experimental
+    pub fn display_list_for_json(&self, sheet: u32, viewport_json: &str) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
         let display_list = self
             .workbook
-            .display_list(&viewport)
+            .display_list_for(SheetId(sheet), &viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
@@ -1083,6 +1088,25 @@ mod tests {
                 .unwrap()
                 .contains(r#""activeSheet":1"#)
         );
+    }
+
+    #[test]
+    fn opening_and_painting_preserve_source_bytes() {
+        let source = formula_xlsx();
+        for session in [
+            Session::open(&source, Some(45000.25)).unwrap(),
+            Session::open_collaborative(&source, 706, Some(45000.25)).unwrap(),
+        ] {
+            assert_eq!(
+                session.workbook.model().sheets[0]
+                    .cell(CellRef::parse_a1("B1").unwrap())
+                    .unwrap()
+                    .value,
+                CellValue::Number { value: 15.0 },
+            );
+            text_command(&display_value(&session), "15");
+            assert_eq!(session.save().unwrap(), source);
+        }
     }
 
     #[test]

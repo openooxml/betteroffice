@@ -8,8 +8,6 @@ import { isLayoutQueued, isSupersededLayout, sourceVersionOf } from '../internal
 import {
   deferWorkerOpenReplica,
   holdWorkerOpenDocument,
-  loadHeldDocumentForSave,
-  workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
@@ -445,22 +443,6 @@ test('a viewer exhausts null completion retries without a main layout', async ()
   expect(h.doc.laidOutHere).toEqual([]);
   expect(h.mainPreflight).not.toHaveBeenCalled();
   expect(h.release).not.toHaveBeenCalled();
-  h.hook.unmount();
-});
-
-test('a viewer keeps worker preflight and layout routing after a save release', async () => {
-  const h = await opened({ experimentalWorkerOpen: true, viewerSession: true });
-  await act(async () => { await loadHeldDocumentForSave(h.session); });
-  expect(workerOpenReplicaPending(h.session)).toBe(false);
-  expect(h.hook.result.current.getLayoutRequest()).toBeNull();
-  expect(await h.hook.result.current.readLayoutRequest()).not.toBeNull();
-  act(() => h.hook.result.current.runLayoutPipeline({ onHost: true }));
-  await act(async () => {});
-  await h.answer(1);
-  expect(h.doc.laidOutHere).toEqual([]);
-  expect(h.mainPreflight).not.toHaveBeenCalled();
-  expect(h.release).toHaveBeenCalledTimes(1);
-  expect(h.errors).toEqual([]);
   h.hook.unmount();
 });
 

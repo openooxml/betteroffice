@@ -8,7 +8,13 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import {
+  EditorDirtyStories,
+  ResidentWorkerSaveUnavailableError,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  serialWorkerSaves,
+} from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -30,6 +36,7 @@ import {
   registeredWorkerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
+import { registerWorkerOpenSave } from '../internals/workerOpenSave';
 
 export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
@@ -126,6 +133,8 @@ export interface YrsCoreSessionOptions {
 
 /** Body blocks a first-page preview parses. */
 const PREVIEW_BODY_BLOCKS = 200;
+/** Paragraph weight budget for a first-page preview. */
+const PREVIEW_PARAGRAPH_BUDGET = 256;
 /** How long the full open waits for the preview's pages to paint. */
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
@@ -149,7 +158,7 @@ async function openPreview(
 ): Promise<{ session: YrsSession; host: YrsDocxHost } | null> {
   const session = await yrs.createYrsSession({ clientId });
   try {
-    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+    const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     if (host) return { session, host };
     session.destroy();
     return null;
@@ -178,14 +187,14 @@ async function openWorkerPreview(
   let release = (): void => {};
   if (!viewer) {
     const loadHere = (): void => {
-      const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS);
+      const host = session.openDocxPreview(bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
       if (!host) throw new Error('The first-page preview cannot open');
       if (host.wholeBody) session.setPartialDocument(false);
     };
     deferWorkerOpenReplica(session, async () => loadHere, loadHere, () => release());
   }
   try {
-    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS);
+    const pending = openPreviewInWorker(session, bytes, PREVIEW_BODY_BLOCKS, PREVIEW_PARAGRAPH_BUDGET);
     onPosted();
     const opened = await pending;
     if (opened) {
@@ -320,7 +329,10 @@ export function useYrsCoreSession(
   const mediaTokensRef = useRef(options?.mediaTokens);
   mediaTokensRef.current = options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
-  const projectionStoriesRef = useRef(new Set<string>());
+  const dirtyStoriesRef = useRef(new EditorDirtyStories());
+  const markProjectionStories = useCallback((stories: readonly string[]): void => {
+    for (const story of stories) dirtyStoriesRef.current.add(story);
+  }, []);
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
@@ -406,8 +418,9 @@ export function useYrsCoreSession(
     if (!enabled || (!seedDocument && !seedBytes)) return;
     let cancelled = false;
     let openedWorker: WorkerOpenedDocument | null = null;
+    let unregisterSave: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
-    projectionStoriesRef.current.clear();
+    dirtyStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
 
     let abandoned = false;
@@ -638,6 +651,20 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
+            unregisterSave = registerWorkerOpenSave(next, {
+              available: () => !stale() && worker.canSave(),
+              save: (comments, peer) => saveInOrder(async (stories) => {
+                if (stale()) throw new Error('The document changed while saving');
+                if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
+                const currentHost = documentRef.current ?? host?.document;
+                return worker.save({
+                  comments,
+                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                  ...(peer ? { stories } : {}),
+                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+              }),
+            });
             let revisionsQueried = false;
             const queryRevisions = (): void => {
               if (revisionsQueried) return;
@@ -753,6 +780,7 @@ export function useYrsCoreSession(
                 current: () => !stale(),
                 laidOut: () => laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: markProjectionStories,
                 adopted: (version) => {
                   adoptWorkerOpenMirrorVersion(next, version);
                   worker.mirrorReady();
@@ -788,7 +816,7 @@ export function useYrsCoreSession(
         if (opened) {
           // Maps and projections of the preview do not describe this session.
           inputPositionMapsRef.current.clear();
-          projectionStoriesRef.current.clear();
+          dirtyStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
           previewingRef.current = false;
           retiringRef.current = opened.session;
@@ -810,6 +838,7 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
+      unregisterSave?.();
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
@@ -833,7 +862,7 @@ export function useYrsCoreSession(
       sessionRef.current = null;
       facadeRef.current = null;
       inputPositionMapsRef.current.clear();
-      projectionStoriesRef.current.clear();
+      dirtyStoriesRef.current.clear();
     };
   }, [
     enabled,
@@ -843,6 +872,7 @@ export function useYrsCoreSession(
     collaborationClientId,
     collaborationInitialUpdate,
     openInWorker,
+    markProjectionStories,
     retire,
     retirePreview,
   ]);
@@ -1064,13 +1094,13 @@ export function useYrsCoreSession(
       if (compatibilityBase) {
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
-      const dirtyStories = projectionStoriesRef.current;
+      const dirtyStories = dirtyStoriesRef.current;
       const projected = facade.yrsToDocument(
         live,
         base,
-        dirtyStories.size > 0 ? { storyIds: new Set(dirtyStories) } : undefined
+        dirtyStories.projection.projectionOptions()
       );
-      dirtyStories.clear();
+      dirtyStories.projected();
       if (compatibilityBase) compatibilityBaseRef.current = projected;
       return projected;
     } catch (error) {
@@ -1089,8 +1119,8 @@ export function useYrsCoreSession(
         : typeof stories === 'string'
           ? [stories]
           : stories;
-    for (const story of dirty) projectionStoriesRef.current.add(dirtyProjectionStory(story));
-  }, []);
+    markProjectionStories(dirty);
+  }, [markProjectionStories]);
 
   return {
     session,

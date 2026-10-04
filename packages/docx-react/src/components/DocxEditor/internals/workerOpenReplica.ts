@@ -37,7 +37,7 @@ export class WorkerOpenDocumentHeldError extends Error {
  * pending, so worker routing and version bookkeeping work as before, but nothing loads it here:
  * starting, awaiting or ensuring it throws {@link WorkerOpenDocumentHeldError}. `release` registers the
  * editor replica with {@link deferWorkerOpenReplica}; {@link releaseWorkerOpenDocument} calls it once
- * the session leaves viewer kind (or for an explicit save).
+ * the session leaves viewer kind.
  */
 export function holdWorkerOpenDocument(session: YrsSession, release: () => PendingReplica): void {
   let reject!: (error: unknown) => void;
@@ -87,12 +87,6 @@ export function releaseWorkerOpenDocument(session: YrsSession): PendingReplica |
   replica.mirrorVersion = held.mirrorVersion;
   replica.handoverVersion = held.handoverVersion;
   return replica;
-}
-
-export async function loadHeldDocumentForSave(session: YrsSession): Promise<void> {
-  const replica = releaseWorkerOpenDocument(session);
-  const ready = requestWorkerOpenReplica(session);
-  await (replica?.ready ?? ready);
 }
 
 export function deferWorkerOpenReplica(

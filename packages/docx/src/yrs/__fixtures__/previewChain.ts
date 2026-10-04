@@ -86,7 +86,12 @@ export function syntheticDocx(
   flavour: Flavour,
   size: number,
   seed: number,
-  options: { pageNumberRestarts?: [number, number] } = {}
+  options: {
+    pageNumberRestarts?: [number, number];
+    tableDense?: boolean;
+    blocks?: number;
+    trailingShortParagraphs?: number;
+  } = {}
 ): Uint8Array {
   let state = seed;
   const random = (limit: number) => {
@@ -118,7 +123,7 @@ export function syntheticDocx(
   const footnotes: number[] = [];
   const endnotes: number[] = [];
   const body: string[] = [];
-  const blocks = flavour === 'whole' ? WHOLE_BLOCKS : BLOCKS;
+  const blocks = options.blocks ?? (flavour === 'whole' ? WHOLE_BLOCKS : BLOCKS);
   for (let i = 1; i <= blocks; i += 1) {
     let properties = '';
     let runs = run(text(3, 9));
@@ -149,6 +154,27 @@ export function syntheticDocx(
       `<w:p><w:pPr>${properties}<w:spacing w:after="0" w:line="240" w:lineRule="auto"/>` +
         `<w:rPr><w:sz w:val="${size}"/></w:rPr></w:pPr>${runs}</w:p>`
     );
+    if (options.tableDense && i <= 60) {
+      const rows = Array.from({ length: 4 }, () => {
+        const cells = Array.from({ length: 3 }, () => {
+          const paragraphs = Array.from(
+            { length: 2 },
+            () =>
+              `<w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>${run(text(3, 9))}</w:p>`
+          ).join('');
+          return `<w:tc><w:tcPr><w:tcW w:w="3120" w:type="dxa"/></w:tcPr>${paragraphs}</w:tc>`;
+        }).join('');
+        return `<w:tr><w:trPr><w:trHeight w:val="960" w:hRule="atLeast"/></w:trPr>${cells}</w:tr>`;
+      }).join('');
+      body.push(
+        '<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr>' +
+          '<w:tblGrid><w:gridCol w:w="3120"/><w:gridCol w:w="3120"/><w:gridCol w:w="3120"/></w:tblGrid>' +
+          `${rows}</w:tbl>`
+      );
+    }
+  }
+  for (let i = 0; i < (options.trailingShortParagraphs ?? 0); i += 1) {
+    body.push(`<w:p>${run('Tail')}</w:p>`);
   }
   set(
     'word/styles.xml',

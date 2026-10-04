@@ -93,8 +93,7 @@ function apiFor(
       pagedEditorRef,
       handleSave: async () => {
         events.push('save');
-        if (viewerSession) return new ArrayBuffer(0);
-        return new TextEncoder().encode(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n')).buffer;
+        return new ArrayBuffer(0);
       },
       zoom: 1,
       setZoom: () => {},
@@ -248,7 +247,7 @@ test('every public ref API is classified for replica access', async () => {
   ].sort());
 });
 
-test('async reads, save, exports and write refusals wait for the main replica', async () => {
+test('async reads, exports and write refusals wait for the main replica while save stays independent', async () => {
   const { api, events, session, replica, release, opens } = await pendingReplica();
   const search = { text: 'Page', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
   const edits = { expectVersion: 'before-ready', steps: [] };
@@ -277,7 +276,7 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   await act(async () => {});
   expect(completed.value).toBe(false);
   expect(session.storyIds()).toEqual([]);
-  expect(events).toEqual([]);
+  expect(events).toEqual(['save']);
   expect(opens).toEqual([]);
   let values!: Awaited<typeof pending>;
   await act(async () => {
@@ -293,9 +292,31 @@ test('async reads, save, exports and write refusals wait for the main replica', 
   for (const result of values.slice(5, 10)) {
     expect(result).toMatchObject({ ok: false, version: session.version(), failure: { code: 'read-only' } });
   }
-  expect(new TextDecoder().decode(values[10]!)).toBe(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n'));
+  expect(new TextDecoder().decode(values[10]!)).toBe('');
   expect(values[12]).toMatchObject({ ok: false, version: session.version(), failure: { code: 'layout-unavailable' } });
   expect(values[13]).toBe(0);
+});
+
+test.each(['viewing', 'editing'] as const)('ref save in %s mode leaves the held viewer document or deferred editor replica unloaded', async (mode) => {
+  if (mode === 'viewing') {
+    const host = await heldViewer();
+    expect(await host.api.save()).toBeInstanceOf(ArrayBuffer);
+    expect(host.events).toEqual(['save']);
+    expect(workerOpenReplica.workerOpenDocumentHeld(host.session)).toBe(true);
+    expect(workerOpenReplica.workerOpenReplicaPending(host.session)).toBe(true);
+    expect(workerOpenReplica.workerOpenReplicaStarted(host.session)).toBe(false);
+    expect(host.session.storyIds()).toEqual([]);
+    expect(host.release).not.toHaveBeenCalled();
+    for (const helper of host.helpers) expect(helper).not.toHaveBeenCalled();
+    return;
+  }
+  const { api, events, session, replica, opens } = await pendingReplica(mode);
+  expect(await api.save()).toBeInstanceOf(ArrayBuffer);
+  expect(events).toEqual(['save']);
+  expect(replica.started).toBe(false);
+  expect(replica.pending).toBe(true);
+  expect(session.storyIds()).toEqual([]);
+  expect(opens).toEqual([]);
 });
 
 test('synchronous reads finish the main open without changing their return types', async () => {

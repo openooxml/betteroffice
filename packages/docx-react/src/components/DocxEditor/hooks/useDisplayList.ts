@@ -91,6 +91,7 @@ import { DocxWorkerError, type DocxWorkerErrorStage } from '../internals/docxWor
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
 import { sameLayoutInput } from '../internals/layoutInput';
 import { SupersededPreviewError } from '../internals/supersededPreview';
+import { stateVectorAhead } from '../internals/stateVector';
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
@@ -104,6 +105,12 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
+  canSave(): boolean;
+  save(
+    request: Parameters<ResidentEngineWorkerClient['save']>[0],
+    peer?: YrsSession,
+    adopt?: (apply: () => void) => void
+  ): Promise<ArrayBuffer>;
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
@@ -141,7 +148,8 @@ export interface WorkerOpenedPreview {
 export type OpenPreviewInWorker = (
   session: YrsSession,
   bytes: Uint8Array,
-  blocks: number
+  blocks: number,
+  paragraphBudget?: number
 ) => Promise<WorkerOpenedPreview | null>;
 
 export type FontRequirementsInWorker = (
@@ -582,6 +590,7 @@ export function useRustDisplayList(
     digest?: string;
     generation?: number;
     previewBlocks?: number;
+    previewParagraphBudget?: number;
   }>());
   // Display-only previews the worker opened and lays out; their load's whole document takes
   // their worker over.
@@ -1604,6 +1613,7 @@ export function useRustDisplayList(
                 : owner.client
                     .openPreview(source.bytes, source.previewBlocks, {
                       heapLimitBytes: workerHeapLimitRef.current,
+                      paragraphBudget: source.previewParagraphBudget,
                     })
                     .then((opened) => {
                       if (!opened) throw new WorkerPreviewRefusedError();
@@ -1738,6 +1748,40 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
+          canSave: () => {
+            const owner = workerRef.current;
+            return owner !== null && isCurrentWorker(hostEngine, owner) && !owner.client.hasFailed();
+          },
+          save: (request, peer, adopt) => {
+            const owner = workerRef.current;
+            const failure = workerFailureRef.current.get(hostEngine);
+            if (failure) return Promise.reject(failure);
+            if (!owner || !isCurrentWorker(hostEngine, owner)) {
+              return Promise.reject(new Error('No document worker'));
+            }
+            const stateVector = peer?.encodeStateVector();
+            if (peer && stateVector) {
+              const remote = owner.client.remoteStateVector();
+              if (stateVectorAhead(stateVector, remote)) {
+                owner.client.invalidate(peer.encodeStateAsUpdate(remote ?? undefined), null);
+              }
+            }
+            return owner.client.save(stateVector ? { ...request, stateVector } : request).then((saved) => {
+              if (!isCurrentWorker(hostEngine, owner)) throw new Error('The document changed while saving');
+              if (peer) {
+                suppressWorkerInvalidationRef.current += 1;
+                try {
+                  const apply = () => {
+                    for (const update of saved.updates) peer.applyUpdate(update);
+                  };
+                  adopt ? adopt(apply) : apply();
+                } finally {
+                  suppressWorkerInvalidationRef.current -= 1;
+                }
+              }
+              return saved.bytes;
+            });
+          },
           fallback: (reason = 'failure') => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;
@@ -1822,9 +1866,13 @@ export function useRustDisplayList(
   );
 
   const openPreviewInWorker = useCallback<OpenPreviewInWorker>(
-    async (hostEngine, bytes, blocks) => {
+    async (hostEngine, bytes, blocks, paragraphBudget) => {
       if (overrides?.build || !canUseResidentEngineWorker()) return null;
-      workerOpenSourcesRef.current.set(hostEngine, { bytes, previewBlocks: blocks });
+      workerOpenSourcesRef.current.set(hostEngine, {
+        bytes,
+        previewBlocks: blocks,
+        previewParagraphBudget: paragraphBudget,
+      });
       workerPreviewEnginesRef.current.add(hostEngine);
       let owner: NonNullable<typeof workerRef.current> | null = null;
       try {

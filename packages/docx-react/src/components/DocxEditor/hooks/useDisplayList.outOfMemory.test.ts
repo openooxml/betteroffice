@@ -20,7 +20,6 @@ import type {
 import {
   deferWorkerOpenReplica,
   holdWorkerOpenDocument,
-  loadHeldDocumentForSave,
   requestWorkerOpenReplica,
   workerOpenReplicaPending,
 } from '../internals/workerOpenReplica';
@@ -442,36 +441,6 @@ test('viewer canvas attachment shares the single retry and then reports a render
     expect((hook.result.current.error as DocxWorkerError).stage).toBe('render');
     expect(FakeWorker.spawned).toHaveLength(2);
     expectWorkerOnly(source);
-  } finally {
-    hook.unmount();
-    source.native.free();
-  }
-});
-
-test('a viewer still refuses main rendering after its explicit save release', async () => {
-  const source = viewerFixture();
-  const hook = viewerDisplay(source);
-  try {
-    const worker = await openViewer(hook.result.current, source.engine);
-    await act(async () => { await loadHeldDocumentForSave(source.engine); });
-    expect(workerOpenReplicaPending(source.engine)).toBe(false);
-    expect(hook.result.current.layoutInWorker.isViewerSession!(source.engine)).toBe(true);
-    expect(source.release).toHaveBeenCalledTimes(1);
-    const requirements = hook.result.current.fontRequirementsInWorker(source.engine, REQUEST)!;
-    await waitFor(() => expect(worker.last().type).toBe('fontRequirements'));
-    await act(async () => {
-      worker.onmessage?.({ data: {
-        id: worker.last().id, ok: true, requirementsJson: '[]',
-      } } as MessageEvent<ResidentEngineWorkerResponse>);
-      await requirements;
-    });
-    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
-    await act(async () => { worker.replyFrame(source.frame(1), 1); });
-    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
-    expect(source.mainOwnership).not.toHaveBeenCalled();
-    expect(source.mainCopy).not.toHaveBeenCalled();
-    expect(source.mainLayout).not.toHaveBeenCalled();
-    expect(source.mainThreadBuilds).toEqual([]);
   } finally {
     hook.unmount();
     source.native.free();
