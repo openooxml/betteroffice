@@ -212,18 +212,29 @@ impl SourceContainer {
     }
 
     /// Whether the archive's members are exactly `names` plus directory entries, each
-    /// listed once. False for anything it cannot read unambiguously, ZIP64 included.
+    /// listed once, as both a strict central-directory walk and the ZIP reader see them.
+    /// False for anything either reads differently or cannot read, ZIP64 included.
     pub fn holds_exactly<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> bool {
-        let Some(members) = central_directory_names(self.as_bytes()) else {
+        let Some(members) = central_directory_entries(self.as_bytes()) else {
             return false;
         };
+        let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(self.as_bytes())) else {
+            return false;
+        };
+        if archive.len() != members.len() {
+            return false;
+        }
         let mut files = HashSet::with_capacity(members.len());
-        for member in &members {
-            if !files.insert(member.as_str()) {
+        for (index, (name, header)) in members.iter().enumerate() {
+            match archive.by_index_raw(index) {
+                Ok(file) if file.name() == name && file.header_start() == *header => {}
+                _ => return false,
+            }
+            if !files.insert(name.as_str()) {
                 return false;
             }
         }
-        files.retain(|name| !name.ends_with('/'));
+        files.retain(|name| !name.ends_with('/') && !name.ends_with('\\'));
         let mut count = 0;
         for name in names {
             if !files.contains(name) {
@@ -235,9 +246,9 @@ impl SourceContainer {
     }
 }
 
-/// The member names of a single-disk, non-ZIP64 archive whose central directory ends
-/// where its only end-of-central-directory record starts.
-fn central_directory_names(bytes: &[u8]) -> Option<Vec<String>> {
+/// The member names and local header offsets of a single-disk, non-ZIP64 archive whose
+/// central directory ends where its only end-of-central-directory record starts.
+fn central_directory_entries(bytes: &[u8]) -> Option<Vec<(String, u64)>> {
     const EOCD: u32 = 0x0605_4b50;
     const ENTRY: u32 = 0x0201_4b50;
     let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
@@ -245,8 +256,8 @@ fn central_directory_names(bytes: &[u8]) -> Option<Vec<String>> {
     let last = bytes.len().checked_sub(22)?;
     let mut found = None;
     for pos in (last.saturating_sub(u16::MAX as usize)..=last).rev() {
-        if u32_at(pos)? == EOCD && pos + 22 + usize::from(u16_at(pos + 20)?) == bytes.len() {
-            if found.is_some() {
+        if u32_at(pos)? == EOCD {
+            if found.is_some() || pos + 22 + usize::from(u16_at(pos + 20)?) != bytes.len() {
                 return None;
             }
             found = Some(pos);
@@ -267,18 +278,22 @@ fn central_directory_names(bytes: &[u8]) -> Option<Vec<String>> {
         return None;
     }
     let mut at = offset as usize;
-    let mut names = Vec::with_capacity(usize::from(total));
+    let mut entries = Vec::with_capacity(usize::from(total));
     for _ in 0..total {
         if u32_at(at)? != ENTRY {
             return None;
         }
         let name_len = usize::from(u16_at(at + 28)?);
         let rest = usize::from(u16_at(at + 30)?) + usize::from(u16_at(at + 32)?);
+        let header = u32_at(at + 42)?;
+        if header == u32::MAX {
+            return None;
+        }
         let name = bytes.get(at + 46..at + 46 + name_len)?;
-        names.push(String::from_utf8(name.to_vec()).ok()?);
+        entries.push((String::from_utf8(name.to_vec()).ok()?, u64::from(header)));
         at += 46 + name_len + rest;
     }
-    (at == eocd).then_some(names)
+    (at == eocd).then_some(entries)
 }
 
 impl std::fmt::Debug for SourceContainer {
@@ -468,13 +483,12 @@ mod tests {
         }
         let bytes = cursor.into_inner();
         assert!(SourceContainer::new(bytes.clone()).holds_exactly(names(&parts)));
-        for comment in [
-            b"comment PK\x05\x06 mid-comment".to_vec(),
-            vec![0; u16::MAX as usize],
-        ] {
+        for comment in [b"archive comment".to_vec(), vec![0; u16::MAX as usize]] {
             let source = SourceContainer::new(with_comment(bytes.clone(), &comment));
             assert!(source.holds_exactly(names(&parts)));
         }
+        let source = SourceContainer::new(with_comment(bytes, b"comment PK\x05\x06 signature"));
+        assert!(!source.holds_exactly(names(&parts)));
     }
 
     #[test]
