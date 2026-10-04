@@ -192,7 +192,8 @@ const VIEWER_REF_REFUSALS = {
 export function routeViewerRefAccess(
   api: DocxEditorRef,
   viewer: () => boolean,
-  viewerApi: Partial<DocxEditorRef> = {}
+  viewerApi: Partial<DocxEditorRef> = {},
+  refusing: () => boolean = viewer
 ): DocxEditorRef {
   const routed = { ...api };
   const members = new Set([...Object.keys(DOCX_REF_ASYNC_TWINS), ...DOCX_REF_ASYNC_TWIN_EXEMPTIONS, ...Object.keys(VIEWER_REF_REFUSALS), ...Object.keys(viewerApi)]);
@@ -206,8 +207,8 @@ export function routeViewerRefAccess(
     Object.defineProperty(routed, member, {
       enumerable: true,
       value: (...args: unknown[]) => {
-        if (!viewer()) return Reflect.apply(api[member] as Function, api, args);
         const refusal = member in VIEWER_REF_REFUSALS;
+        if (!(refusal ? refusing() : viewer())) return Reflect.apply(api[member] as Function, api, args);
         const behaviour = refusal ? `returns ${String(VIEWER_REF_REFUSALS[member as keyof typeof VIEWER_REF_REFUSALS])} in viewer sessions`
           : VIEWER_REF_ROUTING[member] === 'async-only' ? 'throws DocxAsyncOnlyError in viewer sessions'
           : navigation ? 'starts async navigation and returns true in viewer sessions'
@@ -679,7 +680,8 @@ export function useDocxEditorRefApi({
     return onWorker(authority, main);
   };
   const createApi = (): DocxEditorRef => {
-    const viewer = () => viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current);
+    const viewer = () => isWorkerViewer(pagedEditorRef.current);
+    const refusing = () => viewerSessionRef.current || viewer();
     const held = () => {
       const session = pagedEditorRef.current?.getYrsSession();
       return !!session && workerOpenDocumentHeld(session);
@@ -1076,7 +1078,7 @@ export function useDocxEditorRefApi({
       },
       ...hostSearch,
     };
-    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen, viewer);
+    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen, refusing);
     const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
       const session = pagedEditorRef.current?.getYrsSession();
       return session ? modeRefusal(session, modeRef.current, request) : null;
@@ -1121,7 +1123,7 @@ export function useDocxEditorRefApi({
         });
         return true;
       },
-    });
+    }, refusing);
   };
   useImperativeHandle(
     ref,

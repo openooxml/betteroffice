@@ -189,6 +189,23 @@ describe('command store execution', () => {
     });
   }
 
+  test('viewer mutations keep the origin and scope refusals ahead of the mode gate', async () => {
+    const { controller, harness } = setup({ readOnly: true, mode: 'viewing' });
+    harness.binding.isViewer = () => true;
+    const admit = mock(() => new Promise<never>(() => {}));
+    harness.state.admission = admit;
+    const scope = { deny: () => 'permission-denied' as const, subscribe: () => () => {} };
+    expect(await controller.scoped(scope).execute('bold', null)).toMatchObject({
+      ok: false, failure: { code: 'permission-denied' },
+    });
+    const deferred = controller.defer('bold', null, 'selection');
+    harness.state.document = {};
+    expect(await deferred.complete(() => ({ ok: true, status: 'executed' } as const))).toMatchObject({
+      ok: false, failure: { code: 'document-replaced' },
+    });
+    expect(admit).not.toHaveBeenCalled();
+  });
+
   test('viewer non-mutating ordered commands retain input admission', async () => {
     const { store, harness } = setup({ mode: 'viewing' });
     harness.binding.isViewer = () => true;
