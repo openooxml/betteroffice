@@ -151,7 +151,8 @@ impl StoryParser<'_, '_> {
                 break;
             }
             let budget_reached = paragraph_budget.is_some_and(|budget| weight >= budget)
-                && content.len() >= PREVIEW_MIN_BLOCKS;
+                && content.len() >= PREVIEW_MIN_BLOCKS
+                && is_story_block(child);
             if open_fields.is_empty()
                 && (limit.is_some_and(|limit| content.len() >= limit) || budget_reached)
             {

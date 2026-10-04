@@ -3,7 +3,7 @@ use docx_parse::block::PREVIEW_MIN_BLOCKS;
 use docx_parse::s9::{
     S9ParseOptions, parse_docx_s9_preview_from_parts, parse_docx_s9_preview_from_parts_full_dom,
     parse_docx_s9_preview_from_parts_full_dom_with_budget,
-    parse_docx_s9_preview_from_parts_with_budget,
+    parse_docx_s9_preview_from_parts_with_budget, parse_docx_s9_wire_with_limits,
 };
 
 const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
@@ -349,6 +349,77 @@ fn dense_tables_stop_at_the_first_complete_block_after_the_minimum() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn an_exhausted_budget_keeps_trailing_non_block_children() {
+    for markers in [
+        "",
+        r#"<w:bookmarkStart w:id="1" w:name="tail"/><w:bookmarkEnd w:id="1"/><w:permStart w:id="2"/><w:permEnd w:id="2"/><w:proofErr w:type="spellStart"/><w:proofErr w:type="spellEnd"/><w:customXmlInsRangeStart w:id="3"/><w:customXmlInsRangeEnd w:id="3"/><w:moveFromRangeStart w:id="4"/><w:moveFromRangeEnd w:id="4"/>"#,
+    ] {
+        let body = format!(
+            r#"{}{markers}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:pgSz w:w="18000" w:h="24000"/></w:sectPr>"#,
+            table(1, 1, 10).repeat(32),
+        );
+        let (preview, stopped) = weighted_preview(&body, 200, 256);
+        assert!(!stopped);
+        let content = &preview.document.package.document.content;
+        assert_eq!(content.len(), 32);
+        assert!(content.iter().all(|block| matches!(
+            block,
+            docx_parse::BlockContent::Table(_)
+        )));
+        let whole_body = !stopped && content.len() < 200;
+        assert!(whole_body);
+        let full = parse_docx_s9_wire_with_limits(
+            &ooxml_opc::rezip_parts(&package(&body)).unwrap(),
+            S9ParseOptions {
+                determinism_seed: Some("7".repeat(64)),
+                ..S9ParseOptions::default()
+            },
+            &ParseLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&preview).unwrap(),
+            serde_json::to_vec(&full).unwrap()
+        );
+    }
+}
+
+#[test]
+fn an_exhausted_budget_stops_before_another_block() {
+    for trailing_block in [
+        paragraph(32, "", ""),
+        r#"<ext:block xmlns:ext="urn:preview-test"/>"#.to_owned(),
+    ] {
+        let body = format!(
+            r#"{}{trailing_block}<w:sectPr><w:headerReference w:type="default" r:id="rHeader"/><w:pgSz w:w="18000" w:h="24000"/></w:sectPr>"#,
+            table(1, 1, 10).repeat(32),
+        );
+        let (preview, stopped) = weighted_preview(&body, 200, 256);
+        assert!(stopped);
+        let content = &preview.document.package.document.content;
+        assert_eq!(content.len(), 32);
+        let whole_body = !stopped && content.len() < 200;
+        assert!(!whole_body);
+        let expected = parse_docx_s9_preview_from_parts(
+            &package(&body),
+            32,
+            S9ParseOptions {
+                determinism_seed: Some("7".repeat(64)),
+                ..S9ParseOptions::default()
+            },
+            &ParseLimits::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(preview, expected);
+        let properties =
+            serde_json::to_value(preview.document.package.document.final_section_properties)
+                .unwrap();
+        assert!(properties.to_string().contains("18000"));
     }
 }
 
