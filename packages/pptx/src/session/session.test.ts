@@ -356,4 +356,12 @@ describe('presentation sessions', () => {
       } finally { await worker.dispose(); }
     }
   });
+
+  test('closes the transport when the caller buffers cannot be copied', async () => {
+    const pair = createInProcessPair();
+    const detached = new Uint8Array(8);
+    structuredClone(detached, { transfer: [detached.buffer] });
+    await expect(createPresentationSession(detached, {}, pair.client)).rejects.toThrow();
+    expect(() => pair.host.post({})).toThrow();
+  });
 });

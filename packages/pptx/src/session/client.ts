@@ -53,6 +53,28 @@ function copyFonts(
   });
 }
 
+function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationSessionOptions): {
+  document: ArrayBuffer; input: PresentationSessionOpenOptions; transfer: Transferable[];
+} {
+  const document = copyBytes(bytes).buffer;
+  const transfer: Transferable[] = [document];
+  const input: PresentationSessionOpenOptions = {
+    clientId: options.clientId,
+    fonts: copyFonts(options.fonts, transfer),
+    fallbackFonts: copyFonts(options.fallbackFonts, transfer),
+  };
+  if (options.initialUpdate !== undefined) {
+    const update = copyBytes(options.initialUpdate);
+    input.initialUpdate = update;
+    transfer.push(update.buffer);
+  }
+  if (options.wasm instanceof ArrayBuffer) {
+    input.wasm = options.wasm.slice(0);
+    transfer.push(input.wasm);
+  } else if (options.wasm !== undefined) input.wasm = options.wasm;
+  return { document, input, transfer };
+}
+
 /** Opens a worker session, transferring copies so caller buffers stay usable. */
 export async function openPresentationSession(
   bytes: Uint8Array | ArrayBuffer,
@@ -71,23 +93,15 @@ export async function createPresentationSession(
   options: OpenPresentationSessionOptions,
   transport: SessionTransport
 ): Promise<PresentationSession> {
-  const document = copyBytes(bytes).buffer;
-  const transfer: Transferable[] = [document];
-  const input: PresentationSessionOpenOptions = {
-    clientId: options.clientId,
-    fonts: copyFonts(options.fonts, transfer),
-    fallbackFonts: copyFonts(options.fallbackFonts, transfer),
-  };
-  if (options.initialUpdate !== undefined) {
-    const update = copyBytes(options.initialUpdate);
-    input.initialUpdate = update;
-    transfer.push(update.buffer);
+  let document: ArrayBuffer;
+  let input: PresentationSessionOpenOptions;
+  let transfer: Transferable[];
+  try {
+    ({ document, input, transfer } = prepareOpen(bytes, options));
+  } catch (error) {
+    try { transport.close(); } catch {}
+    throw error;
   }
-  if (options.wasm instanceof ArrayBuffer) {
-    input.wasm = options.wasm.slice(0);
-    transfer.push(input.wasm);
-  } else if (options.wasm !== undefined) input.wasm = options.wasm;
-
   const client = createSessionClient<PresentationSessionMethods, Events>(transport, {
     methods: PRESENTATION_SESSION_METHODS,
   });
