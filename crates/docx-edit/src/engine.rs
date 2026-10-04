@@ -752,7 +752,7 @@ fn anchors_objects(blocks: &[LayoutBlock]) -> bool {
                 run,
                 docx_layout::types::Run::Image(image)
                     if image.position.is_some()
-                        || image.wrap_type.is_some()
+                        || image.wrap_type.as_deref().is_some_and(|wrap| wrap != "inline")
                         || image.display_mode.as_deref() == Some("float")
             )
         }),
@@ -3971,6 +3971,12 @@ impl EngineSession {
             )?;
         }
         let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
+        let previous_page_count = self
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .map(|layout| layout.pages.len());
         // The note fixpoint replays `base_input`. Without notes `input` is the
         // final pass; with notes the final pass carries reserved heights, so
         // the reservation-free pass stays out of the retained pagination state
@@ -4126,7 +4132,7 @@ impl EngineSession {
                         },
                         rebuilt_page_ranges: pass.rebuilt_page_ranges.clone(),
                     },
-                    (pass.incremental, deltas),
+                    (pass.incremental, deltas, previous_page_count),
                 )?;
                 placement_passes.placed_blocks = 0;
             } else {
@@ -4878,6 +4884,12 @@ impl EngineSession {
         self.resumable.replace(None);
         self.capture.borrow_mut().take();
         let input_options_fingerprint = options_fingerprint(&input)?;
+        let previous_page_count = self
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .map(|layout| layout.pages.len());
         let mut incremental = false;
         let mut deltas = HashMap::new();
         let run = {
@@ -4954,7 +4966,7 @@ impl EngineSession {
             revision_preview,
             cached_page_totals,
             run,
-            (incremental, deltas),
+            (incremental, deltas, previous_page_count),
         )
     }
 
@@ -4965,7 +4977,7 @@ impl EngineSession {
         revision_preview: Option<(u64, &BTreeMap<String, RevisionPreview>, bool)>,
         cached_page_totals: bool,
         run: docx_layout::place::IncrementalLayout,
-        (incremental, deltas): (bool, HashMap<String, i64>),
+        (incremental, deltas, previous_page_count): (bool, HashMap<String, i64>, Option<usize>),
     ) -> Result<(), String> {
         self.resumable.replace(None);
         self.capture.borrow_mut().take();
@@ -4975,7 +4987,6 @@ impl EngineSession {
             rebuilt_page_ranges,
         } = run;
         let mut pagination = self.pagination.borrow_mut();
-        let previous_page_count = pagination.layout.as_ref().map(|layout| layout.pages.len());
         pagination.input = Some(input);
         pagination.moved_blocks.clear();
         pagination.retain_matches.clear();
