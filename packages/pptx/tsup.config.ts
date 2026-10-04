@@ -1,8 +1,12 @@
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, rename } from 'node:fs/promises';
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
-  entry: { index: 'src/index.ts' },
+  entry: {
+    index: 'src/index.ts',
+    'wasm-pptx': 'src/wasm/loader.ts',
+    pptxSessionWorker: 'src/session/worker.ts',
+  },
   format: ['esm'],
   dts: true,
   splitting: true,
@@ -11,6 +15,7 @@ export default defineConfig({
   treeshake: true,
   minify: true,
   onSuccess: async () => {
+    await rename('dist/pptxSessionWorker.js', 'dist/pptxSessionWorker.mjs');
     await mkdir('dist/generated', { recursive: true });
     await copyFile('src/wasm/generated/pptx_wasm_bg.wasm', 'dist/generated/pptx_wasm_bg.wasm');
   },

@@ -1,0 +1,240 @@
+import { beforeAll, describe, expect, test } from 'bun:test';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { createSessionClient, type SessionTransport } from '../../../../shared/office-session';
+import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import type { PptxEditRequest, PptxReadResult } from '../edits';
+import { initWasm, openPresentation } from '../wasm/loader';
+import { openPresentationSession, type PresentationSession } from './client';
+import { createPresentationSessionHost } from './host';
+import {
+  PRESENTATION_SESSION_METHODS,
+  type PresentationSessionEvents,
+  type PresentationSessionMethods,
+} from './methods';
+
+const root = resolve(import.meta.dir, '../../../..');
+let fixture: Uint8Array;
+let fontBytes: Uint8Array;
+
+beforeAll(async () => {
+  const [wasm, pptx, font] = await Promise.all([
+    readFile(resolve(import.meta.dir, '../wasm/generated/pptx_wasm_bg.wasm')),
+    readFile(resolve(root, 'apps/demo/public/betteroffice-demo.pptx')),
+    readFile(resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')),
+  ]);
+  await initWasm(wasm);
+  fixture = new Uint8Array(pptx);
+  fontBytes = new Uint8Array(font);
+});
+
+function read(result: PptxReadResult): Extract<PptxReadResult, { ok: true }> {
+  if (!result.ok) throw new Error(result.failure.message);
+  return result;
+}
+
+async function session(clientId: number): Promise<PresentationSession> {
+  const pair = createInProcessPair();
+  createPresentationSessionHost(pair.host);
+  return openPresentationSession(fixture, {
+    clientId, transport: pair.client,
+    fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+  });
+}
+
+describe('presentation sessions', () => {
+  test('matches main-thread projections, reads, edits and saved bytes', async () => {
+    const main = openPresentation(fixture, {
+      clientId: 9701, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    });
+    let worker: PresentationSession | undefined;
+    try {
+      worker = await session(9701);
+      const snapshot = main.snapshot();
+      const summaries = snapshot.slides.map((slide, index) => ({
+        id: slide.id, index, name: slide.name, layoutPartPath: slide.layoutPartPath,
+      }));
+      expect(worker.state).toEqual({
+        format: 'pptx', stage: 'ready', version: 0, dirty: false,
+        slides: summaries, size: { width: snapshot.widthEmu, height: snapshot.heightEmu },
+      });
+      expect(await worker.call.slides()).toEqual(summaries);
+      expect(await worker.call.slideSize()).toEqual(worker.state.size);
+      expect(await worker.save()).toEqual(main.save());
+      const mainBefore = read(main.readContent());
+      const workerBefore = read(await worker.call.readContent());
+      expect(await worker.call.version()).toBe(workerBefore.version);
+      expect(mainBefore.version).toBe(main.version());
+      expect({ ...workerBefore, version: mainBefore.version }).toEqual(mainBefore);
+      const story = mainBefore.stories.find((candidate) => candidate.paragraphs[0]?.editable);
+      if (!story) throw new Error('Fixture has no editable story');
+      const request: PptxEditRequest = {
+        expectVersion: workerBefore.version,
+        steps: [
+          { op: 'insertText', at: 'start', text: 'Session: ', target: {
+            kind: 'range', slideId: story.slideId, shapeId: story.shapeId,
+            storyId: story.storyId, start: 0, end: 0,
+          } },
+          { op: 'setSlideNotes', target: { slideId: story.slideId }, text: 'Session notes' },
+        ],
+      };
+      expect(await worker.call.validateEdits(request)).toMatchObject({ ok: true, wouldApply: true });
+      expect(worker.state.dirty).toBe(false);
+      const applied = await worker.call.applyEdits(request);
+      const mainApplied = main.applyEdits({ ...request, expectVersion: mainBefore.version });
+      if (!applied.ok || !mainApplied.ok) throw new Error('Parity batch was refused');
+      expect(applied.applied).toBe(true);
+      expect({ ...applied, baseVersion: mainApplied.baseVersion, version: mainApplied.version })
+        .toEqual(mainApplied);
+      expect(await worker.call.version()).toBe(applied.version);
+      expect(main.version()).toBe(mainApplied.version);
+      expect(applied.version).not.toBe(workerBefore.version);
+      expect(mainApplied.version).not.toBe(mainBefore.version);
+      const workerAfter = read(await worker.call.readContent());
+      const mainAfter = read(main.readContent());
+      expect(workerAfter.version).toBe(applied.version);
+      expect({ ...workerAfter, version: mainAfter.version }).toEqual(mainAfter);
+      const filtered = read(await worker.call.readContent({ slideIds: [story.slideId] }));
+      const mainFiltered = read(main.readContent({ slideIds: [story.slideId] }));
+      expect({ ...filtered, version: mainFiltered.version }).toEqual(mainFiltered);
+      const found = await worker.call.findText({ text: 'Session: ' });
+      const mainFound = main.findText({ text: 'Session: ' });
+      expect({ ...found, version: mainFound.version }).toEqual(mainFound);
+      expect(await worker.save()).toEqual(main.save());
+      expect(new Uint8Array(await worker.call.save())).toEqual(main.save());
+      expect(worker.state).toMatchObject({ version: 1, dirty: true });
+    } finally {
+      main.dispose();
+      await worker?.dispose();
+    }
+  });
+
+  test('returns refusals as data and orders edits, reads, saves and changed events', async () => {
+    const worker = await session(9702);
+    const changes: PresentationSessionEvents['changed'][] = [];
+    const off = worker.on('changed', (change) => { changes.push(change); });
+    try {
+      const initial = await worker.call.version();
+      const slide = worker.state.slides[0];
+      const request: PptxEditRequest = {
+        expectVersion: initial,
+        steps: [{ op: 'setSlideNotes', target: { slideId: slide.id }, text: 'First notes' }],
+      };
+      expect(await worker.call.applyEdits({ ...request, expectVersion: 'stale' }))
+        .toMatchObject({ ok: false, version: initial, failure: { code: 'stale-version' } });
+      expect(await worker.call.validateEdits({ ...request, expectVersion: 'stale' }))
+        .toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      const originalNotes = read(await worker.call.readContent()).slides[0].notes ?? '';
+      expect(await worker.call.applyEdits({
+        expectVersion: initial,
+        steps: [{ op: 'setSlideNotes', target: { slideId: slide.id }, text: originalNotes }],
+      })).toMatchObject({ ok: true, applied: false, version: initial });
+      expect(worker.state).toMatchObject({ version: 0, dirty: false });
+      expect(changes).toEqual([]);
+      const first = await worker.call.applyEdits(request);
+      if (!first.ok) throw new Error(first.failure.message);
+      expect(first.applied).toBe(true);
+      expect(await worker.call.applyEdits(request)).toMatchObject({
+        ok: false, version: first.version, failure: { code: 'stale-version' },
+      });
+      const noOp = await worker.call.applyEdits({ ...request, expectVersion: first.version });
+      expect(noOp).toMatchObject({ ok: true, applied: false, version: first.version });
+      expect(changes).toEqual([{ version: 1, dirty: true }]);
+      const beforeWrite = worker.call.readContent();
+      const saveBefore = worker.save();
+      const second = worker.call.applyEdits({
+        expectVersion: first.version,
+        steps: [{ op: 'setSlideNotes', target: { slideId: slide.id }, text: 'Second notes' }],
+      });
+      const afterWrite = worker.call.readContent();
+      const saveAfter = worker.save();
+      const [before, savedBefore, applied, after, savedAfter] =
+        await Promise.all([beforeWrite, saveBefore, second, afterWrite, saveAfter]);
+      if (!applied.ok) throw new Error(applied.failure.message);
+      expect(applied.applied).toBe(true);
+      expect(read(before).version).toBe(first.version);
+      expect(read(before).slides[0].notes).toBe('First notes');
+      expect(read(after).version).toBe(applied.version);
+      expect(read(after).slides[0].notes).toBe('Second notes');
+      expect(savedBefore).not.toEqual(savedAfter);
+      expect(changes).toEqual([{ version: 1, dirty: true }, { version: 2, dirty: true }]);
+      expect(worker.state).toMatchObject({ version: 2, dirty: true });
+      expect(worker.failure).toBeUndefined();
+      off();
+      await worker.call.applyEdits({
+        expectVersion: applied.version,
+        steps: [{ op: 'setSlideNotes', target: { slideId: slide.id }, text: 'Third notes' }],
+      });
+      expect(changes).toHaveLength(2);
+    } finally {
+      off();
+      await worker.dispose();
+    }
+    await expect(worker.call.version()).rejects.toMatchObject({ code: 'disposed' });
+    await expect(worker.save()).rejects.toMatchObject({ code: 'disposed' });
+    await worker.dispose();
+  });
+
+  test('refuses calls before open, a second open, and calls after RPC disposal', async () => {
+    const pair = createInProcessPair();
+    let initializations = 0;
+    createPresentationSessionHost(pair.host, { initWasm: async (source) => {
+      initializations += 1;
+      await initWasm(source);
+    } });
+    const client = createSessionClient<PresentationSessionMethods, {
+      changed: PresentationSessionEvents['changed'];
+    }>(pair.client, { methods: PRESENTATION_SESSION_METHODS });
+    try {
+      const calls = [
+        () => client.call.version(), () => client.call.readContent(),
+        () => client.call.findText({ text: 'text' }),
+        () => client.call.validateEdits({ expectVersion: 'stale', steps: [] }),
+        () => client.call.applyEdits({ expectVersion: 'stale', steps: [] }),
+        () => client.call.slides(), () => client.call.slideSize(),
+        () => client.call.save(), () => client.call.dispose(),
+      ];
+      for (const call of calls) await expect(call()).rejects.toThrow('not open');
+      expect(initializations).toBe(0);
+      const bytes = new Uint8Array(fixture).buffer;
+      await client.call.open(bytes, { clientId: 9703 });
+      await expect(client.call.open(bytes, { clientId: 9703 })).rejects.toThrow('already open');
+      expect(initializations).toBe(1);
+      await client.call.dispose();
+      await expect(client.call.version()).rejects.toThrow('disposed');
+      await expect(client.call.open(bytes)).rejects.toThrow('disposed');
+    } finally { await client.dispose(); }
+  });
+
+  test('transfers owned copies of document and font buffers, including subviews', async () => {
+    const main = openPresentation(fixture, { clientId: 9704 });
+    let saved: Uint8Array;
+    try { saved = main.save(); } finally { main.dispose(); }
+    for (const asView of [false, true]) {
+      const source = new Uint8Array(fixture.byteLength + (asView ? 16 : 0));
+      source.set(fixture, asView ? 8 : 0);
+      const document = asView ? source.subarray(8, source.byteLength - 8) : source.buffer;
+      const font = new Uint8Array(fontBytes.byteLength + 16);
+      font.set(fontBytes, 8);
+      const face = font.subarray(8, font.byteLength - 8);
+      const pair = createInProcessPair();
+      createPresentationSessionHost(pair.host);
+      const transferred: ArrayBuffer[] = [];
+      const transport: SessionTransport = { ...pair.client, post(message, transfer) {
+        transferred.push(...(transfer ?? []) as ArrayBuffer[]);
+        pair.client.post(message, transfer);
+      } };
+      const worker = await openPresentationSession(document, {
+        clientId: 9704, transport, fonts: [{ family: 'Liberation Sans', bytes: face }],
+      });
+      try {
+        expect(transferred).toHaveLength(2);
+        expect(transferred.every((buffer) => buffer.byteLength === 0)).toBe(true);
+        expect(source.byteLength).toBe(fixture.byteLength + (asView ? 16 : 0));
+        expect(new Uint8Array(document)).toEqual(fixture);
+        expect(face).toEqual(fontBytes);
+        expect(await worker.save()).toEqual(saved);
+      } finally { await worker.dispose(); }
+    }
+  });
+});
