@@ -134,6 +134,7 @@ dependencies = [
  "betteroffice-metafile",
  "betteroffice-opc",
  "indexmap",
+ "memchr",
  "quick-xml",
  "ryu-js",
  "serde",
