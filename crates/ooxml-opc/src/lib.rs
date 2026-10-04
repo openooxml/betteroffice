@@ -255,9 +255,12 @@ fn central_directory_entries(bytes: &[u8]) -> Option<Vec<(String, u64)>> {
     let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
     let last = bytes.len().checked_sub(22)?;
     let mut found = None;
-    for pos in (last.saturating_sub(u16::MAX as usize)..=last).rev() {
+    for pos in (last.saturating_sub(u16::MAX as usize)..=bytes.len() - 4).rev() {
         if u32_at(pos)? == EOCD {
-            if found.is_some() || pos + 22 + usize::from(u16_at(pos + 20)?) != bytes.len() {
+            if found.is_some()
+                || pos > last
+                || pos + 22 + usize::from(u16_at(pos + 20)?) != bytes.len()
+            {
                 return None;
             }
             found = Some(pos);
