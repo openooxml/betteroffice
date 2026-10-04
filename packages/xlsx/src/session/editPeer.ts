@@ -158,7 +158,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
 
   async function flush(): Promise<void> {
     assertReady();
-    if (pending.length) {
+    if (pending.length || dispatching) {
       await new Promise<void>((resolve) => { drainWaiters.push(resolve); });
       assertReady();
     }

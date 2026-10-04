@@ -412,6 +412,33 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('waits for acknowledgement in a replay-started flush', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const internal = workbookSessionInternals.get(session);
+    if (!internal) throw new Error('Missing internal workbook replay helper');
+    const submitReplay = internal.replay;
+    let pendingFlush: Promise<void> | undefined;
+    internal.replay = (envelope) => {
+      if (!pendingFlush) pendingFlush = edits.flush();
+      return submitReplay(envelope);
+    };
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      expect(edits.editCell(0, 2, 1, '901').applied).toBe(true);
+      if (!pendingFlush) throw new Error('Missing replay flush');
+      await pendingFlush;
+      expect(edits.acknowledgedSequence).toBe(1);
+      expect(edits.sentSequence).toBe(1);
+      expect((await session.call.cellInputs(0, 'B3')).cells[0][0].input).toBe('901');
+    } finally {
+      internal.replay = submitReplay;
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('omits nested peer refusals and throws without sequence gaps', async () => {
     const envelopes: WorkbookReplayEnvelope[] = [];
     const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), { calculation });
