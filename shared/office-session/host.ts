@@ -274,7 +274,7 @@ export function createSessionHost<M extends SessionMethods, E extends SessionEve
         policy = typeof configured === 'function'
           ? (configured as (...args: unknown[]) => MethodPolicy)(...message.args) : configured;
       } catch (error) {
-        send({ protocol: 1, kind: 'reply', id: message.id, ok: false, error: replyError(error) });
+        reject(message.id, error);
         return;
       }
       resident.submit({ ...policy, run: () => run(message), supersede: () => send({
