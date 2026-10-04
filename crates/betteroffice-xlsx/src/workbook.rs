@@ -20,15 +20,17 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
-use xlsx_render::{
-    ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    autofit_relevant, build_display_list_with_charts_and_ghosts,
-    build_print_display_list_with_charts, chart_at_point, chart_regions, display_text,
-    moved_chart_anchor, resolve_chart_anchor,
+use xlsx_render::chart::chart_regions_with_geometry;
+#[cfg(feature = "raster")]
+use xlsx_render::region::{
+    viewport_for_range_with_geometry, viewport_for_used_range_with_geometry,
 };
 #[cfg(feature = "raster")]
+use xlsx_render::scaled;
 use xlsx_render::{
-    build_display_list_with_charts, scaled, viewport_for_range, viewport_for_used_range_within,
+    ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
+    autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
+    chart_at_point, display_text, moved_chart_anchor, resolve_chart_anchor,
 };
 
 use crate::authority::{
@@ -201,7 +203,7 @@ struct PreservedStateHistory {
 struct SheetInfoCache {
     info: SheetInfo,
     bounds: Option<CellRange>,
-    geometry: GridGeometry,
+    geometry: Arc<GridGeometry>,
 }
 
 impl SheetInfoCache {
@@ -323,6 +325,7 @@ pub struct Workbook {
     sheet_info_cache: Mutex<Option<SheetInfoCache>>,
     /// Mutation counter; chart resolutions cache against it.
     model_epoch: u64,
+    geometry_cache: Mutex<HashMap<SheetId, (u64, Arc<GridGeometry>)>>,
     /// Rotated whenever the authority is replaced; half of [`Workbook::version`].
     version_nonce: String,
     /// Changes committed since the nonce was minted; the other half.
@@ -516,6 +519,7 @@ impl Workbook {
             opened_anchors,
             sheet_info_cache: Mutex::new(None),
             model_epoch: 0,
+            geometry_cache: Mutex::new(HashMap::new()),
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(HashMap::new()),
@@ -941,15 +945,17 @@ impl Workbook {
     }
 
     pub fn sheet_info(&self) -> Result<SheetInfo> {
-        let mut slot = self
-            .sheet_info_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(cached) = &*slot {
-            return Ok(cached.info.clone());
+        {
+            let slot = self
+                .sheet_info_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(cached) = &*slot {
+                return Ok(cached.info.clone());
+            }
         }
         let sheet = self.sheet(self.active_sheet)?;
-        let geometry = GridGeometry::new(sheet, &self.model.styles);
+        let geometry = self.sheet_geometry(self.active_sheet)?;
         let bounds = sheet.used_range();
         let content = sheet_content(bounds, sheet.freeze_pane, &geometry);
         let info = SheetInfo {
@@ -968,7 +974,10 @@ impl Workbook {
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
         };
-        *slot = Some(SheetInfoCache {
+        *self
+            .sheet_info_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(SheetInfoCache {
             info: info.clone(),
             bounds,
             geometry,
@@ -978,8 +987,8 @@ impl Workbook {
 
     pub fn cell_scroll_position(&self, sheet: SheetId, cell: CellRef) -> Result<(f32, f32)> {
         validate_cell_ref(cell)?;
+        let geometry = self.sheet_geometry(sheet)?;
         let sheet = self.sheet(sheet)?;
-        let geometry = GridGeometry::new(sheet, &self.model.styles);
         let (frozen_rows, frozen_cols) = sheet
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -1513,6 +1522,7 @@ impl Workbook {
             .apply_ops(&ops, SyncOrigin::Undo, &self.model.styles)
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
+        self.bump_model_epoch();
         self.undo.undo(&mut self.model)?;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
@@ -1549,6 +1559,7 @@ impl Workbook {
             .apply_ops(&ops, SyncOrigin::Redo, &self.model.styles)
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
+        self.bump_model_epoch();
         self.undo.redo(&mut self.model)?;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
@@ -1891,7 +1902,9 @@ impl Workbook {
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
-        validate_display_region(sheet_ref, &self.model.styles, viewport)?;
+        validate_viewport(viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(sheet_ref, &geometry, viewport)?;
         let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
         for proposal in self.proposals.list() {
             let drifted: BTreeSet<_> = proposal
@@ -1931,9 +1944,14 @@ impl Workbook {
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
         let owner = sheet_ref.name.clone();
-        build_display_list_with_charts_and_ghosts(&self.model, sheet, viewport, &ghosts, |chart| {
-            self.resolve_chart_space(&owner, chart)
-        })
+        build_display_list_with_geometry(
+            &self.model,
+            sheet,
+            viewport,
+            &ghosts,
+            &geometry,
+            |chart| self.resolve_chart_space(&owner, chart),
+        )
         .map_err(Error::from)
     }
 
@@ -1956,7 +1974,8 @@ impl Workbook {
         x: f32,
         y: f32,
     ) -> Result<Option<ChartRegion>> {
-        let regions = chart_regions(self.sheet(sheet)?, &self.model.styles, viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let regions = chart_regions_with_geometry(self.sheet(sheet)?, &geometry, viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
@@ -1981,17 +2000,13 @@ impl Workbook {
             .iter()
             .find(|chart| chart.frame_id() == frame)
             .ok_or_else(|| chart_frame_not_found(frame))?;
-        let to = moved_chart_anchor(
-            chart.anchor,
-            &GridGeometry::new(sheet_ref, &self.model.styles),
-            f64::from(dx),
-            f64::from(dy),
-        )
-        .ok_or_else(|| {
-            Error::InvalidOperation(format!(
-                "chart {frame} is pinned to the sheet and cannot be moved"
-            ))
-        })?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let to = moved_chart_anchor(chart.anchor, &geometry, f64::from(dx), f64::from(dy))
+            .ok_or_else(|| {
+                Error::InvalidOperation(format!(
+                    "chart {frame} is pinned to the sheet and cannot be moved"
+                ))
+            })?;
         let ops = self
             .model
             .sheets
@@ -2043,10 +2058,11 @@ impl Workbook {
         if let Some(range) = options.range {
             validate_range(range)?;
         }
+        let geometry = self.sheet_geometry(sheet)?;
         let mut viewport = match options.range {
-            Some(range) => viewport_for_range(sheet_ref, &self.model.styles, range),
-            None => viewport_for_used_range_within(sheet_ref, &self.model.styles, |grown| {
-                renderable(sheet_ref, &self.model.styles, grown, options.scale)
+            Some(range) => viewport_for_range_with_geometry(&geometry, range),
+            None => viewport_for_used_range_with_geometry(sheet_ref, &geometry, |grown| {
+                renderable(sheet_ref, &geometry, grown, options.scale)
             }),
         };
         if let Some(width) = options.max_width {
@@ -2059,12 +2075,16 @@ impl Workbook {
         let width = ((viewport.width * options.scale).ceil() as u32).max(1);
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
         validate_render_size(width, height)?;
-        validate_display_region(sheet_ref, &self.model.styles, &viewport)?;
+        validate_display_region(sheet_ref, &geometry, &viewport)?;
         let owner = sheet_ref.name.clone();
-        let display_list =
-            build_display_list_with_charts(&self.model, sheet, &viewport, |chart| {
-                self.resolve_chart_space(&owner, chart)
-            })?;
+        let display_list = build_display_list_with_geometry(
+            &self.model,
+            sheet,
+            &viewport,
+            &[],
+            &geometry,
+            |chart| self.resolve_chart_space(&owner, chart),
+        )?;
         let display_list = if options.scale == 1.0 {
             display_list
         } else {
@@ -2860,6 +2880,10 @@ impl Workbook {
     /// the bump invalidates chart resolutions.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.geometry_cache
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         self.chart_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -2872,13 +2896,25 @@ impl Workbook {
     /// `invalidate_sheet_info` instead — there is no op list that explains
     /// what changed.
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
+        self.bump_model_epoch();
         self.model = model;
-        self.model_epoch = self.model_epoch.wrapping_add(1);
-        self.chart_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
         Ok(())
+    }
+
+    fn sheet_geometry(&self, sheet: SheetId) -> Result<Arc<GridGeometry>> {
+        let sheet_ref = self.sheet(sheet)?;
+        let mut cache = self
+            .geometry_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((epoch, geometry)) = cache.get(&sheet)
+            && *epoch == self.model_epoch
+        {
+            return Ok(Arc::clone(geometry));
+        }
+        let geometry = Arc::new(GridGeometry::new(sheet_ref, &self.model.styles));
+        cache.insert(sheet, (self.model_epoch, Arc::clone(&geometry)));
+        Ok(geometry)
     }
 }
 
@@ -3892,9 +3928,12 @@ impl Workbook {
     }
 }
 
-fn validate_display_region(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport) -> Result<()> {
+fn validate_display_region(
+    sheet: &Sheet,
+    geometry: &GridGeometry,
+    viewport: &Viewport,
+) -> Result<()> {
     validate_viewport(viewport)?;
-    let geometry = GridGeometry::new(sheet, styles);
     let right = viewport.x + viewport.width;
     let bottom = viewport.y + viewport.height;
     if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
@@ -3921,11 +3960,11 @@ fn validate_display_region(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewpo
 /// [`Workbook::render_sheet`] applies. The used range itself is the caller's
 /// to answer for; this decides only whether a chart may widen the frame.
 #[cfg(feature = "raster")]
-fn renderable(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport, scale: f32) -> bool {
+fn renderable(sheet: &Sheet, geometry: &GridGeometry, viewport: &Viewport, scale: f32) -> bool {
     let width = ((viewport.width * scale).ceil() as u32).max(1);
     let height = ((viewport.height * scale).ceil() as u32).max(1);
     validate_render_size(width, height).is_ok()
-        && validate_display_region(sheet, styles, viewport).is_ok()
+        && validate_display_region(sheet, geometry, viewport).is_ok()
 }
 
 #[cfg(feature = "raster")]
