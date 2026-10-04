@@ -2125,6 +2125,13 @@ fn resident_walk(
     Ok((resident_measure_calls, resident_reused_blocks))
 }
 
+/// Put extents moved out of the retained arena back; consumed in index order.
+fn restore_moved_measures(measured: &mut [MeasuredBlock], entries: Vec<MeasuredBlock>) {
+    for (consumed, entry) in entries.into_iter().enumerate() {
+        measured[consumed].measure = entry.measure;
+    }
+}
+
 /// Mirror `contextual_spacing_pair`'s writes for a freshly lowered `owned`
 /// block before it can compare equal to a retained one: `before` vs the
 /// previous sibling and `after` vs the next (the table arm uses the first
@@ -3139,7 +3146,6 @@ impl EngineSession {
         let observer_epoch = Rc::clone(&doc_epoch);
         let observer_trigger = Rc::clone(&relayout_trigger);
         let host_edit_depth = Arc::clone(&doc.host_edit_depth);
-        let host_origin = yrs::Origin::from(crate::batch::HOST_ORIGIN);
         let observer = doc
             .yrs_doc()
             .observe_after_transaction(move |txn| {
