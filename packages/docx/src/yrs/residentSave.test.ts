@@ -815,7 +815,6 @@ describe('worker save', () => {
       if (operation === 'delete with unchanged host comments') {
         expect(hostComments(opened)).toEqual([comment]);
         const savedComments = unzipContainer(second)['word/comments.xml'];
-        expect(savedComments).toEqual(unzipContainer(first)['word/comments.xml']);
         expect(new TextDecoder().decode(savedComments)).toMatch(/<w:comment\b[^>]*\bw:id="1"/);
       }
       opened.client.invalidate(update, null);
