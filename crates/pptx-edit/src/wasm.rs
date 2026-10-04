@@ -384,6 +384,11 @@ impl PptxDocument {
         json(self.session.snapshot().map_err(js_error)?)
     }
 
+    #[wasm_bindgen(js_name = sessionMetadataJson)]
+    pub fn session_metadata_json(&self) -> Result<String, JsValue> {
+        json(self.session.session_metadata().map_err(js_error)?)
+    }
+
     // Version-checked host edits. Requests and results are JSON; policy outcomes come back as
     // `{"ok":true,...}` or `{"ok":false,"version","failure":{"code","message","stepIndex"?,
     // "conflictingStepIndex"?,"target"?}}`, while malformed requests throw.

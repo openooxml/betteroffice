@@ -5,27 +5,22 @@ import {
   type SessionHost,
   type SessionTransport,
 } from '../../../../shared/office-session';
-import type { DeckSnapshot, PptxFontFace } from '../types';
-import { initWasm, openPresentation, type PresentationHandle } from '../wasm/loader';
+import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
+import type { PptxFontFace, SlideDisplayList } from '../types';
+import {
+  decodeTiffImage, initWasm, openPresentation, presentationDisplayListJson, presentationMetadata,
+  type PresentationHandle,
+} from '../wasm/loader';
+import { frameAssetIds } from './frame';
 import {
   PRESENTATION_SESSION_POLICIES,
   type PresentationSessionEvents,
   type PresentationSessionFont,
   type PresentationSessionMethods,
-  type PresentationSlideSummary,
+  type PresentationWireFrame,
 } from './methods';
 
 type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] };
-
-function slides(snapshot: DeckSnapshot): PresentationSlideSummary[] {
-  return snapshot.slides.map((slide, index) => ({
-    id: slide.id, index, name: slide.name, layoutPartPath: slide.layoutPartPath,
-  }));
-}
-
-function size(snapshot: DeckSnapshot): { width: number; height: number } {
-  return { width: snapshot.widthEmu, height: snapshot.heightEmu };
-}
 
 function fonts(faces?: readonly PresentationSessionFont[]): PptxFontFace[] | undefined {
   return faces?.map((face) => ({ ...face, bytes: new Uint8Array(face.bytes) }));
@@ -40,6 +35,10 @@ export function createPresentationSessionHost(
   let disposed = false;
   let version = 0;
   let dirty = false;
+  let epoch = 0;
+  let metadataCache: { version: string; value: ReturnType<typeof presentationMetadata> } | undefined;
+  const encoder = new TextEncoder();
+  const sentMedia = new Set<string>();
 
   function presentation(): PresentationHandle {
     if (disposed) throw new Error('Presentation session is disposed');
@@ -47,10 +46,21 @@ export function createPresentationSessionHost(
     return handle;
   }
 
+  function metadata(
+    opened = presentation(), currentVersion = opened.version()
+  ): ReturnType<typeof presentationMetadata> {
+    if (metadataCache?.version !== currentVersion) {
+      metadataCache = { version: currentVersion, value: presentationMetadata(opened) };
+    }
+    return metadataCache.value;
+  }
+
   function dispose(): void {
     disposed = true;
     const opened = handle;
     handle = undefined;
+    sentMedia.clear();
+    metadataCache = undefined;
     opened?.dispose();
   }
 
@@ -67,10 +77,10 @@ export function createPresentationSessionHost(
         initialUpdate: input.initialUpdate,
       });
       try {
-        const snapshot = opened.snapshot();
+        const projection = metadata(opened);
         handle = opened;
         return { format: 'pptx', stage: 'ready', version, dirty,
-          slides: slides(snapshot), size: size(snapshot) };
+          slides: projection.slides, size: projection.size };
       } catch (error) {
         opened.dispose();
         throw error;
@@ -89,8 +99,32 @@ export function createPresentationSessionHost(
       }
       return result;
     },
-    slides: () => slides(presentation().snapshot()),
-    slideSize: () => size(presentation().snapshot()),
+    frame(_, slideIndex) {
+      const opened = presentation();
+      const frameVersion = opened.version();
+      const slideCount = metadata(opened, frameVersion).slides.length;
+      if (!Number.isInteger(slideIndex) || slideIndex < 0 || slideIndex >= slideCount) {
+        throw new RangeError('Slide index is out of range');
+      }
+      const json = presentationDisplayListJson(opened, slideIndex);
+      const displayList = encoder.encode(json).buffer;
+      const media: PresentationWireFrame['media'] = [];
+      for (const assetId of frameAssetIds(JSON.parse(json) as SlideDisplayList)) {
+        if (sentMedia.has(assetId)) continue;
+        let bytes: Uint8Array;
+        try { bytes = opened.mediaBytes(assetId); } catch { continue; }
+        if (isTiff(bytes) && bytes.byteLength <= MAX_TIFF_BYTES) {
+          try { bytes = decodeTiffImage(bytes); } catch {}
+        }
+        media.push({ assetId, bytes: new Uint8Array(bytes).buffer });
+      }
+      epoch += 1;
+      for (const { assetId } of media) sentMedia.add(assetId);
+      return transferable({ displayList, version: frameVersion, epoch, slideIndex, media },
+        [displayList, ...media.map(({ bytes }) => bytes)]);
+    },
+    slides: () => metadata().slides,
+    slideSize: () => metadata().size,
     save() {
       const bytes = presentation().save();
       const buffer = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 &&
