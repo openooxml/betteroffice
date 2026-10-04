@@ -168,7 +168,7 @@ impl LocalLowering {
         *paragraph = ParagraphSeed::default();
     }
 
-    pub(super) fn finish(
+    pub(crate) fn finish(
         &mut self,
         blocks: &mut [LayoutBlock],
         map: &LoweringMap,
