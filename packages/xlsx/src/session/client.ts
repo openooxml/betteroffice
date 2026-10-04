@@ -1,13 +1,8 @@
 import {
-  createSessionClient,
-  createWorkerTransport,
-  requestWasmCompile,
-  SessionFailure,
-  type MethodPolicy,
-  type Promisified,
-  type SessionClient,
-  type SessionTransport,
-} from '../../../../shared/office-session';
+  createSessionClient, requestWasmCompile, type SessionClient,
+} from '../../../../shared/office-session/client';
+import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenWorkbookOptions, Viewport } from '../wasm/loader';
 import {
