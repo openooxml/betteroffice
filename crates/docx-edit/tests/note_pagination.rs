@@ -255,7 +255,10 @@ fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
         expected["pages"][3]["noteAreas"][0]["notes"][0]["anchorDocStart"],
         anchor + 1
     );
-    assert_eq!(actual["pages"][3]["noteAreas"], expected["pages"][3]["noteAreas"]);
+    assert_eq!(
+        actual["pages"][3]["noteAreas"],
+        expected["pages"][3]["noteAreas"]
+    );
     assert_eq!(actual["pages"][1], expected["pages"][1]);
     assert_eq!(
         serde_json::to_vec(&actual).unwrap(),
