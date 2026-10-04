@@ -655,7 +655,7 @@ export function useYrsCoreSession(
                   comments,
                   ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
                   ...(dirty ? { stories: dirty.stories } : {}),
-                }, peer);
+                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
                 dirty?.clear();
                 return saved;
               },

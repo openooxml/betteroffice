@@ -49,10 +49,22 @@ export class EditorDirtyStories {
   private readonly workerSave = new DirtyProjectionStories();
   private projections = 0;
   private savedAtProjection = 0;
+  private adoptingWorkerSaveUpdates = 0;
 
   add(story: string): void {
+    if (this.adoptingWorkerSaveUpdates > 0) return;
     this.projection.add(story);
     this.workerSave.add(story);
+  }
+
+  /** Adopts a worker save's own updates without marking stories. */
+  adoptWorkerSaveUpdates(apply: () => void): void {
+    this.adoptingWorkerSaveUpdates++;
+    try {
+      apply();
+    } finally {
+      this.adoptingWorkerSaveUpdates--;
+    }
   }
 
   /** The main-thread projection cache advanced over `projection`'s stories. */

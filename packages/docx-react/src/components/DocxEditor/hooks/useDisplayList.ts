@@ -104,7 +104,11 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
   canSave(): boolean;
-  save(request: Parameters<ResidentEngineWorkerClient['save']>[0], peer?: YrsSession): Promise<ArrayBuffer>;
+  save(
+    request: Parameters<ResidentEngineWorkerClient['save']>[0],
+    peer?: YrsSession,
+    adopt?: (apply: () => void) => void
+  ): Promise<ArrayBuffer>;
   fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
   destroy(): void;
   replicaReady(): void;
@@ -1641,7 +1645,7 @@ export function useRustDisplayList(
             const owner = workerRef.current;
             return owner !== null && isCurrentWorker(hostEngine, owner) && !owner.client.hasFailed();
           },
-          save: (request, peer) => {
+          save: (request, peer, adopt) => {
             const owner = workerRef.current;
             const failure = workerFailureRef.current.get(hostEngine);
             if (failure) return Promise.reject(failure);
@@ -1660,7 +1664,10 @@ export function useRustDisplayList(
               if (peer) {
                 suppressWorkerInvalidationRef.current += 1;
                 try {
-                  for (const update of saved.updates) peer.applyUpdate(update);
+                  const apply = () => {
+                    for (const update of saved.updates) peer.applyUpdate(update);
+                  };
+                  adopt ? adopt(apply) : apply();
                 } finally {
                   suppressWorkerInvalidationRef.current -= 1;
                 }

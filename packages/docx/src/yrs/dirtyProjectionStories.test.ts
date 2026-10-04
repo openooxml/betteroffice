@@ -48,3 +48,35 @@ test('editor worker saves project every story after a main-thread projection wit
   expect(dirty.captureWorkerSave().stories).toEqual([]);
   expect(dirty.projection.projectionOptions()).toBeUndefined();
 });
+
+test('adopting worker save updates preserves dirty stories and restores marking afterward', () => {
+  const dirty = new EditorDirtyStories();
+  dirty.add('body');
+  dirty.adoptWorkerSaveUpdates(() => {
+    dirty.add('hf:rId7');
+    dirty.adoptWorkerSaveUpdates(() => dirty.add('fn:1'));
+    dirty.add('en:2');
+  });
+  expect(dirty.captureWorkerSave().stories).toEqual(['body']);
+  expect(dirty.projection.projectionOptions()?.storyIds).toEqual(new Set(['body']));
+  dirty.projected();
+  dirty.adoptWorkerSaveUpdates(() => dirty.add('hf:rId7'));
+  expect(dirty.projection.projectionOptions()).toBeUndefined();
+  const saved = dirty.captureWorkerSave();
+  expect(saved.stories).toEqual([]);
+  saved.clear();
+  dirty.add('fn:1');
+  expect(dirty.captureWorkerSave().stories).toEqual(['fn:1']);
+  expect(dirty.projection.projectionOptions()?.storyIds).toEqual(new Set(['fn:1']));
+  dirty.clear();
+  const failure = new Error('Failed to apply worker save updates');
+  expect(() => dirty.adoptWorkerSaveUpdates(() => {
+    dirty.add('hf:rId7');
+    throw failure;
+  })).toThrow(failure);
+  expect(dirty.captureWorkerSave().stories).toEqual([]);
+  expect(dirty.projection.projectionOptions()).toBeUndefined();
+  dirty.add('en:2');
+  expect(dirty.captureWorkerSave().stories).toEqual(['en:2']);
+  expect(dirty.projection.projectionOptions()?.storyIds).toEqual(new Set(['en:2']));
+});
