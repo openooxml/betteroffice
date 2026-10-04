@@ -1,5 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
-import type { PixelComparison } from './pptx-worker-viewer-harness';
+import type { PixelComparison } from './pptx-worker-viewer-probe';
 
 interface MainWasmProbe {
   instantiate: number;

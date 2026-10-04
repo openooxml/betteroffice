@@ -184,6 +184,7 @@ export function useSessionPresentation(
   useEffect(() => {
     const token = ++generation.current;
     let disposed = false;
+    let openingFailed = false;
     let opened: ViewerSession | undefined;
     let offFailure = () => {};
     const browserFonts: FontFace[] = [];
@@ -197,6 +198,9 @@ export function useSessionPresentation(
     setLoading(Boolean(props.file));
     if (props.file) void (async () => {
       try {
+        const fontsReady = installFonts(fonts, browserFonts,
+          () => current() && !openingFailed && (opened?.current ?? true));
+        void fontsReady.catch(() => {});
         const session = await presentationSessionOpener.open(props.file!, {
           fonts, clientId: props.clientId,
         });
@@ -243,15 +247,19 @@ export function useSessionPresentation(
         };
         offFailure = session.onFailure((failure) => viewer.fail(failure));
         if (session.failure) viewer.fail(session.failure);
-        await installFonts(fonts, browserFonts, () => current() && viewer.current);
+        await fontsReady;
         if (!current()) return;
         setRun(viewer);
         setLoading(false);
         viewer.start();
       } catch (error) {
+        openingFailed = true;
         if (!current()) return;
         opened?.fail(error);
-        if (!opened) reportError(error);
+        if (!opened) {
+          for (const font of browserFonts.splice(0)) document.fonts.delete(font);
+          reportError(error);
+        }
         setLoading(false);
       }
     })();

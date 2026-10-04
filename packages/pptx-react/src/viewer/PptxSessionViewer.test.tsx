@@ -224,17 +224,19 @@ describe('session viewer', () => {
     run.dispose();
   });
 
-  it('installs browser fonts, forwards engine fonts and preserves equivalent inline fonts', async () => {
+  for (const first of ['open', 'fonts'] as const) it(`starts fonts before open resolves and waits for both (${first} first)`, async () => {
     const originalFace = globalThis.FontFace;
     const originalFonts = Object.getOwnPropertyDescriptor(document, 'fonts');
     const add = mock(() => {});
     const remove = mock(() => true);
+    const loaded = deferred<void>();
+    const load = mock(() => loaded.promise);
     const faces: { family: string; source: ArrayBuffer; descriptors: FontFaceDescriptors }[] = [];
     globalThis.FontFace = class {
       constructor(family: string, source: ArrayBuffer, descriptors: FontFaceDescriptors) {
         faces.push({ family, source, descriptors });
       }
-      async load() { return this; }
+      async load() { await load(); return this; }
     } as unknown as typeof FontFace;
     Object.defineProperty(document, 'fonts', { configurable: true, value: { add, delete: remove } });
     restorers.push(() => {
@@ -242,9 +244,19 @@ describe('session viewer', () => {
       if (originalFonts) Object.defineProperty(document, 'fonts', originalFonts);
       else Reflect.deleteProperty(document, 'fonts');
     });
-    const opener = open(session().viewer);
+    const { viewer, call } = session();
+    const opening = deferred<PresentationSession>();
+    const opener = open(viewer).mockImplementation(() => opening.promise);
     const fonts = () => [{ family: 'Viewer Font', bold: true, italic: true, bytes: new Uint8Array([3, 4]) }];
     const view = render(<PptxEditor file={file} fonts={fonts()} readOnly experimentalWorkerOpen />);
+    await waitFor(() => expect(load).toHaveBeenCalledTimes(1));
+    expect(opener).toHaveBeenCalledTimes(1);
+    expect(call.frame).not.toHaveBeenCalled();
+    expect(add).not.toHaveBeenCalled();
+    await act(async () => { if (first === 'open') opening.resolve(viewer); else loaded.resolve(); });
+    expect(call.frame).not.toHaveBeenCalled();
+    expect(painted).toHaveLength(0);
+    await act(async () => { if (first === 'open') loaded.resolve(); else opening.resolve(viewer); });
     await waitFor(() => expect(painted).toHaveLength(1));
     expect(faces).toHaveLength(1);
     expect(faces[0].descriptors).toEqual({ style: 'italic', weight: '700' });
