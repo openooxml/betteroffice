@@ -22,6 +22,43 @@ fn display(engine: &EngineSession) -> Value {
         .unwrap()
 }
 
+fn bulk_laid_out(bytes: &[u8], client_id: u64) -> (EngineSession, String) {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let seed = docx_edit::EditingDoc::new(client_id + 1);
+    docx_edit::seed_from_docx(&seed, bytes).unwrap();
+    let engine = EngineSession::new(client_id);
+    engine
+        .doc()
+        .apply_host_update_v1(&seed.encode_state_as_update_v1())
+        .unwrap();
+    engine
+        .doc()
+        .set_note_separator_state(seed.note_separator_state().unwrap());
+    let request = fixture::region_request(&engine, bytes, font).to_string();
+    engine
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    (engine, request)
+}
+
+fn bulk_edit(engine: &EngineSession, step: Value) {
+    let request = serde_json::from_value(json!({
+        "expectVersion": engine.doc().version(),
+        "history": "none",
+        "steps": [step],
+    }))
+    .unwrap();
+    assert!(
+        engine
+            .doc()
+            .apply_edits(&request, &UndoSession::new())
+            .unwrap()
+            .unwrap()
+            .applied
+    );
+}
+
 /// Lays out and displays `engine`'s document in a fresh session with `request`.
 fn fresh(engine: &EngineSession, request: &str, client_id: u64) -> (String, Value) {
     let fresh = EngineSession::new(client_id);
@@ -285,7 +322,7 @@ fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
         &small_page(&body),
         &fixture::p("70000100", &fixture::r("Note")),
     );
-    let (engine, request) = fixture::laid_out(&bytes, 9321);
+    let (engine, request) = bulk_laid_out(&bytes, 9321);
     engine
         .build_display_list_frame(&extras(&request), 0)
         .unwrap();
@@ -296,15 +333,13 @@ fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
         .unwrap();
     let before = engine.stats();
 
-    engine
-        .doc()
-        .insert_text(
-            &EditCtx::local("", ""),
-            engine.doc().paragraph_mark_position("70000002").unwrap(),
-            "x",
-            FormatPolicy::Inherit,
-        )
-        .unwrap();
+    bulk_edit(
+        &engine,
+        json!({
+            "op": "insertText", "at": "end", "text": "x",
+            "target": {"kind": "paragraph", "story": "body", "paraId": "70000002"},
+        }),
+    );
     let early = engine.layout_document_with_regions_json(&request).unwrap();
     assert_eq!(pages(&early), 10);
     assert_eq!(engine.stats().display_builds, before.display_builds);
@@ -313,15 +348,13 @@ fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
         before.incremental_pagination_calls + 1
     );
 
-    engine
-        .doc()
-        .insert_text(
-            &EditCtx::local("", ""),
-            engine.doc().paragraph_mark_position("70000008").unwrap(),
-            "y",
-            FormatPolicy::Inherit,
-        )
-        .unwrap();
+    bulk_edit(
+        &engine,
+        json!({
+            "op": "insertText", "at": "end", "text": "y",
+            "target": {"kind": "paragraph", "story": "body", "paraId": "70000008"},
+        }),
+    );
     let layout = engine.layout_document_with_regions_json(&request).unwrap();
     assert_eq!(pages(&layout), 10);
     assert_eq!(engine.stats().display_builds, before.display_builds);
@@ -374,7 +407,7 @@ fn an_intermediate_page_build_before_undo_preserves_display_positions() {
         &small_page(&body),
         &fixture::p("71000100", &fixture::r("Note")),
     );
-    let (engine, request) = fixture::laid_out(&bytes, 9323);
+    let (engine, request) = bulk_laid_out(&bytes, 9323);
     engine.set_display_window(Some(0..6));
     engine
         .build_display_list_frame(&extras(&request), 0)
@@ -382,18 +415,25 @@ fn an_intermediate_page_build_before_undo_preserves_display_positions() {
     let initial = display(&engine);
     assert_eq!(initial["pages"].as_array().unwrap().len(), 7);
     assert_eq!(initial["pages"][6]["unbuilt"], true);
+    let edits = docx_edit::EditingDoc::new(9328);
+    edits
+        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
     let undo = UndoSession::new();
-    undo.track(engine.doc());
+    undo.track(&edits);
     let before = engine.stats();
 
-    engine
-        .doc()
+    edits
         .insert_text(
             &EditCtx::local("", ""),
-            engine.doc().paragraph_mark_position("71000002").unwrap(),
+            edits.paragraph_mark_position("71000002").unwrap(),
             "x",
             FormatPolicy::Inherit,
         )
+        .unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&edits.encode_state_as_update_v1())
         .unwrap();
     assert_eq!(
         pages(&engine.layout_document_with_regions_json(&request).unwrap()),
@@ -406,6 +446,10 @@ fn an_intermediate_page_build_before_undo_preserves_display_positions() {
     assert_ne!(intermediate["pages"][6]["unbuilt"], true);
 
     assert!(undo.undo());
+    engine
+        .doc()
+        .apply_host_update_v1(&edits.encode_state_as_update_v1())
+        .unwrap();
     let layout = engine.layout_document_with_regions_json(&request).unwrap();
     assert_eq!(pages(&layout), 7);
     assert_eq!(engine.stats().display_builds, before.display_builds);
@@ -453,7 +497,7 @@ fn accumulated_display_damage_is_bounded_without_changing_single_layout_builds()
             fixture::p(&format!("{:08X}", 0x7200_0000 + page), &content)
         })
         .collect();
-    let (engine, request) = fixture::laid_out(&fixture::with_body(&small_page(&body)), 9325);
+    let (engine, request) = bulk_laid_out(&fixture::with_body(&small_page(&body)), 9325);
     engine
         .build_display_list_frame(&extras(&request), 0)
         .unwrap();
@@ -462,18 +506,19 @@ fn accumulated_display_damage_is_bounded_without_changing_single_layout_builds()
         page_count
     );
     let replace = |page, text| {
-        let mark = engine
-            .doc()
-            .paragraph_mark_position(&format!("{:08X}", 0x7200_0000 + page))
-            .unwrap();
-        engine
-            .doc()
-            .replace_range(
-                &EditCtx::local("", ""),
-                StoryRange::new("body", mark.index - 1, mark.index),
-                text,
-            )
-            .unwrap();
+        let para_id = format!("{:08X}", 0x7200_0000 + page);
+        let offset = format!("Page {page} ").len();
+        bulk_edit(
+            &engine,
+            json!({
+                "op": "replaceText", "text": text,
+                "target": {
+                    "kind": "range", "story": "body", "view": "accepted",
+                    "start": {"paraId": para_id, "offset": offset},
+                    "end": {"paraId": para_id, "offset": offset + 1},
+                },
+            }),
+        );
     };
     let before = engine.stats();
     for page in 1..=page_count {

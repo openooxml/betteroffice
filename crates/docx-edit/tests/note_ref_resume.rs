@@ -144,10 +144,12 @@ fn edit_and_compare(
     let edited = snapshot(&engine, &output);
 
     let fresh = EngineSession::new(75402);
-    fresh
-        .doc()
-        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
-        .unwrap();
+    let update = engine.doc().encode_state_as_update_v1();
+    match class {
+        EditClass::Interactive => fresh.doc().apply_update_v1(&update),
+        EditClass::Bulk => fresh.doc().apply_host_update_v1(&update),
+    }
+    .unwrap();
     fresh
         .doc()
         .set_note_separator_state(engine.doc().note_separator_state().unwrap());
