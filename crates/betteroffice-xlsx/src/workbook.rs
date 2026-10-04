@@ -1,4 +1,6 @@
 pub(crate) mod batch;
+#[cfg(test)]
+mod edit_tests;
 mod staging;
 pub(crate) mod target;
 
@@ -105,10 +107,10 @@ enum WorkbookMode {
 /// Package identity the model does not carry: per current sheet, the source
 /// sheet it came from and the shared-string entry each of its cells was
 /// authored against.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct PreservedSheetState {
     origins: Vec<Option<usize>>,
-    shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+    shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
     /// Where each sheet's source rows and columns sit after the row and column
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
@@ -118,12 +120,30 @@ struct PreservedSheetState {
     created: Vec<bool>,
 }
 
+impl Clone for PreservedSheetState {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        let shared_string_cells = if crate::authority::force_full_materialization() {
+            Arc::new(self.shared_string_cells.as_ref().clone())
+        } else {
+            self.shared_string_cells.clone()
+        };
+        #[cfg(not(test))]
+        let shared_string_cells = self.shared_string_cells.clone();
+        Self {
+            origins: self.origins.clone(),
+            shared_string_cells,
+            axes: self.axes.clone(),
+            created: self.created.clone(),
+        }
+    }
+}
+
 impl PreservedSheetState {
     /// Sheets a restored state added carry no package identity.
     fn resize(&mut self, sheets: usize) {
         self.origins.resize(sheets, None);
-        self.shared_string_cells
-            .resize_with(sheets, Default::default);
+        Arc::make_mut(&mut self.shared_string_cells).resize_with(sheets, Default::default);
         self.axes.resize(sheets, None);
         self.created.resize(sheets, false);
     }
@@ -131,7 +151,7 @@ impl PreservedSheetState {
     fn insert(&mut self, index: usize) {
         let index = index.min(self.origins.len());
         self.origins.insert(index, None);
-        self.shared_string_cells
+        Arc::make_mut(&mut self.shared_string_cells)
             .insert(index, xlsx_parse::SharedStringCells::new());
         self.axes.insert(index, None);
         self.created.insert(index.min(self.created.len()), true);
@@ -140,7 +160,7 @@ impl PreservedSheetState {
     fn remove(&mut self, index: usize) {
         if index < self.origins.len() {
             self.origins.remove(index);
-            self.shared_string_cells.remove(index);
+            Arc::make_mut(&mut self.shared_string_cells).remove(index);
         }
         if index < self.axes.len() {
             self.axes.remove(index);
@@ -153,9 +173,10 @@ impl PreservedSheetState {
     /// Carries each cell's shared-string provenance to the address the op moves
     /// it to; a cell inside a deleted span loses it with the cell.
     fn shift(&mut self, sheet: SheetId, op: &Op) {
-        let Some(cells) = self.shared_string_cells.get_mut(sheet.0 as usize) else {
+        if sheet.0 as usize >= self.shared_string_cells.len() {
             return;
-        };
+        }
+        let cells = &mut Arc::make_mut(&mut self.shared_string_cells)[sheet.0 as usize];
         *cells = cells
             .iter()
             .filter_map(|(&(row, col), &index)| {
@@ -180,7 +201,7 @@ impl PreservedSheetState {
 
     /// Drops shared-string provenance after identity-less replay.
     fn forget_shared_strings(&mut self) {
-        for cells in &mut self.shared_string_cells {
+        for cells in Arc::make_mut(&mut self.shared_string_cells) {
             cells.clear();
         }
     }
@@ -509,15 +530,17 @@ impl Workbook {
                 origins: (0..model.sheets.len())
                     .map(|index| (index < package.source_sheet_count()).then_some(index))
                     .collect(),
-                shared_string_cells: (0..model.sheets.len())
-                    .map(|index| package.source_shared_string_cells(index))
-                    .collect(),
+                shared_string_cells: Arc::new(
+                    (0..model.sheets.len())
+                        .map(|index| package.source_shared_string_cells(index))
+                        .collect(),
+                ),
                 axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
-                shared_string_cells: vec![Default::default(); model.sheets.len()],
+                shared_string_cells: Arc::new(vec![Default::default(); model.sheets.len()]),
                 axes: vec![None; model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
@@ -1622,7 +1645,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
-        self.undo.undo(&mut self.model)?;
+        self.apply_model_history(|undo, model| undo.undo(model))?;
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
@@ -1660,7 +1683,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
-        self.undo.redo(&mut self.model)?;
+        self.apply_model_history(|undo, model| undo.redo(model))?;
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
@@ -2377,7 +2400,7 @@ impl Workbook {
                 .apply_ops(ops, SyncOrigin::User, &self.model.styles)
                 .map_err(authority_error)?;
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
+            self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             update
         };
@@ -2391,6 +2414,23 @@ impl Workbook {
         }
         self.edited_since_open = true;
         Ok(update)
+    }
+
+    fn apply_model_history<T>(
+        &mut self,
+        apply: impl FnOnce(
+            &mut UndoStack,
+            &mut WorkbookModel,
+        ) -> std::result::Result<T, xlsx_ops::OpError>,
+    ) -> std::result::Result<T, xlsx_ops::OpError> {
+        #[cfg(test)]
+        if crate::authority::force_full_materialization() {
+            let mut model = self.model.clone();
+            let result = apply(&mut self.undo, &mut model)?;
+            self.model = model;
+            return Ok(result);
+        }
+        apply(&mut self.undo, &mut self.model)
     }
 
     /// Makes a committed change visible: advances [`Workbook::version`], then hands observers

@@ -818,6 +818,31 @@ export class ResidentEngineWorkerClient {
     this.worker.postMessage(message, [owned.buffer]);
   }
 
+  async syncUpdate(update: Uint8Array, stateVector: Uint8Array): Promise<{
+    version: string;
+    stateVector: Uint8Array;
+    repair: Uint8Array | null;
+  }> {
+    const owned = update.slice();
+    const vector = stateVector.slice();
+    const response = await this.request(
+      { type: 'syncUpdate', update: owned, stateVector: vector },
+      [owned.buffer, vector.buffer]
+    );
+    if (
+      typeof response.version !== 'string' ||
+      !(response.stateVector instanceof ArrayBuffer) ||
+      (response.repair !== null && !(response.repair instanceof ArrayBuffer))
+    ) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted the update acknowledgment');
+    }
+    return {
+      version: response.version,
+      stateVector: new Uint8Array(response.stateVector),
+      repair: response.repair === null ? null : new Uint8Array(response.repair),
+    };
+  }
+
   async attachCanvases(
     pages: ResidentEngineOffscreenPage[],
     activePageIds: string[],

@@ -192,6 +192,7 @@ export type ResidentEngineWorkerRequest =
       /** The editor peer's marked stories. @internal */
       stories?: readonly string[];
     }
+  | { id: number; type: 'syncUpdate'; update: Uint8Array; stateVector: Uint8Array }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | {
@@ -354,6 +355,7 @@ export type ResidentEngineWorkerResponse = (
       proposals?: DocxProposalRegistryState;
       /** @internal */
       version?: string;
+      repair?: ArrayBuffer | null;
       /** @internal */
       proposal?: ResidentProposalResponse;
       /** @internal */
