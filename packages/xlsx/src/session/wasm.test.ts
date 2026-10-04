@@ -232,6 +232,36 @@ describe('workbook session wasm reuse', () => {
     }
   });
 
+  test('recompiles after initialization fails without caching the failed module', async () => {
+    const h = factory();
+    h.rejectInitialize(new Error('Initialize failed'));
+    const spies = mainThreadWasmSpies();
+    try {
+      await expect(h.client.openWorkbookSession(new Uint8Array())).rejects.toThrow('Initialize failed');
+      expect(h.workers[0].terminated).toBe(true);
+      expect(h.workers[0].sources[0]).toBeInstanceOf(WebAssembly.Module);
+      expect(h.workers[0].modules).toEqual([]);
+      expect(h.compiles).toBe(1);
+
+      const second = await h.client.openWorkbookSession(new Uint8Array());
+      expect(input(h.workers[1]).wasm).toBeUndefined();
+      expect(compileRequests(h.workers[1])).toEqual([{ protocol: 1, kind: 'wasm-compile' }]);
+      expect(h.workers[1].modules).toHaveLength(1);
+      expect(h.compiles).toBe(2);
+      await second.dispose();
+
+      const third = await h.client.openWorkbookSession(new Uint8Array());
+      expect(input(h.workers[2]).wasm).toBe(h.workers[1].modules[0]);
+      expect(compileRequests(h.workers[2])).toEqual([]);
+      expect(h.workers[2].modules).toEqual([]);
+      expect(h.compiles).toBe(2);
+      await third.dispose();
+      for (const spy of spies) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
   test('opens independently while the first compile is pending and survives its worker crashing', async () => {
     const h = factory();
     const release = h.holdCompile();

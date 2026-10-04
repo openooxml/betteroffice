@@ -21,14 +21,12 @@ export function createWorkerWasmInitializer(
   compile: (url: URL) => Promise<WebAssembly.Module> = compileWasm
 ): (input?: ArrayBuffer | WebAssembly.Module) => Promise<void> {
   let pending: Promise<WebAssembly.Module> | undefined;
+  let advertised = false;
 
   function module(): Promise<WebAssembly.Module> {
     if (!pending) {
       pending = compile(url);
-      void pending.then((module) => {
-        const message: HostMessage = { protocol: 1, kind: 'wasm-module', url: url.href, module };
-        try { transport.post(message); } catch {}
-      }, () => {});
+      void pending.catch(() => {});
     }
     return pending;
   }
@@ -47,5 +45,10 @@ export function createWorkerWasmInitializer(
       throw error;
     }
     await initialize(compiled);
+    if (!advertised) {
+      advertised = true;
+      const message: HostMessage = { protocol: 1, kind: 'wasm-module', url: url.href, module: compiled };
+      try { transport.post(message); } catch {}
+    }
   };
 }

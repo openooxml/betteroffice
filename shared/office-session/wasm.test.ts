@@ -98,7 +98,9 @@ describe('worker wasm initialization', () => {
     let resolve!: (module: WebAssembly.Module) => void;
     const pending = new Promise<WebAssembly.Module>((done) => { resolve = done; });
     const compile = mock(() => pending);
-    const initialize = mock(() => Promise.resolve());
+    let finishInitialize!: () => void;
+    const initialized = new Promise<void>((done) => { finishInitialize = done; });
+    const initialize = mock(() => initialized);
     const t = transport(messages);
     const init = createWorkerWasmInitializer(t, URL_INPUT, initialize, compile);
     expect(compile).not.toHaveBeenCalled();
@@ -111,6 +113,10 @@ describe('worker wasm initialization', () => {
     expect(initialize).not.toHaveBeenCalled();
     expect(messages).toEqual([]);
     resolve(module);
+    await pending;
+    expect(initialize).toHaveBeenCalledWith(module);
+    expect(messages).toEqual([]);
+    finishInitialize();
     await open;
     expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
     await init();
@@ -165,9 +171,31 @@ describe('worker wasm initialization', () => {
     expect(compile).toHaveBeenCalledTimes(1);
     resolve(module);
     await pending;
+    expect(messages).toEqual([]);
     t.receive({ protocol: 1, kind: 'wasm-compile' });
     await init();
     expect(initialize).toHaveBeenNthCalledWith(2, module);
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
+  });
+
+  it('propagates initialization failure without advertising and retains the compiled module', async () => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const error = new Error('Initialize failed');
+    const messages: HostMessage[] = [];
+    const compile = mock(() => Promise.resolve(module));
+    const initialize = mock(() => Promise.resolve());
+    initialize.mockRejectedValueOnce(error);
+    const t = transport(messages);
+    const init = createWorkerWasmInitializer(t, URL_INPUT, initialize, compile);
+    t.receive({ protocol: 1, kind: 'wasm-compile' });
+    await expect(init()).rejects.toBe(error);
+    expect(initialize).toHaveBeenCalledWith(module);
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(messages).toEqual([]);
+
+    await init();
+    expect(initialize).toHaveBeenCalledTimes(2);
     expect(compile).toHaveBeenCalledTimes(1);
     expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
   });

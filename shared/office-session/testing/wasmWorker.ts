@@ -62,6 +62,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
     let compiles = 0;
     let assetUrl = 'https://example.test/session.wasm';
     let nextCompile: (() => Promise<WebAssembly.Module>) | undefined;
+    let nextInitializeError: Error | undefined;
     const clientHarness = { client: undefined as unknown as Client, get assetUrl() { return assetUrl; } };
 
     class TestWorker implements WasmTestWorker {
@@ -111,6 +112,11 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
           initialize(source: ArrayBuffer | WebAssembly.Module) {
             worker.sources.push(source);
             trace.push('initialize');
+            if (nextInitializeError) {
+              const error = nextInitializeError;
+              nextInitializeError = undefined;
+              return Promise.reject(error);
+            }
             return Promise.resolve();
           },
           open(bytes: Uint8Array) {
@@ -170,6 +176,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
       set assetUrl(url: string) { assetUrl = url; },
       worker: () => new TestWorker(new URL('https://example.test/worker.mjs')) as unknown as Worker,
       rejectCompile(error: Error) { nextCompile = () => Promise.reject(error); },
+      rejectInitialize(error: Error) { nextInitializeError = error; },
       holdCompile() {
         let release!: (module: WebAssembly.Module) => void;
         const pending = new Promise<WebAssembly.Module>((resolve) => { release = resolve; });
