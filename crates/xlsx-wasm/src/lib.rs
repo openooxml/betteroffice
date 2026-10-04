@@ -63,6 +63,26 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = openWithCalculationJson)]
+    pub fn open_with_calculation_json(
+        bytes: &[u8],
+        context: &str,
+    ) -> Result<XlsxDocument, JsValue> {
+        Session::open_with_calculation_json(bytes, context)
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
+            .map_err(|error| js_sys::TypeError::new(&error).into())
+    }
+
+    #[wasm_bindgen(js_name = setCalculationContextJson)]
+    pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), JsValue> {
+        self.session
+            .set_calculation_context_json(context)
+            .map_err(|error| js_sys::TypeError::new(&error).into())
+    }
+
     /// Open a replica with a positive, safe-integer client ID.
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<XlsxDocument, JsValue> {

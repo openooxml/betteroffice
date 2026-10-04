@@ -43,6 +43,7 @@ export interface WorkbookFrame {
   displayList: DisplayList;
   version: string;
   epoch: number;
+  sequence: number;
   sheet: number;
   viewport: Viewport;
   mergedRanges?: MergedRange[];
