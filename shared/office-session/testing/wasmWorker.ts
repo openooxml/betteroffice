@@ -35,6 +35,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const initWasm = (source) => testHarness.initialize(source);
               export const openPresentation = (bytes) => testHarness.open(bytes);
               export const openWorkbook = (bytes) => testHarness.open(bytes);
+              export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
             `,
             loader: 'js',
           }));
