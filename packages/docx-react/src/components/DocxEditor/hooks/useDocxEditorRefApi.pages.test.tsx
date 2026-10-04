@@ -4,9 +4,10 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useRef } from 'react';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
+import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, decodeDocxHostJson, type ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, decodeDocxHostJson, type ResidentDocumentRead, type ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
 import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -89,10 +90,10 @@ function edit(session: YrsSession, text: string) {
   if (!applied.ok) throw new Error(applied.failure.message);
 }
 
-async function openWorkerSession(afterRead?: (value: string) => Promise<void>) {
+async function openWorkerSession(afterRead?: (value: string) => Promise<void>, bytes = PAGES) {
   const worker = await createResidentEngineSession();
   workers.push(worker);
-  const { document } = decodeDocxHostJson(worker.openDocx(PAGES), PAGES);
+  const { document } = decodeDocxHostJson(worker.openDocx(bytes), bytes);
   const font = worker.registerFont(FONT);
   const inputs = buildResidentRegionLayoutRequest(document, 24, {});
   const requirements = JSON.parse(worker.layoutFontRequirementsJson(JSON.stringify(inputs))) as Array<{ key: string }>;
@@ -105,7 +106,7 @@ async function openWorkerSession(afterRead?: (value: string) => Promise<void>) {
   const request = JSON.stringify(inputs);
   const peer = await createYrsSession();
   sessions.push(peer);
-  peer.openDocx(PAGES, false);
+  peer.openDocx(bytes, false);
   peer.loadState(worker.encodeState());
   peer.registerFont(FONT);
   const owner = {};
@@ -119,7 +120,7 @@ async function openWorkerSession(afterRead?: (value: string) => Promise<void>) {
         peer.applyLocalUpdate(worker.encodeStateAsUpdate(vector));
         return { P: peer.version(), W: worker.proposalEngine.version(), changed: false };
       },
-      read: (async (read, version) => {
+      read: (async (read: ResidentDocumentRead, version: string) => {
         if (worker.proposalEngine.version() !== version) return { status: 'superseded' };
         if (read.kind !== 'exportStructuredWithPages') throw new Error('Expected paged export');
         reads.push({ options: read.options, version });
@@ -428,13 +429,26 @@ test('worker editor export reuses its retained layout and pinned tokens round-tr
 });
 
 test('worker editor export waits for deferred layout completion', async () => {
-  const opened = await openWorkerSession();
-  opened.worker.layoutDocumentWithRegionsPrefixRetainedJson(opened.request, 1);
+  const paragraphs = Array.from({ length: 64 }, (_, index) =>
+    `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Page ${index + 1}</w:t></w:r></w:p>`
+  ).join('');
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="document" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${paragraphs}</w:body></w:document>`)],
+  ])));
+  const opened = await openWorkerSession(undefined, bytes);
+  const prefix = JSON.parse(opened.worker.layoutDocumentWithRegionsPrefixRetainedJson(opened.request, 1));
+  expect(prefix).toMatchObject({ provisional: true, layout: { partial: true } });
+  expect(JSON.parse(opened.worker.exportStructuredWithPagesJson(MARKUP, opened.request)))
+    .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  let completed = false;
   const { events, api } = await setup({
     session: opened.session, worker: opened.operation, request: () => opened.request,
-    settle: () => new Promise((resolve) => setTimeout(() => { opened.layout(); resolve(); }, 20)),
+    settle: () => new Promise((resolve) => setTimeout(() => { opened.layout(); completed = true; resolve(); }, 20)),
   });
   expect((await api().exportStructuredWithPages(MARKUP)).ok).toBe(true);
+  expect(completed).toBe(true);
   expect(events).toEqual(['flush', 'relayout in the worker']);
   expect(opened.reads).toHaveLength(2);
 });
