@@ -259,6 +259,25 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = sheetCount)]
+    pub fn sheet_count(&self) -> usize {
+        self.session.sheet_count()
+    }
+
+    #[wasm_bindgen(js_name = sheetInfoForJson)]
+    pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, JsValue> {
+        self.session
+            .sheet_info_for_json(sheet)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = cellRectJson)]
+    pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .cell_rect_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = calculationStatusJson)]
     pub fn calculation_status_json(&self) -> Result<String, JsValue> {
         self.session
@@ -397,6 +416,17 @@ impl XlsxDocument {
     pub fn merged_ranges_json(&self, args: &str) -> Result<String, JsValue> {
         self.session
             .merged_ranges_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = visibleMergedRangesJson)]
+    pub fn visible_merged_ranges_json(
+        &self,
+        sheet: u32,
+        viewport_json: &str,
+    ) -> Result<String, JsValue> {
+        self.session
+            .visible_merged_ranges_json(sheet, viewport_json)
             .map_err(|e| JsValue::from_str(&e))
     }
 

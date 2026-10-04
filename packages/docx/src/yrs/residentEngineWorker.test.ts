@@ -6,6 +6,8 @@ import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDe
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
 import type { ResidentSaveRecord } from './residentSave';
 import { syntheticDocx } from './__fixtures__/previewChain';
+import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
+import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
@@ -106,11 +108,13 @@ function worker() {
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
   const answered: number[] = [];
+  const transfers = new Map<number, Transferable[]>();
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => {},
     onmessageerror: null as (() => void) | null,
-    postMessage(reply: ResidentEngineWorkerResponse) {
+    postMessage(reply: ResidentEngineWorkerResponse, transfer: Transferable[] = []) {
+      transfers.set(reply.id, transfer);
       answered.push(reply.id);
       replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
@@ -347,6 +351,7 @@ function worker() {
     harness,
     surfaces,
     answered,
+    transfers,
     send,
     delta,
     resetCalls() {
@@ -2739,7 +2744,7 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
-  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array) {
+  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array, options: { clientId?: number; headersFooters?: boolean } = {}) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2759,7 +2764,22 @@ describe('worker proposals during sliced completion', () => {
       parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>'));
       parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
     }
-    const engine = await createResidentEngineSession();
+    if (options.headersFooters) {
+      const document = new TextDecoder().decode(parts.get('word/document.xml')!);
+      parts.set('word/document.xml', toBytes(document.replace('<w:sectPr/>',
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>'
+      ).replace('<w:document ', '<w:document xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ')));
+      const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
+      parts.set('[Content_Types].xml', toBytes(types.replace('</Types>',
+        '<Override PartName="/word/header.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>'
+      )));
+      parts.set('word/_rels/document.xml.rels', toBytes(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/><Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>'
+      ));
+      parts.set('word/header.xml', toBytes('<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>'));
+      parts.set('word/footer.xml', toBytes('<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>'));
+    }
+    const engine = await createResidentEngineSession(undefined, options.clientId);
     engine.openDocx(bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
     const calls: string[] = [];
@@ -2986,6 +3006,103 @@ describe('worker proposals during sliced completion', () => {
       return { fontRequirements: reply.proposal.fontRequirements, preview: proposalRevisionPreview(result.snapshot) };
     };
   }
+
+  test('meta and JSON replies preserve decisions, frame bytes, sizes and header epochs', async () => {
+    const run = async (mode: 'json' | 'meta') => {
+      const { w, engine, proposal, snapshot, calls } = await proposalWorker('', undefined, undefined, {
+        clientId: 9501, headersFooters: true,
+      });
+      const frames: Uint8Array[] = [];
+      const layouts: string[] = [];
+      const metas: LayoutMetaV1[] = [];
+      let revision = snapshot.layoutRevision;
+      let epoch = w.harness.delta!.frameEpoch;
+      let input = layoutInput;
+      const sync = async () => {
+        const response = await w.send({
+          type: 'sync', expectedFrameEpoch: epoch, paintCaret: false, extras: '', layoutExtras: '{}',
+          ...(mode === 'meta' ? { layoutReply: 'meta' as const } : {}),
+          snapshot: { ...snapshot, fonts: [], layoutRevision: ++revision, layoutInput: input },
+        });
+        if (!response.ok || !response.frame) throw new Error('expected layout frame');
+        frames.push(new Uint8Array(response.frame));
+        epoch = response.caret!.frameEpoch;
+        const full = await w.send({ type: 'layoutJson', layoutRevision: revision });
+        if (!full.ok || full.layoutJsonStatus !== 'ok' || full.layoutJson === undefined) {
+          throw new Error('expected retained JSON');
+        }
+        layouts.push(full.layoutJson);
+        if (mode === 'json') {
+          expect(response.layoutJson).toBe(full.layoutJson);
+          expect(response.layoutMeta).toBeUndefined();
+        } else {
+          expect(response.layoutJson).toBeUndefined();
+          if (!isLayoutMetaV1(response.layoutMeta)) throw new Error('expected v1 meta');
+          const meta = response.layoutMeta;
+          metas.push(meta);
+          expect(w.transfers.get(response.id)).toContain(meta.pageSizes.buffer);
+          const output = JSON.parse(full.layoutJson) as { layout: Layout; notesConverged: boolean; provisional?: boolean };
+          expect(meta.pageCount).toBe(output.layout.pages.length);
+          expect(meta.pageCount).toBeGreaterThan(1);
+          expect(meta.partial).toBe(output.layout.partial === true);
+          expect(meta.provisional).toBe(output.provisional === true);
+          expect(meta.notesConverged).toBe(output.notesConverged);
+          const sizes = new Float64Array(output.layout.pages.flatMap((page) => [page.size.w, page.size.h]));
+          expect(new Uint8Array(meta.pageSizes.buffer)).toEqual(new Uint8Array(sizes.buffer));
+          expect(JSON.parse(meta.layoutShell)).toEqual({
+            ...output.layout,
+            pages: output.layout.pages.map((page) => ({ ...page, fragments: [] })),
+          });
+        }
+        expect(await w.send({ type: 'layoutJson', layoutRevision: revision - 1 })).toMatchObject({
+          ok: true, layoutJsonStatus: 'stale',
+        });
+      };
+      try {
+        const decide = await decided(w, engine, proposal);
+        for (const state of ['accepted', 'rejected', 'proposed', 'accepted'] as const) {
+          const decision = await decide(state);
+          input = JSON.stringify({ ...JSON.parse(layoutInput),
+            regions: { sections: [{ sectionId: 'main', headerFooterRefs: {
+              headerDefault: 'rIdHeader', footerDefault: 'rIdFooter',
+            } }] },
+            renderEnv: { revisionPreview: decision.preview },
+          });
+          await sync();
+        }
+        engine.applyRawOps('hf:rIdHeader', [{ op: 'insert', index: 0, text: 'Changed ' }]);
+        await sync();
+        await sync();
+        input = JSON.stringify({ ...JSON.parse(input), regions: { sections: [{ sectionId: 'main' }] } });
+        await sync();
+        await sync();
+        if (mode === 'meta') {
+          expect(calls).not.toContain('whole');
+          expect(metas[0]!.headersFooters).toContain('Header');
+          expect(metas[0]!.headersFooters).toContain('Footer');
+          for (const meta of metas.slice(1, 4)) {
+            expect(meta.headersFootersEpoch).toBe(metas[0]!.headersFootersEpoch);
+            expect(meta.headersFooters).toBeUndefined();
+          }
+          expect(metas[4]!.headersFootersEpoch).toBe(metas[0]!.headersFootersEpoch + 1);
+          expect(metas[4]!.headersFooters).toContain('Changed ');
+          expect(metas[5]!.headersFootersEpoch).toBe(metas[4]!.headersFootersEpoch);
+          expect(metas[5]!.headersFooters).toBeUndefined();
+          expect(metas[6]!.headersFootersEpoch).toBe(metas[4]!.headersFootersEpoch + 1);
+          expect(metas[6]!.headersFooters).toBe('null');
+          expect(metas[7]!.headersFootersEpoch).toBe(metas[6]!.headersFootersEpoch);
+          expect(metas[7]!.headersFooters).toBeUndefined();
+        }
+        return { frames, layouts };
+      } finally {
+        void w.send({ type: 'destroy' });
+      }
+    };
+    const full = await run('json');
+    const meta = await run('meta');
+    expect(meta.layouts).toEqual(full.layouts);
+    expect(meta.frames).toEqual(full.frames);
+  });
 
   test('a decision answers with the font requirements of the layout input the host builds next, and an undo reads cached ones', async () => {
     const { w, engine, proposal } = await proposalWorker();

@@ -35,6 +35,7 @@ import {
   type LayoutComputation,
 } from '@betteroffice/docx/editor';
 import {
+  isLayoutMetaV1,
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
@@ -471,7 +472,8 @@ export function useRustDisplayList(
    * page for page: its worker and page surfaces carry over to the next.
    */
   handoffFromRef?: React.RefObject<YrsSession | null>,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen = false,
+  viewerSessionRef?: React.RefObject<boolean>
 ): UseRustDisplayListResult {
   const requestLayoutRef = useRef(requestLayout);
   requestLayoutRef.current = requestLayout;
@@ -594,6 +596,10 @@ export function useRustDisplayList(
       workerPreviewEnginesRef.current.has(hostEngine) && handedOverEnginesRef.current.has(hostEngine),
     []
   );
+  const workerLayoutHeadersRef = useRef(new WeakMap<ResidentEngineWorkerClient, {
+    epoch: number;
+    payload: string;
+  }>());
   const workerOpenEnabledRef = useRef(experimentalWorkerOpen);
   workerOpenEnabledRef.current = experimentalWorkerOpen;
   const spawnedWorkerEnginesRef = useRef(new WeakSet<YrsSession>());
@@ -2455,6 +2461,10 @@ export function useRustDisplayList(
       const contentEpoch = contentEpochRef.current;
       const options = {
         layoutExtras: JSON.stringify(frameExtrasInputs()),
+        ...(!bootstrapping && viewerSessionRef?.current ? {
+          layoutReply: 'meta' as const,
+          headersFootersEpoch: workerLayoutHeadersRef.current.get(worker)?.epoch ?? 0,
+        } : {}),
         stateVector: workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)
           ? owner.stateVector
           : hostEngine.encodeStateVector(),
@@ -2526,14 +2536,36 @@ export function useRustDisplayList(
       };
       // `base` is the frame the reply's frame applies to; without one the
       // display builds its own frame for the layout.
-      const adopt = (
+      const adopt = async (
         result: ResidentEngineWorkerFrame,
         base: RetainedFrame | null | undefined
-      ): LayoutComputation => {
-        if (result.layoutJson === undefined) {
-          throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
+      ): Promise<LayoutComputation | null> => {
+        let computation: LayoutComputation;
+        const meta = result.layoutMeta;
+        const previous = workerLayoutHeadersRef.current.get(worker);
+        const payload = isLayoutMetaV1(meta) && meta.layoutRevision === result.layoutRevision
+          ? meta.headersFooters ??
+            (previous?.epoch === meta.headersFootersEpoch ? previous.payload : undefined)
+          : undefined;
+        if (meta === undefined) {
+          if (result.layoutJson === undefined) {
+            throw new ResidentWorkerFailureError('Resident engine worker omitted its layout');
+          }
+          computation = workerLayoutComputation(result.layoutJson, result.layoutRevision);
+        } else if (payload !== undefined && isLayoutMetaV1(meta)) {
+          workerLayoutHeadersRef.current.set(worker, { epoch: meta.headersFootersEpoch, payload });
+          computation = workerLayoutComputation(meta, result.layoutRevision, payload);
+        } else {
+          // an unknown summary version, or headers this host has not seen: read the full layout
+          const full = await worker.layoutJson(result.layoutRevision);
+          if (full.status === 'stale') {
+            requestLayoutRef.current?.();
+            return null;
+          }
+          if (!isCurrentWorker(hostEngine, owner) ||
+            hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
+          computation = workerLayoutComputation(full.layoutJson, result.layoutRevision);
         }
-        const computation = workerLayoutComputation(result.layoutJson, result.layoutRevision);
         if (base === undefined) return computation;
         workerLayoutFramesRef.current.set(computation.layout, {
           result,
@@ -2547,14 +2579,15 @@ export function useRustDisplayList(
         return computation;
       };
       const pass = reply
-        .then((result): WorkerLayoutComputation | null => {
+        .then(async (result): Promise<WorkerLayoutComputation | null> => {
           if (recoveredEngine(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
             throw new SupersededPreviewError();
           }
           if (holdsWorkerProposals(hostEngine) &&
             (!isCurrentWorker(hostEngine, owner) ||
               hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision)) return null;
-          const computation = adopt(result, previousFrame);
+          const computation = await adopt(result, previousFrame);
+          if (!computation) return null;
           // A display-only preview is replaced by the full document before
           // anything needs the rest of its pages.
           if (!result.layoutProvisional || hostEngine.isDisplayOnly?.()) return computation;
@@ -2625,6 +2658,7 @@ export function useRustDisplayList(
       replaceOutOfMemoryWorker,
       requestOpenedWorker,
       workerFor,
+      viewerSessionRef,
     ]
   );
   const layoutInWorkerRef: { current: LayoutInWorker } = useRef<LayoutInWorker>(layoutInWorker);
@@ -3595,7 +3629,8 @@ export function useCanvasRenderer(
   workerHeapLimitBytes?: number,
   /** See `useRustDisplayList`'s `handoffFromRef`. */
   handoffFromRef?: React.RefObject<YrsSession | null>,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen = false,
+  viewerSessionRef?: React.RefObject<boolean>
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
@@ -3656,7 +3691,8 @@ export function useCanvasRenderer(
     requestLayout,
     workerHeapLimitBytes,
     handoffFromRef,
-    experimentalWorkerOpen
+    experimentalWorkerOpen,
+    viewerSessionRef
   );
   const reset = useCallback((): void => {
     setLayout(null);
