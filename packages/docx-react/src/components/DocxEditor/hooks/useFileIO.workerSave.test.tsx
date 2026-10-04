@@ -18,7 +18,7 @@ import {
 import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { isMacPlatform } from '../../../commands/descriptors';
-import type { DocxEditorRef } from '../../DocxEditor';
+import type { DocxEditorProps, DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplica, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
@@ -96,7 +96,12 @@ function zeroLengthBodyComment(): Uint8Array {
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
-async function workerOpened(initialViewer = true, workerProposals = false, source: Uint8Array = bytes) {
+async function workerOpened(
+  initialViewer = true,
+  workerProposals = false,
+  source: Uint8Array = bytes,
+  onSaveRequest?: DocxEditorProps['onSaveRequest']
+) {
   let client!: ResidentEngineWorkerClient;
   const open = ResidentEngineWorkerClient.prototype.open;
   const capture = spyOn(ResidentEngineWorkerClient.prototype, 'open').mockImplementation(function (
@@ -168,6 +173,7 @@ async function workerOpened(initialViewer = true, workerProposals = false, sourc
       comments: host?.document.package.document.comments ?? [],
       documentName: undefined,
       onSave: (buffer) => saved.push(buffer),
+      onSaveRequest,
       downloadOnSave: false,
       onOpen: undefined,
       onError: (error) => errors.push(error),
@@ -703,6 +709,35 @@ test('an editor switched to viewing waits for its in-flight editing copy before 
     expect(opened.errors).toEqual([]);
   } finally {
     opened.worker.release();
+    save.mockRestore();
+  }
+});
+
+test('a viewer switched to editing during a save request flushes its loaded peer before saving', async () => {
+  let resolveRequest!: (proceed: boolean) => void;
+  const request = new Promise<boolean>((resolve) => { resolveRequest = resolve; });
+  const onSaveRequest = mock(() => request);
+  const opened = await workerOpened(true, false, bytes, onSaveRequest);
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  try {
+    const saving = opened.hook.result.current.io.handleDownloadDocument();
+    await waitFor(() => expect(onSaveRequest).toHaveBeenCalledTimes(1));
+    act(() => opened.hook.result.current.setViewing(false));
+    await act(async () => { await requestWorkerOpenReplica(opened.session); });
+    await waitFor(() => expect(opened.hook.result.current.core.replicaReady).toBe(true));
+    expect(opened.hook.result.current.core.session).toBe(opened.session);
+    expect(save).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveRequest(true);
+      expect(await saving).toBe('saved');
+    });
+    expect(save.mock.calls).toHaveLength(1);
+    expect(save.mock.calls[0]![1]).toBe(opened.session);
+    expect(opened.flush).toHaveBeenCalledTimes(1);
+    expect(opened.saved).toHaveLength(1);
+    expect(opened.errors).toEqual([]);
+  } finally {
+    resolveRequest(false);
     save.mockRestore();
   }
 });

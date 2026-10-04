@@ -190,6 +190,8 @@ export function useFileIO({
   const imageInsertRef = useRef<DocxImageInsert | null>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
   const saveRequestRef = useRef<Promise<DocxSaveOutcome> | null>(null);
+  const viewerSessionRef = useRef(viewerSession);
+  viewerSessionRef.current = viewerSession;
 
   const handleSave = useCallback(
     async (): Promise<ArrayBuffer | null> => {
@@ -197,7 +199,7 @@ export function useFileIO({
       try {
         if (!pagedEditorRef.current) return null;
         const viewer = (!!initialSession && workerOpenDocumentHeld(initialSession)) ||
-          (viewerSession ?? isWorkerViewer(pagedEditorRef.current));
+          (viewerSessionRef.current ?? isWorkerViewer(pagedEditorRef.current));
         const assertCurrent = () => {
           if (pagedEditorRef.current?.getYrsSession() !== initialSession) {
             throw new Error('The document changed while saving');
@@ -235,7 +237,7 @@ export function useFileIO({
         return null;
       }
     },
-    [pagedEditorRef, viewerSession, comments, onSave, onError]
+    [pagedEditorRef, comments, onSave, onError]
   );
 
   const reservePrint = useCallback((): DocxPrintJob => {
