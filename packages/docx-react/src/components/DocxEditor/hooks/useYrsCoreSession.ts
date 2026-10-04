@@ -650,21 +650,18 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
-            const editorSave = serialWorkerSaves(dirtyStoriesRef.current);
+            const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: (comments, peer) => {
-                const save = async (stories?: string[]) => {
-                  if (stale()) throw new Error('The document changed while saving');
-                  const currentHost = documentRef.current ?? host?.document;
-                  return worker.save({
-                    comments,
-                    ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
-                    ...(stories ? { stories } : {}),
-                  }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
-                };
-                return peer ? editorSave(save) : save();
-              },
+              save: (comments, peer) => saveInOrder(async (stories) => {
+                if (stale()) throw new Error('The document changed while saving');
+                const currentHost = documentRef.current ?? host?.document;
+                return worker.save({
+                  comments,
+                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                  ...(peer ? { stories } : {}),
+                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+              }),
             });
             const gate = { reached: false, wanted: false };
             let recoveredRendering = false;
