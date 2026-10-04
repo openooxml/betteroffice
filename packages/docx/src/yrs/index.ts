@@ -1322,7 +1322,7 @@ export interface YrsSession extends CollaborationReplica {
    * The current story revision and the sorted ids of the stories created,
    * edited, or deleted after revision `since` (0 lists every story).
    */
-  storiesChangedSince(since: number): { revision: number; stories: string[] };
+  storiesChangedSince(since: number): { revision: number; stories: string[]; comments?: boolean };
   /**
    * One digest per unit of {@link YrsSession.storySegments}, split after each
    * pilcrow. Equal digests mean equal segments.

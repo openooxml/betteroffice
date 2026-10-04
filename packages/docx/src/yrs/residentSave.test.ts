@@ -112,12 +112,12 @@ function paragraph(paraId: string, text: string): string {
   return `<w:p w14:paraId="${paraId}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
 }
 
-function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.')): Uint8Array {
+function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.'), comments?: string): Uint8Array {
   const parts: PartsMap = new Map();
   const set = (name: string, content: string) => parts.set(name, toBytes(content));
   set(
     '[Content_Types].xml',
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.wordprocessingml.header+xml"/></Types>`
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${OFFICE}.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="${OFFICE}.wordprocessingml.header+xml"/>${comments === undefined ? '' : `<Override PartName="/word/comments.xml" ContentType="${OFFICE}.wordprocessingml.comments+xml"/>`}</Types>`
   );
   set(
     '_rels/.rels',
@@ -125,8 +125,9 @@ function synthetic(first = paragraph('0000B001', 'Alpha beta gamma.')): Uint8Arr
   );
   set(
     'word/_rels/document.xml.rels',
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/></Relationships>`
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH1" Type="${REL}/header" Target="header1.xml"/>${comments === undefined ? '' : `<Relationship Id="rIdC" Type="${REL}/comments" Target="comments.xml"/>`}</Relationships>`
   );
+  if (comments !== undefined) set('word/comments.xml', `<w:comments ${NS}>${comments}</w:comments>`);
   set('word/header1.xml', `<w:hdr ${NS}>${paragraph('0000A001', 'Header text')}</w:hdr>`);
   set(
     'word/document.xml',
@@ -261,6 +262,34 @@ class Replica {
     this.dirtyStories.clear();
     return new Uint8Array(buffer);
   }
+}
+
+async function peerReplica(opened: Opened): Promise<YrsSession> {
+  const peer = await createYrsSession({ clientId: CLIENT_ID + 1 });
+  owned.push(peer);
+  peer.openDocx(opened.bytes.slice(), false);
+  peer.loadState(await opened.client.encodeState());
+  opened.replica = new Replica(peer, opened.host);
+  return peer;
+}
+
+function addComment(opened: Opened, peer: YrsSession, comment: Comment): void {
+  peer.applyRawOps('body', [{
+    op: 'setComment', id: String(comment.id), ranges: [[0, 5]],
+    author: comment.author, date: comment.date, body: comment.content,
+  }]);
+  opened.host.package.document.comments = [comment];
+  opened.replica.dirtyStories.add('body');
+}
+
+function editHeader(engine: Pick<YrsSession, 'applyEdits' | 'version'>): void {
+  expect(engine.applyEdits({
+    expectVersion: engine.version(),
+    steps: [{
+      op: 'insertText', target: { kind: 'paragraph', story: 'hf:rIdH1', paraId: '0000A001' },
+      at: 'end', text: ' edited',
+    }],
+  }).ok).toBe(true);
 }
 
 function firstParagraph(
@@ -558,16 +587,48 @@ describe('worker save', () => {
     expect(commentMarkers(second, id)).toEqual(['Reference']);
   }, TIMEOUT);
 
+  it('projects only the body on the first save after a peer comment add', async () => {
+    const opened = await open(synthetic());
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const peer = await peerReplica(opened);
+    const comment: Comment = {
+      id: 1, author: 'Peer', date: SUGGEST.date,
+      content: [{
+        type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Peer comment' }] }],
+      }],
+    };
+    addComment(opened, peer, comment);
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    const saved = await compareSave(opened);
+    expect(commentMarkers(saved, comment.id)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    expect(unzipContainer(saved)['word/header1.xml'])
+      .toEqual(unzipContainer(opened.bytes)['word/header1.xml']);
+  }, TIMEOUT);
+
+  it('preserves unseeded comment markers on the first save after a header and host edit', async () => {
+    const opened = await open(synthetic(
+      '<w:p w14:paraId="0000B001"><w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/>' +
+      '<w:r><w:commentReference w:id="1"/><w:t>Alpha beta gamma.</w:t></w:r></w:p>',
+      `<w:comment w:id="1" w:author="Host" w:date="${SUGGEST.date}">` +
+      paragraph('0000C001', 'Zero-length comment') + '</w:comment>'
+    ));
+    expect(hostComments(opened).map((comment) => comment.id)).toEqual([1]);
+    expect(opened.replica.session.listComments()).toEqual([]);
+    for (const engine of [opened.resident.proposalEngine, opened.replica.session]) editHeader(engine);
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const saved = await compareSave(opened);
+    expect(commentMarkers(opened.bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    expect(commentMarkers(saved, 1)).toEqual(commentMarkers(opened.bytes, 1));
+  }, TIMEOUT);
+
   for (const operation of ['add', 'delete', 'delete with unchanged host comments'] as const) {
     it(`projects the body after a peer comment ${operation} when another story changed`, async () => {
       const opened = await open(synthetic());
       const body = opened.host.package.document;
       body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
-      const peer = await createYrsSession({ clientId: CLIENT_ID + 1 });
-      owned.push(peer);
-      peer.openDocx(opened.bytes.slice(), false);
-      peer.loadState(await opened.client.encodeState());
-      opened.replica = new Replica(peer, opened.host);
+      const peer = await peerReplica(opened);
       const comment: Comment = {
         id: 1,
         author: 'Peer',
@@ -576,32 +637,17 @@ describe('worker save', () => {
           type: 'paragraph', content: [{ type: 'run', content: [{ type: 'text', text: 'Peer comment' }] }],
         }],
       };
-      const addComment = () => {
-        peer.applyRawOps('body', [{
-          op: 'setComment', id: String(comment.id), ranges: [[0, 5]],
-          author: comment.author, date: comment.date, body: comment.content,
-        }]);
-        opened.host.package.document.comments = [comment];
-        opened.replica.dirtyStories.add('body');
-      };
       if (operation !== 'add') {
-        addComment();
+        addComment(opened, peer, comment);
         opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
       }
       const first = await compareSave(opened);
       expect(commentMarkers(first, comment.id)).toEqual(
         operation === 'add' ? [] : ['RangeStart', 'RangeEnd', 'Reference']
       );
-      const header = 'hf:rIdH1';
-      expect(peer.applyEdits({
-        expectVersion: peer.version(),
-        steps: [{
-          op: 'insertText', target: { kind: 'paragraph', story: header, paraId: '0000A001' },
-          at: 'end', text: ' edited',
-        }],
-      }).ok).toBe(true);
+      editHeader(peer);
       if (operation === 'add') {
-        addComment();
+        addComment(opened, peer, comment);
       } else {
         peer.applyRawOps('body', [{ op: 'removeComment', id: String(comment.id) }]);
         if (operation === 'delete') opened.host.package.document.comments = [];

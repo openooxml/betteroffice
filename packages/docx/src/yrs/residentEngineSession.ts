@@ -146,27 +146,31 @@ export async function createResidentEngineSession(
   const storyRevisions = new Map<string, number>();
   let nativeStoryRevision = 0;
   let storyRevision = 0;
+  let commentRevision = 0;
 
   const syncStoryRevisions = (): number => {
     const changes = JSON.parse(session.stories_changed_since(nativeStoryRevision)) as {
       revision: number;
       stories: string[];
+      comments?: boolean;
     };
     if (changes.revision !== nativeStoryRevision) {
       nativeStoryRevision = changes.revision;
       storyRevision += 1;
       for (const story of changes.stories) storyRevisions.set(story, storyRevision);
+      if (changes.comments === true) commentRevision = storyRevision;
     }
     return storyRevision;
   };
 
   const storiesChangedSince = (since: number) => {
     const revision = syncStoryRevisions();
-    if (since >= revision) return { revision, stories: [] };
+    if (since >= revision) return { revision, stories: [], comments: false };
     return {
       revision,
       stories: [...storyRevisions].filter(([, changed]) => changed > since)
         .map(([story]) => story).sort(),
+      comments: commentRevision > since,
     };
   };
 

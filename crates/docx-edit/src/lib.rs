@@ -60,13 +60,13 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
-use yrs::types::{Attrs, Delta};
+use yrs::types::{Attrs, Delta, EntryChange};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, ClientID, DeepObservable, Doc, In, IndexedSequence, Map, MapPrelim, MapRef,
-    OffsetKind, Options, Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim,
-    TextRef, Transact, Update,
+    Observable, OffsetKind, Options, Out, ReadTxn, StateVector, StickyIndex, Subscription, Text,
+    TextPrelim, TextRef, Transact, Update,
 };
 
 mod batch;
@@ -472,13 +472,12 @@ impl<T> Default for EpochCache<T> {
     }
 }
 
-/// The revision each story last changed at. Every committed change to the
-/// stories map stamps the stories it touched (content, embedded maps, the
-/// story entry itself) with the next revision.
+/// The revision each story and the comment-id set last changed at.
 #[derive(Default)]
 struct StoryRevisions {
     current: u64,
     stamped: HashMap<Arc<str>, u64>,
+    comment_ids: u64,
 }
 
 impl StoryRevisions {
@@ -571,6 +570,7 @@ pub struct EditingDoc {
     story_revisions: Arc<Mutex<StoryRevisions>>,
     _update_sub: Subscription,
     _story_revision_sub: Subscription,
+    _comment_revision_sub: Subscription,
     _seen_subs: Vec<Subscription>,
 }
 
@@ -602,6 +602,16 @@ impl EditingDoc {
         let story_revision_sub = doc
             .get_or_insert_map(STORIES)
             .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
+        let stamped = Arc::clone(&story_revisions);
+        let comment_revision_sub = doc.get_or_insert_map(COMMENTS).observe(move |txn, event| {
+            if event.keys(txn).values().any(|change| {
+                matches!(change, EntryChange::Inserted(_) | EntryChange::Removed(_))
+            }) {
+                let mut revisions = stamped.lock().unwrap();
+                revisions.current += 1;
+                revisions.comment_ids = revisions.current;
+            }
+        });
         let seen = identity::SeenCell::default();
         let seen_subs = identity::observe_seen(&doc, &seen);
         Self {
@@ -629,6 +639,7 @@ impl EditingDoc {
             story_revisions,
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
+            _comment_revision_sub: comment_revision_sub,
             _seen_subs: seen_subs,
         }
     }
@@ -1345,9 +1356,8 @@ impl EditingDoc {
         Ok(story.len(&txn))
     }
 
-    /// The current story revision, and the stories that changed after `since`
-    /// (created, edited, or deleted), sorted.
-    pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>) {
+    /// The current revision, sorted changed stories, and whether comment ids changed after `since`.
+    pub fn stories_changed_since(&self, since: u64) -> (u64, Vec<String>, bool) {
         let revisions = self.story_revisions.lock().unwrap();
         let mut stories: Vec<String> = revisions
             .stamped
@@ -1356,7 +1366,7 @@ impl EditingDoc {
             .map(|(story, _)| story.to_string())
             .collect();
         stories.sort();
-        (revisions.current, stories)
+        (revisions.current, stories, revisions.comment_ids > since)
     }
 
     /// [`Self::story_segments`] split after each pilcrow into units.
@@ -1781,7 +1791,7 @@ mod tests {
     #[test]
     fn story_revisions_name_the_stories_each_change_touched() {
         let (a, b) = peers("one two", 1, 2);
-        let (since, stories) = b.stories_changed_since(0);
+        let (since, stories, _) = b.stories_changed_since(0);
         assert_eq!(stories, ["body", "header:rId7"]);
         assert_eq!(b.stories_changed_since(since).1, Vec::<String>::new());
 
@@ -1793,23 +1803,82 @@ mod tests {
         )
         .unwrap();
         b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
-        let (since, stories) = b.stories_changed_since(since);
+        let (since, stories, _) = b.stories_changed_since(since);
         assert_eq!(stories, ["body"], "a remote text edit");
 
         let header = b.paragraphs("header:rId7").unwrap()[0].para_id.clone();
         b.set_paragraph_attr(&header, "keepNext", Any::Bool(true))
             .unwrap();
-        let (since, stories) = b.stories_changed_since(since);
+        let (since, stories, _) = b.stories_changed_since(since);
         assert_eq!(stories, ["header:rId7"], "a pilcrow property");
 
         b.create_story("fn:1", "note", "Normal", "left").unwrap();
         b.delete_story("header:rId7").unwrap();
-        let (_, stories) = b.stories_changed_since(since);
+        let (_, stories, _) = b.stories_changed_since(since);
         assert_eq!(
             stories,
             ["fn:1", "header:rId7"],
             "created and deleted stories"
         );
+    }
+
+    #[test]
+    fn story_revisions_stamp_comment_id_changes() {
+        let a = EditingDoc::new(1);
+        let b = EditingDoc::new(2);
+        assert_eq!(a.stories_changed_since(0), (0, Vec::<String>::new(), false));
+        {
+            let mut txn = a.doc.transact_mut();
+            let comments = txn.get_map(COMMENTS).unwrap();
+            let comment = comments.insert(&mut txn, "1", MapPrelim::default());
+            comment.insert(&mut txn, "body", "first");
+        }
+        let (since, stories, comments) = a.stories_changed_since(0);
+        assert!(since > 0);
+        assert!(stories.is_empty());
+        assert!(comments);
+        assert_eq!(a.stories_changed_since(since), (since, Vec::<String>::new(), false));
+
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (remote_since, stories, comments) = b.stories_changed_since(0);
+        assert!(remote_since > 0);
+        assert!(stories.is_empty());
+        assert!(comments);
+
+        {
+            let mut txn = a.doc.transact_mut();
+            let comments = txn.get_map(COMMENTS).unwrap();
+            let comment = comments.get(&txn, "1").unwrap().cast::<MapRef>().unwrap();
+            comment.insert(&mut txn, "body", "edited");
+        }
+        assert_eq!(a.stories_changed_since(since), (since, Vec::<String>::new(), false));
+        {
+            let mut txn = a.doc.transact_mut();
+            txn.get_map(COMMENTS)
+                .unwrap()
+                .insert(&mut txn, "1", MapPrelim::default());
+        }
+        assert_eq!(a.stories_changed_since(since), (since, Vec::<String>::new(), false));
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        assert_eq!(
+            b.stories_changed_since(remote_since),
+            (remote_since, Vec::<String>::new(), false)
+        );
+
+        {
+            let mut txn = a.doc.transact_mut();
+            txn.get_map(COMMENTS).unwrap().remove(&mut txn, "1");
+        }
+        let (revision, stories, comments) = a.stories_changed_since(since);
+        assert!(revision > since);
+        assert!(stories.is_empty());
+        assert!(comments);
+        assert_eq!(a.stories_changed_since(revision), (revision, Vec::<String>::new(), false));
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (revision, stories, comments) = b.stories_changed_since(remote_since);
+        assert!(revision > remote_since);
+        assert!(stories.is_empty());
+        assert!(comments);
     }
 
     #[test]
