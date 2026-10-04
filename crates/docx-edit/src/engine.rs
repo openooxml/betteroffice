@@ -215,7 +215,13 @@ impl RelayoutTrigger {
             Self::Interactive => false,
             Self::Preview => true,
             Self::Bulk => BULK_USES_REGION_PATH,
-            Self::Open => OPEN_USES_REGION_PATH,
+            Self::Open => {
+                #[cfg(test)]
+                if let Some(enabled) = OPEN_REGION_PATH_OVERRIDE.with(Cell::get) {
+                    return enabled;
+                }
+                OPEN_USES_REGION_PATH
+            }
         }
     }
 }
@@ -232,6 +238,7 @@ struct RegionWorkCounts {
 
 #[cfg(test)]
 thread_local! {
+    static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
         certification: 0,
         placement: 0,
@@ -1255,6 +1262,8 @@ pub struct EngineSession {
     doc: EditingDoc,
     doc_epoch: Rc<Cell<u64>>,
     relayout_trigger: Rc<Cell<RelayoutTrigger>>,
+    interactive_pending: Rc<Cell<bool>>,
+    region_retention_valid: Rc<Cell<bool>>,
     // Kept alive for the lifetime of the document. Dropping it unregisters the
     // observer before the Rc epoch source is released.
     _doc_epoch_observer: Subscription,
@@ -3143,25 +3152,28 @@ impl EngineSession {
         let doc = EditingDoc::new(client_id);
         let doc_epoch = Rc::new(Cell::new(0_u64));
         let relayout_trigger = Rc::new(Cell::new(RelayoutTrigger::Open));
+        let interactive_pending = Rc::new(Cell::new(false));
+        let region_retention_valid = Rc::new(Cell::new(false));
         let observer_epoch = Rc::clone(&doc_epoch);
         let observer_trigger = Rc::clone(&relayout_trigger);
+        let observer_interactive = Rc::clone(&interactive_pending);
+        let observer_retention = Rc::clone(&region_retention_valid);
         let host_edit_depth = Arc::clone(&doc.host_edit_depth);
         let observer = doc
             .yrs_doc()
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
                     observer_epoch.set(observer_epoch.get().wrapping_add(1));
-                    if observer_trigger.get() != RelayoutTrigger::Open {
-                        observer_trigger.set(
-                            if host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
-                                || txn.origin()
-                                    == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN))
-                            {
-                                RelayoutTrigger::Bulk
-                            } else {
-                                RelayoutTrigger::Interactive
-                            },
-                        );
+                    let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
+                        || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
+                    if !bulk {
+                        observer_trigger.set(RelayoutTrigger::Interactive);
+                        observer_interactive.set(true);
+                        observer_retention.set(false);
+                    } else if !observer_interactive.get()
+                        && observer_trigger.get() != RelayoutTrigger::Open
+                    {
+                        observer_trigger.set(RelayoutTrigger::Bulk);
                     }
                 }
             })
@@ -3170,6 +3182,8 @@ impl EngineSession {
             doc,
             doc_epoch,
             relayout_trigger,
+            interactive_pending,
+            region_retention_valid,
             _doc_epoch_observer: observer,
             render: RefCell::new(RenderState::default()),
             note_separators: RefCell::new(None),
@@ -3189,15 +3203,47 @@ impl EngineSession {
     }
 
     pub(crate) fn set_relayout_trigger(&self, trigger: RelayoutTrigger) {
-        if trigger != RelayoutTrigger::Bulk || self.relayout_trigger.get() != RelayoutTrigger::Open
-        {
-            self.relayout_trigger.set(trigger);
+        match trigger {
+            RelayoutTrigger::Open => {
+                self.interactive_pending.set(false);
+                self.region_retention_valid.set(false);
+            }
+            RelayoutTrigger::Interactive => {
+                self.interactive_pending.set(true);
+                self.region_retention_valid.set(false);
+            }
+            RelayoutTrigger::Bulk | RelayoutTrigger::Preview => {
+                if self.interactive_pending.get()
+                    || (trigger == RelayoutTrigger::Bulk
+                        && self.relayout_trigger.get() == RelayoutTrigger::Open)
+                {
+                    return;
+                }
+            }
         }
+        self.relayout_trigger.set(trigger);
+    }
+
+    fn consume_relayout_trigger(&self) {
+        self.relayout_trigger.set(RelayoutTrigger::Interactive);
+        self.interactive_pending.set(false);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_relayout_trigger(&self) -> RelayoutTrigger {
+        self.relayout_trigger.get()
+    }
+
+    fn take_region_relayout_trigger(&self, input_json: &str) -> Result<RelayoutTrigger, String> {
+        let trigger = self.region_relayout_trigger(input_json);
+        self.consume_relayout_trigger();
+        trigger
     }
 
     fn region_relayout_trigger(&self, input_json: &str) -> Result<RelayoutTrigger, String> {
         let trigger = self.relayout_trigger.get();
         if trigger != RelayoutTrigger::Interactive
+            || self.interactive_pending.get()
             || self.pagination.borrow().doc_epoch != self.doc_epoch()
         {
             return Ok(trigger);
@@ -3236,6 +3282,7 @@ impl EngineSession {
     }
 
     fn clear_region_retention(&self) {
+        self.region_retention_valid.set(false);
         let mut pagination = self.pagination.borrow_mut();
         if !pagination.moved_blocks.is_empty() {
             pagination.input = None;
@@ -3243,14 +3290,45 @@ impl EngineSession {
             pagination.checkpoints.clear();
             pagination.block_fingerprints.clear();
         }
-        pagination.retain_matches.clear();
-        pagination.region_placements.clear();
-        pagination.moved_blocks.clear();
+        pagination.retain_matches = Vec::new();
+        pagination.region_placements = Vec::new();
+        pagination.moved_blocks = BTreeSet::new();
         self.preview_locality.replace(None);
+        self.preview_font_requirements.borrow_mut().take();
         self.resumable.replace(None);
         if let Some(state) = self.regions.borrow_mut().as_mut() {
             state.region_request_fingerprint = None;
         }
+    }
+
+    fn ensure_region_retention(&self) {
+        if self.region_retention_valid.replace(true) {
+            return;
+        }
+        self.render.borrow_mut().stories = HashMap::new();
+        self.measurement.borrow_mut().templates = HashMap::new();
+        self.note_separators.borrow_mut().take();
+        self.preview_font_requirements.borrow_mut().take();
+        self.preview_locality.borrow_mut().take();
+        let mut pagination = self.pagination.borrow_mut();
+        pagination.input = None;
+        pagination.measured_with = None;
+        pagination.lowered_from = None;
+        pagination.input_lowering = None;
+        pagination.retain_matches = Vec::new();
+        pagination.moved_blocks = BTreeSet::new();
+        pagination.measured_widths = Vec::new();
+        pagination.measured_font_dependencies = Vec::new();
+        pagination.measured_table_wrap_frames = Vec::new();
+        pagination.measured_float_geometry = None;
+        pagination.measured_with_floats = false;
+        pagination.layout = None;
+        pagination.checkpoints = Vec::new();
+        pagination.region_placements = Vec::new();
+        pagination.block_fingerprints = Vec::new();
+        pagination.options_fingerprint = 0;
+        pagination.revision_preview_key = 0;
+        pagination.revision_preview = BTreeMap::new();
     }
 
     /// Lets an eligible resident text edit re-lower only its paragraph. Off by default.
@@ -3727,8 +3805,10 @@ impl EngineSession {
 
     /// Parses, paginates, and retains measured input and layout.
     pub fn layout_document_json(&self, input_json: &str) -> Result<String, String> {
-        let input: LayoutInput =
-            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let input: LayoutInput = serde_json::from_str(input_json).map_err(|error| {
+            self.consume_relayout_trigger();
+            format!("parse: {error}")
+        })?;
         self.regions.borrow_mut().take();
         self.layout_document_value(input)?;
         let pagination = self.pagination.borrow();
@@ -3753,6 +3833,19 @@ impl EngineSession {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
+        if use_preview_superset
+            && !self.region_retention_valid.get()
+            && !self.interactive_pending.get()
+            && {
+                let pagination = self.pagination.borrow();
+                pagination.doc_epoch == self.doc_epoch()
+                    && pagination.revision_preview
+                        != RenderEnv::parse_revision_preview(&render_env["revisionPreview"])
+            }
+            && self.region_relayout_trigger(input_json)?.uses_region_path()
+        {
+            self.ensure_region_retention();
+        }
         let cache_key = if use_preview_superset
             && !RenderEnv::parse_revision_preview(&render_env["revisionPreview"]).is_empty()
         {
@@ -4048,7 +4141,7 @@ impl EngineSession {
     pub fn begin_region_layout(&self, input_json: &str) -> Result<RegionLayoutProgress, String> {
         self.resumable.replace(None);
         let version = self.doc.version();
-        let trigger = self.region_relayout_trigger(input_json)?;
+        let trigger = self.take_region_relayout_trigger(input_json)?;
         let prepared = self.prepare_region_layout(input_json, None, trigger)?;
         let progress = self.region_layout_step(ResumableRegionLayout { version, prepared }, 0)?;
         Ok(progress)
@@ -4175,7 +4268,7 @@ impl EngineSession {
         input_json: &str,
         prefix_pages: Option<usize>,
     ) -> Result<RegionPass, String> {
-        let trigger = self.region_relayout_trigger(input_json)?;
+        let trigger = self.take_region_relayout_trigger(input_json)?;
         self.layout_regions_for_trigger(input_json, prefix_pages, trigger)
     }
 
@@ -4185,6 +4278,7 @@ impl EngineSession {
         prefix_pages: Option<usize>,
         trigger: RelayoutTrigger,
     ) -> Result<RegionPass, String> {
+        self.consume_relayout_trigger();
         self.resumable.replace(None);
         let mut prepared = self.prepare_region_layout(input_json, prefix_pages, trigger)?;
         prepared.measure(usize::MAX)?;
@@ -4286,6 +4380,8 @@ impl EngineSession {
     ) -> Result<PreparedRegionLayout, String> {
         if !trigger.uses_region_path() {
             self.clear_region_retention();
+        } else {
+            self.ensure_region_retention();
         }
         let request: serde_json::Value =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
@@ -5054,7 +5150,6 @@ impl EngineSession {
                 notes: Rc::new(notes.contents),
             }));
         }
-        self.set_relayout_trigger(RelayoutTrigger::Interactive);
         Ok(RegionPass {
             notes_converged,
             provisional,
@@ -5481,15 +5576,16 @@ impl EngineSession {
     /// Typed resident pagination path shared by the compatibility JSON seam
     /// and `apply_input`.
     fn layout_document_value(&self, input: LayoutInput) -> Result<(), String> {
+        let trigger = self.relayout_trigger.get();
+        self.consume_relayout_trigger();
         let block_fingerprints = measured_fingerprints(&input)?;
         self.layout_document_value_with_fingerprints(
             input,
             block_fingerprints,
             None,
             false,
-            self.relayout_trigger.get(),
+            trigger,
         )?;
-        self.set_relayout_trigger(RelayoutTrigger::Interactive);
         Ok(())
     }
 
@@ -5647,6 +5743,7 @@ impl EngineSession {
         cached_page_totals: bool,
         trigger: RelayoutTrigger,
     ) -> Result<(), String> {
+        self.consume_relayout_trigger();
         if !trigger.uses_region_path() {
             self.clear_region_retention();
         }
@@ -9517,8 +9614,20 @@ mod tests {
         };
         let resident = snapshot(engine);
         let trigger = engine.relayout_trigger.replace(RelayoutTrigger::Open);
+        let interactive = engine.interactive_pending.replace(false);
+        let retention = engine.region_retention_valid.replace(false);
         let locality = engine.preview_locality.replace(None);
-        let (render, measurement, pagination, regions, display, capture, resumable) = (
+        let (
+            render,
+            measurement,
+            pagination,
+            regions,
+            display,
+            capture,
+            resumable,
+            separators,
+            fonts,
+        ) = (
             engine.render.replace(Default::default()),
             engine.measurement.replace(Default::default()),
             engine.pagination.replace(Default::default()),
@@ -9526,6 +9635,8 @@ mod tests {
             engine.display.replace(Default::default()),
             engine.capture.replace(Default::default()),
             engine.resumable.replace(Default::default()),
+            engine.note_separators.replace(None),
+            engine.preview_font_requirements.replace(None),
         );
         engine.layout_document_with_regions_json(request).unwrap();
         assert_eq!(resident, snapshot(engine), "{label}");
@@ -9536,7 +9647,11 @@ mod tests {
         engine.display.replace(display);
         engine.capture.replace(capture);
         engine.resumable.replace(resumable);
+        engine.note_separators.replace(separators);
+        engine.preview_font_requirements.replace(fonts);
         engine.relayout_trigger.set(trigger);
+        engine.interactive_pending.set(interactive);
+        engine.region_retention_valid.set(retention);
         engine.preview_locality.replace(locality);
     }
 
@@ -9578,6 +9693,7 @@ mod tests {
                 Any::from("nextPage"),
             )
             .unwrap();
+        engine.set_relayout_trigger(RelayoutTrigger::Open);
         engine
             .layout_document_with_regions_retained(&request.to_string())
             .unwrap();
@@ -9888,6 +10004,7 @@ mod tests {
             .doc()
             .create_story("body", "Opened text", "Normal", "left")
             .unwrap();
+        engine.set_relayout_trigger(RelayoutTrigger::Open);
         let paragraph = &engine.doc().paragraphs("body").unwrap()[0].para_id;
         let batch: crate::EditRequest = serde_json::from_value(json!({
             "expectVersion": engine.doc().version(),
@@ -9919,6 +10036,362 @@ mod tests {
             OPEN_USES_REGION_PATH
         );
         assert_region_state_matches_cold(&engine, &request, "initial proposals");
+    }
+
+    #[test]
+    fn first_preview_after_interactive_layout_reuses_nothing() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for (notes, resident) in [(false, false), (false, true), (true, false), (true, true)] {
+            let (engine, mut request) = if notes {
+                interactive_note_sections_engine(font)
+            } else {
+                let request = preview_pagination_request(font);
+                let engine = preview_pagination_engine(
+                    &preview_fixture::document(&preview_pagination_body(&[(45, "ins", "1")])),
+                    &request,
+                );
+                engine
+                    .layout_document_with_regions_retained(&request.to_string())
+                    .unwrap();
+                engine
+                    .build_display_list_frame(
+                        &json!({"fontChains": request["measurement"]["fontChains"]}).to_string(),
+                        0,
+                    )
+                    .unwrap();
+                (engine, request)
+            };
+            assert_note_preview_toggle(&engine, &mut request, "accepted");
+            assert_note_preview_toggle(&engine, &mut request, "rejected");
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
+                .unwrap();
+            assert_interactive_note_layout(&engine, &request, "after warm previews", resident);
+            assert!(!engine.region_retention_valid.get());
+            assert!(engine.preview_font_requirements.borrow().is_none());
+            let before = engine.stats();
+            let matches = engine.pagination.borrow().retain_match_calls;
+            request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+            engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap();
+            engine
+                .layout_document_with_regions_retained(&request.to_string())
+                .unwrap();
+            let after = engine.stats();
+            assert_eq!(after.resident_reused_blocks, before.resident_reused_blocks);
+            assert_eq!(engine.pagination.borrow().retain_match_calls, matches);
+            assert_eq!(
+                after.incremental_pagination_calls,
+                before.incremental_pagination_calls
+            );
+            assert!(!engine.pagination.borrow().last_incremental);
+            assert!(
+                engine
+                    .pagination
+                    .borrow()
+                    .region_placements
+                    .iter()
+                    .all(|pass| !pass.incremental)
+            );
+            assert_region_state_matches_cold(&engine, &request.to_string(), "first preview");
+            assert_note_preview_toggle(&engine, &mut request, "rejected");
+        }
+    }
+
+    #[test]
+    fn interactive_transactions_win_before_the_first_open_layout() {
+        struct OpenSwitch(Option<bool>);
+        impl Drop for OpenSwitch {
+            fn drop(&mut self) {
+                OPEN_REGION_PATH_OVERRIDE.with(|enabled| enabled.set(self.0));
+            }
+        }
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for open_region_path in [false, true] {
+            let _switch = OpenSwitch(
+                OPEN_REGION_PATH_OVERRIDE.with(|enabled| enabled.replace(Some(open_region_path))),
+            );
+            assert_eq!(RelayoutTrigger::Open.uses_region_path(), open_region_path);
+            for edit in ["typing", "paste", "format", "peer", "undo"] {
+                let engine = paragraphs_engine(9385, 3);
+                let request = small_page_request(font);
+                assert_eq!(
+                    engine.region_relayout_trigger(&request).unwrap(),
+                    RelayoutTrigger::Open
+                );
+                let ctx = crate::EditCtx::local("", "");
+                match edit {
+                    "typing" | "paste" => {
+                        engine
+                            .doc()
+                            .insert_text(
+                                &ctx,
+                                crate::Position::new("body", 3),
+                                if edit == "typing" { "x" } else { "pasted text" },
+                                crate::FormatPolicy::Plain,
+                            )
+                            .unwrap();
+                    }
+                    "format" => {
+                        engine
+                            .doc()
+                            .format_range(
+                                &ctx,
+                                crate::StoryRange::new("body", 0, 3),
+                                &crate::InlineFormatDelta {
+                                    bold: crate::Patch::Set(true),
+                                    ..Default::default()
+                                },
+                            )
+                            .unwrap();
+                    }
+                    "peer" => {
+                        let peer = EditingDoc::new(9386);
+                        peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+                            .unwrap();
+                        peer.insert_text(
+                            &ctx,
+                            crate::Position::new("body", 3),
+                            "x",
+                            crate::FormatPolicy::Plain,
+                        )
+                        .unwrap();
+                        engine
+                            .doc()
+                            .apply_update_v1(&peer.encode_state_as_update_v1())
+                            .unwrap();
+                    }
+                    "undo" => {
+                        let undo = crate::UndoSession::new();
+                        let paragraph = &engine.doc().paragraphs("body").unwrap()[0].para_id;
+                        let batch: crate::EditRequest = serde_json::from_value(json!({
+                            "expectVersion": engine.doc().version(), "history": "separate",
+                            "steps": [{"op": "insertText", "at": "start", "text": "bulk", "target": {
+                                "kind": "paragraph", "story": "body", "paraId": paragraph
+                            }}]
+                        })).unwrap();
+                        assert!(
+                            engine
+                                .doc()
+                                .apply_edits(&batch, &undo)
+                                .unwrap()
+                                .unwrap()
+                                .applied
+                        );
+                        assert_eq!(engine.pending_relayout_trigger(), RelayoutTrigger::Open);
+                        assert!(undo.undo());
+                    }
+                    _ => unreachable!(),
+                }
+                engine.set_relayout_trigger(RelayoutTrigger::Preview);
+                let paragraph = &engine.doc().paragraphs("body").unwrap()[0].para_id;
+                let batch: crate::EditRequest = serde_json::from_value(json!({
+                    "expectVersion": engine.doc().version(), "history": "none",
+                    "steps": [{"op": "insertText", "at": "start", "text": "bulk", "target": {
+                        "kind": "paragraph", "story": "body", "paraId": paragraph
+                    }}]
+                }))
+                .unwrap();
+                assert!(
+                    engine
+                        .doc()
+                        .apply_edits(&batch, &crate::UndoSession::new())
+                        .unwrap()
+                        .unwrap()
+                        .applied
+                );
+                assert_eq!(
+                    engine.region_relayout_trigger(&request).unwrap(),
+                    RelayoutTrigger::Interactive
+                );
+                REGION_WORK_COUNTS.with(|counts| counts.set(RegionWorkCounts::default()));
+                engine
+                    .layout_document_with_regions_retained(&request)
+                    .unwrap();
+                assert_eq!(
+                    REGION_WORK_COUNTS.with(Cell::get),
+                    RegionWorkCounts::default(),
+                    "{edit}"
+                );
+                assert!(!engine.interactive_pending.get());
+                assert_region_state_matches_cold(&engine, &request, edit);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_open_layouts_consume_the_trigger() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for layout in ["plain", "regions", "sliced"] {
+            let engine = paragraphs_engine(9387, 3);
+            match layout {
+                "plain" => assert!(engine.layout_document_json("{").is_err()),
+                "regions" => assert!(engine.layout_document_with_regions_retained("{").is_err()),
+                "sliced" => assert!(engine.begin_region_layout("{").is_err()),
+                _ => unreachable!(),
+            }
+            assert_eq!(engine.relayout_trigger.get(), RelayoutTrigger::Interactive);
+            assert!(!engine.interactive_pending.get());
+            let request = small_page_request(font);
+            REGION_WORK_COUNTS.with(|counts| counts.set(RegionWorkCounts::default()));
+            engine
+                .layout_document_with_regions_retained(&request)
+                .unwrap();
+            assert_eq!(
+                REGION_WORK_COUNTS.with(Cell::get),
+                RegionWorkCounts::default()
+            );
+        }
+    }
+
+    #[test]
+    fn host_update_maintenance_stays_bulk_and_remote_updates_stay_interactive() {
+        use yrs::{Assoc, IndexedSequence, Map, MapRef, ReadTxn};
+
+        for host in [false, true] {
+            let engine = EngineSession::new(9388);
+            let doc = engine.doc();
+            let paragraph = doc
+                .create_story("body", "first second", "Normal", "left")
+                .unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    crate::RawOp::InsertEmbed {
+                        index: 5,
+                        kind: "field".into(),
+                        payload: vec![
+                            ("modelKind".into(), Any::from("commentReference")),
+                            ("commentId".into(), Any::from(1.0)),
+                        ],
+                        attrs: Attrs::new(),
+                    },
+                    crate::RawOp::SetComment {
+                        id: "1".into(),
+                        ranges: vec![(0, 5)],
+                        author: "Ada".into(),
+                        date: "".into(),
+                        body: Any::Null,
+                    },
+                ],
+                &crate::EditCtx::local("", ""),
+            )
+            .unwrap();
+            let peer = EditingDoc::new(9389);
+            peer.apply_update_v1(&doc.encode_state_as_update_v1())
+                .unwrap();
+            peer.create_story_with_paragraph_id(
+                "header",
+                &paragraph,
+                "duplicate",
+                "Normal",
+                "left",
+            )
+            .unwrap();
+            {
+                let mut txn = peer.yrs_doc().transact_mut_with(peer.client_id());
+                let story = crate::story_ref(&txn, "body").unwrap();
+                let start = story.sticky_index(&txn, 0, Assoc::After).unwrap();
+                let end = story.sticky_index(&txn, 3, Assoc::Before).unwrap();
+                let comment = txn
+                    .get_map(crate::COMMENTS)
+                    .unwrap()
+                    .get(&txn, "1")
+                    .unwrap()
+                    .cast::<MapRef>()
+                    .unwrap();
+                comment.insert(
+                    &mut txn,
+                    "anchors",
+                    Any::Array(Arc::from([crate::anchor_value("body", &start, &end)])),
+                );
+            }
+            engine.consume_relayout_trigger();
+            let origins = Rc::new(RefCell::new(Vec::new()));
+            let observed = Rc::clone(&origins);
+            let _subscription = doc
+                .yrs_doc()
+                .observe_after_transaction(move |txn| {
+                    if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                        observed.borrow_mut().push(txn.origin().cloned());
+                    }
+                })
+                .unwrap();
+            let update = peer.encode_state_as_update_v1();
+            if host {
+                doc.apply_host_update_v1(&update).unwrap();
+            } else {
+                doc.apply_update_v1(&update).unwrap();
+            }
+            assert_eq!(
+                engine.relayout_trigger.get(),
+                if host {
+                    RelayoutTrigger::Bulk
+                } else {
+                    RelayoutTrigger::Interactive
+                }
+            );
+            assert_eq!(
+                origins
+                    .borrow()
+                    .iter()
+                    .filter(|origin| **origin == Some(yrs::Origin::from("system")))
+                    .count(),
+                2
+            );
+            assert_ne!(
+                doc.paragraphs("body").unwrap()[0].para_id,
+                doc.paragraphs("header").unwrap()[0].para_id
+            );
+            assert!(doc.story_segments("body").unwrap().iter().all(|segment| {
+                !matches!(&segment.content, crate::SegmentContent::OtherEmbed { payload, .. }
+                    if payload.get("modelKind") == Some(&Any::from("commentReference")))
+            }));
+            assert_eq!(
+                doc.host_edit_depth
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn undo_of_a_bulk_batch_is_interactive() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, mut request) = interactive_note_sections_engine(font);
+        let undo = crate::UndoSession::new();
+        let paragraph = &engine.doc().paragraphs("body").unwrap()[0].para_id;
+        let batch: crate::EditRequest = serde_json::from_value(json!({
+            "expectVersion": engine.doc().version(), "history": "separate",
+            "steps": [{"op": "insertText", "at": "start", "text": "bulk", "target": {
+                "kind": "paragraph", "story": "body", "paraId": paragraph
+            }}]
+        }))
+        .unwrap();
+        assert!(
+            engine
+                .doc()
+                .apply_edits(&batch, &undo)
+                .unwrap()
+                .unwrap()
+                .applied
+        );
+        assert_eq!(engine.relayout_trigger.get(), RelayoutTrigger::Bulk);
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        assert!(undo.undo());
+        assert_interactive_note_layout(&engine, &request, "bulk undo", false);
+        assert_note_preview_toggle(&engine, &mut request, "accepted");
     }
 
     #[test]
@@ -10041,6 +10514,7 @@ mod tests {
             let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
             let engine = EngineSession::new(9665);
             crate::seed_from_docx(engine.doc(), &retained_identity_fixture()).unwrap();
+            engine.set_relayout_trigger(RelayoutTrigger::Open);
             let request = small_page_request(font);
             engine.set_relayout_trigger(RelayoutTrigger::Preview);
             let full = engine
@@ -10253,6 +10727,7 @@ mod tests {
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
         let engine = EngineSession::new(9666);
         crate::seed_from_docx(engine.doc(), &retained_identity_fixture()).unwrap();
+        engine.set_relayout_trigger(RelayoutTrigger::Open);
         let mut request: serde_json::Value =
             serde_json::from_str(&small_page_request(font)).unwrap();
         engine.set_relayout_trigger(RelayoutTrigger::Preview);
@@ -11344,6 +11819,7 @@ mod tests {
                 cursor += 1;
             }
         }
+        engine.set_relayout_trigger(RelayoutTrigger::Open);
         engine
     }
 
@@ -18413,6 +18889,7 @@ mod tests {
     fn preview_seeded(bytes: &[u8]) -> EngineSession {
         let engine = EngineSession::new(75210);
         crate::seed_from_docx(engine.doc(), bytes).unwrap();
+        engine.set_relayout_trigger(RelayoutTrigger::Open);
         let primer = RenderEnv {
             show_hidden_text: true,
             ..RenderEnv::default()
@@ -18996,6 +19473,7 @@ mod tests {
                     .unwrap();
             }
         }
+        engine.set_relayout_trigger(RelayoutTrigger::Open);
         engine
     }
 

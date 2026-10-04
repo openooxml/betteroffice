@@ -76,10 +76,10 @@ pub(crate) fn version_token(nonce: u64, epoch: u64) -> DocumentVersion {
     DocumentVersion(format!("{nonce:016x}-{epoch}"))
 }
 
-struct HostEditGuard<'a>(&'a AtomicU32);
+pub(crate) struct HostEditGuard<'a>(&'a AtomicU32);
 
 impl<'a> HostEditGuard<'a> {
-    fn new(depth: &'a AtomicU32) -> Self {
+    pub(crate) fn new(depth: &'a AtomicU32) -> Self {
         depth.fetch_add(1, Ordering::Relaxed);
         Self(depth)
     }
