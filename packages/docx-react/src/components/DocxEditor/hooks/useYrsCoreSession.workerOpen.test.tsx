@@ -721,7 +721,7 @@ function workerLoadRecorder(load?: () => Promise<void>) {
     },
     commands: [{
       id: 'ready', label: 'Ready', mutatesDocument: false,
-      execute: () => ({ ok: true }),
+      execute: () => ({ ok: true, status: 'executed' }),
     }],
   });
   return {
