@@ -25,6 +25,7 @@ export class YrsStorySegmentCache {
   private readonly stale = new Map<string, CachedStory>();
   private readonly units = new Map<string, { segments: YrsStorySegment[]; stories: number }>();
   private readonly undigested = new Set<string>();
+  private readonly warming = new Map<string, CachedStory | null>();
   private cancelIdle: (() => void) | null = null;
   private digestExpiresAt: number | null = null;
   private released = false;
@@ -60,7 +61,10 @@ export class YrsStorySegmentCache {
     if (!this.stale.get(story)?.digests) {
       const segments = this.session.storySegments(story);
       this.store(story, null, [segments]);
-      if (splitUnits(segments).length > 1) this.undigested.add(story);
+      if (splitUnits(segments).length > 1) {
+        this.undigested.add(story);
+        if (this.warming.has(story)) this.warming.set(story, this.stories.get(story)!);
+      }
       return segments;
     }
     const digests = this.session.storySegmentUnitDigests(story);
@@ -76,22 +80,22 @@ export class YrsStorySegmentCache {
   /** Fetches the digests of stories read whole once the main thread is idle. */
   scheduleDigests(): void {
     if (this.released || this.cancelIdle || this.undigested.size === 0) return;
-    this.digestExpiresAt ??= performance.now() + DIGEST_FALLBACK_MS;
+    this.digestExpiresAt ??=
+      performance.now() + (typeof requestIdleCallback === 'function' ? DIGEST_FALLBACK_MS : 0);
     const run = (deadline?: IdleDeadline) => {
       this.cancelIdle = null;
       try {
         this.completeDigests(deadline ?? {
-          didTimeout: false,
-          timeRemaining: () => IDLE_SLICE_MS,
+          didTimeout: true,
+          timeRemaining: () => 0,
         });
         if (this.undigested.size > 0) this.scheduleDigests();
         else this.digestExpiresAt = null;
       } catch {
-        this.digestExpiresAt = null;
         // A session destroyed meanwhile has nothing left to digest.
       }
     };
-    this.cancelIdle = scheduleIdleWork(run, this.digestExpiresAt).cancel;
+    this.cancelIdle = scheduleIdleWork(run, this.digestExpiresAt, 0).cancel;
   }
 
   /** Whether {@link YrsStorySegmentCache.dispose} ran; a disposed cache holds nothing. */
@@ -108,16 +112,33 @@ export class YrsStorySegmentCache {
     this.stale.clear();
     this.units.clear();
     this.undigested.clear();
+    this.warming.clear();
   }
 
-  /** Reads the digests of stories read whole that have not changed since. */
+  /** Warms pending stories, re-reading those edited after a yield. */
   completeDigests(deadline?: IdleDeadline): void {
+    if (this.released) return;
     const start = performance.now();
     const { stories: changed } = this.session.storiesChangedSince(this.revision);
     const changedSince = new Set(changed);
+    if (this.warming.size === 0) {
+      for (const story of this.undigested) {
+        const cached = this.stories.get(story);
+        this.warming.set(story, cached && !changedSince.has(story) ? cached : null);
+      }
+    }
     for (const story of this.undigested) {
-      const cached = this.stories.get(story);
-      if (cached && !cached.digests && !changedSince.has(story)) {
+      let cached = this.stories.get(story);
+      if (!this.warming.has(story)) {
+        this.warming.set(story, cached && !changedSince.has(story) ? cached : null);
+      }
+      const warming = this.warming.get(story);
+      if (warming && !cached?.digests && (cached !== warming || changedSince.has(story))) {
+        this.refresh();
+        this.store(story, null, [this.session.storySegments(story)]);
+        cached = this.stories.get(story);
+      }
+      if (warming && cached && !cached.digests) {
         const digests = this.session.storySegmentUnitDigests(story);
         const units = splitUnits(cached.segments);
         if (digests.length === units.length) {
@@ -126,11 +147,10 @@ export class YrsStorySegmentCache {
         }
       }
       this.undigested.delete(story);
-      const now = performance.now();
+      this.warming.delete(story);
       if (
         deadline &&
-        (this.digestExpiresAt === null || now < this.digestExpiresAt) &&
-        (now - start >= IDLE_SLICE_MS ||
+        (performance.now() - start >= IDLE_SLICE_MS ||
           (deadline.timeRemaining() <= 1 && !deadline.didTimeout))
       ) {
         break;

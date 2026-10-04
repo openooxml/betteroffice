@@ -6,31 +6,31 @@ export type PageBuildTask = { cancel(): void };
 export function scheduleIdleWork(
   run: (deadline?: IdleDeadline) => void,
   expiresAt: number,
-  delay = 0
+  fallbackDelay?: number
 ): PageBuildTask {
-  let idle: number | undefined;
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  let pending = true;
-  const cancel = () => {
-    pending = false;
-    if (idle !== undefined) cancelIdleCallback(idle);
-    clearTimeout(timeout);
-    clearTimeout(timer);
-  };
-  const invoke = (deadline?: IdleDeadline) => {
-    if (!pending) return;
-    cancel();
-    run(deadline);
-  };
   const remaining = Math.max(0, expiresAt - performance.now());
+  let idleId: number | null = null;
+  let cancelled = false;
+  const cancel = () => {
+    cancelled = true;
+    clearTimeout(timer);
+    if (idleId !== null) {
+      cancelIdleCallback(idleId);
+      idleId = null;
+    }
+  };
+  const finish = (deadline?: IdleDeadline) => {
+    if (cancelled) return;
+    cancel();
+    run(performance.now() >= expiresAt ? undefined : deadline);
+  };
+  const hasIdle = typeof requestIdleCallback === 'function';
   const timer = setTimeout(
-    () => invoke({ didTimeout: true, timeRemaining: () => 0 }),
-    remaining
+    () => finish(),
+    hasIdle ? remaining : Math.min(fallbackDelay ?? remaining, remaining)
   );
-  if (typeof requestIdleCallback === 'function') {
-    idle = requestIdleCallback(invoke, { timeout: remaining });
-  } else {
-    timeout = setTimeout(() => invoke(), Math.min(delay, remaining));
+  if (hasIdle && remaining > 0) {
+    idleId = requestIdleCallback(finish, { timeout: remaining });
   }
   return { cancel };
 }

@@ -743,25 +743,20 @@ test('first fallbacks cap each idle slice at eight milliseconds and keep FIFO or
   }
 });
 
-for (const { name, noIdle, duringPage, idleDeadline, dispose } of [
-  { name: 'busy fallback continuations finish at the original deadline', noIdle: false },
-  { name: 'fallback expiry during a page finishes the overdue queue', duringPage: true },
-  { name: 'the idle deadline can expire during a page', idleDeadline: true },
-  { name: 'timers continue fallbacks without requestIdleCallback', noIdle: true },
-  { name: 'unmount cancels a rescheduled fallback', dispose: true },
-  { name: 'unmount cancels a rescheduled fallback without idle callbacks', noIdle: true, dispose: true },
-]) {
-  test(name, () => {
+for (const scenario of ['busy', 'no idle', 'dispose', 'dispose no idle', 'expiry during page']) {
+  test(`fallback continuation: ${scenario}`, () => {
+    const noIdle = scenario.includes('no idle');
+    if (noIdle) globalThis.requestIdleCallback = undefined as unknown as typeof requestIdleCallback;
+    const timers = new Map<number, { at: number; run: () => void }>();
+    let next = 0;
     let now = 0;
     let hosts: Element[] = [];
-    const built = () => hosts.filter((host) => host.firstChild !== null).length;
-    const cost = idleDeadline ? 2 : 8;
-    const clock = spyOn(performance, 'now').mockImplementation(() => now + built() * cost);
-    const timers = new Map<number, { at: number; run: () => void }>();
-    let nextTimer = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(
+      () => now + (hosts[0]?.firstChild ? 8 : 0)
+    );
     const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
       ((run: () => void, delay = 0) => {
-        const id = ++nextTimer;
+        const id = ++next;
         timers.set(id, { at: performance.now() + delay, run });
         return id;
       }) as unknown as typeof setTimeout
@@ -769,54 +764,61 @@ for (const { name, noIdle, duringPage, idleDeadline, dispose } of [
     const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
       timers.delete(id as unknown as number);
     });
-    if (noIdle) globalThis.requestIdleCallback = undefined as unknown as typeof requestIdleCallback;
-    const flushTimers = (at: number) => {
-      now = at - built() * cost;
-      for (const [id, timer] of [...timers].sort((a, b) => a[1].at - b[1].at)) {
-        if (timer.at > performance.now() || !timers.delete(id)) continue;
-        timer.run();
-      }
+    const flushTimer = () => {
+      expect(timers.size).toBe(1);
+      const [id, timer] = timers.entries().next().value!;
+      expect(timer.at).toBeLessThanOrEqual(performance.now());
+      timers.delete(id);
+      act(() => timer.run());
     };
-    const pages = blankPages(3);
-    const { container, unmount } = render(
-      <>{pages.map((page) => (
-        <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
-      ))}</>
-    );
-    hosts = Array.from(container.querySelectorAll('.canvas-page-mirror'));
+    const built = () => hosts.map((host) => host.textContent);
+    let unmount: (() => void) | undefined;
     try {
-      if (noIdle) act(() => flushTimers(50));
-      else {
-        now = duringPage ? 4999 : 4990;
-        act(() => flushIdle({
-          didTimeout: false,
-          timeRemaining: () => idleDeadline && built() > 0 ? 0 : 40,
-        }));
+      const pages = blankPages(3, (index) => [{
+        kind: 'text', x: 10, y: 10, font: '11px sans-serif', color: '#000', text: `Page ${index}`,
+      }]);
+      const rendered = render(
+        <>{pages.map((page) => (
+          <CanvasPageMirror key={page.pageIndex} page={page} active={false} />
+        ))}</>
+      );
+      unmount = rendered.unmount;
+      hosts = Array.from(rendered.container.querySelectorAll('.canvas-page-mirror'));
+      if (noIdle) {
+        now = 50;
+        flushTimer();
+      } else {
+        now = scenario === 'expiry during page' ? 4999 : 4990;
+        act(() => flushIdle({ didTimeout: false, timeRemaining: () => 40 }));
       }
-      if (duringPage) expect(built()).toBe(3);
-      else {
-        expect(built()).toBe(1);
-        expect([...timers.values()].some(({ at }) => at === 5000)).toBe(true);
-        if (!noIdle) {
-          expect([...idleWork.values()].map(({ timeout }) => timeout)).toEqual([idleDeadline ? 8 : 2]);
+      expect(built()).toEqual(['Page 0', '', '']);
+      const expiresAt = noIdle ? 50 : 5000;
+      expect([...timers.values()].map(({ at }) => at)).toEqual([
+        Math.max(expiresAt, performance.now()),
+      ]);
+      if (scenario.startsWith('dispose')) {
+        unmount();
+        unmount = undefined;
+        expect(timers.size).toBe(0);
+        expect(idleWork.size).toBe(0);
+      } else {
+        if (!noIdle && scenario !== 'expiry during page') {
+          now = 4991;
+          expect([...timers.values()].every(({ at }) => at > performance.now())).toBe(true);
+          now = 4992;
         }
-        if (dispose) {
-          unmount();
-          expect(timers.size).toBe(0);
-          expect(idleWork.size).toBe(0);
-        } else {
-          if (!noIdle) {
-            act(() => flushTimers(4999));
-            expect(built()).toBe(1);
-          }
-          act(() => flushTimers(5000));
-          expect(built()).toBe(3);
-        }
+        const held = Array.from(idleWork.values(), ({ callback }) => callback);
+        flushTimer();
+        expect(built()).toEqual(['Page 0', 'Page 1', '']);
+        flushTimer();
+        act(() => held.forEach((run) => run({ didTimeout: true, timeRemaining: () => 0 })));
+        expect(built()).toEqual(['Page 0', 'Page 1', 'Page 2']);
+        expect(performance.now()).toBe(noIdle ? 58 : scenario === 'expiry during page' ? 5007 : 5000);
+        expect(timers.size).toBe(0);
+        expect(idleWork.size).toBe(0);
       }
-      expect(idleWork.size).toBe(0);
-      expect(timers.size).toBe(0);
     } finally {
-      unmount();
+      unmount?.();
       timeout.mockRestore();
       clear.mockRestore();
       clock.mockRestore();
@@ -843,42 +845,72 @@ test('unmounting an inactive page cancels its queued first fallback', async () =
   expect(idleWork.size).toBe(0);
 });
 
-test('capped fallbacks A and B complete before later deferred chrome D', () => {
-  const pages = blankPages(3);
-  const { container, unmount } = render(
+test('deferred full chrome keeps its own idle schedule alongside queued fallbacks', async () => {
+  const pages = blankPages(2);
+  const { container } = render(
     <>
       <CanvasPageMirror page={pages[0]!} active={false} />
-      <CanvasPageMirror page={pages[1]!} active={false} />
-      <CanvasPageMirror page={pages[2]!} defer />
+      <CanvasPageMirror page={pages[1]!} defer />
     </>
   );
-  const hosts = Array.from(container.querySelectorAll('.canvas-page-mirror'));
-  const clock = spyOn(performance, 'now').mockImplementation(
-    () => hosts[0]!.firstChild ? 8 : 0
+  const [fallback, chrome] = Array.from(idleWork.values());
+  expect(fallback!.timeout).toBeGreaterThan(0);
+  expect(fallback!.timeout).toBeLessThanOrEqual(5000);
+  expect(chrome!.timeout).toBe(1500);
+  await idle();
+  const mirrors = container.querySelectorAll<HTMLElement>('.layout-page-mirror');
+  expect(mirrors).toHaveLength(2);
+  expect(mirrors[0]!.style.contentVisibility).toBe('auto');
+  expect(mirrors[1]!.style.contentVisibility).not.toBe('auto');
+});
+
+test('deferred chrome keeps independent 150 ms timers without requestIdleCallback', () => {
+  globalThis.requestIdleCallback = undefined as unknown as typeof requestIdleCallback;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  let next = 0;
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  const timeout = spyOn(globalThis, 'setTimeout').mockImplementation(
+    ((run: () => void, delay = 0) => {
+      const id = ++next;
+      timers.set(id, { at: now + delay, run });
+      return id;
+    }) as unknown as typeof setTimeout
   );
-  const observer = new MutationObserver(() => {});
-  observer.observe(container, { childList: true, subtree: true });
-  const completed: number[] = [];
+  const clear = spyOn(globalThis, 'clearTimeout').mockImplementation((id) => {
+    timers.delete(id as unknown as number);
+  });
+  let unmount: (() => void) | undefined;
   try {
-    for (const expected of [[0], [0, 1, 2]]) {
-      expect(idleWork.size).toBe(1);
+    const pages = blankPages(3);
+    const rendered = render(
+      <>
+        <CanvasPageMirror page={pages[0]!} active={false} />
+        <CanvasPageMirror page={pages[1]!} defer />
+        <CanvasPageMirror page={pages[2]!} defer />
+      </>
+    );
+    unmount = rendered.unmount;
+    const mirrors = () => rendered.container.querySelectorAll<HTMLElement>('.layout-page-mirror');
+    expect([...timers.values()].map(({ at }) => at)).toEqual([50, 150, 150]);
+    for (const at of [50, 150]) {
+      now = at;
       act(() => {
-        flushIdle({ didTimeout: false, timeRemaining: () => 40 });
-        completed.push(
-          ...observer.takeRecords().map(({ target }) => hosts.indexOf(target as Element))
-        );
+        for (const [id, timer] of [...timers]) {
+          if (timer.at > now || !timers.delete(id)) continue;
+          timer.run();
+        }
       });
-      expect(completed).toEqual(expected);
+      expect(mirrors()).toHaveLength(at === 50 ? 1 : 3);
     }
-    expect(idleWork.size).toBe(0);
-    const mirrors = container.querySelectorAll<HTMLElement>('.layout-page-mirror');
-    expect(mirrors).toHaveLength(3);
-    expect(mirrors[0]!.style.contentVisibility).toBe('auto');
-    expect(mirrors[1]!.style.contentVisibility).toBe('auto');
-    expect(mirrors[2]!.style.contentVisibility).not.toBe('auto');
+    expect(mirrors()[0]!.style.contentVisibility).toBe('auto');
+    expect(mirrors()[1]!.style.contentVisibility).not.toBe('auto');
+    expect(mirrors()[2]!.style.contentVisibility).not.toBe('auto');
+    expect(timers.size).toBe(0);
   } finally {
-    observer.disconnect();
-    unmount();
+    unmount?.();
+    timeout.mockRestore();
+    clear.mockRestore();
     clock.mockRestore();
   }
 });
