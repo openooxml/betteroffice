@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
 import {
-  createSessionClient, createSessionHost, SessionFailure, type SessionTransport,
+  createSessionClient, createSessionHost, SessionFailure, type MethodPolicy, type SessionTransport,
 } from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import type { PptxEditRequest, PptxReadResult } from '../edits';
@@ -58,7 +58,8 @@ describe('presentation sessions', () => {
       lane: 'input', mutates: true, userInput: true,
     });
     for (const policy of Object.values(PRESENTATION_SESSION_POLICIES)) {
-      expect(policy.reorderable).not.toBe(true);
+      expect(typeof policy).toBe('object');
+      expect((policy as MethodPolicy).reorderable).not.toBe(true);
     }
   });
 
