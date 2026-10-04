@@ -22,7 +22,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplica, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
 import { registerWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
-import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { registeredWorkerProposalAuthority, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { useCanvasRenderer, type OpenInWorker, type WorkerOpenedDocument } from './useDisplayList';
 import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -68,7 +68,7 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function workerOpened(viewer = true) {
+async function workerOpened(viewer = true, workerProposals = false) {
   let client!: ResidentEngineWorkerClient;
   const open = ResidentEngineWorkerClient.prototype.open;
   const capture = spyOn(ResidentEngineWorkerClient.prototype, 'open').mockImplementation(function (
@@ -90,6 +90,7 @@ async function workerOpened(viewer = true) {
       return workerDocument.current;
     }, [renderer.openInWorker]);
     const [host, setHost] = useState<YrsDocxHost | null>(null);
+    const [renderedFrame, setRenderedFrame] = useState<object | null>(null);
     const core = useYrsCoreSession(true, host?.document ?? null, null, bytes, generation, undefined, {
       onSession: (session) => {
         renderer.recordSession(session);
@@ -104,8 +105,9 @@ async function workerOpened(viewer = true) {
     }, {
       workerOpen: {
         openInWorker,
-        renderedFrame: null,
-        hydrateOnDemand: viewer,
+        renderedFrame,
+        workerProposals,
+        hydrateOnDemand: viewer || workerProposals,
       },
     });
     const pagedEditorRef = useRef<PagedEditorRef | null>(null);
@@ -197,7 +199,7 @@ async function workerOpened(viewer = true) {
         onSearchChange: () => () => {},
       },
     });
-    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument };
+    return { core, io, pagedEditorRef, ref, host, setHost, controller, workerDocument, setRenderedFrame };
   }, { initialProps: 1 });
   try {
     await waitFor(() => expect(hook.result.current.core.session).not.toBeNull());
@@ -295,6 +297,54 @@ test('an editor with an unloaded peer saves without hydrating', async () => {
   expect(opened.flush).not.toHaveBeenCalled();
   expect(opened.project).not.toHaveBeenCalled();
   expect(opened.errors).toEqual([]);
+});
+
+test('a save without the editing copy clears the editor\'s save marks for the next editor save', async () => {
+  const opened = await workerOpened(false, true);
+  await layOut(opened);
+  act(() => opened.hook.result.current.setRenderedFrame({}));
+  await waitFor(() => expect(opened.hook.result.current.core.workerProposalsReady).toBe(true));
+  const authority = registeredWorkerProposalAuthority(opened.session)!;
+  const identities = await authority.paragraphIdentities(async () => {
+    throw new Error('Unexpected main paragraph identities');
+  });
+  const story = 'hf:rIdHeader1';
+  const paragraph = identities.paragraphs.find((identity) => identity.session?.story === story)!.session!;
+  expect(paragraph.story).not.toBe('body');
+  await act(async () => {
+    expect(await authority.propose({
+      expectVersion: opened.session.version(),
+      proposals: [{
+        id: 'header-proposal', paragraph,
+        suggest: { author: 'Host', date: '2026-09-29T12:00:00Z' },
+        op: 'insertText', at: 'start', text: 'Worker header ',
+      }],
+    }, async () => {
+      throw new Error('Unexpected main proposal');
+    })).toMatchObject({
+      ok: true,
+      snapshot: { proposals: [{ changed: true, paragraph: { story } }] },
+    });
+  });
+  const save = spyOn(opened.hook.result.current.workerDocument.current!, 'save');
+  try {
+    expect(workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
+    expect(save.mock.calls).toHaveLength(1);
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('stories');
+    expect(save.mock.calls[0]![1]).toBeUndefined();
+    expect(workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(opened.flush).not.toHaveBeenCalled();
+    await act(async () => { await requestWorkerOpenReplica(opened.session); });
+    expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
+    expect(save.mock.calls).toHaveLength(2);
+    expect(save.mock.calls[1]![0].stories).toEqual([]);
+    expect(save.mock.calls[1]![1]).toBe(opened.session);
+    expect(opened.project).not.toHaveBeenCalled();
+    expect(opened.errors).toEqual([]);
+  } finally {
+    save.mockRestore();
+  }
 });
 
 test('an editor flushes its loaded peer and posts its diff immediately before save', async () => {
