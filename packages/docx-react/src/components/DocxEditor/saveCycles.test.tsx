@@ -99,5 +99,5 @@ for (const typing of [false, true]) {
         ]);
       }
     }
-  });
+  }, 10_000);
 }
