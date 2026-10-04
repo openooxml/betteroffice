@@ -1022,7 +1022,10 @@ impl PaginationState {
             .enumerate()
             .filter_map(|(index, measured)| {
                 measured.block.block_id().map(|id| {
-                    (serde_json::to_string(id).expect("block ids serialize"), index)
+                    (
+                        serde_json::to_string(id).expect("block ids serialize"),
+                        index,
+                    )
                 })
             })
             .collect();
@@ -1650,7 +1653,8 @@ fn paragraph_positions_changed(previous: &LayoutBlock, next: &LayoutBlock) -> bo
                     previous.fmt.modern_effects != next.fmt.modern_effects
                 }
                 (Run::Image(_), Run::Image(_)) => {
-                    crate::fingerprint::fingerprint_with_positions(previous).expect("runs serialize")
+                    crate::fingerprint::fingerprint_with_positions(previous)
+                        .expect("runs serialize")
                         != crate::fingerprint::fingerprint_with_positions(next)
                             .expect("runs serialize")
                 }
@@ -1682,10 +1686,12 @@ fn swap_transferred_measures(
         .iter()
         .enumerate()
         .filter_map(|(index, measured)| {
-            measured
-                .block
-                .block_id()
-                .map(|id| (serde_json::to_string(id).expect("block ids serialize"), index))
+            measured.block.block_id().map(|id| {
+                (
+                    serde_json::to_string(id).expect("block ids serialize"),
+                    index,
+                )
+            })
         })
         .collect();
     let mut moved = Vec::new();
@@ -3172,7 +3178,10 @@ impl EngineSession {
         let fonts = docx_layout::measure_fonts_generation();
         if revision_preview_key != self.pagination.borrow().revision_preview_key
             || self.regions.borrow().as_ref().is_some_and(|state| {
-                state.fast_path.as_ref().is_some_and(|fast| fast.fonts != fonts)
+                state
+                    .fast_path
+                    .as_ref()
+                    .is_some_and(|fast| fast.fonts != fonts)
             })
         {
             self.pagination.borrow_mut().materialize_resolved_lines();
@@ -3637,9 +3646,8 @@ impl EngineSession {
         // baked into the retained headers/footers payload. With one section,
         // an unchanged page count implies unchanged labels.
         let single_section = self.lays_out_as_one_section(&regions, body_section_breaks);
-        let defer_resolved_lines = unique_block_ids(
-            &pagination.input.as_ref().expect("retained input").measured,
-        );
+        let defer_resolved_lines =
+            unique_block_ids(&pagination.input.as_ref().expect("retained input").measured);
         drop(pagination);
         let regional = match (
             resident_body && single_section && !provisional,
@@ -4290,21 +4298,20 @@ impl EngineSession {
                     previous.input.as_ref().expect("eligibility checked input"),
                     &input,
                 );
-                let attempted =
-                    docx_layout::place::layout_document_incremental_ranges_with_options(
-                        &mut input,
-                        previous
-                            .layout
-                            .as_mut()
-                            .expect("eligibility checked layout"),
-                        &previous.checkpoints,
-                        &previous.block_fingerprints,
-                        &block_fingerprints,
-                        dirty_index,
-                        docx_layout::place::IncrementalPlacementOptions {
-                            defer_resolved_lines,
-                        },
-                    );
+                let attempted = docx_layout::place::layout_document_incremental_ranges_with_options(
+                    &mut input,
+                    previous
+                        .layout
+                        .as_mut()
+                        .expect("eligibility checked layout"),
+                    &previous.checkpoints,
+                    &previous.block_fingerprints,
+                    &block_fingerprints,
+                    dirty_index,
+                    docx_layout::place::IncrementalPlacementOptions {
+                        defer_resolved_lines,
+                    },
+                );
                 match attempted {
                     Ok(mut run) => {
                         if previous.materialize_changed_prefix(
@@ -4551,10 +4558,7 @@ impl EngineSession {
             .resident_reused_blocks
             .wrapping_add(resident_reused_blocks);
         Ok(ResidentLayoutInput {
-            input: LayoutInput {
-                measured,
-                options,
-            },
+            input: LayoutInput { measured, options },
             block_fingerprints,
             font_dependencies,
             lowering: None,
@@ -4761,7 +4765,11 @@ impl EngineSession {
                     .find(|&index| docx_layout::measure_blocks::resets_float_flow(&blocks[index]))
                     .unwrap_or(blocks.len());
                 if float_dirty[start..end].contains(&true) {
-                    if pagination.layout.as_ref().is_some_and(has_pending_resolved_lines) {
+                    if pagination
+                        .layout
+                        .as_ref()
+                        .is_some_and(has_pending_resolved_lines)
+                    {
                         let moved =
                             swap_transferred_measures(&mut previous.measured, &mut measured);
                         let materialized = docx_layout::place::materialize_resolved_lines(
@@ -7603,7 +7611,10 @@ mod tests {
                     "seed {seed}, step {step}"
                 );
             }
-            assert!(reused_steps > 40, "seed {seed}: {reused_steps} reused steps");
+            assert!(
+                reused_steps > 40,
+                "seed {seed}: {reused_steps} reused steps"
+            );
             assert!(repeated_steps >= 40);
             engine.pagination.borrow_mut().materialize_resolved_lines();
             let stats = engine.stats();
@@ -7627,7 +7638,9 @@ mod tests {
             let frame = engine.build_display_list_frame("{}", 0).unwrap();
             crate::frame_delta::apply_placeholder_test_frame(&frame, &mut retained);
             for paragraph in [30, 8, 8] {
-                let para_id = engine.doc().paragraphs("body").unwrap()[paragraph].para_id.clone();
+                let para_id = engine.doc().paragraphs("body").unwrap()[paragraph]
+                    .para_id
+                    .clone();
                 let (start, _) = engine
                     .doc()
                     .paragraph_index("body")
@@ -7681,7 +7694,9 @@ mod tests {
         engine.layout_document_with_regions_json(&request).unwrap();
         engine.build_display_list_frame("{}", 0).unwrap();
         for paragraph in [0, 20, 8, 30] {
-            let para_id = engine.doc().paragraphs("body").unwrap()[paragraph].para_id.clone();
+            let para_id = engine.doc().paragraphs("body").unwrap()[paragraph]
+                .para_id
+                .clone();
             let (start, _) = engine
                 .doc()
                 .paragraph_index("body")
@@ -7774,14 +7789,15 @@ mod tests {
                 panic!("text expected");
             };
             run.text.replace_range(1..2, "e");
-            let blocks: Vec<_> = input.measured.into_iter().map(|entry| entry.block).collect();
+            let blocks: Vec<_> = input
+                .measured
+                .into_iter()
+                .map(|entry| entry.block)
+                .collect();
             let resident = engine
-                .resident_layout_input_from_blocks(
-                    &blocks,
-                    true,
-                    take,
-                    &mut |index, _, _, _| Ok(extents[index].clone()),
-                )
+                .resident_layout_input_from_blocks(&blocks, true, take, &mut |index, _, _, _| {
+                    Ok(extents[index].clone())
+                })
                 .unwrap();
             let before = engine.stats();
             assert_eq!(before.pagination_resolved_fragments_materialized, 0);
@@ -7892,14 +7908,15 @@ mod tests {
                 panic!("text expected");
             };
             run.text = "y".to_owned();
-            let blocks: Vec<_> = input.measured.into_iter().map(|entry| entry.block).collect();
+            let blocks: Vec<_> = input
+                .measured
+                .into_iter()
+                .map(|entry| entry.block)
+                .collect();
             let resident = engine
-                .resident_layout_input_from_blocks(
-                    &blocks,
-                    true,
-                    take,
-                    &mut |index, _, _, _| Ok(extents[index].clone()),
-                )
+                .resident_layout_input_from_blocks(&blocks, true, take, &mut |index, _, _, _| {
+                    Ok(extents[index].clone())
+                })
                 .unwrap();
             assert_eq!(resident.block_fingerprints[..10], fingerprints[..10]);
             assert_ne!(resident.block_fingerprints[10], fingerprints[10]);
@@ -7952,7 +7969,11 @@ mod tests {
             )
         };
         docx_layout::place::materialize_resolved_lines(&mut expected, &input.measured);
-        let blocks: Vec<_> = input.measured.into_iter().map(|entry| entry.block).collect();
+        let blocks: Vec<_> = input
+            .measured
+            .into_iter()
+            .map(|entry| entry.block)
+            .collect();
         let mut resident = engine
             .resident_layout_input_from_blocks(&blocks, true, true, &mut |_, _, _, _| {
                 panic!("unchanged blocks reuse their extents");

@@ -1150,9 +1150,7 @@ fn refresh_reused_page_ranges(
     let blocks = measured_blocks_by_id(measured);
     ranges
         .iter()
-        .map(|range| {
-            refresh_reused_pages(&mut pages[range.clone()], &blocks, defer_resolved_lines)
-        })
+        .map(|range| refresh_reused_pages(&mut pages[range.clone()], &blocks, defer_resolved_lines))
         .sum()
 }
 
@@ -2666,9 +2664,7 @@ mod pagination_rule_tests {
             .iter()
             .flat_map(|page| &page.fragments)
             .filter_map(|fragment| match fragment {
-                Fragment::Paragraph(fragment) if fragment.resolved_lines_pending => {
-                    Some(fragment)
-                }
+                Fragment::Paragraph(fragment) if fragment.resolved_lines_pending => Some(fragment),
                 _ => None,
             })
             .collect();
