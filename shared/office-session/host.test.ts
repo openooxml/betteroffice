@@ -83,7 +83,7 @@ describe('session host and cloned transport', () => {
 
   it('rejects non-cloneable arguments without failing the session', async () => {
     const s = session();
-    const error = await s.client.call.echo(() => {}).catch((error: Error) => error);
+    const error = (await s.client.call.echo(() => {}).catch((error: unknown) => error)) as Error;
     expect(error).toBeInstanceOf(Error);
     expect(error.name).toBe('DataCloneError');
     expect(error.message.length).toBeGreaterThan(0);
