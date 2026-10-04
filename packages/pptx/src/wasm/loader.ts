@@ -9,6 +9,7 @@ import initWasmModule, {
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
+import { wasmAssetUrl } from './asset';
 import { StaleProposalError } from '../proposals';
 import { PptxExportError } from '../structuredExport';
 import type {
@@ -243,6 +244,19 @@ export interface PresentationHandle extends CollaborationReplica {
 let initialized = false;
 const displayListJsonReaders = new WeakMap<PresentationHandle, (slideIndex: number) => string>();
 
+type SessionMetadataDocument = PptxDocument & { sessionMetadataJson(): string };
+type PresentationMetadata = {
+  slides: { id: string; index: number; name: string | null; layoutPartPath: string | null }[];
+  size: { width: number; height: number };
+};
+const metadataReaders = new WeakMap<PresentationHandle, () => PresentationMetadata>();
+
+export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
+  const read = metadataReaders.get(handle);
+  if (!read) throw new Error('Presentation metadata is unavailable');
+  return read();
+}
+
 /** @experimental */
 export function presentationDisplayListJson(handle: PresentationHandle, slideIndex: number): string {
   const read = displayListJsonReaders.get(handle);
@@ -257,7 +271,7 @@ export function isProposalsAvailable(): boolean {
 let initialization: Promise<void> | undefined;
 
 export function initWasm(
-  input: WasmInitInput = new URL('./generated/pptx_wasm_bg.wasm', import.meta.url)
+  input: WasmInitInput = wasmAssetUrl()
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
@@ -862,6 +876,9 @@ export function openPresentation(
   };
   displayListJsonReaders.set(handle, (slideIndex) =>
     wasmCall(() => renderer.layoutSlideJson(doc, slideIndex))
+  );
+  metadataReaders.set(handle, () =>
+    jsonWasmCall(() => (doc as SessionMetadataDocument).sessionMetadataJson())
   );
   Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
     value: {

@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { useState } from 'react';
+import type { ComponentProps } from 'react';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
 import type {
@@ -19,13 +20,37 @@ import type {
   PptxPresenceCursor,
   SlideDisplayList,
 } from '@betteroffice/pptx';
-import type { PptxEditorApi } from './PptxEditor';
+import type { PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
 import { isMacPlatform, matchesChord } from './commands/descriptors';
 import * as presenceRendering from './presence-rendering';
 
 const mod = () => (isMacPlatform() ? { metaKey: true } : { ctrlKey: true });
+
+type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
+  (<T>() => T extends B ? 1 : 2) ? true : false;
+
+function assertType<T extends true>(_value?: T): void {}
+
+it('preserves editor props and contextual API types across overloads', () => {
+  assertType<Equal<Parameters<typeof PptxEditor>[0], PptxEditorProps>>();
+  assertType<Equal<PptxEditorProps, Parameters<typeof PptxEditor>[0]>>();
+  assertType<Equal<ComponentProps<typeof PptxEditor>, PptxEditorProps>>();
+  assertType<Equal<PptxEditorProps, ComponentProps<typeof PptxEditor>>>();
+  const check = (props: Partial<Parameters<typeof PptxEditor>[0]> = {}) => {
+    const opened: PptxEditorApi[] = [];
+    const editor = <PptxEditor fonts={[]} onReady={(api) => {
+      assertType<Equal<typeof api, PptxEditorApi>>();
+      opened.push(api);
+    }} {...props} />;
+    const viewer = <PptxEditor fonts={[]} readOnly experimentalWorkerOpen onReady={(api) => {
+      assertType<Equal<typeof api, PptxWorkerViewerApi>>();
+    }} />;
+    return { editor, viewer };
+  };
+  void check;
+});
 
 const root = resolve(import.meta.dir, '../../..');
 

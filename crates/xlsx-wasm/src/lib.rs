@@ -63,6 +63,26 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = openWithCalculationJson)]
+    pub fn open_with_calculation_json(
+        bytes: &[u8],
+        context: &str,
+    ) -> Result<XlsxDocument, JsValue> {
+        Session::open_with_calculation_json(bytes, context)
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
+            .map_err(|error| js_sys::TypeError::new(&error).into())
+    }
+
+    #[wasm_bindgen(js_name = setCalculationContextJson)]
+    pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), JsValue> {
+        self.session
+            .set_calculation_context_json(context)
+            .map_err(|error| js_sys::TypeError::new(&error).into())
+    }
+
     /// Open a replica with a positive, safe-integer client ID.
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<XlsxDocument, JsValue> {
@@ -259,6 +279,25 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = sheetCount)]
+    pub fn sheet_count(&self) -> usize {
+        self.session.sheet_count()
+    }
+
+    #[wasm_bindgen(js_name = sheetInfoForJson)]
+    pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, JsValue> {
+        self.session
+            .sheet_info_for_json(sheet)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = cellRectJson)]
+    pub fn cell_rect_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .cell_rect_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     #[wasm_bindgen(js_name = calculationStatusJson)]
     pub fn calculation_status_json(&self) -> Result<String, JsValue> {
         self.session
@@ -397,6 +436,17 @@ impl XlsxDocument {
     pub fn merged_ranges_json(&self, args: &str) -> Result<String, JsValue> {
         self.session
             .merged_ranges_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = visibleMergedRangesJson)]
+    pub fn visible_merged_ranges_json(
+        &self,
+        sheet: u32,
+        viewport_json: &str,
+    ) -> Result<String, JsValue> {
+        self.session
+            .visible_merged_ranges_json(sheet, viewport_json)
             .map_err(|e| JsValue::from_str(&e))
     }
 

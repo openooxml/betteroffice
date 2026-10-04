@@ -252,6 +252,59 @@ impl AxisLayout {
     }
 }
 
+fn viewport_axes(
+    sheet: &Sheet,
+    viewport: &Viewport,
+    geometry: &GridGeometry,
+    print: bool,
+) -> (AxisLayout, AxisLayout, u32, u32) {
+    let (frozen_rows, frozen_cols) = if print {
+        (0, 0)
+    } else {
+        sheet
+            .freeze_pane
+            .map_or((0, 0), |pane| (pane.rows, pane.cols))
+    };
+    let mut rows = AxisLayout::new(
+        MAX_ROWS,
+        frozen_rows,
+        viewport.y,
+        viewport.height,
+        |row| geometry.row_y(row),
+        |y| geometry.row_at_y(y),
+    );
+    let mut cols = AxisLayout::new(
+        MAX_COLS,
+        frozen_cols,
+        viewport.x,
+        viewport.width,
+        |col| geometry.col_x(col),
+        |x| geometry.col_at_x(x),
+    );
+    if print {
+        rows.print_extent = Some(viewport.height);
+        cols.print_extent = Some(viewport.width);
+    }
+    (rows, cols, frozen_rows, frozen_cols)
+}
+
+pub fn visible_merged_ranges_with_geometry(
+    sheet: &Sheet,
+    viewport: &Viewport,
+    geometry: &GridGeometry,
+) -> Vec<CellRange> {
+    let (rows, cols, _, _) = viewport_axes(sheet, viewport, geometry, false);
+    sheet
+        .merges
+        .iter()
+        .copied()
+        .filter(|range| {
+            rows.intersects(range.start.row, range.end.row)
+                && cols.intersects(range.start.col, range.end.col)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 struct CellBox {
     x: f32,
@@ -431,33 +484,8 @@ where
     let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
     let mut fx = FrameStyles::new(styles);
     let geom = geometry.expect("sheet geometry initialized");
-    let (frozen_rows, frozen_cols) = if print.is_some() {
-        (0, 0)
-    } else {
-        sheet_ref
-            .freeze_pane
-            .map_or((0, 0), |pane| (pane.rows, pane.cols))
-    };
-    let mut rows = AxisLayout::new(
-        MAX_ROWS,
-        frozen_rows,
-        viewport.y,
-        viewport.height,
-        |row| geom.row_y(row),
-        |y| geom.row_at_y(y),
-    );
-    let mut cols = AxisLayout::new(
-        MAX_COLS,
-        frozen_cols,
-        viewport.x,
-        viewport.width,
-        |col| geom.col_x(col),
-        |x| geom.col_at_x(x),
-    );
-    if print.is_some() {
-        rows.print_extent = Some(viewport.height);
-        cols.print_extent = Some(viewport.width);
-    }
+    let (rows, cols, frozen_rows, frozen_cols) =
+        viewport_axes(sheet_ref, viewport, geom, print.is_some());
 
     let grid = GridMeta {
         start_row: rows.start(),

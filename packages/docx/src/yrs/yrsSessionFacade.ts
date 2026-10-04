@@ -1,3 +1,4 @@
+import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
   YrsChangeTarget,
   YrsCommentInfo,
@@ -476,6 +477,15 @@ export function wrapSession(
       layoutRanInWorker = false;
       return output;
     },
+    layoutDocumentWithRegionsRetainedMeta: (input) => {
+      const output = readRetainedLayoutMeta(session.layout_document_with_regions_retained_meta(input));
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      layoutRanInWorker = false;
+      return output;
+    },
+    retainedLayoutJson: () => session.retained_layout_json(),
     beginRegionLayout: (input) => {
       steppedLayoutInput = input;
       return completedRegionLayout(
