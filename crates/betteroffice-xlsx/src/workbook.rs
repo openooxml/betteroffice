@@ -4268,6 +4268,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -4485,8 +4486,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn single_projection_open_matches_double_projection_with_shared_and_array_formulas() {
+    fn source_with_sheet_data(sheet_data: &str) -> Vec<u8> {
         let case = crate::authority::open_test_cases::matrix().remove(0);
         let mut parts = generated_source_parts(&case.model);
         let (_, sheet) = parts
@@ -4496,14 +4496,15 @@ mod tests {
         let xml = std::str::from_utf8(sheet).unwrap();
         let start = xml.find("<sheetData>").unwrap();
         let end = xml.find("</sheetData>").unwrap() + "</sheetData>".len();
-        *sheet = format!(
-            "{}{}{}",
-            &xml[..start],
+        *sheet = format!("{}{}{}", &xml[..start], sheet_data, &xml[end..]).into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn single_projection_open_matches_double_projection_with_shared_and_array_formulas() {
+        let bytes = source_with_sheet_data(
             r#"<sheetData><row r="1"><c r="A1"><v>2</v></c><c r="D1"><f t="shared" si="0" ref="D1:D2">A1+1</f><v>3</v></c></row><row r="2"><c r="A2"><f>A1+1</f><v>3</v></c><c r="D2"><f t="shared" si="0"/><v>4</v></c></row><row r="3"><c r="B3"><f t="array" ref="B3:B4">ROW(A1:A2)</f><v>1</v></c></row><row r="4"><c r="B4"><v>2</v></c></row><row r="5"><c r="A5" s="1"/><c r="B5" s="0"/></row></sheetData>"#,
-            &xml[end..],
-        )
-        .into_bytes();
-        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        );
         for build_graph in [false, true] {
             for client_id in [None, Some(11)] {
                 let actual = Workbook::open_internal(&bytes, build_graph, client_id).unwrap();
@@ -4536,6 +4537,29 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn single_projection_seeded_recalculated_open_matches_double_projection() {
+        let bytes = source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>RANDBETWEEN(1,1000000)</f><v>0</v></c><c r="C1"><f>RANDBETWEEN(1,1000)+A1</f><v>0</v></c><c r="D1"><f>NOW()+B1</f><v>0</v></c></row></sheetData>"#,
+        );
+        let options = CalculationOptions {
+            now_serial: Some(45_000.25),
+        };
+        let actual = Workbook::open_recalculated_with_seed(&bytes, options, Some(0x5eed)).unwrap();
+        let mut expected = Workbook::open_internal_oracle(&bytes, false, None).unwrap();
+        expected.set_rand_seed(Some(0x5eed));
+        expected.recalculate(options);
+        assert!(matches!(
+            actual.model.sheets[0].cell(CellRef::new(0, 1)).unwrap().value,
+            CellValue::Number { value } if value != 0.0
+        ));
+        assert!(assert_open_paths_equal(
+            Ok(actual),
+            Ok(expected),
+            "seeded recalculated open"
+        ));
     }
 
     #[test]
