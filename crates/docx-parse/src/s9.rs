@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
+use ooxml_opc::PackageBytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -216,7 +217,16 @@ pub fn parse_docx_s9_wire_with_media_table(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
-    let (parts, table) = media_table_parts(&data)?;
+    parse_docx_s9_wire_with_media_table_bytes(data.into(), options, limits)
+}
+
+/// [`parse_docx_s9_wire_with_media_table`] with shared or owned package bytes.
+pub fn parse_docx_s9_wire_with_media_table_bytes(
+    data: PackageBytes,
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    let (parts, table) = media_table_parts_bytes(&data)?;
     let envelope = parse_s9_package(&parts, &data, options, limits, None, Some(&table))?
         .expect("a whole body is never refused");
     Ok((envelope, parts, table))
@@ -226,7 +236,14 @@ pub fn parse_docx_s9_wire_with_media_table(
 pub fn media_table_parts(
     data: &Arc<[u8]>,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
-    media_table_parts_within(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
+    media_table_parts_bytes(&Arc::clone(data).into())
+}
+
+/// [`media_table_parts`] with shared or owned package bytes.
+pub fn media_table_parts_bytes(
+    data: &PackageBytes,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within_bytes(data, ooxml_opc::MAX_TOTAL_UNCOMPRESSED_BYTES)
 }
 
 /// Bounded extraction before transcoding, reserving compressed images' sizes.
@@ -235,8 +252,17 @@ pub fn media_table_parts_within(
     data: &Arc<[u8]>,
     budget: u64,
 ) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
+    media_table_parts_within_bytes(&Arc::clone(data).into(), budget)
+}
+
+/// [`media_table_parts_within`] with shared or owned package bytes.
+#[doc(hidden)]
+pub fn media_table_parts_within_bytes(
+    data: &PackageBytes,
+    budget: u64,
+) -> Result<(Vec<(String, Vec<u8>)>, MediaTable), ParseError> {
     let package =
-        ooxml_opc::RetainedPackage::new(Arc::clone(data)).map_err(ParseError::Container)?;
+        ooxml_opc::RetainedPackage::from_bytes(data.clone()).map_err(ParseError::Container)?;
     let scan = MediaScan::new(package, budget).map_err(ParseError::Container)?;
     let mut parts = ooxml_opc::unzip_parts_where(data, scan.remaining_budget(), |path| {
         !scan.keeps_compressed(path)

@@ -764,14 +764,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const map = activeStory ? inputPositionMap(activeStory) : null;
         if (!current || !activeStory || !map) return;
         const caret = current.head;
-        const paragraphs = session.paragraphs(activeStory);
-        const index = paragraphs.findIndex((paragraph) => paragraph.paraId === caret.paraId);
-        if (index < 0) return;
-        const paragraph = paragraphs[index];
+        const mapIndex = map.paragraphs.findIndex((entry) => entry.paraId === caret.paraId);
         const hasTarget =
-          direction === 'backward'
-            ? caret.offset > 0 || index > 0
-            : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
+          mapIndex >= 0 &&
+          (direction === 'backward'
+            ? caret.offset > 0 || mapIndex > 0
+            : caret.offset < map.paragraphs[mapIndex].length ||
+              mapIndex + 1 < map.paragraphs.length);
         if (hasTarget && isBodyFlowStory(activeStory) && !isSuggesting && applyResidentDelete) {
           const applied = await applyResidentDelete(direction, remaining);
           if (!isCurrentInput(session)) return;
@@ -781,6 +780,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             continue;
           }
         }
+        const paragraphs = session.paragraphs(activeStory);
+        const index = paragraphs.findIndex((paragraph) => paragraph.paraId === caret.paraId);
+        if (index < 0) return;
+        const paragraph = paragraphs[index];
         if (direction === 'backward') {
           if (caret.offset > 0) {
             const start = previousCodePointOffset(paragraph.text, caret.offset);

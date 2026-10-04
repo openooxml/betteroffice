@@ -1513,20 +1513,22 @@ fn malformed(reader: &Reader<&[u8]>, part: &str, error: impl ToString) -> ParseE
 pub(crate) fn escape_stray_ampersands(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     // Stray ampersands are repaired only in UTF-8 or ASCII input.
     let mut output: Option<Vec<u8>> = None;
-    let mut index = 0;
-    while index < xml.len() {
-        if xml[index] != b'&' || is_entity_reference(&xml[index..]) {
-            if let Some(output) = &mut output {
-                output.push(xml[index]);
-            }
-            index += 1;
+    let mut start = 0;
+    for index in memchr::memchr_iter(b'&', xml) {
+        if is_entity_reference(&xml[index..]) {
             continue;
         }
-        let output = output.get_or_insert_with(|| xml[..index].to_vec());
+        let output = output.get_or_insert_with(|| Vec::with_capacity(xml.len()));
+        output.extend_from_slice(&xml[start..index]);
         output.extend_from_slice(b"&amp;");
-        index += 1;
+        start = index + 1;
     }
-    output.map_or(std::borrow::Cow::Borrowed(xml), std::borrow::Cow::Owned)
+    if let Some(mut output) = output {
+        output.extend_from_slice(&xml[start..]);
+        std::borrow::Cow::Owned(output)
+    } else {
+        std::borrow::Cow::Borrowed(xml)
+    }
 }
 
 pub(crate) fn is_legal_xml_character(character: char) -> bool {
@@ -1910,6 +1912,84 @@ mod tests {
         assert_eq!(root.text_content(), " left & right <x>");
         assert_eq!(root.children_named("w", "r").count(), 2);
         assert!(root.to_xml().contains(" left &amp; right "));
+    }
+
+    fn escape_stray_ampersands_scalar(xml: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+        let mut output: Option<Vec<u8>> = None;
+        let mut index = 0;
+        while index < xml.len() {
+            if xml[index] != b'&' || is_entity_reference(&xml[index..]) {
+                if let Some(output) = &mut output {
+                    output.push(xml[index]);
+                }
+                index += 1;
+                continue;
+            }
+            let output = output.get_or_insert_with(|| xml[..index].to_vec());
+            output.extend_from_slice(b"&amp;");
+            index += 1;
+        }
+        output.map_or(std::borrow::Cow::Borrowed(xml), std::borrow::Cow::Owned)
+    }
+
+    #[test]
+    fn ampersand_repair_borrows_unchanged_bytes() {
+        for xml in [
+            "",
+            "<w:t>plain text</w:t>",
+            "雪 café 🦀",
+            "&amp;",
+            "&lt;&gt;&quot;&apos;&custom_name-1.a:b;",
+            "&#0;&#65;&#1234567890;",
+            "&#x0;&#xAf;&#X1F980;",
+            "雪&amp;café&#65;🦀&#x1F980;",
+        ] {
+            let bytes = xml.as_bytes();
+            let repaired = escape_stray_ampersands(bytes);
+            assert_eq!(repaired.as_ref(), bytes, "{xml:?}");
+            assert_eq!(
+                repaired.as_ref(),
+                escape_stray_ampersands_scalar(bytes).as_ref(),
+                "{xml:?}"
+            );
+            assert!(matches!(repaired, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(repaired.as_ptr(), bytes.as_ptr());
+        }
+    }
+
+    #[test]
+    fn ampersand_repair_matches_scalar_bytes() {
+        for (xml, expected) in [
+            ("&start", "&amp;start"),
+            ("middle & text", "middle &amp; text"),
+            ("end&", "end&amp;"),
+            ("&", "&amp;"),
+            ("&&", "&amp;&amp;"),
+            ("&&amp;", "&amp;&amp;"),
+            ("&amp;&&#65;&&#x41;&", "&amp;&amp;&#65;&amp;&#x41;&amp;"),
+            ("text&amp", "text&amp;amp"),
+            ("text&#", "text&amp;#"),
+            ("text&#12", "text&amp;#12"),
+            ("text&#x", "text&amp;#x"),
+            ("text&#xAf", "text&amp;#xAf"),
+            ("&amp;&incomplete", "&amp;&amp;incomplete"),
+            ("&#;&\u{e9};&9name;", "&amp;#;&amp;\u{e9};&amp;9name;"),
+            ("雪&café&&🦀&amp;終&", "雪&amp;café&amp;&amp;🦀&amp;終&amp;"),
+        ] {
+            let repaired = escape_stray_ampersands(xml.as_bytes());
+            assert_eq!(repaired.as_ref(), expected.as_bytes(), "{xml:?}");
+            assert_eq!(
+                repaired.as_ref(),
+                escape_stray_ampersands_scalar(xml.as_bytes()).as_ref(),
+                "{xml:?}"
+            );
+            assert!(matches!(repaired, std::borrow::Cow::Owned(_)));
+        }
+        let bytes = [0xff, b'&', 0xfe, b'&', b'a', b'm', b'p', b';'];
+        assert_eq!(
+            escape_stray_ampersands(&bytes).as_ref(),
+            escape_stray_ampersands_scalar(&bytes).as_ref()
+        );
     }
 
     #[test]
