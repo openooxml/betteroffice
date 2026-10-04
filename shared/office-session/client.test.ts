@@ -182,6 +182,7 @@ describe('session client', () => {
 
   it('makes malformed inbound messages terminal', async () => {
     for (const message of [null, { kind: 'event', name: 'tick', payload: 1 },
+      { protocol: 1, kind: 'wasm-compile' },
       { protocol: 1, kind: 'reply', id: 1, ok: true },
       { protocol: 1, kind: 'reply', id: 1, ok: false, error: {} }]) {
       const h = harness();

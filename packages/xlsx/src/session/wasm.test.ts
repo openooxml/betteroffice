@@ -27,6 +27,10 @@ function input(worker: WasmTestWorker): { wasm?: ArrayBuffer | WebAssembly.Modul
   return open.args[1] as { wasm?: ArrayBuffer | WebAssembly.Module };
 }
 
+function compileRequests(worker: WasmTestWorker) {
+  return worker.requests.filter((message) => message.kind === 'wasm-compile');
+}
+
 describe('workbook session wasm reuse', () => {
   test('keeps worker URLs and options statically evaluable', () => {
     const source = createSourceFile('client.ts',
@@ -34,6 +38,8 @@ describe('workbook session wasm reuse', () => {
     const workers: Array<Record<string, string>> = [];
     function visit(node: Node): void {
       if (isNewExpression(node) && isIdentifier(node.expression) && node.expression.text === 'Worker') {
+        expect(node.getText(source))
+          .toBe("new Worker(new URL('./xlsxSessionWorker.mjs', import.meta.url), { type: 'module' })");
         expect(node.arguments?.[0]?.getText(source))
           .toBe("new URL('./xlsxSessionWorker.mjs', import.meta.url)");
         const options = node.arguments?.[1];
@@ -47,10 +53,7 @@ describe('workbook session wasm reuse', () => {
       forEachChild(node, visit);
     }
     visit(source);
-    expect(workers).toEqual([
-      { type: 'module', name: 'office-session-wasm-provided' },
-      { type: 'module', name: 'office-session-wasm-default' },
-    ]);
+    expect(workers).toEqual([{ type: 'module' }]);
   });
 
   test('starts before open delivery and reuses the first worker module after disposal', async () => {
@@ -59,7 +62,9 @@ describe('workbook session wasm reuse', () => {
     const bytes = new Uint8Array([1, 2, 3]);
     try {
       const first = await h.client.openWorkbookSession(bytes);
-      expect(h.trace.indexOf('fetch')).toBeLessThan(h.trace.indexOf('post:open'));
+      expect(compileRequests(h.workers[0])).toEqual([{ protocol: 1, kind: 'wasm-compile' }]);
+      expect(h.trace.indexOf('post:wasm-compile')).toBeLessThan(h.trace.indexOf('post:open'));
+      expect(h.trace.indexOf('fetch')).toBeLessThan(h.trace.indexOf('receive:open'));
       expect(h.compiles).toBe(1);
       expect(input(h.workers[0]).wasm).toBeUndefined();
       expect(await first.save()).toEqual(bytes);
@@ -69,6 +74,7 @@ describe('workbook session wasm reuse', () => {
       try {
         expect(h.workers[0].terminated).toBe(true);
         expect(input(h.workers[1]).wasm).toBe(h.workers[0].modules[0]);
+        expect(compileRequests(h.workers[1])).toEqual([]);
         expect(h.workers[1].sources[0]).toBeInstanceOf(WebAssembly.Module);
         expect(h.workers[1].modules).toEqual([]);
         expect(h.compiles).toBe(1);
@@ -88,6 +94,7 @@ describe('workbook session wasm reuse', () => {
     try {
       const first = await h.client.openWorkbookSession(new Uint8Array(), { wasm: explicit });
       expect(input(h.workers[0]).wasm).toBe(explicit);
+      expect(compileRequests(h.workers[0])).toEqual([]);
       expect(h.compiles).toBe(0);
       await first.dispose();
 
@@ -98,6 +105,7 @@ describe('workbook session wasm reuse', () => {
 
       const overridden = await h.client.openWorkbookSession(new Uint8Array(), { wasm: explicit });
       expect(input(h.workers[2]).wasm).toBe(explicit);
+      expect(compileRequests(h.workers[2])).toEqual([]);
       expect(h.compiles).toBe(1);
       await overridden.dispose();
 
@@ -117,6 +125,7 @@ describe('workbook session wasm reuse', () => {
     const spies = mainThreadWasmSpies();
     try {
       const first = await h.client.openWorkbookSession(new Uint8Array(), { wasm });
+      expect(compileRequests(h.workers[0])).toEqual([]);
       expect(h.compiles).toBe(0);
       expect(new Uint8Array(h.workers[0].sources[0] as ArrayBuffer)).toEqual(new Uint8Array(wasm));
       expect(wasm.byteLength).toBe(3);
@@ -137,10 +146,13 @@ describe('workbook session wasm reuse', () => {
     const spies = mainThreadWasmSpies();
     try {
       const first = await h.client.openWorkbookSession(new Uint8Array(), { worker: h.worker });
+      expect(compileRequests(h.workers[0])).toEqual([]);
+      expect(h.trace.indexOf('post:open')).toBeLessThan(h.trace.indexOf('fetch'));
       expect(input(h.workers[0]).wasm).toBeUndefined();
       expect(h.compiles).toBe(1);
       await first.dispose();
       const second = await h.client.openWorkbookSession(new Uint8Array(), { worker: h.worker });
+      expect(compileRequests(h.workers[1])).toEqual([]);
       expect(input(h.workers[1]).wasm).toBeUndefined();
       expect(h.compiles).toBe(2);
       await second.dispose();
@@ -151,6 +163,7 @@ describe('workbook session wasm reuse', () => {
       await warm.dispose();
 
       const custom = await h.client.openWorkbookSession(new Uint8Array(), { worker: h.worker });
+      expect(compileRequests(h.workers[3])).toEqual([]);
       expect(input(h.workers[3]).wasm).toBeUndefined();
       expect(h.compiles).toBe(4);
       await custom.dispose();
@@ -175,6 +188,7 @@ describe('workbook session wasm reuse', () => {
       await warm.dispose();
 
       const custom = await h.client.openWorkbookSession(new Uint8Array(), { worker: h.worker, wasm });
+      expect(compileRequests(h.workers[1])).toEqual([]);
       if (kind === 'bytes') {
         expect(input(h.workers[1]).wasm).not.toBe(wasm);
         expect(new Uint8Array(h.workers[1].sources[0] as ArrayBuffer)).toEqual(bytes);

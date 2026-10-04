@@ -1,4 +1,6 @@
-import { createSessionClient, type SessionClient } from '../../../../shared/office-session/client';
+import {
+  createSessionClient, requestWasmCompile, type SessionClient,
+} from '../../../../shared/office-session/client';
 import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
 import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxFontFace } from '../types';
@@ -90,14 +92,11 @@ export async function openPresentationSession(
 ): Promise<PresentationSession> {
   const transport = createWorkerTransport(
     options.worker ? options.worker() :
-      options.wasm !== undefined || wasmModules.has(wasmAssetUrl().href)
-        ? new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), {
-          type: 'module', name: 'office-session-wasm-provided',
-        })
-        : new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), {
-          type: 'module', name: 'office-session-wasm-default',
-        })
+      new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })
   );
+  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+    requestWasmCompile(transport);
+  }
   return createPresentationSession(bytes, options, transport);
 }
 

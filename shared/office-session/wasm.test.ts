@@ -8,10 +8,13 @@ import { compileWasm, createWorkerWasmInitializer } from './wasm';
 const WASM_BYTES = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
 const URL_INPUT = new URL('https://example.test/module.wasm');
 
-function transport(messages: HostMessage[]): SessionTransport {
+function transport(messages: HostMessage[]): SessionTransport & { receive(message: unknown): void } {
+  let receive = (_message: unknown) => {};
   return {
     post: (message) => { messages.push(message as HostMessage); },
-    listen: () => () => {}, onError: () => () => {}, close() {},
+    listen: (listener) => { receive = listener; return () => { receive = () => {}; }; },
+    onError: () => () => {}, close() {},
+    receive: (message) => receive(message),
   };
 }
 
@@ -89,19 +92,45 @@ describe('worker wasm advertisements', () => {
 });
 
 describe('worker wasm initialization', () => {
-  it('starts compilation eagerly and publishes the module before initialization', async () => {
+  it('starts compilation on the message and open awaits it before initialization', async () => {
     const module = new WebAssembly.Module(WASM_BYTES);
     const messages: HostMessage[] = [];
-    const compile = mock(() => Promise.resolve(module));
+    let resolve!: (module: WebAssembly.Module) => void;
+    const pending = new Promise<WebAssembly.Module>((done) => { resolve = done; });
+    const compile = mock(() => pending);
     const initialize = mock(() => Promise.resolve());
-    const init = createWorkerWasmInitializer(transport(messages), URL_INPUT, initialize, true, compile);
+    const t = transport(messages);
+    const init = createWorkerWasmInitializer(t, URL_INPUT, initialize, compile);
+    expect(compile).not.toHaveBeenCalled();
+    t.receive({ protocol: 1, kind: 'wasm-compile' });
     expect(compile).toHaveBeenCalledTimes(1);
+    expect(compile).toHaveBeenCalledWith(URL_INPUT);
     expect(initialize).not.toHaveBeenCalled();
+    const open = init();
     await Promise.resolve();
+    expect(initialize).not.toHaveBeenCalled();
+    expect(messages).toEqual([]);
+    resolve(module);
+    await open;
     expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
     await init();
     expect(initialize).toHaveBeenCalledWith(module);
     expect(compile).toHaveBeenCalledTimes(1);
+    expect(messages).toHaveLength(1);
+  });
+
+  it('compiles lazily in open when no message or input was supplied', async () => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const messages: HostMessage[] = [];
+    const compile = mock(() => Promise.resolve(module));
+    const initialize = mock(() => Promise.resolve());
+    const init = createWorkerWasmInitializer(transport(messages), URL_INPUT, initialize, compile);
+    expect(compile).not.toHaveBeenCalled();
+    await init();
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(compile).toHaveBeenCalledWith(URL_INPUT);
+    expect(initialize).toHaveBeenCalledWith(module);
+    expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
   });
 
   it('does not compile or publish when a module or bytes are supplied', async () => {
@@ -109,13 +138,38 @@ describe('worker wasm initialization', () => {
     const messages: HostMessage[] = [];
     const compile = mock(() => Promise.resolve(module));
     const initialize = mock(() => Promise.resolve());
-    const init = createWorkerWasmInitializer(transport(messages), URL_INPUT, initialize, false, compile);
+    const init = createWorkerWasmInitializer(transport(messages), URL_INPUT, initialize, compile);
     await init(module);
     await init(WASM_BYTES.buffer);
     expect(initialize).toHaveBeenNthCalledWith(1, module);
     expect(initialize).toHaveBeenNthCalledWith(2, WASM_BYTES.buffer);
     expect(compile).not.toHaveBeenCalled();
     expect(messages).toEqual([]);
+  });
+
+  it.each(['module', 'bytes'])('uses explicit %s during a compile and publishes the result once', async (kind) => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const input = kind === 'module' ? new WebAssembly.Module(WASM_BYTES) : WASM_BYTES.buffer;
+    const messages: HostMessage[] = [];
+    let resolve!: (module: WebAssembly.Module) => void;
+    const pending = new Promise<WebAssembly.Module>((done) => { resolve = done; });
+    const compile = mock(() => pending);
+    const initialize = mock(() => Promise.resolve());
+    const t = transport(messages);
+    const init = createWorkerWasmInitializer(t, URL_INPUT, initialize, compile);
+    t.receive({ protocol: 1, kind: 'wasm-compile' });
+    await init(input);
+    expect(initialize).toHaveBeenCalledWith(input);
+    expect(messages).toEqual([]);
+    t.receive({ protocol: 1, kind: 'wasm-compile' });
+    expect(compile).toHaveBeenCalledTimes(1);
+    resolve(module);
+    await pending;
+    t.receive({ protocol: 1, kind: 'wasm-compile' });
+    await init();
+    expect(initialize).toHaveBeenNthCalledWith(2, module);
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
   });
 
   it('retains an eager compile error until open and retries the next attempt', async () => {
@@ -125,7 +179,9 @@ describe('worker wasm initialization', () => {
     const compile = mock(() => Promise.resolve(module));
     compile.mockRejectedValueOnce(error);
     const initialize = mock(() => Promise.resolve());
-    const init = createWorkerWasmInitializer(transport(messages), URL_INPUT, initialize, true, compile);
+    const t = transport(messages);
+    const init = createWorkerWasmInitializer(t, URL_INPUT, initialize, compile);
+    t.receive({ protocol: 1, kind: 'wasm-compile' });
     await Promise.resolve();
     expect(messages).toEqual([]);
     await expect(init()).rejects.toBe(error);
@@ -135,6 +191,21 @@ describe('worker wasm initialization', () => {
     expect(compile).toHaveBeenCalledTimes(2);
     expect(initialize).toHaveBeenCalledWith(module);
     expect(messages).toEqual([{ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module }]);
+  });
+
+  it('ignores malformed compile messages until open', async () => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const messages: HostMessage[] = [];
+    const compile = mock(() => Promise.resolve(module));
+    const initialize = mock(() => Promise.resolve());
+    const t = transport(messages);
+    const init = createWorkerWasmInitializer(t, URL_INPUT, initialize, compile);
+    t.receive({ protocol: 2, kind: 'wasm-compile' });
+    t.receive({ kind: 'wasm-compile' });
+    t.receive({ protocol: 1, kind: 'wasm-module', url: URL_INPUT.href, module });
+    expect(compile).not.toHaveBeenCalled();
+    await init();
+    expect(compile).toHaveBeenCalledTimes(1);
   });
 });
 

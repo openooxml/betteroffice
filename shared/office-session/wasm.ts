@@ -1,4 +1,4 @@
-import type { HostMessage } from './protocol';
+import { isClientMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 
 export async function compileWasm(url: URL): Promise<WebAssembly.Module> {
@@ -18,7 +18,6 @@ export function createWorkerWasmInitializer(
   transport: SessionTransport,
   url: URL,
   initialize: (input: ArrayBuffer | WebAssembly.Module) => Promise<void>,
-  eager = true,
   compile: (url: URL) => Promise<WebAssembly.Module> = compileWasm
 ): (input?: ArrayBuffer | WebAssembly.Module) => Promise<void> {
   let pending: Promise<WebAssembly.Module> | undefined;
@@ -34,7 +33,9 @@ export function createWorkerWasmInitializer(
     return pending;
   }
 
-  if (eager) module();
+  transport.listen((message) => {
+    if (isClientMessage(message) && message.kind === 'wasm-compile') module();
+  });
   return async (input) => {
     if (input !== undefined) return initialize(input);
     const compiling = module();

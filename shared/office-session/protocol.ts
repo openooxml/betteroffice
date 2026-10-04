@@ -1,6 +1,7 @@
 import type { SessionFailureCode } from './types';
 
 export type ClientMessage =
+  | { protocol: 1; kind: 'wasm-compile' }
   | { protocol: 1; kind: 'call'; id: number; method: string; args: unknown[] }
   | { protocol: 1; kind: 'dispose' };
 
@@ -64,7 +65,7 @@ function requestId(value: unknown): boolean {
 
 export function isClientMessage(value: unknown): value is ClientMessage {
   if (!record(value) || value.protocol !== 1) return false;
-  return value.kind === 'dispose' || (
+  return value.kind === 'wasm-compile' || value.kind === 'dispose' || (
     value.kind === 'call' && requestId(value.id) &&
     typeof value.method === 'string' && Array.isArray(value.args)
   );

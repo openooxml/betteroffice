@@ -72,12 +72,11 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
       private readonly listeners = new Map<string, Set<EventListener>>();
       private readonly scopeListeners = new Map<string, Set<EventListener>>();
 
-      constructor(url: URL, options?: WorkerOptions) {
+      constructor(url: URL) {
         workers.push(this);
         const worker = this;
         const scope = {
           location: { href: url.href },
-          name: options?.name ?? '',
           postMessage(message: HostMessage, transfer: Transferable[] = []) {
             const data = structuredClone(message, { transfer });
             if (data.kind === 'wasm-module') worker.modules.push(data.module);
@@ -139,9 +138,12 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
 
       postMessage(message: ClientMessage, transfer: Transferable[] = []) {
         this.requests.push(message);
-        if (message.kind === 'call') trace.push(`post:${message.method}`);
+        trace.push(`post:${message.kind === 'call' ? message.method : message.kind}`);
         const data = structuredClone(message, { transfer });
-        queueMicrotask(() => this.dispatch(this.scopeListeners, 'message', { data }));
+        queueMicrotask(() => {
+          trace.push(`receive:${data.kind === 'call' ? data.method : data.kind}`);
+          this.dispatch(this.scopeListeners, 'message', { data });
+        });
       }
 
       addEventListener(type: string, listener: EventListener) {

@@ -5,7 +5,6 @@ import { initWasm } from '../wasm/loader';
 import { createWorkbookSessionHost } from './host';
 
 const transport = createScopeTransport(self as unknown as SessionScope);
-const eager = self.name === 'office-session-wasm-default';
 createWorkbookSessionHost(transport, {
-  initWasm: createWorkerWasmInitializer(transport, wasmAssetUrl(), initWasm, eager),
+  initWasm: createWorkerWasmInitializer(transport, wasmAssetUrl(), initWasm),
 });

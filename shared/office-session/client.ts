@@ -4,6 +4,15 @@ import { SessionFailure, type Promisified, type SessionEvents, type SessionMetho
 
 export const OFFICE_SESSION_SILENCE_MS = 60_000;
 
+export function requestWasmCompile(transport: SessionTransport): void {
+  try {
+    transport.post({ protocol: 1, kind: 'wasm-compile' });
+  } catch (error) {
+    try { transport.close(); } catch {}
+    throw error;
+  }
+}
+
 export interface SessionClientOptions<M extends SessionMethods> {
   methods: { readonly [K in keyof M]-?: true };
   silenceMs?: number;
