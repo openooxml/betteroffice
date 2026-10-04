@@ -1140,13 +1140,27 @@ fn missing_font_chains<'a>(
     .collect()
 }
 
-/// A fingerprint of everything in a region layout request that shapes pages: sections,
-/// settings, notes, the render environment and options, but not the fonts, which are
-/// fingerprinted by content, or the gap between pages.
+/// Fingerprints global region layout configuration.
 fn layout_options_fingerprint(mut request: serde_json::Value) -> String {
     if let Some(fields) = request.as_object_mut() {
         fields.remove("measurement");
         fields.remove("measured");
+        if let Some(env) = fields
+            .get_mut("renderEnv")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            if let Some(preview) = env
+                .get_mut("revisionPreview")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                preview.retain(|_, value| {
+                    !matches!(value.as_str(), Some("accepted" | "rejected"))
+                });
+                if preview.is_empty() {
+                    env.remove("revisionPreview");
+                }
+            }
+        }
         if let Some(options) = fields
             .get_mut("options")
             .and_then(serde_json::Value::as_object_mut)
@@ -2049,6 +2063,37 @@ fn incremental_eligible(
             .iter()
             .zip(&next.measured)
             .all(|(previous, next)| resident_fragment_keys_match(&previous.block, &next.block))
+}
+
+fn preview_placement_is_coupled(input: &LayoutInput) -> bool {
+    fn anchored(block: &LayoutBlock) -> bool {
+        if anchors_objects(std::slice::from_ref(block)) {
+            return true;
+        }
+        match block {
+            LayoutBlock::Image(image) => image.anchor.is_some(),
+            LayoutBlock::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .flat_map(|cell| &cell.blocks)
+                .any(anchored),
+            _ => false,
+        }
+    }
+    input.measured.iter().any(|measured| {
+        anchored(&measured.block)
+            || !collect_note_refs(std::slice::from_ref(&measured.block)).is_empty()
+    }) || input
+        .options
+        .footnote_reserved_heights
+        .as_ref()
+        .is_some_and(|heights| !heights.is_empty())
+        || input
+            .options
+            .section_page_float_bands
+            .as_ref()
+            .is_some_and(|bands| !bands.is_empty())
 }
 
 impl EngineSession {
@@ -3268,6 +3313,21 @@ impl EngineSession {
             .iter()
             .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
             .collect::<Vec<_>>();
+        {
+            let mut pagination = self.pagination.borrow_mut();
+            if revision_preview != pagination.revision_preview
+                && (has_floats
+                    || pagination.measured_with_floats
+                    || !notes.contents.is_empty()
+                    || preview_placement_is_coupled(&input)
+                    || pagination
+                        .input
+                        .as_ref()
+                        .is_some_and(preview_placement_is_coupled))
+            {
+                pagination.checkpoints.clear();
+            }
+        }
         let previous_notes = note_page_keys(self.pagination.borrow().layout.as_ref());
         // The note fixpoint replays `base_input`. Without notes `input` is the
         // final pass; with notes the final pass carries reserved heights, so
@@ -15568,6 +15628,524 @@ mod tests {
             engine.stats().lower_preview_patches,
             before.lower_preview_patches
         );
+    }
+
+    #[test]
+    fn region_layout_key_excludes_only_recognized_preview_decisions() {
+        let request = json!({"bodyStory": "body", "renderEnv": {}});
+        let key = layout_options_fingerprint(request.clone());
+        for preview in [
+            json!({}),
+            json!({"1": "accepted"}),
+            json!({"1": "rejected", "2": "accepted"}),
+        ] {
+            let mut next = request.clone();
+            next["renderEnv"]["revisionPreview"] = preview;
+            assert_eq!(layout_options_fingerprint(next), key);
+        }
+        for (field, value) in [
+            (
+                "compatibilityFlags",
+                json!({"doNotUseHTMLParagraphAutoSpacing": true}),
+            ),
+            ("tocStyleIds", json!(["TOC1"])),
+            ("themeColors", json!({"accent1": "FF0000"})),
+            ("defaultTabStopTwips", json!(720)),
+            ("pageContentHeight", json!(120)),
+            ("numericIds", json!({"1": 5})),
+            ("showHiddenText", json!(true)),
+            ("paragraphSpacingLinePx", json!(20)),
+            ("docGridPitchPx", json!(24)),
+            ("defaultParagraphStyleId", json!("Normal")),
+            ("mediaTokens", json!(true)),
+            ("markupMode", json!("balloons")),
+        ] {
+            let mut next = request.clone();
+            next["renderEnv"][field] = value;
+            next["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+            assert_ne!(layout_options_fingerprint(next), key, "{field}");
+        }
+        for preview in [json!({"mode": "balloons"}), json!("accepted"), json!(null)] {
+            let mut next = request.clone();
+            next["renderEnv"]["revisionPreview"] = preview;
+            assert_ne!(layout_options_fingerprint(next), key);
+        }
+        let mut unknown = request;
+        unknown["renderEnv"]["revisionPreview"] = json!({"mode": "balloons"});
+        let unknown_key = layout_options_fingerprint(unknown.clone());
+        unknown["renderEnv"]["revisionPreview"]["1"] = json!("rejected");
+        assert_eq!(layout_options_fingerprint(unknown), unknown_key);
+    }
+
+    fn preview_pagination_request(font: u32) -> serde_json::Value {
+        json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "pageSize": {"w": 300, "h": 200},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20,
+                    "header": 5, "footer": 5}
+            }]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+    }
+
+    fn preview_pagination_paragraph(index: u32, content: &str) -> String {
+        preview_fixture::paragraph(
+            index + 1,
+            &format!(
+                r#"<w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/><w:widowControl w:val="0"/></w:pPr>{content}"#
+            ),
+        )
+    }
+
+    fn preview_pagination_revision(kind: &str, id: &str, text: &str) -> String {
+        let content = if kind == "del" {
+            format!("<w:r><w:delText>{text}</w:delText></w:r>")
+        } else {
+            preview_fixture::run(text)
+        };
+        preview_fixture::revision(kind, id, &content)
+    }
+
+    fn preview_pagination_body(revisions: &[(u32, &str, &str)]) -> String {
+        (0..90)
+            .map(|index| {
+                let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                for &(at, kind, id) in revisions {
+                    if at == index {
+                        content.push_str(&preview_pagination_revision(kind, id, " changed"));
+                    }
+                }
+                preview_pagination_paragraph(index, &content)
+            })
+            .collect()
+    }
+
+    fn preview_pagination_engine(bytes: &[u8], request: &serde_json::Value) -> EngineSession {
+        let engine = EngineSession::new(75230);
+        crate::seed_from_docx(engine.doc(), bytes).unwrap();
+        if request["regions"]["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|section| !section["headerFooterRefs"].is_null())
+        {
+            let fields = [json!({
+                "type": "paragraph", "content": [
+                    {"type": "simpleField", "fieldType": "PAGE", "instruction": " PAGE ",
+                        "content": [{"type": "run", "content": [{"type": "text", "text": "1"}]}]},
+                    {"type": "simpleField", "fieldType": "NUMPAGES", "instruction": " NUMPAGES ",
+                        "content": [{"type": "run", "content": [{"type": "text", "text": "97"}]}]}
+                ]
+            })];
+            crate::seed::seed_blocks(
+                engine.doc(),
+                None,
+                &[
+                    ("hf:header".to_owned(), &fields),
+                    ("hf:footer".to_owned(), &fields),
+                ],
+            )
+            .unwrap();
+        }
+        for note in request["notes"]["contents"].as_array().into_iter().flatten() {
+            let prefix = if note["noteKind"] == "footnote" {
+                "fn"
+            } else {
+                "en"
+            };
+            engine
+                .doc()
+                .create_story(
+                    &format!("{prefix}:{}", note["id"].as_u64().unwrap()),
+                    "Note text that reserves room on the page.",
+                    "Normal",
+                    "left",
+                )
+                .unwrap();
+        }
+        engine
+    }
+
+    fn preview_pagination_display(engine: &EngineSession, request: &serde_json::Value) -> String {
+        let extras = json!({
+            "fontChains": request["measurement"]["fontChains"],
+            "headersFooters": engine.regions.borrow().as_ref().unwrap().headers_footers
+        });
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine
+            .build_display_list_frame(&extras.to_string(), epoch)
+            .unwrap();
+        engine
+            .with_display_list(|list| serde_json::to_string(list).unwrap())
+            .unwrap()
+    }
+
+    fn preview_pagination_prime(engine: &EngineSession, request: &serde_json::Value) -> usize {
+        let meta = engine
+            .layout_document_with_regions_retained_meta(&request.to_string())
+            .unwrap();
+        preview_pagination_display(engine, request);
+        meta.page_count
+    }
+
+    fn assert_preview_pagination_matches_fresh(
+        engine: &EngineSession,
+        bytes: &[u8],
+        request: &serde_json::Value,
+    ) -> RetainedLayoutMeta {
+        let meta = engine
+            .layout_document_with_regions_retained_meta(&request.to_string())
+            .unwrap();
+        let fresh = preview_pagination_engine(bytes, request);
+        let expected = fresh
+            .layout_document_with_regions_retained_meta(&request.to_string())
+            .unwrap();
+        assert_eq!(
+            engine.retained_layout_json().unwrap(),
+            fresh.retained_layout_json().unwrap()
+        );
+        let snapshot = |meta: &RetainedLayoutMeta| {
+            (
+                meta.page_count,
+                meta.partial,
+                meta.provisional,
+                meta.notes_converged,
+                meta.page_sizes
+                    .iter()
+                    .map(|size| size.to_bits())
+                    .collect::<Vec<_>>(),
+                meta.layout_shell_json.clone(),
+            )
+        };
+        assert_eq!(snapshot(&meta), snapshot(&expected));
+        assert_eq!(
+            engine.pagination.borrow().checkpoints,
+            fresh.pagination.borrow().checkpoints
+        );
+        assert_eq!(
+            preview_pagination_display(engine, request),
+            preview_pagination_display(&fresh, request)
+        );
+        meta
+    }
+
+    #[test]
+    fn retained_preview_decisions_resume_paragraph_placement_and_match_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for kind in ["ins", "del"] {
+            for at in [3, 45, 86] {
+                for decision in ["accepted", "rejected"] {
+                    let bytes =
+                        preview_fixture::document(&preview_pagination_body(&[(at, kind, "1")]));
+                    let mut request = preview_pagination_request(font);
+                    let engine = preview_pagination_engine(&bytes, &request);
+                    preview_pagination_prime(&engine, &request);
+                    let before = engine.stats();
+                    let previous_fingerprints =
+                        engine.pagination.borrow().block_fingerprints.clone();
+                    let previous_checkpoints = engine.pagination.borrow().checkpoints.clone();
+                    request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                    let meta = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                    let pagination = engine.pagination.borrow();
+                    let dirty = previous_fingerprints
+                        .iter()
+                        .zip(&pagination.block_fingerprints)
+                        .position(|(previous, next)| previous != next)
+                        .unwrap();
+                    assert_eq!(dirty, at as usize);
+                    assert!(previous_checkpoints.iter().any(|checkpoint| {
+                        checkpoint.page_index == pagination.rebuilt_page_start
+                            && checkpoint.block_index < dirty
+                    }));
+                    assert!(pagination.last_incremental, "{kind} {at} {decision}");
+                    assert_eq!(
+                        engine.stats().incremental_pagination_calls,
+                        before.incremental_pagination_calls + 1
+                    );
+                    assert!(
+                        pagination.rebuilt_page_end < meta.page_count,
+                        "suffix converges"
+                    );
+                    if at > 3 {
+                        assert!(pagination.rebuilt_page_start > 0, "prefix is retained");
+                    }
+                    assert!(
+                        engine.stats().pagination_blocks_placed - before.pagination_blocks_placed
+                            < 90
+                    );
+                }
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_page_count_changes_refresh_page_fields() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for headers in [false, true] {
+            for kind in ["ins", "del"] {
+                let mut body = String::new();
+                for index in 0..54 {
+                    let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+                    if index == 26 {
+                        let text_tag = if kind == "ins" { "t" } else { "delText" };
+                        content.push_str(&preview_fixture::revision(
+                            kind,
+                            "1",
+                            &format!("<w:r><w:br/><w:{text_tag}>Added line</w:{text_tag}></w:r>")
+                                .repeat(6),
+                        ));
+                    }
+                    body.push_str(&preview_pagination_paragraph(index, &content));
+                }
+                let bytes = preview_fixture::document(&body);
+                let mut request = preview_pagination_request(font);
+                request["regions"]["sections"][0]["margins"]["top"] = json!(40);
+                request["regions"]["sections"][0]["margins"]["bottom"] = json!(40);
+                if headers {
+                    request["regions"]["sections"][0]["headerFooterRefs"] = json!({
+                        "headerDefault": "header", "footerDefault": "footer"
+                    });
+                }
+                let visible = if kind == "ins" { "accepted" } else { "rejected" };
+                let hidden = if kind == "ins" { "rejected" } else { "accepted" };
+                request["renderEnv"]["revisionPreview"] = json!({"1": hidden});
+                let engine = preview_pagination_engine(&bytes, &request);
+                let count = preview_pagination_prime(&engine, &request);
+                request["renderEnv"]["revisionPreview"] = json!({"1": visible});
+                let added = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                assert_eq!(count, 9);
+                assert_eq!(added.page_count, 10);
+                assert!(engine.pagination.borrow().last_incremental);
+                assert!(engine.pagination.borrow().rebuilt_page_start > 0);
+                request["renderEnv"]["revisionPreview"] = json!({"1": hidden});
+                let removed = assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                assert_eq!(removed.page_count, count);
+                if headers {
+                    assert!(
+                        engine
+                            .with_display_list(|list| list.pages.iter().all(|page| {
+                                page.header.is_some() && page.footer.is_some()
+                            }))
+                            .unwrap()
+                    );
+                }
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_decisions_in_a_split_table_row_match_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for kind in ["ins", "del"] {
+            for decision in ["accepted", "rejected"] {
+                let mut body = preview_pagination_body(&[]);
+                let cell: String = (100..136)
+                    .map(|index| {
+                        let mut content = preview_fixture::run(&format!("Cell paragraph {index}"));
+                        if index == 118 {
+                            content.push_str(&preview_pagination_revision(kind, "1", " changed"));
+                        }
+                        preview_pagination_paragraph(index, &content)
+                    })
+                    .collect();
+                body.push_str(&preview_fixture::table(&cell));
+                body.push_str(&preview_pagination_paragraph(
+                    140,
+                    &preview_fixture::run("After table"),
+                ));
+                let bytes = preview_fixture::document(&body);
+                let mut request = preview_pagination_request(font);
+                let engine = preview_pagination_engine(&bytes, &request);
+                preview_pagination_prime(&engine, &request);
+                assert!(
+                    engine
+                        .pagination
+                        .borrow()
+                        .layout
+                        .as_ref()
+                        .unwrap()
+                        .pages
+                        .iter()
+                        .filter(|page| {
+                            page.fragments
+                                .iter()
+                                .any(|fragment| matches!(fragment, Fragment::Table(_)))
+                        })
+                        .count()
+                        > 1
+                );
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_decisions_in_multi_column_sections_match_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for first_section in [false, true] {
+            for decision in ["accepted", "rejected"] {
+                let mut body = if first_section {
+                    String::new()
+                } else {
+                    preview_pagination_body(&[])
+                };
+                if !first_section {
+                    body.push_str(&preview_fixture::paragraph(
+                        100,
+                        r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr>"#,
+                    ));
+                }
+                for index in 110..200 {
+                    let mut content = preview_fixture::run(&format!("Column paragraph {index}"));
+                    if index == 155 {
+                        content.push_str(&preview_pagination_revision("ins", "1", " changed"));
+                    }
+                    body.push_str(&preview_pagination_paragraph(index, &content));
+                }
+                if !first_section {
+                    body.push_str(&preview_fixture::paragraph(
+                        210,
+                        r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:cols w:num="2" w:space="300"/></w:sectPr></w:pPr>"#,
+                    ));
+                    for index in 220..230 {
+                        body.push_str(&preview_pagination_paragraph(
+                            index,
+                            &preview_fixture::run("After columns"),
+                        ));
+                    }
+                }
+                let bytes = preview_fixture::document(&body);
+                let mut request = preview_pagination_request(font);
+                let mut columns = request["regions"]["sections"][0].clone();
+                columns["sectionId"] = json!("columns");
+                columns["columns"] = json!({"count": 2, "gap": 20});
+                if first_section {
+                    request["regions"]["sections"][0] = columns;
+                } else {
+                    let mut final_section = request["regions"]["sections"][0].clone();
+                    final_section["sectionId"] = json!("final");
+                    request["regions"]["sections"]
+                        .as_array_mut()
+                        .unwrap()
+                        .extend([columns, final_section]);
+                }
+                let engine = preview_pagination_engine(&bytes, &request);
+                preview_pagination_prime(&engine, &request);
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                if first_section {
+                    assert!(!engine.pagination.borrow().last_incremental);
+                } else {
+                    assert!(engine.pagination.borrow().last_incremental);
+                }
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_decisions_with_notes_keep_full_placement_and_match_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for (kind, reference) in [
+            ("footnote", "footnoteReference"),
+            ("endnote", "endnoteReference"),
+        ] {
+            for decision in ["accepted", "rejected"] {
+                let mut body = preview_pagination_body(&[]);
+                body.push_str(&preview_pagination_paragraph(
+                    100,
+                    &format!(
+                        "{}{}",
+                        preview_fixture::run("With note"),
+                        preview_fixture::revision(
+                            "ins",
+                            "1",
+                            &format!(
+                                r#"<w:r><w:t> inserted</w:t><w:{reference} w:id="5"/></w:r>"#
+                            )
+                        )
+                    ),
+                ));
+                let bytes = preview_fixture::document(&body);
+                let mut request = preview_pagination_request(font);
+                request["notes"] = json!({"contents": [{"id": 5, "noteKind": kind, "height": 0}]});
+                let engine = preview_pagination_engine(&bytes, &request);
+                preview_pagination_prime(&engine, &request);
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+                assert!(!engine.pagination.borrow().last_incremental);
+            }
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_two_consecutive_preview_decisions_match_fresh() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let bytes = preview_fixture::document(&preview_pagination_body(&[
+            (30, "ins", "1"),
+            (65, "del", "2"),
+        ]));
+        let mut request = preview_pagination_request(font);
+        let engine = preview_pagination_engine(&bytes, &request);
+        preview_pagination_prime(&engine, &request);
+        for preview in [
+            json!({"1": "accepted"}),
+            json!({"1": "accepted", "2": "accepted"}),
+            json!({"1": "rejected", "2": "rejected"}),
+            json!({}),
+        ] {
+            request["renderEnv"]["revisionPreview"] = preview;
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            assert!(engine.pagination.borrow().last_incremental);
+        }
+        docx_layout::clear_measure_fonts();
+    }
+
+    #[test]
+    fn retained_preview_floats_and_global_environment_changes_keep_full_placement() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        for (bytes, floats) in [
+            (preview_fixture::drawings(), true),
+            (
+                preview_fixture::document(&preview_pagination_body(&[(45, "ins", "1")])),
+                false,
+            ),
+        ] {
+            let mut request = preview_pagination_request(font);
+            let engine = preview_pagination_engine(&bytes, &request);
+            preview_pagination_prime(&engine, &request);
+            request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+            request["renderEnv"]["showHiddenText"] = json!(true);
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            assert!(!engine.pagination.borrow().last_incremental);
+            request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+            assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
+            if floats {
+                assert!(!engine.pagination.borrow().last_incremental);
+            } else {
+                assert!(engine.pagination.borrow().last_incremental);
+            }
+        }
+        docx_layout::clear_measure_fonts();
     }
 
     #[test]
