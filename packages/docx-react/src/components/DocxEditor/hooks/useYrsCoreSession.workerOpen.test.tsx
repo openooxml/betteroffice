@@ -1052,11 +1052,8 @@ test.each([false, true])('viewer save explicitly loads the held document and kee
     expect(result.current.renderer.status).toBe('ready');
     expect(result.current.renderer.layoutInWorker.isViewerSession?.(session)).toBe(true);
     if (workerProposals) {
-      const reads = posted.filter((request) => request.type === 'documentRead').length;
-      await act(async () => {
-        expect(await result.current.ref.current!.readParagraphs({ view: 'accepted' })).toMatchObject({ ok: true });
-      });
-      expect(posted.filter((request) => request.type === 'documentRead').length).toBeGreaterThan(reads);
+      expect(registeredWorkerProposalAuthority(session)!.geometry()).toBeNull();
+      expect(workerProposalAuthority(session)).toBeNull();
     }
   } finally {
     io.unmount();

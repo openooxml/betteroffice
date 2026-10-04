@@ -193,7 +193,7 @@ export async function applyProposalCall(
   });
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) throw new Error('The editor input is unavailable');
-  if (workerOpenDocumentHeld(session) || pagedEditorRef.current?.isWorkerViewer?.() === true) {
+  if (workerOpenDocumentHeld(session)) {
     if (!allowed()) return denied(session);
     throw new Error('Viewer proposals must use the worker proposal authority');
   }

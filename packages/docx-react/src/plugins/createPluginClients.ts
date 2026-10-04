@@ -23,7 +23,6 @@ import {
 } from '../components/DocxEditor/internals/workerOpenReplica';
 import {
   handedOverRequest,
-  registeredWorkerProposalAuthority,
   workerProposalAuthority,
   type WorkerProposalAuthority,
 } from '../components/DocxEditor/internals/workerProposalAuthority';
@@ -198,10 +197,10 @@ export function createPluginClients(
     },
     findText: async (request) => {
       const session = access.pagedEditorRef.current?.getYrsSession();
-      if (session && (access.viewer?.() === true || workerOpenDocumentHeld(session))) {
+      if (session && workerOpenDocumentHeld(session)) {
         const before = invalid(session);
         if (before) return before;
-        const authority = registeredWorkerProposalAuthority(session) ?? workerProposalAuthority(session);
+        const authority = workerProposalAuthority(session);
         if (!authority) return pluginRefusal('input-failed');
         const fallback = pluginRefusal('input-failed');
         try {

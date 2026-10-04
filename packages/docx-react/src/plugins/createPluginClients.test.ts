@@ -275,7 +275,7 @@ function routeWorker(env: Awaited<ReturnType<typeof setup>>) {
     navigation.mockRestore();
     routing.mockRestore();
   });
-  return { authority, navigation, read, findText, flush, replica };
+  return { authority, navigation, read, findText, flush, replica, routing };
 }
 
 describe('plugin edit client', () => {
@@ -805,9 +805,10 @@ describe('plugin read and navigation clients', () => {
   });
 
   for (const held of [true, false]) {
-    test(`viewer text search reads the worker with ${held ? 'a held document' : 'a main copy already present'}`, async () => {
+    test(`viewer text search reads ${held ? 'the worker with a held document' : 'the main copy already present'}`, async () => {
       const env = await setup();
       const worker = routeWorker(env);
+      if (!held) worker.routing.mockReturnValue(null);
       env.state.viewer = !held;
       const release = mock(() => { throw new Error('unexpected viewer release'); });
       if (held) workerOpenReplica.holdWorkerOpenDocument(env.session, release);
@@ -817,12 +818,19 @@ describe('plugin read and navigation clients', () => {
       restoreWorkers.push(() => { awaitReplica.mockRestore(); ensureReplica.mockRestore(); mainFind.mockRestore(); });
       const request = { text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
       expect(await env.clients.read.findText(request)).toEqual({
-        ok: true, version: env.session.version(), matches: [], truncated: false,
+        ok: true, version: env.session.version(), matches: held ? [] : expect.any(Array), truncated: false,
       });
-      expect(worker.findText).toHaveBeenCalledWith(request, expect.any(Function));
-      expect(mainFind).not.toHaveBeenCalled();
-      expect(worker.flush).not.toHaveBeenCalled();
-      expect(worker.replica).not.toHaveBeenCalled();
+      if (held) {
+        expect(worker.findText).toHaveBeenCalledWith(request, expect.any(Function));
+        expect(mainFind).not.toHaveBeenCalled();
+        expect(worker.flush).not.toHaveBeenCalled();
+        expect(worker.replica).not.toHaveBeenCalled();
+      } else {
+        expect(worker.findText).not.toHaveBeenCalled();
+        expect(mainFind).toHaveBeenCalledWith(request);
+        expect(worker.flush).toHaveBeenCalledTimes(1);
+        expect(worker.replica).not.toHaveBeenCalled();
+      }
       expect(awaitReplica).not.toHaveBeenCalled();
       expect(ensureReplica).not.toHaveBeenCalled();
       expect(release).not.toHaveBeenCalled();
@@ -833,6 +841,7 @@ describe('plugin read and navigation clients', () => {
     const env = await setup();
     const worker = routeWorker(env);
     env.state.viewer = true;
+    workerOpenReplica.holdWorkerOpenDocument(env.session, () => { throw new Error('unexpected viewer release'); });
     worker.findText.mockImplementationOnce(async () => {
       env.pagedEditorRef.current = null;
       return { ok: true as const, version: env.session.version(), matches: [], truncated: false };
@@ -848,6 +857,7 @@ describe('plugin read and navigation clients', () => {
     const env = await setup();
     const worker = routeWorker(env);
     env.state.viewer = true;
+    workerOpenReplica.holdWorkerOpenDocument(env.session, () => { throw new Error('unexpected viewer release'); });
     worker.findText.mockImplementation((_request, main) => main());
     expect(await env.clients.read.findText({
       text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',

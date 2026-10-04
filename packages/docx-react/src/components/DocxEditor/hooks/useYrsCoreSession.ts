@@ -818,7 +818,6 @@ export function useYrsCoreSession(
                 workerLaidOutRef.current = resolve;
               });
               const authority = registerWorkerProposalAuthority(next, worker, {
-                viewer: () => workerOpenRef.current?.viewer === true,
                 relayout: () => {
                   if (!authority.initialized) {
                     laidOut = new Promise<void>((resolve) => {
@@ -948,7 +947,7 @@ export function useYrsCoreSession(
       !session ||
       session !== sessionRef.current ||
       !hasOwnWorkerFrame ||
-      (!workerOpen?.viewer && !workerOpenDocumentHeld(session) &&
+      (!workerOpenDocumentHeld(session) &&
         (!pendingReplicaRef.current?.pending || !startReplicaRef.current)) ||
       previewing ||
       (handoffFrom && options?.shownEngine !== session)
@@ -962,7 +961,6 @@ export function useYrsCoreSession(
     }
   }, [
     openInWorker,
-    workerOpen?.viewer,
     session,
     hasOwnWorkerFrame,
     workerOpen?.renderedFrame,

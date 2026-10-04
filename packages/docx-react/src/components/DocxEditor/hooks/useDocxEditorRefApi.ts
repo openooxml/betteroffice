@@ -433,8 +433,7 @@ async function exportWithPagesInWorker(
   authority: WorkerProposalAuthority,
   options: DocxPageExportOptions,
   settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
-  experimentalWorkerOpen = false,
-  viewer: () => boolean = () => false
+  experimentalWorkerOpen = false
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
   const editor = (): PagedEditorRef => {
     const current = pagedEditorRef.current;
@@ -459,7 +458,7 @@ async function exportWithPagesInWorker(
         return request;
       },
       async () => {
-        if (viewer() || workerOpenDocumentHeld(session)) return unavailable('The worker document is unavailable.');
+        if (workerOpenDocumentHeld(session)) return unavailable('The worker document is unavailable.');
         fellBack = true;
         return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
       }
@@ -473,7 +472,7 @@ async function exportWithPagesInWorker(
     editor();
     if (result === 'timeout') return unavailable('The document is not laid out yet.');
     if (result !== null) return result;
-    if (!viewer() && !workerOpenDocumentHeld(session) && !workerOpenReplicaPending(session)) {
+    if (!workerOpenDocumentHeld(session) && !workerOpenReplicaPending(session)) {
       fellBack = true;
       return exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
     }
@@ -647,11 +646,7 @@ export function useDocxEditorRefApi({
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   const proposalAuthority = () => {
     const session = pagedEditorRef.current?.getYrsSession();
-    return experimentalWorkerOpen && session
-      ? viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current) || workerOpenDocumentHeld(session)
-        ? registeredWorkerProposalAuthority(session)
-        : workerProposalAuthority(session)
-      : null;
+    return experimentalWorkerOpen && session ? workerProposalAuthority(session) : null;
   };
   /** A proposal call on the worker's registry while it holds them, else on the main session. */
   const routedProposalCall = <R extends { expectVersion: string }>(
@@ -663,7 +658,8 @@ export function useDocxEditorRefApi({
     call: (session: YrsSession, request: R) => DocxProposalResult
   ): Promise<DocxProposalResult> => {
     const main = (input: R) => {
-      if (viewerSessionRef.current) return Promise.reject(new Error('The worker proposal authority is unavailable'));
+      const session = pagedEditorRef.current?.getYrsSession();
+      if (session && workerOpenDocumentHeld(session)) return Promise.reject(new Error('The worker proposal authority is unavailable'));
       return applyProposalCall(
         pagedEditorRef,
         hostProposalsAllowed,
@@ -683,12 +679,13 @@ export function useDocxEditorRefApi({
     return onWorker(authority, main);
   };
   const createApi = (): DocxEditorRef => {
-    const viewer = () => {
+    const viewer = () => viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current);
+    const held = () => {
       const session = pagedEditorRef.current?.getYrsSession();
-      return viewerSessionRef.current || isWorkerViewer(pagedEditorRef.current) || (!!session && workerOpenDocumentHeld(session));
+      return !!session && workerOpenDocumentHeld(session);
     };
     const mainSession = async () => {
-      if (viewer()) throw new Error('The worker document authority is unavailable');
+      if (held()) throw new Error('The worker document authority is unavailable');
       return flushedSession(pagedEditorRef, experimentalWorkerOpen);
     };
     const flush = async () => {
@@ -750,7 +747,7 @@ export function useDocxEditorRefApi({
         const main = async () =>
           (await mainSession()).session.listContentControls(options);
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
-        const authority = session
+        const authority = session && workerOpenReplicaPending(session)
           ? registeredWorkerProposalAuthority(session)
           : null;
         return authority ? authority.listContentControls(options, main) : main();
@@ -759,7 +756,7 @@ export function useDocxEditorRefApi({
         const main = async () =>
           (await mainSession()).session.findContentControls(query, options);
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
-        const authority = session
+        const authority = session && workerOpenReplicaPending(session)
           ? registeredWorkerProposalAuthority(session)
           : null;
         return authority ? authority.findContentControls(query, options, main) : main();
@@ -803,12 +800,12 @@ export function useDocxEditorRefApi({
 
       exportStructuredWithPages: (options) => {
         const session = viewer() ? pagedEditorRef.current?.getYrsSession() : null;
-        const authority = session
+        const authority = session && workerOpenReplicaPending(session)
           ? registeredWorkerProposalAuthority(session)
           : null;
         return session && authority
-          ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen, viewer)
-          : viewer()
+          ? exportWithPagesInWorker(pagedEditorRef, session, authority, options, settledDisplayList, experimentalWorkerOpen)
+          : held()
             ? Promise.reject(new Error('The worker document authority is unavailable'))
             : exportWithPages(pagedEditorRef, options, experimentalWorkerOpen);
       },
@@ -822,7 +819,7 @@ export function useDocxEditorRefApi({
         return api.getSelectionInfo();
       },
       findParagraphs: async (query, options) => {
-        const main = async () => { if (viewer()) throw new Error('The worker document authority is unavailable'); await flush(); return api.findInDocument(query, options); };
+        const main = async () => { await flush(); return api.findInDocument(query, options); };
         if (viewer()) {
           const session = pagedEditorRef.current?.getYrsSession();
           const authority = session ? registeredWorkerProposalAuthority(session) : null;
@@ -1096,18 +1093,17 @@ export function useDocxEditorRefApi({
         if (!options.search && !options.replaceWith) return false;
         proposalQueueRef.current = proposalQueueRef.current.then(async () => {
           const session = pagedEditorRef.current?.getYrsSession();
-          const authority = session ? registeredWorkerProposalAuthority(session) : null;
-          if (!session || !authority) throw new Error('The worker proposal authority is unavailable');
-          const identities = await authority.paragraphIdentities(async () =>
-            (await mainSession()).session.paragraphIdentities()
-          );
+          if (!session) throw new Error('The worker proposal authority is unavailable');
+          const authority = proposalAuthority();
+          const main = async () => (await mainSession()).session.paragraphIdentities();
+          const identities = await (authority ? authority.paragraphIdentities(main) : main());
           const paragraph = identities.paragraphs.find(({ session: anchor }) =>
             anchor?.paraId === options.paraId && (anchor.story === 'body' || anchor.story.startsWith('body:'))
           )?.session;
           if (!paragraph) throw new Error(`Paragraph ${options.paraId} was not found`);
           if (pagedEditorRef.current?.getYrsSession() !== session) throw new Error('The document changed while proposing a change');
           const result = await direct.proposeChanges({
-            expectVersion: authority.geometry()?.version ?? session.version(),
+            expectVersion: authority?.geometry()?.version ?? session.version(),
             proposals: [{
               id: crypto.randomUUID(),
               paragraph: { kind: 'session', sessionId: identities.sessionId, story: paragraph.story, paraId: options.paraId },

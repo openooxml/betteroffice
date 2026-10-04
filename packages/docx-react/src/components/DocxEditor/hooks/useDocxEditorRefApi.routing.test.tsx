@@ -25,7 +25,7 @@ import { resetDeprecatedViewerMembersForTests } from '../internals/deprecatedVie
 import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProvenance';
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
 import * as workerOpenReplica from '../internals/workerOpenReplica';
-import { deferWorkerOpenReplica, holdWorkerOpenDocument, releaseWorkerOpenDocument, requestWorkerOpenReplica, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
+import { deferWorkerOpenReplica, holdWorkerOpenDocument, releaseWorkerOpenDocument, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
 import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
@@ -122,7 +122,6 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     runAfterPendingInput: mock(async () => { throw new Error('unexpected input admission'); }),
   };
   const subscribers = new Set<(change: DocxDocumentChange) => void>();
-  const handleSave = mock(async () => null);
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     const commands = useDocxCommandBinding({
@@ -132,7 +131,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     useDocxEditorRefApi({
       ref, document, documentFromYrs: () => document, historyStateRef: { current: document }, pagedEditorRef,
       experimentalWorkerOpen: pendingReplica, settledDisplayList, viewerSession,
-      handleSave, zoom: 1, setZoom: () => {},
+      handleSave: async () => null, zoom: 1, setZoom: () => {},
       scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
       loadParsedDocument: () => {}, loadBuffer: async () => {},
       comments: [{ id: 1 } as never], setComments, setShowCommentsSidebar: sidebar,
@@ -148,7 +147,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     });
     return ref;
   });
-  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar, setComments, bridge, handleSave };
+  return { api: hook.result.current.current!, editor, session, state, replica, hydrate, fallback, request, events, pagedEditorRef, subscribers, modeRef, allowHostProposalsRef, sidebar, setComments, bridge };
 }
 
 const WORKER_IDENTITIES: DocxParagraphIdentitySnapshot = {
@@ -530,44 +529,13 @@ test('viewer paged export rejects a session replacement while waiting for layout
   expectWorkerPageExport(host);
 });
 
-test('viewer worker reads stay routed after the save handler loads a replica', async () => {
-  const host = apiFor(true, true);
-  const worker = workerFor(host);
-  host.handleSave.mockImplementation(async () => {
-    releaseWorkerOpenDocument(host.session);
-    await requestWorkerOpenReplica(host.session);
-    return null;
-  });
-  await host.api.save();
-  expect(workerOpenReplica.workerOpenReplicaPending(host.session)).toBe(false);
-  const options = { stories: ['body'] } as const;
-  const query = { kind: 'tag', tag: 'field' } as const;
-  const text = { text: 'hello', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
-  worker.documentRead.mockResolvedValueOnce({ version: 'worker-v', value: CONTROLS });
-  expect(await host.api.listContentControls(options)).toEqual(CONTROLS);
-  worker.documentRead.mockResolvedValueOnce({ version: 'worker-v', value: CONTROLS });
-  expect(await host.api.findContentControls(query, options)).toEqual(CONTROLS);
-  const found: DocxFindTextResult = { ok: true, version: 'worker-v', matches: [], truncated: false };
-  worker.documentRead.mockResolvedValueOnce({ version: 'worker-v', value: found });
-  expect(await host.api.findText(text)).toEqual(found);
-  worker.documentRead.mockResolvedValueOnce({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) });
-  expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
-  expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(1);
-  expect(host.session.listContentControls).not.toHaveBeenCalled();
-  expect(host.session.findContentControls).not.toHaveBeenCalled();
-  expect(host.session.findText).not.toHaveBeenCalled();
-  expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
-  expect(host.editor.flushPendingInput).not.toHaveBeenCalled();
-});
-
-test('viewer paged export uses the worker even when a main-thread copy is present', async () => {
+test('viewer paged export uses a main-thread copy that is already loaded', async () => {
   const host = apiFor(true);
   const worker = workerFor(host);
-  worker.documentRead.mockResolvedValue({ version: 'worker-v', value: JSON.stringify(PAGE_EXPORT) });
   expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
-  expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
-  expect(host.editor.readLayoutRequest).toHaveBeenCalledTimes(1);
-  expect(worker.documentRead).toHaveBeenCalledTimes(1);
+  expect(host.session.exportStructuredWithPagesFor).toHaveBeenCalledWith(PAGE_OPTIONS, PAGE_REQUEST);
+  expect(host.editor.readLayoutRequest).not.toHaveBeenCalled();
+  expect(worker.documentRead).not.toHaveBeenCalled();
 });
 
 test('editor paged export still flushes and reads the main session layout', async () => {
