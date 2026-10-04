@@ -121,6 +121,36 @@ enum Convergence {
     },
 }
 
+fn pristine_paragraph_start(
+    block_index: usize,
+    measured: &[MeasuredBlock],
+    page: &crate::types::Page,
+) -> bool {
+    let Some(block) = measured.get(block_index) else {
+        return false;
+    };
+    let Some(Fragment::Paragraph(fragment)) = page.fragments.first() else {
+        return false;
+    };
+    page.columns
+        .as_ref()
+        .is_none_or(|columns| columns.count <= 1.0)
+        && page.float_bands.is_empty()
+        && Some(&fragment.block_id) == block.block.block_id()
+        && fragment.from_line == 0
+        && fragment.carried_from_prev != Some(true)
+        && (crate::break_policy::breaks_before_block(&block.block).is_some()
+            || block_index
+                .checked_sub(1)
+                .and_then(|before| measured.get(before))
+                .is_some_and(|before| {
+                    matches!(
+                        before.block,
+                        LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_)
+                    )
+                }))
+}
+
 impl<F: PartialEq> ConvergenceInput<'_, F> {
     fn retained_match(&self, checkpoint: &LayoutCheckpoint) -> Option<Convergence> {
         if checkpoint.block_index <= self.dirty_index {
@@ -207,17 +237,17 @@ fn resumable(
     else {
         return false;
     };
-    let mut fragments = pages
-        .get(checkpoint.page_index)
-        .into_iter()
-        .flat_map(|page| &page.fragments)
-        .filter_map(|fragment| match fragment {
-            Fragment::Paragraph(fragment) if fragment.block_id == block.id => Some(fragment),
-            _ => None,
-        });
+    let Some(page) = pages.get(checkpoint.page_index) else {
+        return false;
+    };
+    let mut fragments = page.fragments.iter().filter_map(|fragment| match fragment {
+        Fragment::Paragraph(fragment) if fragment.block_id == block.id => Some(fragment),
+        _ => None,
+    });
     let starts_paragraph = fragments.next().is_some_and(|fragment| {
         fragment.from_line == 0 && fragment.carried_from_prev != Some(true)
-    }) && fragments.next().is_none();
+    }) && (fragments.next().is_none()
+        || pristine_paragraph_start(checkpoint.block_index, measured, page));
     let flow = &checkpoint.flow;
     let same_geometry = checkpoint.page_index.checked_sub(1).is_some_and(|before| {
         pages
@@ -1067,7 +1097,9 @@ fn place<F: PartialEq>(
             });
         if let Some((page_index, 0)) = first_changed_page
             && checkpointed_page != Some(page_index)
-            && (!matches!(mb.block, LayoutBlock::Paragraph(_)) || fragments_after[page_index] == 1)
+            && (!matches!(mb.block, LayoutBlock::Paragraph(_))
+                || fragments_after[page_index] == 1
+                || pristine_paragraph_start(i, measured, &paginator.pages[page_index]))
             && paginator
                 .current_page_start()
                 .is_some_and(|(current, _, _)| current == page_index)
@@ -1739,6 +1771,17 @@ mod pagination_rule_tests {
                 "totalHeight": lines as f64 * height,
             },
         })
+    }
+
+    fn paragraph_with_line_heights(
+        id: u32,
+        heights: &[f64],
+        attrs: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut block = paragraph(id, 0, 0.0, attrs);
+        block["measure"]["lines"] = json!(heights.iter().copied().map(line).collect::<Vec<_>>());
+        block["measure"]["totalHeight"] = json!(heights.iter().sum::<f64>());
+        block
     }
 
     fn layout(measured: Vec<serde_json::Value>) -> Layout {
@@ -2520,6 +2563,79 @@ mod pagination_rule_tests {
                 );
                 assert_eq!(incremental.checkpoints, full.checkpoints);
             }
+        }
+    }
+
+    #[test]
+    fn incremental_resumes_at_pristine_multiple_fragment_paragraphs() {
+        for repetitions in [1, 2] {
+            let blocks = |edited: bool| {
+                let mut blocks = vec![paragraph(0, 1, 10.0, json!({}))];
+                for repeat in 0..repetitions {
+                    let id = blocks.len() as u32;
+                    blocks.push(json!({
+                        "block": {"kind": "pageBreak", "id": id},
+                        "measure": {"kind": "pageBreak"},
+                    }));
+                    blocks.push(paragraph_with_line_heights(
+                        id + 1,
+                        &[20.0, 20.0, 20.0, 90.0],
+                        json!({"widowControl": true}),
+                    ));
+                    blocks.push(paragraph(
+                        id + 2,
+                        1,
+                        if edited && repeat + 1 == repetitions {
+                            20.0
+                        } else {
+                            10.0
+                        },
+                        json!({}),
+                    ));
+                }
+                let id = blocks.len() as u32;
+                blocks.push(json!({
+                    "block": {"kind": "pageBreak", "id": id},
+                    "measure": {"kind": "pageBreak"},
+                }));
+                blocks.push(paragraph(id + 1, 1, 100.0, json!({})));
+                blocks
+            };
+            let mut previous_input = input(blocks(false));
+            let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+            for repeat in 0..repetitions {
+                let opening_page = 1 + repeat * 2;
+                assert_eq!(
+                    paragraph_slices(&previous.layout, (2 + repeat * 3) as f64),
+                    vec![
+                        (opening_page, 0, 2),
+                        (opening_page, 2, 3),
+                        (opening_page + 1, 3, 4),
+                    ]
+                );
+            }
+            let dirty = repetitions * 3;
+            let fingerprints = vec![1_u64; previous_input.measured.len()];
+            let mut next_fingerprints = fingerprints.clone();
+            next_fingerprints[dirty] = 2;
+            let next = blocks(true);
+            let incremental = layout_document_incremental(
+                &mut input(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &fingerprints,
+                &next_fingerprints,
+                dirty,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut input(next)).unwrap();
+            assert_eq!(incremental.rebuilt_page_start, repetitions * 2 - 1);
+            assert!(incremental.placed_blocks < full.placed_blocks);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
         }
     }
 
