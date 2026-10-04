@@ -430,7 +430,7 @@ function useHarness(props: HarnessProps) {
     documentFromYrs: core.documentFromYrs,
     historyStateRef: { current: host?.document ?? null },
     pagedEditorRef,
-    handleSave: async () => core.documentFromYrs() ? new ArrayBuffer(0) : null,
+    handleSave: async () => new ArrayBuffer(0),
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
