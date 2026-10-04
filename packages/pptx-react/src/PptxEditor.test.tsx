@@ -79,6 +79,123 @@ describe('PptxEditor slide layout cache', () => {
     } as unknown as CanvasRenderingContext2D;
   }
 
+  function queueThumbnailTasks() {
+    const tasks: Array<() => void> = [];
+    const originalTimeout = globalThis.setTimeout;
+    const timers = spyOn(globalThis, 'setTimeout').mockImplementation(((...args: Parameters<typeof setTimeout>) => {
+      const [callback, delay, ...params] = args;
+      if (typeof callback === 'function' && callback.name === 'step' && delay === 0) {
+        tasks.push(() => callback(...params));
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return originalTimeout(...args);
+    }) as typeof setTimeout);
+    return { tasks, timers };
+  }
+
+  for (const scenario of [
+    { name: 'instant layouts', layoutMs: 0, failAt: undefined },
+    { name: 'layouts exceeding the budget', layoutMs: 13, failAt: undefined },
+    { name: 'a layout failure', layoutMs: 0, failAt: 3 },
+  ]) {
+    it(`batches deferred thumbnails with ${scenario.name} in a 50-slide deck`, async () => {
+      const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+      const originalOpen = pptx.openPresentation;
+      const peer = originalOpen(fixture, { clientId: 9440, fonts });
+      let count = peer.snapshot().slides.length;
+      while (count < 50) peer.insertSlide(count++);
+      const seed = peer.encodeStateAsUpdate();
+      const expected = peer.snapshot().slides.map((_slide, index) => peer.layoutSlide(index));
+      const calls: number[] = [];
+      const errors: Error[] = [];
+      const failure = new Error('layout failed');
+      let clock = 0;
+      const now = spyOn(performance, 'now').mockImplementation(() => clock);
+      const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+        const handle = originalOpen(bytes, options);
+        const layout = handle.layoutSlide.bind(handle);
+        handle.layoutSlide = (index) => {
+          calls.push(index);
+          clock += scenario.layoutMs;
+          if (index === scenario.failAt) throw failure;
+          return layout(index);
+        };
+        return handle;
+      });
+      let finishPaint!: () => void;
+      const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
+      const paintedFrames = new Map<HTMLCanvasElement, SlideDisplayList>();
+      const paint = spyOn(pptx, 'paintSlide').mockImplementation((ctx, frame, _dpr, scale) => {
+        paintedFrames.set(ctx.canvas, frame);
+        return scale === 1 ? firstPaint : Promise.resolve();
+      });
+      const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+        getContext as unknown as HTMLCanvasElement['getContext']
+      );
+      const { tasks, timers } = queueThumbnailTasks();
+      let api: PptxEditorApi | undefined;
+      let view: ReturnType<typeof render> | undefined;
+      try {
+        view = render(<PptxEditor file={fixture} fonts={fonts}
+          collaboration={{ clientId: 9441, initialUpdate: seed }}
+          onError={(error) => errors.push(error)}
+          onReady={(ready) => { api = ready; }} />);
+        await waitFor(() => expect(api).toBeDefined());
+        await waitFor(() => expect(paint).toHaveBeenCalled());
+        expect(calls).toEqual([0]);
+        expect(tasks).toHaveLength(0);
+        const cache = (api!.handle as unknown as Record<symbol, {
+          activate(slideId: string, key: string): boolean;
+        }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
+        const activate = spyOn(cache, 'activate');
+        try {
+          await act(async () => { finishPaint(); await firstPaint; });
+          expect(tasks).toHaveLength(1);
+          const batches: number[][] = [];
+          while (tasks.length > 0) {
+            expect(batches.length).toBeLessThan(50);
+            const before = calls.length;
+            await act(async () => { tasks.shift()!(); });
+            batches.push(calls.slice(before));
+          }
+          if (scenario.layoutMs === 0) {
+            expect(batches.length).toBeLessThanOrEqual(3);
+          } else {
+            expect(batches).toEqual(Array.from({ length: 49 }, (_, index) => [index + 1]));
+          }
+          expect(activate).toHaveBeenCalledTimes(batches.length);
+          const activeId = api!.handle.snapshot().slides[0].id;
+          expect(activate.mock.calls.every(([id]) => id === activeId)).toBe(true);
+          expect(activate.mock.results.every((result) =>
+            result.type === 'return' && result.value === true)).toBe(true);
+          const completed = scenario.failAt ?? 50;
+          const attempted = scenario.failAt === undefined ? 50 : completed + 1;
+          expect(calls).toEqual(Array.from({ length: attempted }, (_, index) => index));
+          expect(errors).toEqual(scenario.failAt === undefined ? [] : [failure]);
+          await waitFor(() => {
+            const canvases = view!.container.querySelectorAll<HTMLCanvasElement>('aside canvas');
+            expect(canvases).toHaveLength(completed);
+            expected.slice(0, completed).forEach((frame, index) => {
+              expect(paintedFrames.get(canvases[index])).toEqual(frame);
+              expect(paint.mock.calls.filter(([ctx]) => ctx.canvas === canvases[index])).toHaveLength(1);
+            });
+          });
+        } finally {
+          activate.mockRestore();
+        }
+      } finally {
+        finishPaint();
+        view?.unmount();
+        peer.dispose();
+        timers.mockRestore();
+        open.mockRestore();
+        paint.mockRestore();
+        context.mockRestore();
+        now.mockRestore();
+      }
+    }, 60_000);
+  }
+
   for (const scenario of ['ready navigation', 'undo restoration'] as const) {
     it(`completes uncached thumbnails after ${scenario}`, async () => {
       const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
@@ -148,6 +265,8 @@ describe('PptxEditor slide layout cache', () => {
       while (count < 12) peer.insertSlide(count++);
       const seed = peer.encodeStateAsUpdate();
       const calls: number[] = [];
+      let clock = 0;
+      const now = spyOn(performance, 'now').mockImplementation(() => clock);
       let finishPaint!: () => void;
       const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
       let finishThumbnail!: () => void;
@@ -158,6 +277,7 @@ describe('PptxEditor slide layout cache', () => {
         handle.layoutSlide = (index) => {
           const frame = layout(index);
           calls.push(index);
+          clock += 13;
           if (index === 1) finishThumbnail();
           return frame;
         };
@@ -217,6 +337,7 @@ describe('PptxEditor slide layout cache', () => {
         open.mockRestore();
         paint.mockRestore();
         context.mockRestore();
+        now.mockRestore();
       }
     }, 30_000);
   }

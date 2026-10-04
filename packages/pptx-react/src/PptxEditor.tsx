@@ -40,6 +40,7 @@ import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalsPanel } from './components/ProposalsPanel';
 import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -131,6 +132,8 @@ import {
   wordBoundary,
 } from './textSelection';
 import type { CaretLine, TextSelectionGranularity } from './textSelection';
+
+const THUMBNAIL_SLICE_MS = 12;
 
 export interface PptxTextSelection {
   shapeId: string;
@@ -1110,25 +1113,35 @@ function PptxEditorContent({
       const current = modelRef.current;
       if (cancelled || handleRef.current !== handle || !current ||
           current.layoutKeys !== pending.layoutKeys || handle.version() !== current.version) return;
-      while (index < current.snapshot.slides.length) {
-        const slideIndex = index++;
-        const slideId = current.snapshot.slides[slideIndex].id;
-        if (current.thumbnails.has(slideId)) continue;
+      const started = performance.now();
+      const thumbnails = new Map(current.thumbnails);
+      let failure: { value: unknown } | undefined;
+      try {
         try {
-          const frame = handle.layoutSlide(slideIndex);
+          while (index < current.snapshot.slides.length) {
+            const slideIndex = index++;
+            const slideId = current.snapshot.slides[slideIndex].id;
+            if (thumbnails.has(slideId)) continue;
+            thumbnails.set(slideId, handle.layoutSlide(slideIndex));
+            if (performance.now() - started >= THUMBNAIL_SLICE_MS) break;
+          }
+        } finally {
           const activeId = current.snapshot.slides[current.slideIndex]?.id;
           if (activeId) slideLayoutCache(handle).activate(activeId, current.layoutKeys[activeId]);
-          const thumbnails = new Map(current.thumbnails);
-          thumbnails.set(slideId, frame);
-          const next = { ...current, thumbnails };
-          modelRef.current = next;
-          setModel(next);
-          timer = setTimeout(step, 0);
-        } catch (value) {
-          reportError(value);
         }
+      } catch (value) {
+        failure = { value };
+      }
+      if (thumbnails.size !== current.thumbnails.size) {
+        const next = { ...current, thumbnails };
+        modelRef.current = next;
+        setModel(next);
+      }
+      if (failure) {
+        reportError(failure.value);
         return;
       }
+      if (thumbnails.size < current.snapshot.slides.length) timer = setTimeout(step, 0);
     };
     void activePaintRef.current.then(() => {
       if (!cancelled) timer = setTimeout(step, 0);
@@ -3026,7 +3039,7 @@ function NotesPanel({
   );
 }
 
-function SlideThumbnail({
+const SlideThumbnail = memo(function SlideThumbnail({
   frame,
   resolveImage,
   afterPaint,
@@ -3052,7 +3065,7 @@ function SlideThumbnail({
     return () => { cancelled = true; };
   }, [afterPaint, frame, resolveImage]);
   return <canvas ref={canvasRef} style={styles.thumbnailCanvas} aria-hidden="true" />;
-}
+});
 
 export function SelectionOverlay({
   frame,
