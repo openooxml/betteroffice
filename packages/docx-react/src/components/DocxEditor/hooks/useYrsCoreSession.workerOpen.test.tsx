@@ -26,7 +26,6 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
-import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
 import { useCanvasRenderer, type OpenInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';

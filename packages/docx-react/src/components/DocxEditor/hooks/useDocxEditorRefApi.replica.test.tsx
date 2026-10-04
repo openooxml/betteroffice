@@ -444,8 +444,9 @@ test.each(['focus', 'scrollToPosition', 'print', 'openPrintPreview', 'highlightR
       api[method]();
       expect(execute).toHaveBeenCalledWith('print', null);
     } else if (method === 'getPositionAtPoint') {
-      const point = spyOn(pagedEditorRef.current!, method).mockReturnValue(7);
-      expect(api.getPositionAtPoint(0, 0)).toBe(7);
+      const position = {} as NonNullable<ReturnType<PagedEditorRef['getPositionAtPoint']>>;
+      const point = spyOn(pagedEditorRef.current!, method).mockReturnValue(position);
+      expect(api.getPositionAtPoint(0, 0)).toBe(position);
       expect(point).toHaveBeenCalledWith(0, 0);
     } else {
       const call = spyOn(pagedEditorRef.current!, method);
