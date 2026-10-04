@@ -22,6 +22,7 @@ pub(crate) enum SplitError {
     Malformed,
     UnsupportedContent(u8),
     UnsupportedType(u8),
+    UnsupportedMap,
     JsonLengthMismatch,
     MissingDependency,
     RetainedDeletion,
@@ -30,6 +31,7 @@ pub(crate) enum SplitError {
 #[derive(Default)]
 struct Client {
     clock: u32,
+    ranges: Vec<(u32, u32, u8)>,
     delete_offset: Option<usize>,
     delete_count: u32,
 }
@@ -78,10 +80,25 @@ pub(crate) fn split_update_v1(
                 block.kind,
                 BLOCK_GC_REF_NUMBER | BLOCK_ITEM_DELETED_REF_NUMBER
             );
-            for (dependency_client, dependency_clock) in block.dependencies.into_iter().flatten() {
-                if !clients
+            for (index, dependency) in block.dependencies.into_iter().enumerate() {
+                let Some((dependency_client, dependency_clock)) = dependency else {
+                    continue;
+                };
+                let known = clients
                     .get(&dependency_client)
-                    .is_some_and(|known| dependency_clock < known.clock)
+                    .ok_or(SplitError::MissingDependency)?;
+                if dependency_clock >= known.clock {
+                    return Err(SplitError::MissingDependency);
+                }
+                let end = known
+                    .ranges
+                    .partition_point(|(start, _, _)| *start <= dependency_clock);
+                let kind = known.ranges[..end]
+                    .last()
+                    .filter(|(start, len, _)| dependency_clock - *start < *len)
+                    .map(|(_, _, kind)| *kind);
+                if (index == 2 && kind != Some(BLOCK_ITEM_TYPE_REF_NUMBER))
+                    || (index < 2 && kind == Some(BLOCK_GC_REF_NUMBER))
                 {
                     return Err(SplitError::MissingDependency);
                 }
@@ -106,8 +123,19 @@ pub(crate) fn split_update_v1(
                 run_count = 0;
             }
             run_count += 1;
+            let known = clients.get_mut(&client).unwrap();
+            if matches!(block.kind, BLOCK_GC_REF_NUMBER | BLOCK_ITEM_TYPE_REF_NUMBER) {
+                if let Some((start, len, kind)) = known.ranges.last_mut()
+                    && *kind == block.kind
+                    && *start + *len == clock
+                {
+                    *len += block.len;
+                } else {
+                    known.ranges.push((clock, block.len, block.kind));
+                }
+            }
             clock = next_clock;
-            clients.get_mut(&client).unwrap().clock = clock;
+            known.clock = clock;
         }
         parts.push(encode_run(
             client,
@@ -356,6 +384,9 @@ impl<'a> Scanner<'a> {
             }
             tag @ (118 | 117) => {
                 let count = usize::try_from(self.var()?).map_err(|_| SplitError::Malformed)?;
+                if tag == 118 && count > 1 {
+                    return Err(SplitError::UnsupportedMap);
+                }
                 if count > self.bytes.len() - self.pos {
                     return Err(SplitError::Malformed);
                 }
@@ -631,6 +662,9 @@ impl Json<'_> {
                     if !self.consume(b',') {
                         return Err(SplitError::Malformed);
                     }
+                    if open == b'{' {
+                        return Err(SplitError::UnsupportedMap);
+                    }
                     self.space();
                 }
             }
@@ -781,7 +815,6 @@ mod tests {
         let (delete_start, _) = append_structs(update, &mut original_structs, &mut HashMap::new());
         let mut split_structs = Vec::with_capacity(original_structs.len());
         let mut clocks = HashMap::new();
-        let doc = Doc::with_client_id(client_id);
         for (index, part) in parts.iter().enumerate() {
             let (delete_offset, count) = append_structs(part, &mut split_structs, &mut clocks);
             assert!(part.len() <= limit || count <= 1);
@@ -790,7 +823,29 @@ mod tests {
             } else {
                 assert_eq!(&part[delete_offset..], &[0]);
             }
-            hydrate_snapshot_part(&doc, part).unwrap();
+        }
+        assert_eq!(split_structs, original_structs);
+        assert_applied_parts(update, vector, client_id, parts, |doc, part| {
+            hydrate_snapshot_part(doc, part).unwrap();
+        });
+    }
+
+    fn apply_raw_part(doc: &Doc, part: &[u8]) {
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(part).unwrap())
+            .unwrap();
+    }
+
+    fn assert_applied_parts(
+        update: &[u8],
+        vector: &[u8],
+        client_id: u64,
+        parts: &[Vec<u8>],
+        apply_part: fn(&Doc, &[u8]),
+    ) {
+        let doc = Doc::with_client_id(client_id);
+        for (index, part) in parts.iter().enumerate() {
+            apply_part(&doc, part);
             let txn = doc.transact();
             assert!(
                 txn.store().pending_update().is_none(),
@@ -801,7 +856,6 @@ mod tests {
                 "part {index} has missing deletes"
             );
         }
-        assert_eq!(split_structs, original_structs);
         let txn = doc.transact();
         assert_eq!(txn.state_vector(), StateVector::decode_v1(vector).unwrap());
         assert_eq!(vector_bytes(&txn.state_vector()), vector);
@@ -978,24 +1032,37 @@ mod tests {
     }
 
     fn assert_boundaries(update: &[u8], clock: u32) {
+        let source = Doc::with_client_id(7);
+        apply_raw_part(&source, update);
+        let txn = source.transact();
+        assert_eq!(txn.state_vector().get(&source.client_id()), clock);
+        let vector = vector_bytes(&txn.state_vector());
+        let expected = txn.encode_state_as_update_v1(&StateVector::default());
+        drop(txn);
         for limit in LIMITS {
             let parts = split_update_v1(update, limit).unwrap();
             let mut original = Vec::new();
             append_structs(update, &mut original, &mut HashMap::new());
             let mut actual = Vec::new();
             let mut clocks = HashMap::new();
-            for part in parts {
-                Update::decode_v1(&part).unwrap();
-                append_structs(&part, &mut actual, &mut clocks);
+            for part in &parts {
+                append_structs(part, &mut actual, &mut clocks);
             }
             assert_eq!(actual, original);
             assert_eq!(clocks[&7], clock);
+            assert_applied_parts(
+                &expected,
+                &vector,
+                source.client_id().get(),
+                &parts,
+                apply_raw_part,
+            );
         }
     }
 
     #[test]
     fn content_boundaries_and_utf16_clocks_are_preserved() {
-        let update = raw_update(14, |encoder| {
+        let update = raw_update(13, |encoder| {
             item(encoder, BLOCK_ITEM_BINARY_REF_NUMBER);
             encoder.write_buf([0, 1, 128, 255]);
             item(encoder, BLOCK_ITEM_STRING_REF_NUMBER);
@@ -1012,11 +1079,8 @@ mod tests {
                     encoder.write_key("element");
                 }
             }
-            item(encoder, BLOCK_ITEM_DOC_REF_NUMBER);
-            encoder.write_string("subdoc");
-            encoder.write_any(&Any::Map(std::sync::Arc::new(HashMap::new())));
         });
-        assert_boundaries(&update, 17);
+        assert_boundaries(&update, 16);
     }
 
     #[test]
@@ -1046,6 +1110,219 @@ mod tests {
             }
         });
         assert_boundaries(&update, 5);
+    }
+
+    #[test]
+    fn parent_ids_must_reference_shared_type_items() {
+        let update = [1, 2, 7, 0, 8, 1, 1, 109, 1, 126, 8, 0, 7, 0, 1, 126, 0];
+        for limit in LIMITS {
+            assert_eq!(
+                split_update_v1(&update, limit),
+                Err(SplitError::MissingDependency)
+            );
+        }
+        for kind in [
+            BLOCK_GC_REF_NUMBER,
+            BLOCK_SKIP_REF_NUMBER,
+            BLOCK_ITEM_DELETED_REF_NUMBER,
+            BLOCK_ITEM_ANY_REF_NUMBER,
+        ] {
+            for parent_clock in [1_u32, 2] {
+                let update = raw_update(3, |encoder| {
+                    item(encoder, BLOCK_ITEM_TYPE_REF_NUMBER);
+                    encoder.write_type_ref(TYPE_REFS_MAP);
+                    if matches!(kind, BLOCK_GC_REF_NUMBER | BLOCK_SKIP_REF_NUMBER) {
+                        encoder.write_info(kind);
+                    } else {
+                        item(encoder, kind);
+                    }
+                    encoder.write_len(2);
+                    if kind == BLOCK_ITEM_ANY_REF_NUMBER {
+                        encoder.write_any(&Any::Null);
+                        encoder.write_any(&Any::Null);
+                    }
+                    encoder.write_info(BLOCK_ITEM_ANY_REF_NUMBER);
+                    encoder.write_parent_info(false);
+                    encoder.write_var(7_u64);
+                    encoder.write_var(parent_clock);
+                    encoder.write_len(1);
+                    encoder.write_any(&Any::Null);
+                });
+                for limit in LIMITS {
+                    assert_eq!(
+                        split_update_v1(&update, limit),
+                        Err(SplitError::MissingDependency),
+                        "accepted parent kind {kind} at clock {parent_clock}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn origins_inside_gc_ranges_are_refused() {
+        for flags in [HAS_ORIGIN, HAS_RIGHT_ORIGIN, HAS_ORIGIN | HAS_RIGHT_ORIGIN] {
+            for origin_clock in [0_u32, 2] {
+                let update = raw_update(3, |encoder| {
+                    encoder.write_info(BLOCK_GC_REF_NUMBER);
+                    encoder.write_len(3);
+                    item(encoder, BLOCK_ITEM_TYPE_REF_NUMBER);
+                    encoder.write_type_ref(TYPE_REFS_MAP);
+                    encoder.write_info(BLOCK_ITEM_ANY_REF_NUMBER | flags);
+                    for flag in [HAS_ORIGIN, HAS_RIGHT_ORIGIN] {
+                        if flags & flag != 0 {
+                            encoder.write_var(7_u64);
+                            encoder.write_var(origin_clock);
+                        }
+                    }
+                    encoder.write_len(1);
+                    encoder.write_any(&Any::Null);
+                });
+                for limit in LIMITS {
+                    assert_eq!(
+                        split_update_v1(&update, limit),
+                        Err(SplitError::MissingDependency),
+                        "accepted origin flags {flags} at GC clock {origin_clock}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_shared_type_parents_are_exact() {
+        let update = raw_update(4, |encoder| {
+            for _ in 0..2 {
+                item(encoder, BLOCK_ITEM_TYPE_REF_NUMBER);
+                encoder.write_type_ref(TYPE_REFS_MAP);
+            }
+            for parent_clock in [0_u32, 1] {
+                encoder.write_info(BLOCK_ITEM_ANY_REF_NUMBER | HAS_PARENT_SUB);
+                encoder.write_parent_info(false);
+                encoder.write_var(7_u64);
+                encoder.write_var(parent_clock);
+                encoder.write_string("key");
+                encoder.write_len(1);
+                encoder.write_any(&Any::Null);
+            }
+        });
+        assert_boundaries(&update, 4);
+    }
+
+    #[test]
+    fn multi_key_any_maps_are_refused() {
+        let value = Any::Map(std::sync::Arc::new(HashMap::from([
+            ("a".into(), Any::Number(0.0)),
+            ("b".into(), Any::Number(1.0)),
+        ])));
+        for value in [
+            value.clone(),
+            Any::Array(std::sync::Arc::from([value.clone()])),
+            Any::Map(std::sync::Arc::new(HashMap::from([(
+                "outer".into(),
+                Any::Array(std::sync::Arc::from([value])),
+            )]))),
+        ] {
+            let doc = Doc::with_client_id(7);
+            let map = doc.get_or_insert_map("map");
+            map.insert(&mut doc.transact_mut(), "value", value);
+            let update = doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            for limit in LIMITS {
+                assert_eq!(
+                    split_update_v1(&update, limit),
+                    Err(SplitError::UnsupportedMap)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_single_key_any_maps_are_exact() {
+        let doc = Doc::with_client_id(7);
+        let map = doc.get_or_insert_map("map");
+        let empty = Any::Map(std::sync::Arc::new(HashMap::new()));
+        let single = Any::Map(std::sync::Arc::new(HashMap::from([(
+            "a".into(),
+            Any::Number(0.0),
+        )])));
+        {
+            let mut txn = doc.transact_mut();
+            map.insert(&mut txn, "empty", empty.clone());
+            map.insert(&mut txn, "single", single.clone());
+            map.insert(
+                &mut txn,
+                "nested",
+                Any::Map(std::sync::Arc::new(HashMap::from([(
+                    "outer".into(),
+                    Any::Array(std::sync::Arc::from([empty, single])),
+                )]))),
+            );
+        }
+        assert_doc(&doc);
+    }
+
+    #[test]
+    fn multi_key_json_objects_are_refused() {
+        for kind in [BLOCK_ITEM_EMBED_REF_NUMBER, BLOCK_ITEM_FORMAT_REF_NUMBER] {
+            for json in [
+                r#"{"a":0,"b":1}"#,
+                r#"[{"a":0,"b":1}]"#,
+                r#"{"outer":[{"a":0,"b":1}]}"#,
+            ] {
+                let update = raw_update(1, |encoder| {
+                    item(encoder, kind);
+                    if kind == BLOCK_ITEM_FORMAT_REF_NUMBER {
+                        encoder.write_key("format");
+                    }
+                    encoder.write_string(json);
+                });
+                for limit in LIMITS {
+                    assert_eq!(
+                        split_update_v1(&update, limit),
+                        Err(SplitError::UnsupportedMap)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_key_subdocument_options_are_refused() {
+        let doc = Doc::with_client_id(7);
+        let map = doc.get_or_insert_map("map");
+        map.insert(&mut doc.transact_mut(), "subdoc", Doc::with_client_id(8));
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        for limit in LIMITS {
+            assert_eq!(
+                split_update_v1(&update, limit),
+                Err(SplitError::UnsupportedMap)
+            );
+        }
+    }
+
+    #[test]
+    fn empty_and_single_key_json_objects_are_exact() {
+        let update = raw_update(8, |encoder| {
+            for kind in [BLOCK_ITEM_EMBED_REF_NUMBER, BLOCK_ITEM_FORMAT_REF_NUMBER] {
+                for json in [
+                    "{}",
+                    r#"{"a":0}"#,
+                    r#"[{"a":0}]"#,
+                    r#"{"outer":[{"a":0}]}"#,
+                ] {
+                    item(encoder, kind);
+                    if kind == BLOCK_ITEM_FORMAT_REF_NUMBER {
+                        encoder.write_key("format");
+                    }
+                    encoder.write_string(json);
+                }
+            }
+        });
+        assert_boundaries(&update, 8);
     }
 
     #[test]
@@ -1079,6 +1356,7 @@ mod tests {
             assert_eq!(parts, vec![update.clone()]);
             Update::decode_v1(&parts[0]).unwrap();
         }
+        assert_boundaries(&update, values.len() as u32);
     }
 
     #[test]
