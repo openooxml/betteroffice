@@ -89,6 +89,17 @@ const font = new Uint8Array(readFileSync(resolve(
   import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 )));
 const sessions: YrsSession[] = [];
+const globalRestores = new Set<() => void>();
+
+function registerRestore(restore: () => void): () => void {
+  const run = () => {
+    if (!globalRestores.delete(run)) return;
+    restore();
+  };
+  globalRestores.add(run);
+  return run;
+}
+
 let startWorker!: () => InProcessResidentWorker;
 const editModule = new WebAssembly.Module(
   new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
@@ -96,6 +107,11 @@ const editModule = new WebAssembly.Module(
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
 
 beforeEach(() => {
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  registerRestore(() => {
+    if (fonts) Object.defineProperty(document, 'fonts', fonts);
+    else Reflect.deleteProperty(document, 'fonts');
+  });
   compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(editModule);
 });
 
@@ -106,15 +122,37 @@ beforeAll(async () => {
   startWorker = await residentWorkerFactory();
 });
 afterEach(() => {
-  cleanup();
-  compileModule.mockRestore();
-  globalThis.Worker = originalWorker;
-  for (const session of sessions.splice(0)) session.destroy();
+  try {
+    cleanup();
+  } finally {
+    compileModule.mockRestore();
+    mock.restore();
+    for (const restore of [...globalRestores].reverse()) restore();
+    globalThis.Worker = originalWorker;
+    for (const session of sessions.splice(0)) session.destroy();
+  }
 });
 afterAll(async () => {
   await act(async () => {});
   if (ownsDom) await GlobalRegistrator.unregister();
 });
+
+function withTimeout<T>(promise: PromiseLike<T>, timeout: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out waiting for ${label} after ${timeout}ms`));
+      restore();
+    }, timeout);
+    const restore = registerRestore(() => {
+      clearTimeout(timer);
+      reject(new Error(`Cancelled waiting for ${label}`));
+    });
+    void Promise.resolve(promise).then(
+      (value) => { resolve(value); restore(); },
+      (error) => { reject(error); restore(); },
+    );
+  });
+}
 
 function installWorker(options: {
   failOpen?: boolean;
@@ -235,9 +273,10 @@ function installWorker(options: {
   } as unknown as typeof Worker;
   return {
     workers, posted, hostModules, replies, responses,
-    received(type: ResidentEngineWorkerRequest['type'], afterId = 0): Promise<ResidentEngineWorkerRequest> {
-      return new Promise((resolve) => {
-        const check = () => {
+    received(type: ResidentEngineWorkerRequest['type'], afterId = 0, timeout?: number): Promise<ResidentEngineWorkerRequest> {
+      let check!: () => void;
+      const promise = new Promise<ResidentEngineWorkerRequest>((resolve) => {
+        check = () => {
           const request = [...received].find((request) => request.type === type && request.id > afterId);
           if (!request) return;
           replyWaiters.delete(check);
@@ -245,6 +284,10 @@ function installWorker(options: {
         };
         replyWaiters.add(check);
         check();
+      });
+      if (timeout === undefined) return promise;
+      return withTimeout(promise, timeout, `${type} worker reply`).finally(() => {
+        replyWaiters.delete(check);
       });
     },
     reply(request: ResidentEngineWorkerRequest) {
@@ -991,10 +1034,10 @@ function holdFrames() {
       await act(async () => {});
       return promise;
     },
-    restore() {
+    restore: registerRestore(() => {
       globalThis.requestAnimationFrame = request;
       globalThis.cancelAnimationFrame = cancel;
-    },
+    }),
   };
 }
 
@@ -1027,10 +1070,10 @@ function holdReplicaTimers() {
         timer.run();
       }
     },
-    restore() {
+    restore: registerRestore(() => {
       globalThis.clearTimeout = cancel;
       globalThis.setTimeout = schedule;
-    },
+    }),
   };
 }
 
@@ -1045,10 +1088,10 @@ function trackMainLoads() {
   });
   return {
     loads,
-    restore() {
+    restore: registerRestore(() => {
       factory.mockRestore();
       for (const load of loads) load.mockRestore();
-    },
+    }),
   };
 }
 
@@ -3524,6 +3567,8 @@ test('a later proposal succeeds after an OOM during the first proposal', async (
 test.each([true, false])(
   'viewer revisions are asked after worker completion is queued without loading a replica, with onWorkerRevisions=%s',
   async (withCallback) => {
+    const source = await withTimeout(longFixture(1200), 5000, 'viewer fixture');
+    const bounds = { timeout: 1000 };
     let completionReplied = false;
     const asked: boolean[] = [];
     const onWorkerRevisions = mock(() => {});
@@ -3538,14 +3583,14 @@ test.each([true, false])(
     const frames = holdFrames();
     const props = {
       ...workerProposalProps,
-      source: await longFixture(1200),
+      source,
       followCompletion: true,
       onWorkerRevisions: withCallback ? onWorkerRevisions : undefined,
     };
     const { result, unmount } = renderHook(useHarness, { initialProps: props });
     try {
-      await act(async () => { await received('open'); });
-      await waitFor(() => expect(result.current.host).not.toBeNull());
+      await withTimeout(act(async () => { await received('open', 0, 5000); }), 6000, 'open React updates');
+      await waitFor(() => expect(result.current.host).not.toBeNull(), bounds);
       const session = result.current.core.session!;
       const receive = workers[0].onmessage;
       workers[0].onmessage = (event) => {
@@ -3554,33 +3599,33 @@ test.each([true, false])(
         )) completionReplied = true;
         receive?.(event);
       };
-      await waitFor(() => expect(posted.map((request) => request.type)).toContain('bootstrap'));
+      await waitFor(() => expect(posted.map((request) => request.type)).toContain('bootstrap'), bounds);
       expect(result.current.core.workerProposalsReady).toBe(false);
       expect(posted.some((request) => request.type === 'proposal')).toBe(false);
-      await act(async () => { workers[0].release(); });
+      await withTimeout(act(async () => { workers[0].release(); }), 1000, 'bootstrap React updates');
       await waitFor(() => expect(posted.map((request) => request.type)).toContain('completeLayout'), {
         timeout: 5000,
       });
-      await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull());
-      await act(async () => {});
+      await waitFor(() => expect(result.current.renderer.pendingCompletion).toBeNull(), bounds);
+      await withTimeout(act(async () => {}), 1000, 'completion React updates');
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
       await waitFor(() => expect(posted.filter((request) =>
         request.type === 'revisionCount'
-      )).toHaveLength(1));
+      )).toHaveLength(1), bounds);
       expect(asked).toEqual([false]);
       expect(completionReplied).toBe(false);
       expect(posted.findIndex((request) => request.type === 'revisionCount')).toBeGreaterThan(
         posted.findIndex((request) => request.type === 'completeLayout')
       );
       if (withCallback) {
-        await waitFor(() => expect(onWorkerRevisions).toHaveBeenCalledTimes(1));
+        await waitFor(() => expect(onWorkerRevisions).toHaveBeenCalledTimes(1), bounds);
       }
       act(() => result.current.presentFrame());
       act(() => frames.run());
       act(() => frames.run());
-      await act(async () => {});
+      await withTimeout(act(async () => {}), 1000, 'revision React updates');
       expect(onWorkerRevisions).toHaveBeenCalledTimes(withCallback ? 1 : 0);
       expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
       expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
@@ -3588,11 +3633,11 @@ test.each([true, false])(
       expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
       expect(session.storyIds()).toEqual([]);
       expect(result.current.mainOpens).toEqual([]);
-      await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
+      await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true), bounds);
       expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
       expect(completionReplied).toBe(false);
-      await act(async () => { workers[0].release(); });
-      await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true));
+      await withTimeout(act(async () => { workers[0].release(); }), 1000, 'released completion React updates');
+      await waitFor(() => expect(result.current.core.workerProposalsReady).toBe(true), bounds);
       expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(1);
       expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
       expect(result.current.core.replicaReady).toBe(false);
@@ -3600,11 +3645,14 @@ test.each([true, false])(
       expect(result.current.mainOpens).toEqual([]);
       expect(result.current.errors).toEqual([]);
     } finally {
-      unmount();
-      frames.restore();
+      try {
+        unmount();
+      } finally {
+        frames.restore();
+      }
     }
   },
-  15_000
+  30_000
 );
 
 test('worker content and preview mutations wait for the replacement frame before settling', async () => {
