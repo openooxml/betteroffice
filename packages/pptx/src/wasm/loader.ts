@@ -852,6 +852,16 @@ export function openPresentation(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
+    value: {
+      snapshot: (): { snapshot: DeckSnapshot; keys: Record<string, string> } =>
+        jsonWasmCall(() => renderer.snapshotWithLayoutKeysJson(doc)),
+      activate: (slideId: string, key: string): boolean =>
+        wasmCall(() => renderer.setActiveSlide(slideId, key)),
+      hitTest: (slideId: string, x: number, y: number): HitTestResult | null =>
+        jsonWasmCall(() => renderer.hitTestSlideJson(doc, slideId, x, y)),
+    },
+  });
   return handle;
 }
 

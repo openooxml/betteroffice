@@ -240,6 +240,19 @@ interface EditorModel {
   slideIndex: number;
   frame: SlideDisplayList | null;
   thumbnails: Map<string, SlideDisplayList>;
+  layoutKeys: Record<string, string>;
+}
+
+interface SlideLayoutCache {
+  snapshot(): { snapshot: DeckSnapshot; keys: Record<string, string> };
+  activate(slideId: string, key: string): boolean;
+  hitTest(slideId: string, x: number, y: number): HitTestResult | null;
+}
+
+function slideLayoutCache(handle: PresentationHandle): SlideLayoutCache {
+  return (handle as unknown as Record<symbol, SlideLayoutCache>)[
+    Symbol.for('@betteroffice/pptx/slide-layout-cache')
+  ];
 }
 
 interface PptxShapeSelection {
@@ -512,6 +525,8 @@ function PptxEditorContent({
   const imageCacheRef = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
   const [model, setModel] = useState<EditorModel | null>(null);
+  const activePaintRef = useRef<Promise<unknown>>(Promise.resolve());
+  const afterActivePaint = useCallback(() => activePaintRef.current, []);
   const [selection, setSelection, selectionRef] = useSyncedState<PptxTextSelection | null>(null);
   const [shapeSelection, setShapeSelection, shapeSelectionRef] =
     useSyncedState<PptxShapeSelection | null>(null);
@@ -538,7 +553,7 @@ function PptxEditorContent({
     model?.slideIndex ?? 0
   );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
-  const resolveProposalImage = useCallback((assetId: string) =>
+  const resolveSlideImage = useCallback((assetId: string) =>
     resolveImage(assetId, handleRef, imageCacheRef, decodeImageError), [decodeImageError]);
 
   useEffect(() => {
@@ -582,30 +597,31 @@ function PptxEditorContent({
   const refreshAt = useCallback(
     (
       requestedIndex?: number,
-      notify = false,
-      refreshAll = false,
-      editedSlideId?: string
+      notify = false
     ): EditorModel | null => {
       const handle = handleRef.current;
       if (!handle) return null;
       try {
         caretGoalRef.current = null;
-        const snapshot = handle.snapshot();
+        const cache = slideLayoutCache(handle);
+        const { snapshot, keys: layoutKeys } = cache.snapshot();
         const index = clampSlideIndex(
           requestedIndex ?? modelRef.current?.slideIndex ?? 0,
           snapshot.slides.length
         );
         const thumbnails = new Map<string, SlideDisplayList>();
-        for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
-          const slide = snapshot.slides[slideIndex];
+        for (const slide of snapshot.slides) {
           const cached = modelRef.current?.thumbnails.get(slide.id);
-          if (slideIndex !== index && cached && !refreshAll && slide.id !== editedSlideId)
+          if (cached && modelRef.current?.layoutKeys[slide.id] === layoutKeys[slide.id])
             thumbnails.set(slide.id, cached);
-          else if (slideIndex !== index) thumbnails.set(slide.id, handle.layoutSlide(slideIndex));
         }
-        const frame = snapshot.slides.length > 0 ? handle.layoutSlide(index) : null;
-        if (frame) thumbnails.set(snapshot.slides[index].id, frame);
-        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails };
+        const slideId = snapshot.slides[index]?.id;
+        const retained = slideId && cache.activate(slideId, layoutKeys[slideId]);
+        const frame = slideId
+          ? (retained && thumbnails.get(slideId)) || handle.layoutSlide(index)
+          : null;
+        if (frame && slideId) thumbnails.set(slideId, frame);
+        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails, layoutKeys };
         const activeSlide = snapshot.slides[index];
         setSelection((current) =>
           current && activeSlide && findShape(activeSlide.shapes, current.shapeId) ? current : null
@@ -651,7 +667,7 @@ function PptxEditorContent({
   );
 
   const refresh = useCallback(() => {
-    refreshAt(undefined, false, true);
+    refreshAt();
   }, [refreshAt]);
 
   /** The editor's batch path, after pending input: `authorize`, read-only, apply, one refresh. */
@@ -667,7 +683,7 @@ function PptxEditorContent({
       const refused = readOnlyRefusal(opened);
       if (refused) return refused;
       const result = commit(() => opened.applyEdits(request));
-      if (result.ok && result.applied) refreshAt(undefined, true, true);
+      if (result.ok && result.applied) refreshAt(undefined, true);
       return result;
     },
     [readOnlyRefusal, refreshAt]
@@ -774,7 +790,7 @@ function PptxEditorContent({
     if (!handle) throw new Error('Presentation is no longer open');
     try {
       handle.acceptProposal(id, { force });
-      refreshAt(undefined, true, true);
+      refreshAt(undefined, true);
       return 'accepted';
     } catch (value) {
       refreshProposals();
@@ -917,7 +933,7 @@ function PptxEditorContent({
           });
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
-            if (origin === 'remote') refreshAt(undefined, true, true);
+            if (origin === 'remote') refreshAt(undefined, true);
           });
           const requestedSlide = initialSlideRef.current;
           refreshAt(
@@ -1049,7 +1065,7 @@ function PptxEditorContent({
     presentFrame(null);
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
-    void paintSlide(currentOnly(ctx, () => !cancelled), frame, dpr, scale, {
+    activePaintRef.current = paintSlide(currentOnly(ctx, () => !cancelled), frame, dpr, scale, {
       resolveImage: (assetId) =>
         resolveImage(assetId, handleRef, imageCacheRef, decodeImageError),
     }).then(
@@ -1065,7 +1081,47 @@ function PptxEditorContent({
     return () => {
       cancelled = true;
     };
-  }, [decodeImageError, model?.frame, presentFrame, reportError, scale]);
+  }, [decodeImageError, model?.frame, model?.snapshot, model?.slideIndex, model?.version, presentFrame, reportError, scale]);
+
+  useEffect(() => {
+    const handle = handleRef.current;
+    const pending = model;
+    if (!handle || !pending) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let index = 0;
+    const step = () => {
+      const current = modelRef.current;
+      if (cancelled || handleRef.current !== handle || !current ||
+          current.layoutKeys !== pending.layoutKeys || handle.version() !== current.version) return;
+      while (index < current.snapshot.slides.length) {
+        const slideIndex = index++;
+        const slideId = current.snapshot.slides[slideIndex].id;
+        if (current.thumbnails.has(slideId)) continue;
+        try {
+          const frame = handle.layoutSlide(slideIndex);
+          const activeId = current.snapshot.slides[current.slideIndex]?.id;
+          if (activeId) slideLayoutCache(handle).activate(activeId, current.layoutKeys[activeId]);
+          const thumbnails = new Map(current.thumbnails);
+          thumbnails.set(slideId, frame);
+          const next = { ...current, thumbnails };
+          modelRef.current = next;
+          setModel(next);
+          timer = setTimeout(step, 0);
+        } catch (value) {
+          reportError(value);
+        }
+        return;
+      }
+    };
+    void activePaintRef.current.then(() => {
+      if (!cancelled) timer = setTimeout(step, 0);
+    });
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [model?.layoutKeys, reportError]);
 
   const selectedShape = useMemo(() => {
     if (!model?.frame || !shapeSelection) return null;
@@ -1209,7 +1265,7 @@ function PptxEditorContent({
         text: '',
         style: textStyleRef.current,
       });
-      const next = refreshAt(undefined, true, false, slide.id);
+      const next = refreshAt(undefined, true);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
@@ -1281,7 +1337,7 @@ function PptxEditorContent({
         },
         fill: '#d9eaf7',
       });
-      const next = refreshAt(undefined, true, false, slide.id);
+      const next = refreshAt(undefined, true);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
@@ -1348,7 +1404,7 @@ function PptxEditorContent({
         contentType,
         mediaBase64,
       });
-      const next = refreshAt(undefined, true, false, slide.id);
+      const next = refreshAt(undefined, true);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
@@ -1443,8 +1499,7 @@ function PptxEditorContent({
       return;
     }
     try {
-      handle.layoutSlide(current.slideIndex);
-      const engineHit = handle.hitTest(point.x, point.y);
+      const engineHit = slide ? slideLayoutCache(handle).hitTest(slide.id, point.x, point.y) : null;
       // The edge band grabs the box rather than typing in it, so a click there
       // reads as a shape hit and matches the cursor the pointer showed.
       const hit =
@@ -2099,7 +2154,7 @@ function PptxEditorContent({
     recentClickRef.current = null;
     resizeRef.current = null;
     setResizeDelta(null);
-    refreshAt(index, true, true);
+    refreshAt(index, true);
     return true;
   };
 
@@ -2179,9 +2234,8 @@ function PptxEditorContent({
     const point = slidePoint(canvas.getBoundingClientRect(), current.frame, clientX, clientY);
     if (!point || point.x < 0 || point.y < 0 ||
         point.x >= current.frame.width || point.y >= current.frame.height) return null;
-    handle.layoutSlide(current.slideIndex);
-    const hit = handle.hitTest(point.x, point.y);
     const slide = current.snapshot.slides[current.slideIndex];
+    const hit = slide && slideLayoutCache(handle).hitTest(slide.id, point.x, point.y);
     return hit && slide ? { ...hit, slide: current.slideIndex + 1, slideId: slide.id } : null;
   };
 
@@ -2540,9 +2594,8 @@ function PptxEditorContent({
                   {model.thumbnails.get(slide.id) ? (
                     <SlideThumbnail
                       frame={model.thumbnails.get(slide.id)!}
-                      resolveImage={(assetId) =>
-                        resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
-                      }
+                      resolveImage={resolveSlideImage}
+                      afterPaint={afterActivePaint}
                     />
                   ) : (
                     <span style={styles.slideTitle}>
@@ -2732,7 +2785,7 @@ function PptxEditorContent({
                   {canvasReview.diff && <ProposalCanvasOverlay
                     key={`${canvasReview.diff.proposal.id}:${model.slideIndex}`}
                     diff={canvasReview.diff} current={model.snapshot} frame={model.frame}
-                    slideIndex={model.slideIndex} scale={scale} resolveImage={resolveProposalImage}
+                    slideIndex={model.slideIndex} scale={scale} resolveImage={resolveSlideImage}
                     onPainted={setPaintedReview}
                     onTarget={(slideId, shapeId) => {
                       navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
@@ -2960,9 +3013,11 @@ function NotesPanel({
 function SlideThumbnail({
   frame,
   resolveImage,
+  afterPaint,
 }: {
   frame: SlideDisplayList;
   resolveImage: CanvasImageResolver;
+  afterPaint: () => Promise<unknown>;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -2973,8 +3028,13 @@ function SlideThumbnail({
     const scale = 128 / frame.width;
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
-    void paintSlide(ctx, frame, dpr, scale, { resolveImage }).catch(() => undefined);
-  }, [frame, resolveImage]);
+    let cancelled = false;
+    void Promise.resolve().then(afterPaint).then(() => {
+      if (!cancelled)
+        return paintSlide(currentOnly(ctx, () => !cancelled), frame, dpr, scale, { resolveImage });
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [afterPaint, frame, resolveImage]);
   return <canvas ref={canvasRef} style={styles.thumbnailCanvas} aria-hidden="true" />;
 }
 

@@ -70,6 +70,143 @@ describe('shortcut matching', () => {
   });
 });
 
+describe('PptxEditor slide layout cache', () => {
+  it('paints the active slide first and lays out only damaged slides in a 50-slide deck', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const originalOpen = pptx.openPresentation;
+    const peer = originalOpen(fixture, { clientId: 9400, fonts });
+    let count = peer.snapshot().slides.length;
+    while (count < 50) peer.insertSlide(count++);
+    const seed = peer.encodeStateAsUpdate();
+    const freshFrames = peer.snapshot().slides.map((_slide, index) => peer.layoutSlide(index));
+    const calls: number[] = [];
+    const frames: SlideDisplayList[] = [];
+    let api: PptxEditorApi | undefined;
+    let finishPaint!: () => void;
+    const firstPaint = new Promise<void>((resolve) => { finishPaint = resolve; });
+    let painted = false;
+    const open = spyOn(pptx, 'openPresentation').mockImplementation((bytes, options) => {
+      const handle = originalOpen(bytes, options);
+      const layout = handle.layoutSlide.bind(handle);
+      handle.layoutSlide = (index) => {
+        calls.push(index);
+        return layout(index);
+      };
+      return handle;
+    });
+    const paint = spyOn(pptx, 'paintSlide').mockImplementation((_ctx, frame, _dpr, scale) => {
+      if (scale === 1) frames.push(frame);
+      if (!painted) {
+        painted = true;
+        return firstPaint;
+      }
+      return Promise.resolve();
+    });
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      setTransform() {}, drawImage() {},
+    } as unknown as CanvasRenderingContext2D);
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      view = render(<PptxEditor file={fixture} fonts={fonts}
+        collaboration={{ clientId: 9401, initialUpdate: seed }}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(painted).toBe(true));
+      expect(calls).toEqual([0]);
+      expect(frames[0]).toEqual(freshFrames[0]);
+      await act(async () => { finishPaint(); await firstPaint; });
+      const thumbnails = () => view!.container.querySelectorAll('aside canvas');
+      await waitFor(() => expect(thumbnails()).toHaveLength(50), { timeout: 15_000 });
+      expect(calls).toEqual(Array.from({ length: 50 }, (_, index) => index));
+      await waitFor(() => {
+        const paintedFrames = paint.mock.calls.map((call) => call[1]);
+        for (const frame of freshFrames) expect(paintedFrames).toContainEqual(frame);
+      });
+
+      const canvas = view.getByTestId('pptx-slide-canvas');
+      const frame = freshFrames[0];
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, frame.width, frame.height);
+      canvas.setPointerCapture = () => {};
+      calls.length = 0;
+      let point: { x: number; y: number } | undefined;
+      for (let y = 0; y < frame.height && !point; y += 16) {
+        for (let x = 0; x < frame.width; x += 16) {
+          if (api!.getPositionAtPoint(x, y)?.kind === 'text') { point = { x, y }; break; }
+        }
+      }
+      expect(point).toBeDefined();
+      expect(api!.getPositionAtPoint(point!.x, point!.y)).toEqual({
+        ...api!.handle.hitTest(point!.x, point!.y)!, slide: 1, slideId: peer.snapshot().slides[0].id,
+      });
+      fireEvent.pointerDown(canvas, {
+        isPrimary: true, button: 0, pointerId: 9, clientX: point!.x, clientY: point!.y,
+      });
+      fireEvent.pointerUp(canvas, { pointerId: 9, clientX: point!.x, clientY: point!.y });
+      expect(calls).toHaveLength(0);
+
+      const slide = peer.snapshot().slides[0];
+      const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+      const story = shape.textStories[0];
+      peer.insertText(story.id, 0, 'Remote ');
+      await act(async () => {
+        api!.handle.applyUpdate(peer.encodeDiff(api!.handle.encodeStateVector()));
+      });
+      await waitFor(() => expect(thumbnails()).toHaveLength(50));
+      expect(calls).toEqual([0]);
+      expect(frames.at(-1)).toEqual(peer.layoutSlide(0));
+      api!.getPositionAtPoint(point!.x, point!.y);
+      expect(calls).toEqual([0]);
+
+      calls.length = 0;
+      const lastSlide = peer.snapshot().slides[49];
+      peer.addTextBox(lastSlide.id, {
+        name: 'Remote text', rect: { x: 100_000, y: 100_000, width: 1_000_000, height: 500_000 },
+        text: 'Thumbnail change',
+      });
+      await act(async () => {
+        api!.handle.applyUpdate(peer.encodeDiff(api!.handle.encodeStateVector()));
+      });
+      await waitFor(() => expect(thumbnails()).toHaveLength(50));
+      expect(calls).toEqual([49]);
+      expect(frames.at(-1)).toEqual(peer.layoutSlide(0));
+      const changedThumbnail = peer.layoutSlide(49);
+      await waitFor(() => expect(paint.mock.calls.map((call) => call[1])).toContainEqual(changedThumbnail));
+
+      calls.length = 0;
+      await act(async () => {
+        const result = await api!.applyEdits({
+          expectVersion: api!.handle.version(),
+          steps: [{ op: 'insertText', at: 'start', text: 'Host ', target: {
+            kind: 'range', slideId: slide.id, shapeId: shape.id, storyId: story.id, start: 0, end: 0,
+          } }],
+        });
+        expect(result).toMatchObject({ ok: true, applied: true });
+      });
+      await waitFor(() => expect(thumbnails()).toHaveLength(50));
+      expect(calls).toEqual([0]);
+      const fresh = originalOpen(fixture, {
+        clientId: 9402, fonts, initialUpdate: api!.handle.encodeStateAsUpdate(),
+      });
+      try { expect(frames.at(-1)).toEqual(fresh.layoutSlide(0)); }
+      finally { fresh.dispose(); }
+      calls.length = 0;
+      await act(async () => { api!.refresh(); });
+      expect(calls).toHaveLength(0);
+      await act(async () => { api!.goToSlide(25); });
+      expect(calls).toEqual([24]);
+      api!.getPositionAtPoint(10, 10);
+      expect(calls).toEqual([24]);
+    } finally {
+      finishPaint();
+      view?.unmount();
+      peer.dispose();
+      open.mockRestore();
+      paint.mockRestore();
+      context.mockRestore();
+    }
+  }, 60_000);
+});
+
 describe('PptxEditor PNG export', () => {
   const cases = [
     ['download', 'downloads the current slide'],
@@ -1478,6 +1615,7 @@ describe('PptxEditor commands', () => {
             api.selectText({ slide: 2, shapeId: target!.id, storyId: story.id, start: 0, end: 0 })
           ).toBe(true);
         });
+        await waitFor(() => expect(view.container.querySelectorAll('aside canvas')).toHaveLength(before.slides.length));
         const handle = api.handle;
         const layoutSlide = handle.layoutSlide.bind(handle);
         const laidOut: number[] = [];
@@ -1489,8 +1627,9 @@ describe('PptxEditor commands', () => {
         await api.flushPendingInput();
         expect(added(0)).toEqual(['queued.png', name]);
         expect(added(1)).toEqual([]);
-        expect(laidOut.filter((index) => index === 0)).toHaveLength(2);
-        expect(new Set(laidOut)).toEqual(new Set([0, 1]));
+        await waitFor(() => expect(laidOut.filter((index) => index === 0).length).toBeGreaterThan(0));
+        expect(laidOut.filter((index) => index === 0).length).toBeLessThanOrEqual(2);
+        expect(new Set(laidOut)).toEqual(new Set([0]));
         fireEvent.keyDown(view.getByRole('application'), { key: 'Q' });
         expect(api.handle.story(story.id).paragraphs[0].runs[0].text.startsWith('Q')).toBe(true);
       } finally {
