@@ -1,3 +1,4 @@
+import type { LayoutMetaV1 } from './layoutMeta';
 import type {
   YrsEngineApplyProfile,
   YrsLoc,
@@ -22,6 +23,8 @@ import type { ResidentSearchResult } from './residentSearch';
 import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import type {
   DocxProposalRegistryState,
   DocxProposalRequest,
@@ -57,6 +60,7 @@ export interface ResidentProposalResponse {
   result?: DocxProposalResult;
   mirror: { version: string; proposals: DocxProposalRegistryState };
   changedStories: string[];
+  projectionStories?: string[];
   updates: ArrayBuffer[];
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
@@ -138,6 +142,8 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       layoutExtras?: string;
+      layoutReply?: 'meta';
+      headersFootersEpoch?: number;
       /** Pages `[start, end)` a full build compiles; the rest stay unbuilt. */
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
@@ -175,7 +181,18 @@ export type ResidentEngineWorkerRequest =
       previewParagraphBudget?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
+  | { id: number; type: 'layoutJson'; layoutRevision: number }
   | { id: number; type: 'encodeState' }
+  | {
+      id: number;
+      type: 'save';
+      comments: Comment[];
+      host?: Document;
+      stateVector?: Uint8Array;
+      /** The editor peer's marked stories. @internal */
+      stories?: readonly string[];
+    }
+  | { id: number; type: 'syncUpdate'; update: Uint8Array; stateVector: Uint8Array }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
   | {
@@ -198,6 +215,8 @@ export type ResidentEngineWorkerRequest =
        * from the layout it runs and returns that layout as `layoutJson`.
        */
       layoutExtras?: string;
+      layoutReply?: 'meta';
+      headersFootersEpoch?: number;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
       provisionalPages?: number;
@@ -317,6 +336,8 @@ export type ResidentEngineWorkerResponse = (
       stateVector?: ArrayBuffer;
       /** The region layout the worker ran, for a request carrying `layoutExtras`. */
       layoutJson?: string;
+      layoutMeta?: LayoutMetaV1 | { v: number };
+      layoutJsonStatus?: 'ok' | 'stale';
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
       /** An `open` reply: the opened package's host metadata JSON. */
@@ -327,11 +348,14 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      /** @internal */
+      saved?: ArrayBuffer;
       revisionCount?: number;
       /** @internal */
       proposals?: DocxProposalRegistryState;
       /** @internal */
       version?: string;
+      repair?: ArrayBuffer | null;
       /** @internal */
       proposal?: ResidentProposalResponse;
       /** @internal */
@@ -341,6 +365,8 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: false;
       error: string;
+      /** @internal */
+      code?: 'save-unavailable';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

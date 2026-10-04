@@ -1,4 +1,6 @@
 pub(crate) mod batch;
+#[cfg(test)]
+mod edit_tests;
 mod staging;
 pub(crate) mod target;
 
@@ -21,6 +23,7 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
+use xlsx_parse::{ChartRefresh, ChartRefreshPlan};
 use xlsx_render::chart::chart_regions_with_geometry;
 #[cfg(feature = "raster")]
 use xlsx_render::region::{
@@ -104,10 +107,10 @@ enum WorkbookMode {
 /// Package identity the model does not carry: per current sheet, the source
 /// sheet it came from and the shared-string entry each of its cells was
 /// authored against.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct PreservedSheetState {
     origins: Vec<Option<usize>>,
-    shared_string_cells: Vec<xlsx_parse::SharedStringCells>,
+    shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
     /// Where each sheet's source rows and columns sit after the row and column
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
@@ -117,12 +120,30 @@ struct PreservedSheetState {
     created: Vec<bool>,
 }
 
+impl Clone for PreservedSheetState {
+    fn clone(&self) -> Self {
+        #[cfg(test)]
+        let shared_string_cells = if crate::authority::force_full_materialization() {
+            Arc::new(self.shared_string_cells.as_ref().clone())
+        } else {
+            self.shared_string_cells.clone()
+        };
+        #[cfg(not(test))]
+        let shared_string_cells = self.shared_string_cells.clone();
+        Self {
+            origins: self.origins.clone(),
+            shared_string_cells,
+            axes: self.axes.clone(),
+            created: self.created.clone(),
+        }
+    }
+}
+
 impl PreservedSheetState {
     /// Sheets a restored state added carry no package identity.
     fn resize(&mut self, sheets: usize) {
         self.origins.resize(sheets, None);
-        self.shared_string_cells
-            .resize_with(sheets, Default::default);
+        Arc::make_mut(&mut self.shared_string_cells).resize_with(sheets, Default::default);
         self.axes.resize(sheets, None);
         self.created.resize(sheets, false);
     }
@@ -130,7 +151,7 @@ impl PreservedSheetState {
     fn insert(&mut self, index: usize) {
         let index = index.min(self.origins.len());
         self.origins.insert(index, None);
-        self.shared_string_cells
+        Arc::make_mut(&mut self.shared_string_cells)
             .insert(index, xlsx_parse::SharedStringCells::new());
         self.axes.insert(index, None);
         self.created.insert(index.min(self.created.len()), true);
@@ -139,7 +160,7 @@ impl PreservedSheetState {
     fn remove(&mut self, index: usize) {
         if index < self.origins.len() {
             self.origins.remove(index);
-            self.shared_string_cells.remove(index);
+            Arc::make_mut(&mut self.shared_string_cells).remove(index);
         }
         if index < self.axes.len() {
             self.axes.remove(index);
@@ -152,9 +173,10 @@ impl PreservedSheetState {
     /// Carries each cell's shared-string provenance to the address the op moves
     /// it to; a cell inside a deleted span loses it with the cell.
     fn shift(&mut self, sheet: SheetId, op: &Op) {
-        let Some(cells) = self.shared_string_cells.get_mut(sheet.0 as usize) else {
+        if sheet.0 as usize >= self.shared_string_cells.len() {
             return;
-        };
+        }
+        let cells = &mut Arc::make_mut(&mut self.shared_string_cells)[sheet.0 as usize];
         *cells = cells
             .iter()
             .filter_map(|(&(row, col), &index)| {
@@ -179,7 +201,7 @@ impl PreservedSheetState {
 
     /// Drops shared-string provenance after identity-less replay.
     fn forget_shared_strings(&mut self) {
-        for cells in &mut self.shared_string_cells {
+        for cells in Arc::make_mut(&mut self.shared_string_cells) {
             cells.clear();
         }
     }
@@ -334,24 +356,24 @@ pub struct Workbook {
     version_nonce: String,
     /// Changes committed since the nonce was minted; the other half.
     committed_changes: u64,
-    /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
-    /// stored epoch and part-bytes hash.
-    chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
+    /// Chart plans by part path and resolutions by part path and owner sheet.
+    chart_cache: Mutex<ChartCache>,
     /// SHA-256 of retained source parts that exports have cited.
     source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
 
-struct CachedChartSpace {
-    bytes_hash: u64,
-    epoch: u64,
-    space: Arc<ChartSpace>,
+#[derive(Default)]
+struct ChartCache {
+    plans: HashMap<String, Arc<ChartRefreshPlan>>,
+    spaces: HashMap<(String, String), CachedChartSpace>,
 }
 
-fn chart_bytes_hash(bytes: &[u8]) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hasher::write(&mut h, bytes);
-    std::hash::Hasher::write_usize(&mut h, bytes.len());
-    std::hash::Hasher::finish(&h)
+struct CachedChartSpace {
+    plan: Arc<ChartRefreshPlan>,
+    refresh: ChartRefresh,
+    theme: xlsx_model::styles::Theme,
+    epoch: u64,
+    space: Arc<ChartSpace>,
 }
 
 impl Workbook {
@@ -478,14 +500,17 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let authority =
-            WorkbookAuthority::from_source(&model, client_id, legacy_dimensions, legacy_styles)
-                .map_err(authority_error)?;
+        let (authority, mut projected, structure) = WorkbookAuthority::from_source_with_projection(
+            &model,
+            client_id,
+            legacy_dimensions,
+            legacy_styles,
+        )
+        .map_err(authority_error)?;
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
         }
-        let mut projected = authority.materialize().map_err(authority_error)?;
         retain_array_formulas(&model, &mut projected);
         let model = projected;
         validate_model(&model)?;
@@ -497,9 +522,7 @@ impl Workbook {
             .collect();
         let graph = build_graph.then(|| DepGraph::build(&model));
         let mode = match client_id {
-            Some(_) => WorkbookMode::Collaborative {
-                structure: authority.structure().map_err(authority_error)?,
-            },
+            Some(_) => WorkbookMode::Collaborative { structure },
             None => WorkbookMode::Standalone,
         };
         let preserved = match &source_package {
@@ -507,15 +530,17 @@ impl Workbook {
                 origins: (0..model.sheets.len())
                     .map(|index| (index < package.source_sheet_count()).then_some(index))
                     .collect(),
-                shared_string_cells: (0..model.sheets.len())
-                    .map(|index| package.source_shared_string_cells(index))
-                    .collect(),
+                shared_string_cells: Arc::new(
+                    (0..model.sheets.len())
+                        .map(|index| package.source_shared_string_cells(index))
+                        .collect(),
+                ),
                 axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
-                shared_string_cells: vec![Default::default(); model.sheets.len()],
+                shared_string_cells: Arc::new(vec![Default::default(); model.sheets.len()]),
                 axes: vec![None; model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
@@ -547,7 +572,7 @@ impl Workbook {
             geometry_cache: Mutex::new(HashMap::new()),
             version_nonce,
             committed_changes: 0,
-            chart_cache: Mutex::new(HashMap::new()),
+            chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
         })
     }
@@ -1620,7 +1645,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
-        self.undo.undo(&mut self.model)?;
+        self.apply_model_history(|undo, model| undo.undo(model))?;
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
@@ -1658,7 +1683,7 @@ impl Workbook {
             .map_err(authority_error)?;
         let prior_styles = self.pre_edit_cell_styles(&ops);
         self.bump_model_epoch();
-        self.undo.redo(&mut self.model)?;
+        self.apply_model_history(|undo, model| undo.redo(model))?;
         self.edited_since_open = true;
         self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
@@ -2375,7 +2400,7 @@ impl Workbook {
                 .apply_ops(ops, SyncOrigin::User, &self.model.styles)
                 .map_err(authority_error)?;
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
+            self.apply_model_history(|undo, model| undo.commit(model, &transaction))?;
             self.update_sheet_info_cache(ops, &prior_styles);
             update
         };
@@ -2389,6 +2414,23 @@ impl Workbook {
         }
         self.edited_since_open = true;
         Ok(update)
+    }
+
+    fn apply_model_history<T>(
+        &mut self,
+        apply: impl FnOnce(
+            &mut UndoStack,
+            &mut WorkbookModel,
+        ) -> std::result::Result<T, xlsx_ops::OpError>,
+    ) -> std::result::Result<T, xlsx_ops::OpError> {
+        #[cfg(test)]
+        if crate::authority::force_full_materialization() {
+            let mut model = self.model.clone();
+            let result = apply(&mut self.undo, &mut model)?;
+            self.model = model;
+            return Ok(result);
+        }
+        apply(&mut self.undo, &mut self.model)
     }
 
     /// Makes a committed change visible: advances [`Workbook::version`], then hands observers
@@ -2982,15 +3024,11 @@ impl StagedApply {
 
 impl Workbook {
     /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
-    /// the bump invalidates chart resolutions.
+    /// charts revalidate against their refresh value after the bump.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
         self.geometry_cache
             .get_mut()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-        self.chart_cache
-            .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
     }
@@ -3986,13 +4024,28 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 }
 
 impl Workbook {
-    /// `ChartSpace` for a chart part, resolved against `owner`; cached per
-    /// epoch and part bytes.
+    /// Resolves a chart against `owner`, revalidating its refresh value per epoch.
     fn resolve_chart_space(
         &self,
         owner: &str,
         chart: &SheetChart,
     ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
+        let epoch = self.model_epoch;
+        let key = (chart.part.clone(), owner.to_owned());
+        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let changed = if let Some(hit) = cache.spaces.get_mut(&key) {
+            if hit.epoch == epoch {
+                return Ok(Arc::clone(&hit.space));
+            }
+            let refresh = hit.plan.refresh(&self.model, owner);
+            if refresh == hit.refresh && hit.theme == self.model.styles.theme {
+                hit.epoch = epoch;
+                return Ok(Arc::clone(&hit.space));
+            }
+            Some((Arc::clone(&hit.plan), refresh))
+        } else {
+            None
+        };
         let package =
             self.source_package
                 .as_ref()
@@ -4005,28 +4058,34 @@ impl Workbook {
                 .ok_or_else(|| RenderError::ChartPartMissing {
                     part: chart.part.clone(),
                 })?;
-        let bytes_hash = chart_bytes_hash(bytes);
-        let epoch = self.model_epoch;
-        let key = (chart.part.clone(), owner.to_owned());
-        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(hit) = cache.get(&key)
-            && hit.epoch == epoch
-            && hit.bytes_hash == bytes_hash
-        {
-            return Ok(hit.space.clone());
-        }
-        let space =
-            xlsx_parse::preserved_chart_space(bytes, &self.model, owner, &self.model.styles.theme)
-                .ok_or_else(|| RenderError::ChartParseFailed {
-                    part: chart.part.clone(),
-                })
-                .map(Arc::new)?;
-        cache.insert(
+        let (plan, refresh) = changed.unwrap_or_else(|| {
+            let plan = Arc::clone(
+                cache
+                    .plans
+                    .entry(chart.part.clone())
+                    .or_insert_with(|| Arc::new(ChartRefreshPlan::new(bytes))),
+            );
+            let refresh = plan.refresh(&self.model, owner);
+            (plan, refresh)
+        });
+        let space = plan
+            .chart_space(&refresh, bytes, &self.model.styles.theme)
+            .ok_or_else(|| RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            })
+            .map(Arc::new)?;
+        let sheets = &self.model.sheets;
+        cache
+            .spaces
+            .retain(|(_, owner), _| sheets.iter().any(|sheet| sheet.name == *owner));
+        cache.spaces.insert(
             key,
             CachedChartSpace {
-                bytes_hash,
+                plan,
+                refresh,
+                theme: self.model.styles.theme.clone(),
                 epoch,
-                space: space.clone(),
+                space: Arc::clone(&space),
             },
         );
         Ok(space)
@@ -4140,8 +4199,443 @@ fn invalidates_proposals(op: &Op) -> bool {
 }
 
 #[cfg(test)]
+impl Workbook {
+    fn open_internal_oracle(
+        bytes: &[u8],
+        build_graph: bool,
+        client_id: Option<u64>,
+    ) -> Result<Self> {
+        let parts = ooxml_opc::unzip_parts(bytes).map_err(Error::Package)?;
+        let mut names = HashSet::with_capacity(parts.len());
+        for (name, _) in &parts {
+            if !names.insert(name) {
+                return Err(Error::DuplicatePart(name.clone()));
+            }
+        }
+        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
+        let mut workbook = Self::from_source_oracle(
+            parsed.workbook,
+            Some(parsed.package),
+            parsed.active_sheet,
+            build_graph,
+            client_id,
+            &parsed.legacy_dimensions,
+            parsed.legacy_styles.as_ref(),
+        )?;
+        workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
+        Ok(workbook)
+    }
+
+    fn from_source_oracle(
+        model: WorkbookModel,
+        source_package: Option<xlsx_parse::PreservedPackage>,
+        active_sheet: SheetId,
+        build_graph: bool,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+    ) -> Result<Self> {
+        validate_model(&model)?;
+        validate_chart_source(&model, source_package.is_some())?;
+        let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
+            active_sheet
+        } else {
+            SheetId(0)
+        };
+        if let Some(client_id) = client_id {
+            validate_collaboration_client_id(client_id)?;
+        }
+        let authority = WorkbookAuthority::from_source_oracle(
+            &model,
+            client_id,
+            legacy_dimensions,
+            legacy_styles,
+        )
+        .map_err(authority_error)?;
+        if client_id.is_some() {
+            validate_collaboration_size(&authority.encode_state_as_update_v1())?;
+            validate_collaboration_state_entries(authority.state_vector_entries())?;
+        }
+        let mut projected = authority.materialize_oracle().map_err(authority_error)?;
+        retain_array_formulas(&model, &mut projected);
+        let model = projected;
+        validate_model(&model)?;
+        let opened_anchors = model
+            .sheets
+            .iter()
+            .flat_map(|sheet| &sheet.charts)
+            .map(|chart| (chart.frame_id(), chart.anchor))
+            .collect();
+        let graph = build_graph.then(|| DepGraph::build(&model));
+        let mode = match client_id {
+            Some(_) => WorkbookMode::Collaborative {
+                structure: authority.structure_oracle().map_err(authority_error)?,
+            },
+            None => WorkbookMode::Standalone,
+        };
+        let preserved = match &source_package {
+            Some(package) => PreservedSheetState {
+                origins: (0..model.sheets.len())
+                    .map(|index| (index < package.source_sheet_count()).then_some(index))
+                    .collect(),
+                shared_string_cells: Arc::new(
+                    (0..model.sheets.len())
+                        .map(|index| package.source_shared_string_cells(index))
+                        .collect(),
+                ),
+                axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
+                created: vec![false; model.sheets.len()],
+            },
+            None => PreservedSheetState {
+                origins: vec![None; model.sheets.len()],
+                shared_string_cells: Arc::new(vec![Default::default(); model.sheets.len()]),
+                axes: vec![None; model.sheets.len()],
+                created: vec![false; model.sheets.len()],
+            },
+        };
+        let version_nonce = batch::mint_nonce();
+        Ok(Self {
+            authority,
+            mode,
+            pending_remote_updates: Vec::new(),
+            model,
+            source_package,
+            source_container: None,
+            preserved,
+            preserved_undo: Vec::new(),
+            preserved_redo: Vec::new(),
+            edited_since_open: false,
+            recalculated_since_open: false,
+            moved_references_since_open: false,
+            active_sheet,
+            undo: UndoStack::new(),
+            graph,
+            rand_seed: None,
+            proposals: ProposalSet::new(),
+            last_calculation: CalculationResult::default(),
+            update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
+            opened_anchors,
+            sheet_info_cache: Mutex::new(None),
+            model_epoch: 0,
+            geometry_cache: Mutex::new(HashMap::new()),
+            version_nonce,
+            committed_changes: 0,
+            chart_cache: Mutex::new(ChartCache::default()),
+            source_part_hashes: Mutex::new(BTreeMap::new()),
+        })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_open_paths_equal(
+        actual: Result<Workbook>,
+        expected: Result<Workbook>,
+        label: &str,
+    ) -> bool {
+        match (actual, expected) {
+            (Ok(actual), Ok(expected)) => {
+                assert_eq!(actual.model, expected.model, "{label}");
+                assert_eq!(actual.active_sheet, expected.active_sheet, "{label}");
+                assert_eq!(
+                    actual.encode_state_vector_v1(),
+                    expected.encode_state_vector_v1(),
+                    "{label}"
+                );
+                assert_eq!(
+                    actual.encode_state_as_update_v1(),
+                    expected.encode_state_as_update_v1(),
+                    "{label}"
+                );
+                match (&actual.mode, &expected.mode) {
+                    (
+                        WorkbookMode::Collaborative { structure: actual },
+                        WorkbookMode::Collaborative {
+                            structure: expected,
+                        },
+                    ) => {
+                        assert_eq!(actual, expected, "{label}");
+                    }
+                    (WorkbookMode::Standalone, WorkbookMode::Standalone) => {
+                        assert_eq!(
+                            actual.authority.structure().unwrap(),
+                            expected.authority.structure_oracle().unwrap(),
+                            "{label}"
+                        );
+                    }
+                    _ => panic!("{label}: workbook modes differ"),
+                }
+                match (actual.save(), expected.save()) {
+                    (Ok(actual), Ok(expected)) => {
+                        assert_eq!(actual, expected, "{label}");
+                        true
+                    }
+                    (Err(actual), Err(expected)) => {
+                        assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{label}");
+                        false
+                    }
+                    _ => panic!("{label}: save results differ"),
+                }
+            }
+            (Err(actual), Err(expected)) => {
+                assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "{label}");
+                false
+            }
+            (Err(error), Ok(_)) => panic!("{label}: single projection failed: {error:?}"),
+            (Ok(_), Err(error)) => panic!("{label}: oracle failed: {error:?}"),
+        }
+    }
+
+    fn append_xml(parts: &mut Vec<(String, Vec<u8>)>, name: &str, closing: &str, markup: &str) {
+        match parts.iter_mut().find(|(path, _)| path == name) {
+            Some((_, bytes)) => {
+                let xml = std::str::from_utf8(bytes).unwrap();
+                assert!(xml.contains(closing));
+                *bytes = xml
+                    .replace(closing, &format!("{markup}{closing}"))
+                    .into_bytes();
+            }
+            None => {
+                assert_eq!(closing, "</Relationships>");
+                parts.push((name.into(), format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{markup}</Relationships>"#
+                ).into_bytes()));
+            }
+        }
+    }
+
+    fn generated_source_parts(model: &WorkbookModel) -> Vec<(String, Vec<u8>)> {
+        let mut without_charts = model.clone();
+        for sheet in &mut without_charts.sheets {
+            sheet.charts.clear();
+        }
+        let mut parts = xlsx_parse::serialize_workbook(&without_charts).unwrap();
+        if model.sheets[0].charts.is_empty() {
+            return parts;
+        }
+        append_xml(
+            &mut parts,
+            "xl/worksheets/sheet1.xml",
+            "</worksheet>",
+            r#"<drawing xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdDrawing"/><tableParts count="1"><tablePart xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdTable"/></tableParts>"#,
+        );
+        append_xml(
+            &mut parts,
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            "</Relationships>",
+            r#"<Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rIdTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table1.xml"/>"#,
+        );
+        append_xml(
+            &mut parts,
+            "[Content_Types].xml",
+            "</Types>",
+            r#"<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/xl/tables/table1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>"#,
+        );
+        parts.extend([
+            (
+                "xl/drawings/drawing1.xml".into(),
+                br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:ext cx="100000" cy="200000"/><xdr:graphicFrame><c:chart r:id="rIdChart"/></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>"#.to_vec(),
+            ),
+            (
+                "xl/drawings/_rels/drawing1.xml.rels".into(),
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_vec(),
+            ),
+            (
+                "xl/charts/chart1.xml".into(),
+                br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numRef><c:f>Sheet1!$A$1:$A$2</c:f></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec(),
+            ),
+            (
+                "xl/tables/table1.xml".into(),
+                br#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Data" displayName="Data" ref="A6:B7"><tableColumns count="2"><tableColumn id="1" name="First"/><tableColumn id="2" name="Second"/></tableColumns></table>"#.to_vec(),
+            ),
+        ]);
+        parts
+    }
+
+    #[test]
+    fn single_projection_workbooks_match_double_projection_matrix() {
+        for case in crate::authority::open_test_cases::matrix() {
+            let parts = generated_source_parts(&case.model);
+            let parsed = xlsx_parse::parse_workbook_with_owned_package(parts).unwrap();
+            assert_eq!(
+                parsed.workbook.sheets[0].charts,
+                case.model.sheets[0].charts
+            );
+            assert_eq!(parsed.workbook.tables, case.model.tables);
+            for client_id in [None, Some(11)] {
+                let actual = Workbook::from_source(
+                    case.model.clone(),
+                    Some(parsed.package.clone()),
+                    SheetId(0),
+                    true,
+                    client_id,
+                    &case.legacy_dimensions,
+                    case.legacy_styles.as_ref(),
+                )
+                .unwrap();
+                assert_eq!(
+                    actual.model.sheets[0].array_formula(CellRef::new(2, 1)),
+                    case.model.sheets[0].array_formula(CellRef::new(2, 1)),
+                    "{}",
+                    case.label
+                );
+                let expected = Workbook::from_source_oracle(
+                    case.model.clone(),
+                    Some(parsed.package.clone()),
+                    SheetId(0),
+                    true,
+                    client_id,
+                    &case.legacy_dimensions,
+                    case.legacy_styles.as_ref(),
+                )
+                .unwrap();
+                assert!(assert_open_paths_equal(
+                    Ok(actual),
+                    Ok(expected),
+                    &case.label
+                ));
+                if case
+                    .model
+                    .sheets
+                    .iter()
+                    .all(|sheet| sheet.charts.is_empty())
+                {
+                    assert!(assert_open_paths_equal(
+                        Workbook::from_source(
+                            case.model.clone(),
+                            None,
+                            SheetId(99),
+                            false,
+                            client_id,
+                            &case.legacy_dimensions,
+                            case.legacy_styles.as_ref(),
+                        ),
+                        Workbook::from_source_oracle(
+                            case.model.clone(),
+                            None,
+                            SheetId(99),
+                            false,
+                            client_id,
+                            &case.legacy_dimensions,
+                            case.legacy_styles.as_ref(),
+                        ),
+                        &case.label,
+                    ));
+                }
+            }
+        }
+    }
+
+    fn source_with_sheet_data(sheet_data: &str) -> Vec<u8> {
+        let case = crate::authority::open_test_cases::matrix().remove(0);
+        let mut parts = generated_source_parts(&case.model);
+        let (_, sheet) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+            .unwrap();
+        let xml = std::str::from_utf8(sheet).unwrap();
+        let start = xml.find("<sheetData>").unwrap();
+        let end = xml.find("</sheetData>").unwrap() + "</sheetData>".len();
+        *sheet = format!("{}{}{}", &xml[..start], sheet_data, &xml[end..]).into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn single_projection_open_matches_double_projection_with_shared_and_array_formulas() {
+        let bytes = source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c><c r="D1"><f t="shared" si="0" ref="D1:D2">A1+1</f><v>3</v></c></row><row r="2"><c r="A2"><f>A1+1</f><v>3</v></c><c r="D2"><f t="shared" si="0"/><v>4</v></c></row><row r="3"><c r="B3"><f t="array" ref="B3:B4">ROW(A1:A2)</f><v>1</v></c></row><row r="4"><c r="B4"><v>2</v></c></row><row r="5"><c r="A5" s="1"/><c r="B5" s="0"/></row></sheetData>"#,
+        );
+        for build_graph in [false, true] {
+            for client_id in [None, Some(11)] {
+                let actual = Workbook::open_internal(&bytes, build_graph, client_id).unwrap();
+                let expected =
+                    Workbook::open_internal_oracle(&bytes, build_graph, client_id).unwrap();
+                assert_eq!(
+                    actual.model.sheets[0]
+                        .cell(CellRef::new(1, 3))
+                        .unwrap()
+                        .formula
+                        .as_deref(),
+                    Some("A2+1")
+                );
+                assert!(
+                    actual.model.sheets[0]
+                        .array_formula(CellRef::new(2, 1))
+                        .is_some()
+                );
+                assert!(
+                    actual.model.sheets[0]
+                        .cell(CellRef::new(4, 0))
+                        .unwrap()
+                        .style
+                        .is_some()
+                );
+                assert!(assert_open_paths_equal(
+                    Ok(actual),
+                    Ok(expected),
+                    "shared and array formulas"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn single_projection_seeded_recalculated_open_matches_double_projection() {
+        let bytes = source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c><c r="B1"><f>RANDBETWEEN(1,1000000)</f><v>0</v></c><c r="C1"><f>RANDBETWEEN(1,1000)+A1</f><v>0</v></c><c r="D1"><f>NOW()+B1</f><v>0</v></c></row></sheetData>"#,
+        );
+        let options = CalculationOptions {
+            now_serial: Some(45_000.25),
+        };
+        let actual = Workbook::open_recalculated_with_seed(&bytes, options, Some(0x5eed)).unwrap();
+        let mut expected = Workbook::open_internal_oracle(&bytes, false, None).unwrap();
+        expected.set_rand_seed(Some(0x5eed));
+        expected.recalculate(options);
+        assert!(matches!(
+            actual.model.sheets[0].cell(CellRef::new(0, 1)).unwrap().value,
+            CellValue::Number { value } if value != 0.0
+        ));
+        assert!(assert_open_paths_equal(
+            Ok(actual),
+            Ok(expected),
+            "seeded recalculated open"
+        ));
+    }
+
+    #[test]
+    fn single_projection_open_matches_double_projection_xlsx_fixtures() {
+        fn collect_xlsx(dir: &std::path::Path, paths: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    collect_xlsx(&entry.path(), paths);
+                } else if kind.is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "xlsx")
+                {
+                    paths.push(entry.path());
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/xlsx/test-fixtures");
+        let mut paths = Vec::new();
+        collect_xlsx(&root, &mut paths);
+        paths.sort();
+        assert!(!paths.is_empty());
+        for path in paths {
+            let bytes = std::fs::read(&path).unwrap();
+            for client_id in [None, Some(11)] {
+                let _ = assert_open_paths_equal(
+                    Workbook::open_internal(&bytes, true, client_id),
+                    Workbook::open_internal_oracle(&bytes, true, client_id),
+                    &format!("{} client_id={client_id:?}", path.display()),
+                );
+            }
+        }
+    }
 
     #[test]
     fn visible_merged_ranges_include_viewport_edges_and_exclude_frozen_gaps() {

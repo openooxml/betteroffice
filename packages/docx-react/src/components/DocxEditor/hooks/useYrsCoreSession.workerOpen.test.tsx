@@ -9,6 +9,7 @@ import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   createYrsSession,
   preloadResidentEngineWorker,
+  ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
   proposalRevisionPreview,
   createYrsPositionProjection,
@@ -33,7 +34,9 @@ import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
-import { isLayoutQueued, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, markPresented, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { workerOpenSave } from '../internals/workerOpenSave';
+import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
@@ -49,6 +52,9 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
 const originalWorker = globalThis.Worker;
+const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
+const originalConsoleError = console.error;
 const bytes = new Uint8Array(readFileSync(resolve(
   import.meta.dir,
   '../../../../../../crates/docx-edit/tests/fixtures/page-fragments/pages.docx'
@@ -100,6 +106,9 @@ afterEach(() => {
   cleanup();
   compileModule.mockRestore();
   globalThis.Worker = originalWorker;
+  globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+  globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+  console.error = originalConsoleError;
   for (const session of sessions.splice(0)) session.destroy();
 });
 afterAll(async () => {
@@ -399,6 +408,8 @@ function useHarness(props: HarnessProps) {
     if (props.readOnly && core.session) relayout.current?.();
   }, [props.readOnly, core.session]);
   const pagedEditorRef = useRef<PagedEditorRef | null>(null);
+  const pipelineRef = useRef(pipeline);
+  pipelineRef.current = pipeline;
   const coreRef = useRef(core);
   coreRef.current = core;
   const searchReveals = useRef<number[]>([]);
@@ -407,6 +418,9 @@ function useHarness(props: HarnessProps) {
     getDocument: () => coreRef.current.documentFromYrs(),
     hasPendingInput: () => false,
     flushPendingInput: async () => {},
+    getLayoutRequest: () => pipelineRef.current.getLayoutRequest(),
+    readLayoutRequest: () => pipelineRef.current.readLayoutRequest(),
+    relayout: () => pipelineRef.current.runLayoutPipeline(),
     yrsLocToDisplayPosition: (loc: Parameters<PagedEditorRef['yrsLocToDisplayPosition']>[0]) => {
       const session = coreRef.current.session!;
       const projection = createYrsPositionProjection(session, 'body');
@@ -429,7 +443,7 @@ function useHarness(props: HarnessProps) {
     documentFromYrs: core.documentFromYrs,
     historyStateRef: { current: host?.document ?? null },
     pagedEditorRef,
-    handleSave: async () => core.documentFromYrs() ? new ArrayBuffer(0) : null,
+    handleSave: async () => new ArrayBuffer(0),
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -490,6 +504,137 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+test('a hydrated editor exports ordinary and pinned pages through the real layout request path', async () => {
+  const { posted } = installWorker();
+  const { result } = renderHook(useHarness, { initialProps: { ...initialProps, hydrateOnDemand: false } });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  act(() => result.current.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  act(() => result.current.presentFrame());
+  await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+  await act(async () => { await result.current.renderer.settledDisplayList(null, 3000, 'window'); });
+  expect(await result.current.pipeline.readLayoutRequest()).toBeNull();
+  expect(result.current.pipeline.getLayoutRequest()).not.toBeNull();
+  const session = result.current.core.session!;
+  const peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+  try {
+    let first!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => { first = await result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' }); });
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(first.version).toBe(session.version());
+    const options = { revisionView: 'markup' as const, expectLayoutVersion: first.content.layout.layoutVersion };
+    const beforePinned = posted.length;
+    let pinned!: Awaited<ReturnType<DocxEditorRef['exportStructuredWithPages']>>;
+    await act(async () => {
+      pinned = await result.current.ref.current!.exportStructuredWithPages(options);
+    });
+    expect(pinned).toEqual(first);
+    expect(posted.slice(beforePinned).filter((request) => request.type === 'documentRead' && request.read.kind === 'exportStructuredWithPages')).toHaveLength(1);
+    expect(posted.slice(beforePinned).some(({ type }) => type === 'bootstrap' || type === 'sync' || type === 'completeLayout')).toBe(false);
+    expect(peerExport).not.toHaveBeenCalled();
+  } finally {
+    peerExport.mockRestore();
+  }
+});
+
+test('main-thread takeover retires worker exports while an in-flight export still rejects', async () => {
+  const source = await longFixture(1);
+  let holdReads = false;
+  const { workers, posted, replies } = installWorker({ holdReply: (request) => holdReads && request.type === 'documentRead' });
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source, hydrateOnDemand: false },
+  });
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
+  try {
+    await frames.waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await frames.waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await frames.waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000, 'window'), 3000);
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const first = await frames.untilCommitted(api.exportStructuredWithPages({ revisionView: 'markup' }), 3000);
+    if (!first.ok) throw new Error(first.failure.message);
+    expect(workerOpenExport(session)).not.toBeNull();
+    const request = result.current.pipeline.getLayoutRequest()!;
+    session.layoutDocumentWithRegionsRetainedJson(request);
+    session.buildDisplayListFrame('{}', 0);
+    session.setSelection({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 0 });
+    peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+    const previousId = posted.at(-1)!.id;
+    holdReads = true;
+    const exporting = api.exportStructuredWithPages({ revisionView: 'markup', expectLayoutVersion: first.content.layout.layoutVersion });
+    void exporting.catch(() => {});
+    await frames.waitFor(() => {
+      const request = posted.find((request) => request.type === 'documentRead' && request.id > previousId);
+      expect(request).toBeDefined();
+      expect(replies.has(request!.id)).toBe(true);
+    });
+    workers[0]!.hold();
+    let input!: ReturnType<typeof result.current.renderer.applyInput>;
+    act(() => { input = result.current.renderer.applyInput('Recovered '); });
+    await frames.waitFor(() => expect(posted.some((request) => request.type === 'applyInput')).toBe(true));
+    act(() => { workers[0]!.onerror?.({ message: 'worker crashed' } as ErrorEvent); });
+    await frames.untilCommitted(Promise.all([input, expect(exporting).rejects.toThrow(ResidentWorkerFailureError)]), 3000);
+    expect(workerOpenExport(session)).toBeNull();
+    expect(peerExport).not.toHaveBeenCalled();
+    const exported = await frames.untilCommitted(api.exportStructuredWithPages({ revisionView: 'markup' }), 3000);
+    if (!exported.ok) throw new Error(exported.failure.message);
+    expect(exported.version).toBe(session.version());
+    expect(JSON.stringify(exported.content.structured)).toContain('Recovered ');
+    expect(peerExport).toHaveBeenCalled();
+    expect(workers).toHaveLength(1);
+  } finally {
+    unmount();
+    peerExport?.mockRestore();
+    errorLog.mockRestore();
+    frames.restore();
+    globalThis.Worker = originalWorker;
+  }
+});
+
+test('registered editor export reconciles worker repairs without echoing updates to the worker', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames();
+  const { result, unmount } = renderHook(useHarness, { initialProps: { ...initialProps, hydrateOnDemand: false } });
+  let applyLocal: ReturnType<typeof spyOn<YrsSession, 'applyLocalUpdate'>> | undefined;
+  let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
+  try {
+    await frames.waitFor(() => expect(result.current.host).not.toBeNull());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await frames.waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await frames.waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000, 'window'), 3000);
+    const session = result.current.core.session!;
+    applyLocal = spyOn(session, 'applyLocalUpdate');
+    peerExport = spyOn(session, 'exportStructuredWithPagesFor');
+    workers[0]!.sessions[0]!.applyRawOps('body', [{ op: 'insert', index: 0, text: 'Worker repair ' }]);
+    const before = posted.filter(({ type }) => type === 'applyUpdate').length;
+    const beforeExport = posted.length;
+    const exported = await frames.untilCommitted(result.current.ref.current!.exportStructuredWithPages({ revisionView: 'markup' }), 3000);
+    if (!exported.ok) throw new Error(exported.failure.message);
+    expect(exported.version).toBe(session.version());
+    expect(exported.content.layout.documentVersion).toBe(session.version());
+    expect(JSON.stringify(exported.content.structured)).toContain('Worker repair ');
+    expect(session.paragraphs('body')[0]!.text).toStartWith('Worker repair ');
+    expect(applyLocal).toHaveBeenCalled();
+    expect(posted.filter(({ type }) => type === 'applyUpdate')).toHaveLength(before);
+    expect(posted.slice(beforeExport).some(({ type }) => type === 'syncUpdate')).toBe(true);
+    expect(posted.slice(beforeExport).some(({ type }) => type === 'sync')).toBe(true);
+    expect(peerExport).not.toHaveBeenCalled();
+  } finally {
+    unmount();
+    applyLocal?.mockRestore();
+    peerExport?.mockRestore();
+    frames.restore();
+    globalThis.Worker = originalWorker;
+  }
+});
 
 test('eager worker open preserves input and command order after first paint until loadState completes', async () => {
   const { workers, posted } = installWorker({ holdState: true });
@@ -563,6 +708,183 @@ test('eager worker open preserves input and command order after first paint unti
   load.mockRestore();
   insert.mockRestore();
 });
+
+test('saved paragraph ID claims refresh editor point geometry without another edit', async () => {
+  installWorker();
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const point = () => {
+    const queries = harness.renderer.queries!;
+    const size = queries.pageSize(0)!;
+    canvasHost.current!.firstElementChild!.getBoundingClientRect = () => ({
+      left: 0, top: 0, right: size.width, bottom: size.height, ...size,
+    }) as DOMRect;
+    markPresented(canvasHost.current!, queries.displayList);
+    const caret = queries.caretRect(1)!;
+    return editor.current!.getPositionAtPoint(caret.x, caret.y + caret.height / 2);
+  };
+  expect(point()).not.toBeNull();
+  const beforeSave = session.encodeStateVector();
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(session.encodeStateVector()).not.toEqual(beforeSave);
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  expect(point()).not.toBeNull();
+  expect(harness.errors).toEqual([]);
+}, 20_000);
+
+test("a worker save's own paragraph ID claims leave no story dirty for the next save", async () => {
+  const { posted } = installWorker();
+  const savedStories = () => posted.filter((request) => request.type === 'save').map((request) => request.stories);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const beforeSave = session.encodeStateVector();
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(session.encodeStateVector()).not.toEqual(beforeSave);
+  expect(savedStories()).toEqual([['body']]);
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(savedStories()).toEqual([['body'], []]);
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 2 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  await act(async () => {
+    expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+  });
+  expect(savedStories()).toEqual([['body'], [], ['body']]);
+  expect(harness.errors).toEqual([]);
+}, 20_000);
+
+test('overlapping editor worker saves capture their stories in call order', async () => {
+  const { workers, posted, received, reply } = installWorker({ holdReply: (request) => request.type === 'save' });
+  const savedStories = () => posted.filter((request) => request.type === 'save').map((request) => request.stories);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable() {
+    harness = useHarness({ ...initialProps, source, hydrateOnDemand: false });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={(layout, session) => harness.renderer.onLayoutComputed(layout, session)}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  render(<Editable />);
+  await waitFor(() => expect(harness.renderer.status).toBe('ready'));
+  act(() => harness.presentFrame());
+  await waitFor(() => expect(harness.core.replicaReady).toBe(true));
+  const session = harness.core.session!;
+  act(() => {
+    session.splitParagraph({ story: 'body', paraId: session.paragraphs('body')[0]!.paraId, offset: 5 });
+    editor.current!.syncYrsInputState(true, ['body']);
+  });
+  await waitFor(() => expect(sourceVersionOf(harness.renderer.queries)).toBe(session.version()));
+  await act(async () => { await harness.renderer.settledDisplayList(null, 3000); });
+  const events: string[] = [];
+  const worker = workers[0]!;
+  const postMessage = worker.postMessage.bind(worker);
+  const send = spyOn(worker, 'postMessage').mockImplementation((request, transfer) => {
+    if (request.type === 'save') events.push('request');
+    postMessage(request, transfer);
+  });
+  try {
+    await act(async () => {
+      const save = workerOpenSave(session)!;
+      const first = save.save([], session).then((bytes) => {
+        events.push('resolved');
+        return bytes;
+      });
+      const second = save.save([], session);
+      const firstRequest = await received('save');
+      expect(savedStories()).toEqual([['body']]);
+      expect(events).toEqual(['request']);
+      reply(firstRequest);
+      const secondRequest = await received('save', firstRequest.id);
+      expect(events).toEqual(['request', 'resolved', 'request']);
+      expect(savedStories()).toEqual([['body'], []]);
+      reply(secondRequest);
+      for (const bytes of await Promise.all([first, second])) {
+        expect(bytes).toBeInstanceOf(ArrayBuffer);
+        expect(bytes.byteLength).toBeGreaterThan(0);
+      }
+    });
+    expect(harness.errors).toEqual([]);
+  } finally {
+    send.mockRestore();
+  }
+}, 20_000);
 
 test('read-only on-demand worker open supersedes pending select-all when admitting a command', async () => {
   const { workers, posted } = installWorker({ holdState: true });
@@ -695,6 +1017,21 @@ function holdFrames() {
   };
   return {
     run,
+    async waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        try {
+          assertion();
+          return;
+        } catch (error) {
+          if (Date.now() >= deadline) throw error;
+        }
+        await act(async () => {
+          run();
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        });
+      }
+    },
     async until<T>(promise: Promise<T>): Promise<T> {
       let settled = false;
       void promise.then(() => { settled = true; }, () => { settled = true; });
@@ -704,10 +1041,12 @@ function holdFrames() {
       }
       return promise;
     },
-    async untilCommitted<T>(promise: Promise<T>): Promise<T> {
+    async untilCommitted<T>(promise: Promise<T>, timeoutMs?: number): Promise<T> {
       let settled = false;
       void promise.then(() => { settled = true; }, () => { settled = true; });
+      const deadline = timeoutMs === undefined ? Infinity : Date.now() + timeoutMs;
       while (!settled) {
+        if (Date.now() >= deadline) throw new Error(`Operation did not settle within ${timeoutMs}ms`);
         await act(async () => {
           run();
           await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1977,7 +2316,7 @@ test('opening the comments sidebar hydrates the pending replica and keeps worker
   }
 });
 
-test('a first-layout font setup failure starts the replica for pending reads, save and commands', async () => {
+test('a first-layout font setup failure starts the replica for pending reads and commands', async () => {
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -1987,7 +2326,6 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
   try {
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-      result.current.ref.current!.save(),
       result.current.bridgeRef.current!.runAfterPendingInput(() => true),
     ]);
     const completed = { value: false };
@@ -2006,8 +2344,7 @@ test('a first-layout font setup failure starts the replica for pending reads, sa
     await waitFor(() => expect(completed.value).toBe(true));
     const settled = await calls;
     expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-    expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
-    expect(settled[2]).toEqual({ status: 'fulfilled', value: true });
+    expect(settled[1]).toEqual({ status: 'fulfilled', value: true });
     expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.core.replicaReady).toBe(true);
     expect(result.current.renderer.frame).toBeNull();
@@ -2050,9 +2387,11 @@ test('a worker open without a frame or error starts the replica after the bounde
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
+  expect(await result.current.ref.current!.save()).toEqual(new ArrayBuffer(0));
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
   const calls = Promise.allSettled([
     result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-    result.current.ref.current!.save(),
   ]);
   const completed = { value: false };
   void calls.then(() => { completed.value = true; });
@@ -2066,7 +2405,6 @@ test('a worker open without a frame or error starts the replica after the bounde
   await waitFor(() => expect(completed.value).toBe(true));
   const settled = await calls;
   expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
-  expect(settled[1]).toEqual({ status: 'fulfilled', value: new ArrayBuffer(0) });
   expect(result.current.mainOpens).toEqual([false]);
   expect(result.current.core.replicaReady).toBe(true);
 }, 15_000);
@@ -2129,14 +2467,13 @@ test('a replaced worker open never publishes its host or revives its replica', a
 });
 
 for (const stage of ['fontRequirements', 'bootstrap'] as const) {
-  test(`terminal OOM during ${stage} rejects pending reads, save and commands`, async () => {
+  test(`terminal OOM during ${stage} rejects pending reads and commands`, async () => {
     const { workers, posted } = installWorker({ oomStage: stage });
     const { result } = renderHook(useHarness, { initialProps });
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
     const calls = Promise.allSettled([
       result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-      result.current.ref.current!.save(),
       result.current.ref.current!.flushPendingInput(),
       result.current.bridgeRef.current!.runAfterPendingInput(() => true),
     ]);
@@ -2148,7 +2485,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
     const failure = result.current.renderer.error;
     expect(failure).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
     const settled: PromiseSettledResult<unknown>[] = await calls;
-    expect(settled).toEqual(Array.from({ length: 4 }, () => ({ status: 'rejected', reason: failure })));
+    expect(settled).toEqual(Array.from({ length: 3 }, () => ({ status: 'rejected', reason: failure })));
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.renderer.workerMemory()).toBeNull();
     expect(workers).toHaveLength(2);
@@ -2166,7 +2503,6 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       const session = result.current.core.session!;
       const pending = Promise.allSettled([
         result.current.ref.current!.readParagraphs({ view: 'accepted' }),
-        result.current.ref.current!.save(),
         result.current.bridgeRef.current!.runAfterPendingInput(() => true),
       ]);
       const completed = { value: false };

@@ -1,12 +1,14 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { useRef } from 'react';
 import { buildResidentRegionLayoutRequest } from '@betteroffice/docx/editor';
+import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
+import { createYrsSession, decodeDocxHostJson, type ResidentDocumentRead, type ResidentEngineWorkerClient, type YrsSession } from '@betteroffice/docx/yrs';
+import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
 import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
@@ -15,11 +17,14 @@ import type { EditorMode } from '../internals/editing-modes';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
 import type { DocxHostSearch } from './useHostSearch';
 import type { Comment } from '@betteroffice/docx/types/content';
+import { exportWorkerOpenPages, registerWorkerOpenExport, type WorkerOpenExport } from '../internals/workerOpenExport';
+import { workerExportVersions } from '../internals/workerExportVersions';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { cleanup, renderHook } = await import('@testing-library/react');
 const sessions: YrsSession[] = [];
+const workers: Awaited<ReturnType<typeof createResidentEngineSession>>[] = [];
 
 const ROOT = resolve(import.meta.dir, '../../../../../..');
 const PAGES = new Uint8Array(
@@ -38,6 +43,7 @@ beforeAll(() =>
 afterEach(() => {
   cleanup();
   for (const session of sessions.splice(0)) session.destroy();
+  for (const worker of workers.splice(0)) worker.destroy();
 });
 afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
@@ -84,6 +90,51 @@ function edit(session: YrsSession, text: string) {
   if (!applied.ok) throw new Error(applied.failure.message);
 }
 
+async function openWorkerSession(afterRead?: (value: string) => Promise<void>, bytes = PAGES) {
+  const worker = await createResidentEngineSession();
+  workers.push(worker);
+  const { document } = decodeDocxHostJson(worker.openDocx(bytes), bytes);
+  const font = worker.registerFont(FONT);
+  const inputs = buildResidentRegionLayoutRequest(document, 24, {});
+  const requirements = JSON.parse(worker.layoutFontRequirementsJson(JSON.stringify(inputs))) as Array<{ key: string }>;
+  inputs.measurement = {
+    fontChains: Object.fromEntries(requirements.map(({ key }) => [key, [font]])),
+    defaults: { fontSize: 11, fontFamily: 'Calibri' },
+    compat: { noLeading: false, doNotExpandShiftReturn: false },
+    authoritativeShaping: true,
+  };
+  const request = JSON.stringify(inputs);
+  const peer = await createYrsSession();
+  sessions.push(peer);
+  peer.openDocx(bytes, false);
+  peer.loadState(worker.encodeState());
+  peer.registerFont(FONT);
+  const owner = {};
+  const reads: Array<{ options: Parameters<WorkerOpenExport['export']>[0]; version: string }> = [];
+  const operation: WorkerOpenExport = {
+    export: (options, context) => exportWorkerOpenPages(peer, options, context, {
+      assertCurrent: () => {},
+      catchUp: async () => {
+        const vector = peer.encodeStateVector();
+        worker.applyUpdate(peer.encodeStateAsUpdate(worker.encodeStateVector()));
+        peer.applyLocalUpdate(worker.encodeStateAsUpdate(vector));
+        return { P: peer.version(), W: worker.proposalEngine.version(), changed: false };
+      },
+      read: (async (read: ResidentDocumentRead, version: string) => {
+        if (worker.proposalEngine.version() !== version) return { status: 'superseded' };
+        if (read.kind !== 'exportStructuredWithPages') throw new Error('Expected paged export');
+        reads.push({ options: read.options, version });
+        const value = worker.exportStructuredWithPagesJson(read.options, read.currentRequest);
+        await afterRead?.(value);
+        return { status: 'ok', version, value };
+      }) as ResidentEngineWorkerClient['documentReadAt'],
+      versions: workerExportVersions(peer, owner, 1),
+      serialize: (run) => run(),
+    }),
+  };
+  return { session: peer, worker, operation, reads, request, layout: (current = request) => { worker.layoutDocumentWithRegionsRetainedJson(current); } };
+}
+
 async function setup(options: {
   session: YrsSession;
   request: () => string | null;
@@ -94,6 +145,8 @@ async function setup(options: {
   setComments?: () => void;
   save?: () => Promise<ArrayBuffer | null>;
   awaitingDocument?: () => boolean;
+  worker?: WorkerOpenExport;
+  settle?: () => Promise<void>;
 }) {
   const events: string[] = [];
   const editor = {
@@ -105,12 +158,12 @@ async function setup(options: {
       options.flush?.();
     },
     relayout: (relayoutOptions?: { onHost?: boolean }) => {
-      // An export lays out on this thread: a worker pass would leave the session's layout as it is.
       events.push(relayoutOptions?.onHost ? 'relayout' : 'relayout in the worker');
       options.relayout?.();
     },
   } as unknown as PagedEditorRef;
   const pagedEditorRef = { current: editor as PagedEditorRef | null };
+  if (options.worker) registerWorkerOpenExport(options.session, options.worker);
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
@@ -120,6 +173,11 @@ async function setup(options: {
       documentFromYrs: () => null,
       historyStateRef: { current: null },
       pagedEditorRef,
+      experimentalWorkerOpen: options.worker !== undefined,
+      settledDisplayList: options.worker ? async () => {
+        await options.settle?.();
+        return {} as never;
+      } : undefined,
       handleSave: options.save ?? (async () => null),
       zoom: 1,
       setZoom: () => {},
@@ -331,4 +389,149 @@ test('an expected layout version is never laid out again', async () => {
   });
   expect(result).toMatchObject({ ok: false, failure: { code: 'stale-document' } });
   expect(events).toEqual(['flush']);
+});
+
+test('worker editor export lays out flushed input and returns a peer edit version', async () => {
+  const opened = await openWorkerSession();
+  opened.layout();
+  const peerExport = spyOn(opened.session, 'exportStructuredWithPagesFor');
+  const { events, api } = await setup({
+    session: opened.session, worker: opened.operation, request: () => opened.request,
+    flush: () => edit(opened.session, 'Typed before the worker export'), relayout: opened.layout,
+  });
+  const result = await api().exportStructuredWithPages(MARKUP);
+  if (!result.ok) throw new Error(result.failure.message);
+  expect(events).toEqual(['flush', 'relayout in the worker']);
+  expect(result.version).toBe(opened.session.version());
+  expect(result.content.layout.documentVersion).toBe(result.version);
+  const title = result.content.structured.stories[0]!.blocks[0]!;
+  expect(title.kind === 'heading' && title.paragraph.inlines[0]).toMatchObject({ kind: 'text', text: 'Typed before the worker export' });
+  const target = { kind: 'paragraph', story: 'body', paraId: '00000001' } as const;
+  expect(opened.session.validateEdits({ expectVersion: result.version, steps: [{ op: 'replaceText', target, text: 'Next edit' }] }).ok).toBe(true);
+  const applied = opened.session.applyEdits({ expectVersion: result.version, steps: [{ op: 'replaceText', target, text: 'Next edit' }] });
+  expect(applied.ok).toBe(true);
+  expect(opened.session.validateEdits({ expectVersion: result.version, steps: [{ op: 'replaceText', target, text: 'Stale edit' }] })).toMatchObject({ ok: false });
+  expect(peerExport).not.toHaveBeenCalled();
+  peerExport.mockRestore();
+});
+
+test('worker editor export reuses its retained layout and pinned tokens round-trip', async () => {
+  const opened = await openWorkerSession();
+  opened.layout();
+  const { events, api } = await setup({ session: opened.session, worker: opened.operation, request: () => opened.request, relayout: opened.layout });
+  const first = await api().exportStructuredWithPages(MARKUP);
+  if (!first.ok) throw new Error(first.failure.message);
+  expect(first.content.layout.layoutVersion.startsWith(`${opened.session.version()}:`)).toBe(true);
+  const second = await api().exportStructuredWithPages({ ...MARKUP, expectLayoutVersion: first.content.layout.layoutVersion });
+  expect(second).toEqual(first);
+  expect(opened.reads[1]!.options.expectLayoutVersion).toBe(`${opened.reads[0]!.version}:${first.content.layout.layoutVersion.split(':').at(-1)}`);
+  expect(events).toEqual(['flush', 'flush']);
+});
+
+test('worker editor export waits for deferred layout completion', async () => {
+  const paragraphs = Array.from({ length: 64 }, (_, index) =>
+    `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}"><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Page ${index + 1}</w:t></w:r></w:p>`
+  ).join('');
+  const bytes = new Uint8Array(rezipPartsToArrayBuffer(new Map([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="document" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', toBytes(`<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>${paragraphs}</w:body></w:document>`)],
+  ])));
+  const opened = await openWorkerSession(undefined, bytes);
+  const prefix = JSON.parse(opened.worker.layoutDocumentWithRegionsPrefixRetainedJson(opened.request, 1));
+  expect(prefix).toMatchObject({ provisional: true, layout: { partial: true } });
+  expect(JSON.parse(opened.worker.exportStructuredWithPagesJson(MARKUP, opened.request)))
+    .toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  let completed = false;
+  const { events, api } = await setup({
+    session: opened.session, worker: opened.operation, request: () => opened.request,
+    settle: () => new Promise((resolve) => setTimeout(() => { opened.layout(); completed = true; resolve(); }, 20)),
+  });
+  expect((await api().exportStructuredWithPages(MARKUP)).ok).toBe(true);
+  expect(completed).toBe(true);
+  expect(events).toEqual(['flush', 'relayout in the worker']);
+  expect(opened.reads).toHaveLength(2);
+});
+
+test('worker editor export lays out changed inputs and waits for fonts', async () => {
+  const opened = await openWorkerSession();
+  opened.layout();
+  const inputs = JSON.parse(opened.request) as { renderEnv: Record<string, unknown> };
+  inputs.renderEnv.showHiddenText = true;
+  const changed = JSON.stringify(inputs);
+  let fontsReady = false;
+  const { events, api } = await setup({
+    session: opened.session, worker: opened.operation, request: () => fontsReady ? changed : null,
+    settle: async () => { fontsReady = true; opened.layout(changed); },
+  });
+  expect((await api().exportStructuredWithPages(MARKUP)).ok).toBe(true);
+  expect(events).toEqual(['flush', 'relayout in the worker']);
+});
+
+test('worker editor export refreshes a layout made with other inputs', async () => {
+  const opened = await openWorkerSession();
+  opened.layout();
+  const inputs = JSON.parse(opened.request) as { renderEnv: Record<string, unknown> };
+  inputs.renderEnv.showHiddenText = true;
+  const changed = JSON.stringify(inputs);
+  const { events, api } = await setup({
+    session: opened.session, worker: opened.operation, request: () => changed,
+    relayout: () => opened.layout(changed),
+  });
+  expect((await api().exportStructuredWithPages(MARKUP)).ok).toBe(true);
+  expect(events).toEqual(['flush', 'relayout in the worker']);
+  expect(opened.reads).toHaveLength(2);
+});
+
+test('worker editor export refreshes a retained revision preview', async () => {
+  const opened = await openWorkerSession();
+  const inputs = JSON.parse(opened.request) as { renderEnv: Record<string, unknown> };
+  inputs.renderEnv.revisionPreview = { '1': 'accepted' };
+  opened.layout(JSON.stringify(inputs));
+  const { events, api } = await setup({
+    session: opened.session, worker: opened.operation, request: () => opened.request, relayout: opened.layout,
+  });
+  expect((await api().exportStructuredWithPages(MARKUP)).ok).toBe(true);
+  expect(events).toEqual(['flush', 'relayout in the worker']);
+});
+
+test('a pinned worker editor export refuses changed input without relayout', async () => {
+  const opened = await openWorkerSession();
+  opened.layout();
+  const { events, api } = await setup({ session: opened.session, worker: opened.operation, request: () => opened.request, relayout: opened.layout });
+  const first = await api().exportStructuredWithPages(MARKUP);
+  if (!first.ok) throw new Error(first.failure.message);
+  edit(opened.session, 'Changed after capture');
+  const refusal = await api().exportStructuredWithPages({ ...MARKUP, expectLayoutVersion: first.content.layout.layoutVersion });
+  expect(refusal).toMatchObject({ ok: false, version: opened.session.version(), failure: { code: 'stale-document' } });
+  expect(events).toEqual(['flush', 'flush']);
+  expect(opened.reads).toHaveLength(2);
+});
+
+test('later typing does not appear in the captured worker export', async () => {
+  let release!: () => void;
+  let posted!: () => void;
+  const pendingRead = new Promise<void>((resolve) => { release = resolve; });
+  const reading = new Promise<void>((resolve) => { posted = resolve; });
+  const opened = await openWorkerSession((value) => {
+    if (!(JSON.parse(value) as { ok: boolean }).ok) return Promise.resolve();
+    posted();
+    return pendingRead;
+  });
+  const { api } = await setup({
+    session: opened.session, worker: opened.operation, request: () => opened.request,
+    flush: () => { edit(opened.session, 'Flushed text'); },
+    relayout: opened.layout,
+  });
+  const pending = api().exportStructuredWithPages(MARKUP);
+  await reading;
+  const capturedVersion = opened.session.version();
+  edit(opened.session, 'Later typing');
+  release();
+  const result = await pending;
+  if (!result.ok) throw new Error(result.failure.message);
+  expect(result.version).toBe(capturedVersion);
+  expect(JSON.stringify(result.content.structured)).toContain('Flushed text');
+  expect(JSON.stringify(result.content.structured)).not.toContain('Later typing');
+  expect(opened.reads).toHaveLength(2);
 });

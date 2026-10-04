@@ -97,6 +97,7 @@ export class PptxDocument {
     searchTextJson(args: string): string;
     sendShapeBackwardJson(args: string): string;
     sendShapeToBackJson(args: string): string;
+    sessionMetadataJson(): string;
     setCommentFlavorJson(args: string): string;
     setCommentPositionJson(args: string): string;
     setCommentStatusJson(args: string): string;
@@ -246,6 +247,7 @@ export interface InitOutput {
     readonly pptxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_sessionMetadataJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];

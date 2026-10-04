@@ -242,6 +242,27 @@ export interface PresentationHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+const displayListJsonReaders = new WeakMap<PresentationHandle, (slideIndex: number) => string>();
+
+type SessionMetadataDocument = PptxDocument & { sessionMetadataJson(): string };
+type PresentationMetadata = {
+  slides: { id: string; index: number; name: string | null; layoutPartPath: string | null }[];
+  size: { width: number; height: number };
+};
+const metadataReaders = new WeakMap<PresentationHandle, () => PresentationMetadata>();
+
+export function presentationMetadata(handle: PresentationHandle): PresentationMetadata {
+  const read = metadataReaders.get(handle);
+  if (!read) throw new Error('Presentation metadata is unavailable');
+  return read();
+}
+
+/** @experimental */
+export function presentationDisplayListJson(handle: PresentationHandle, slideIndex: number): string {
+  const read = displayListJsonReaders.get(handle);
+  if (!read) throw new Error('Presentation display list is unavailable');
+  return read(slideIndex);
+}
 
 export function isProposalsAvailable(): boolean {
   return typeof PptxDocument.prototype.proposeJson === 'function'
@@ -853,6 +874,12 @@ export function openPresentation(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  displayListJsonReaders.set(handle, (slideIndex) =>
+    wasmCall(() => renderer.layoutSlideJson(doc, slideIndex))
+  );
+  metadataReaders.set(handle, () =>
+    jsonWasmCall(() => (doc as SessionMetadataDocument).sessionMetadataJson())
+  );
   Object.defineProperty(handle, Symbol.for('@betteroffice/pptx/slide-layout-cache'), {
     value: {
       snapshot: (): { snapshot: DeckSnapshot; keys: Record<string, string> } =>

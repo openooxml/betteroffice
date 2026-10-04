@@ -197,6 +197,12 @@ impl Sheet {
         self.cells.get_mut(&(at.row, at.col))
     }
 
+    #[doc(hidden)]
+    pub fn adopt_cells(&mut self, mut cells: BTreeMap<(RowId, ColId), Cell>) {
+        cells.retain(|_, cell| *cell != Cell::default());
+        self.cells = cells;
+    }
+
     pub fn set_cell(&mut self, at: CellRef, cell: Cell) {
         if cell == Cell::default() {
             self.cells.remove(&(at.row, at.col));
@@ -650,6 +656,95 @@ impl CellProvider for Workbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_cell_adoption_matches_set_cell() {
+        let cells = BTreeMap::from([
+            ((0, 0), Cell::default()),
+            (
+                (0, 1),
+                Cell {
+                    style: Some(0),
+                    ..Cell::default()
+                },
+            ),
+            (
+                (0, 2),
+                Cell {
+                    style: Some(7),
+                    ..Cell::default()
+                },
+            ),
+            (
+                (1, 0),
+                Cell {
+                    formula: Some(String::new()),
+                    ..Cell::default()
+                },
+            ),
+            (
+                (1, 1),
+                Cell {
+                    value: CellValue::Text {
+                        value: String::new(),
+                    },
+                    ..Cell::default()
+                },
+            ),
+            (
+                (1, 2),
+                Cell {
+                    value: CellValue::Number { value: 0.0 },
+                    ..Cell::default()
+                },
+            ),
+            (
+                (2, 0),
+                Cell {
+                    value: CellValue::Bool { value: false },
+                    ..Cell::default()
+                },
+            ),
+            (
+                (2, 1),
+                Cell {
+                    value: CellValue::Number { value: 2.0 },
+                    formula: Some("1+1".into()),
+                    style: Some(1),
+                },
+            ),
+            (
+                (u32::MAX, u32::MAX),
+                Cell {
+                    style: Some(2),
+                    ..Cell::default()
+                },
+            ),
+        ]);
+        for cells in [cells, BTreeMap::new()] {
+            let mut actual = Sheet::new("Data");
+            actual.set_cell(
+                CellRef::new(9, 9),
+                Cell {
+                    style: Some(1),
+                    ..Cell::default()
+                },
+            );
+            actual.set_array_formula(
+                CellRef::new(1, 1),
+                CellRange::new(CellRef::new(1, 1), CellRef::new(2, 1)),
+            );
+            actual.col_widths.insert(3, 12.0);
+            actual.row_heights.insert(4, 20.0);
+            let mut expected = actual.clone();
+            expected.cells.clear();
+            for (&(row, col), cell) in &cells {
+                expected.set_cell(CellRef::new(row, col), cell.clone());
+            }
+            actual.adopt_cells(cells);
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn sparse_set_get_and_used_range() {

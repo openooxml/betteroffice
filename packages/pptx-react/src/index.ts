@@ -3,6 +3,8 @@ export type {
   PptxEditorApi,
   PptxEditorCollaborationOptions,
   PptxEditorProps,
+  PptxWorkerViewerApi,
+  PptxWorkerViewerProps,
   PptxPointPosition,
   PptxTextSelection,
   PptxTextSelectionTarget,

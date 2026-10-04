@@ -5,6 +5,7 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
@@ -141,6 +142,158 @@ function setup() {
   const client = new ResidentEngineWorkerClient(worker);
   return { worker, client };
 }
+
+test('save posts comments and optional host metadata and returns the saved buffer and its updates', async () => {
+  const { worker, client } = setup();
+  const host = { package: { document: { content: [] } } };
+  const pending = client.save({ comments: [], host });
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'save', comments: [], host });
+  expect(worker.transfers[0]).toEqual([]);
+  const saved = new ArrayBuffer(4);
+  const stateVector = new Uint8Array([3, 1]).buffer;
+  worker.reply({
+    id: worker.lastId(), ok: true, saved, updates: [new Uint8Array([9]).buffer], stateVector,
+    version: 'saved',
+  });
+  const result = await pending;
+  expect(result.bytes).toBe(saved);
+  expect(result.updates.map((update) => [...update])).toEqual([[9]]);
+  expect(result.version).toBe('saved');
+  expect([...client.remoteStateVector()!]).toEqual([3, 1]);
+  const withoutHost = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutHost;
+  client.destroy();
+});
+
+test('save copies peer stories and state vector and omits them when absent', async () => {
+  const { worker, client } = setup();
+  const stateVector = new Uint8Array([1, 2, 3]);
+  const stories = ['hf:rIdH1'];
+  const pending = client.save({ comments: [], stateVector, stories });
+  const request = worker.requestAt(0);
+  expect(request).toEqual({ id: worker.lastId(), type: 'save', comments: [], stateVector, stories });
+  if (request.type !== 'save') throw new Error('Expected a save request');
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(request.stateVector!.buffer).not.toBe(stateVector.buffer);
+  expect(request.stories).not.toBe(stories);
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await pending;
+  const withoutVector = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutVector;
+  const empty = client.save({ comments: [], stories: [] });
+  expect(worker.requestAt(2)).toEqual({ id: worker.lastId(), type: 'save', comments: [], stories: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await empty;
+  client.destroy();
+});
+
+test('syncUpdate copies and acknowledges the peer diff, vector and worker repairs', async () => {
+  const { worker, client } = setup();
+  const update = new Uint8Array([7, 8]);
+  const stateVector = new Uint8Array([1, 2]);
+  client.invalidate(new Uint8Array([6]), null);
+  const pending = client.syncUpdate(update, stateVector);
+  client.invalidate(new Uint8Array([9]), null);
+  const request = worker.requestAt(1);
+  expect(worker.posted.map((message) => message.type)).toEqual(['applyUpdate', 'syncUpdate', 'applyUpdate']);
+  expect(request).toMatchObject({ type: 'syncUpdate', update, stateVector });
+  if (request.type !== 'syncUpdate') throw new Error('Expected syncUpdate');
+  expect(request.update).not.toBe(update);
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(worker.transfers[1]).toEqual([request.update.buffer, request.stateVector.buffer]);
+  worker.reply({ id: request.id, ok: true, version: 'worker-v', stateVector: new Uint8Array([3]).buffer, repair: new Uint8Array([4]).buffer });
+  expect(await pending).toEqual({ version: 'worker-v', stateVector: new Uint8Array([3]), repair: new Uint8Array([4]) });
+  expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+  client.destroy();
+});
+
+test('syncUpdate sends an empty update even when the peer state vector is unchanged', async () => {
+  const { worker, client } = setup();
+  const vector = new Uint8Array([1, 2]);
+  for (let i = 0; i < 2; i += 1) {
+    const pending = client.syncUpdate(new Uint8Array(), vector);
+    expect(worker.requestAt(i)).toMatchObject({ type: 'syncUpdate', update: new Uint8Array(), stateVector: vector });
+    worker.reply({ id: worker.lastId(), ok: true, version: `v${i}`, stateVector: vector.slice().buffer, repair: null });
+    expect((await pending).repair).toBeNull();
+  }
+  client.destroy();
+});
+
+test('syncUpdate rejects incomplete acknowledgments', async () => {
+  const { worker, client } = setup();
+  for (const fields of [
+    { stateVector: new ArrayBuffer(0), repair: null },
+    { version: 'v', repair: null },
+    { version: 'v', stateVector: new ArrayBuffer(0) },
+  ]) {
+    const pending = client.syncUpdate(new Uint8Array(), new Uint8Array());
+    worker.reply({ id: worker.lastId(), ok: true, ...fields });
+    await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  }
+  client.destroy();
+});
+
+test('an empty syncUpdate preserves readiness of the retained worker frame', async () => {
+  const { worker, client } = setup();
+  const bootstrapped = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrapped;
+  expect(client.isReady()).toBe(true);
+  const acknowledged = client.syncUpdate(new Uint8Array([0, 0]), new Uint8Array([0]));
+  worker.reply({ id: worker.lastId(), ok: true, version: 'v', stateVector: new Uint8Array([0]).buffer, repair: null });
+  await acknowledged;
+  expect(client.isReady()).toBe(true);
+  client.destroy();
+});
+
+test('syncUpdate rejects worker crashes and out-of-memory traps', async () => {
+  const first = setup();
+  const crashed = first.client.syncUpdate(new Uint8Array(), new Uint8Array());
+  first.worker.onerror?.({ message: 'crash' } as ErrorEvent);
+  await expect(crashed).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  expect(first.worker.terminated).toBe(true);
+  const second = setup();
+  const trapped = second.client.syncUpdate(new Uint8Array(), new Uint8Array());
+  second.worker.reply({ id: second.worker.lastId(), ok: false, error: 'out of memory', terminal: true, outOfMemory: true });
+  await expect(trapped).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+});
+
+test('save rejects a missing or malformed saved buffer', async () => {
+  const { worker, client } = setup();
+  for (const reply of [
+    { updates: [], version: 'v' },
+    { saved: new Uint8Array(4), updates: [], version: 'v' },
+    { saved: new ArrayBuffer(4), version: 'v' },
+    { saved: new ArrayBuffer(4), updates: [] },
+  ]) {
+    const pending = client.save({ comments: [] });
+    worker.reply({ id: worker.lastId(), ok: true, ...reply } as ResidentEngineWorkerResponse);
+    await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  }
+  client.destroy();
+});
+
+test('an unavailable save is a recoverable save failure', async () => {
+  const { worker, client } = setup();
+  const pending = client.save({ comments: [] });
+  worker.reply({
+    id: worker.lastId(), ok: false,
+    error: 'Resident engine worker is still opening', code: 'save-unavailable',
+  });
+  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  expect(client.hasFailed()).toBe(false);
+  const retry = client.save({ comments: [] });
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'v' });
+  expect((await retry).bytes).toBe(saved);
+  client.destroy();
+});
 
 test('a font base mismatch forgets optimistic revisions, including queued snapshots', async () => {
   const { worker, client } = setup();

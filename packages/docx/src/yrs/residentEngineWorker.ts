@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import { LAYOUT_META_VERSION, type LayoutMetaV1, type RetainedLayoutMeta } from './layoutMeta';
 import type { CollaborationCursor } from '../collaboration/types';
 import type { YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import {
@@ -18,6 +19,8 @@ import {
 import { computeProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
 import { findBodyMatches } from './findMatches';
 import { readResidentSearch, residentBodyPositions } from './residentSearch';
+import type { ResidentSaveRecord } from './residentSave';
+import { proposalProjectionStories } from './dirtyProjectionStories';
 import { findParagraphs } from './findParagraphs';
 import { DisplayPositionIndex } from './displayPositionIndex';
 import { resolveYrsPointPosition } from './pointPosition';
@@ -101,6 +104,9 @@ let requestedRequirements: { owner: ResidentEngineSession; layoutInput: string }
 const REQUIREMENTS_CACHE_INPUTS = 8;
 /** Set while the session holds the document `open` seeded, with the heap limit it used. */
 let openedDocument: { heapLimitBytes?: number } | null = null;
+let openedSource: { bytes: ArrayBuffer; hostJson: string } | null = null;
+let editorSaves: ResidentSaveRecord = { full: false };
+class SaveUnavailableError extends Error {}
 let openedVersion: string | null | undefined;
 /** A change before the whole document's first frame leaves no frame as opened. */
 function noteDocumentChange(): void {
@@ -118,6 +124,11 @@ let provisionalDisplayWindow: {
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
+let retainedRegions = false;
+let retainedLayoutVersion: string | null = null;
+let headersFootersPayload: string | undefined;
+let headersFootersEpoch = 0;
+let sentHeadersFootersEpoch = 0;
 // -1 = no fonts applied yet (fresh session); hydrate skips re-registration
 // when the snapshot's revision matches what this session already holds.
 let fontsRevision = -1;
@@ -213,6 +224,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
     case 'applyDelete':
       return { lane: 'input', userInput: true, holdsIdleTasks: true, mutates: true, run };
     case 'applyUpdate':
+    case 'syncUpdate':
       return { lane: 'collab', userInput: true, mutates: true, run };
     case 'proposal':
       if (request.operation.kind === 'snapshot') return { lane: 'interactive', run };
@@ -235,6 +247,8 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
     case 'fontRequirements':
     case 'encodeState':
     case 'revisionCount':
+    case 'layoutJson':
+    case 'save':
       return { lane: 'interactive', run };
     case 'buildPages':
       return {
@@ -280,6 +294,7 @@ function replyFailure(id: number, error: unknown): void {
     id,
     ok: false,
     error: error instanceof Error ? error.message : String(error),
+    ...(failure instanceof SaveUnavailableError ? { code: 'save-unavailable' as const } : {}),
   });
 }
 
@@ -306,6 +321,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (
     request.type !== 'documentRead' && request.type !== 'fontRequirements' &&
     request.type !== 'encodeState' && request.type !== 'revisionCount' &&
+    request.type !== 'save' &&
     request.type !== 'warm' &&
     !(request.type === 'proposal' && request.operation.kind === 'snapshot')
   ) supersedeBackgroundPageBuild();
@@ -346,6 +362,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     }
     // The preview's memory goes before the whole package seeds; its pages stay painted.
     if (session) destroySession(true);
+    openedSource = null;
+    editorSaves = { full: false };
     const opening = await createResidentEngineSession(request.heapLimitBytes);
     let hostJson: string | null;
     try {
@@ -373,6 +391,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (request.previewBlocks === undefined) openedVersion = undefined;
     openedDocument = { heapLimitBytes: request.heapLimitBytes };
     previewing = request.previewBlocks !== undefined;
+    if (!previewing) {
+      openedSource = { bytes: request.bytes, hostJson };
+    }
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, hostJson, stateVector }, [stateVector]);
     return;
@@ -399,11 +420,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     previewFinalPages = null;
     clearProvisionalFinalPages();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson, provisional } = hydrate(
+    const { layoutJson, layoutMeta, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined,
-      request.opened !== true
+      request.opened !== true,
+      request.layoutReply,
+      request.headersFootersEpoch
     );
     if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
@@ -419,7 +442,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
-      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      frameExtras(request.extras, request.layoutExtras, layoutMeta ? headersFootersPayload : undefined),
       request.expectedFrameEpoch
     );
     await replyFrame(
@@ -431,7 +454,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       false,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      request.layoutExtras === undefined ? undefined : (layoutMeta ?? layoutJson ?? undefined),
       provisional
     );
     return;
@@ -463,6 +486,44 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
+  if (request.type === 'save') {
+    if (previewing) throw new SaveUnavailableError('Resident engine worker is still opening');
+    if (!session || !openedSource) {
+      throw new SaveUnavailableError('Resident engine worker has no opened document to save');
+    }
+    const held = pendingUpdates;
+    pendingUpdates = [];
+    try {
+      const saved = await session.save(
+        new Uint8Array(openedSource.bytes),
+        openedSource.hostJson,
+        request.host,
+        request.comments,
+        editorSaves,
+        request.stories
+      );
+      const bytes = saved.slice(0);
+      // What the editor copy lacks: the paragraph IDs this save recorded and repairs its updates caused.
+      const updates = request.stateVector
+        ? [exactBuffer(session.encodeStateAsUpdate(request.stateVector))]
+        : [];
+      const stateVector = exactBuffer(session.encodeStateVector());
+      reply(
+        {
+          id: request.id,
+          ok: true,
+          saved: bytes,
+          updates,
+          stateVector,
+          version: session.proposalEngine.version(),
+        },
+        [bytes, ...updates, stateVector]
+      );
+    } finally {
+      pendingUpdates = held;
+    }
+    return;
+  }
   if (request.type === 'revisionCount') {
     if (!session) throw new Error('Resident engine worker is not initialized');
     // Host proposals' revisions are not the document's own.
@@ -484,8 +545,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     try {
       const registry = proposals ??= createProposalRegistry(session.proposalEngine);
       const previousVersion = session.proposalEngine.version();
+      const known = new Set(registry.snapshot().proposals.map((proposal) => proposal.id));
       const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
       let result: DocxProposalResult | undefined;
+      let projectionStories: string[] = [];
       switch (request.operation.kind) {
         case 'propose':
           result = registry.propose(request.operation.request);
@@ -498,12 +561,18 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           break;
         case 'removeComment':
           try {
-            session.applyRawOps('body', [{ op: 'removeComment', id: request.operation.id }]);
+            const story = session.selection()?.head.story ?? 'body';
+            session.applyRawOps(story, [{ op: 'removeComment', id: request.operation.id }]);
+            projectionStories = [story];
           } catch {}
           break;
       }
       committed = request.operation.kind !== 'snapshot';
       const changedStories = session.storiesChangedSince(since).stories;
+      if (result?.ok) {
+        projectionStories = [...proposalProjectionStories(known, result, changedStories)];
+      }
+      session.markProjectionStories(projectionStories);
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
       const stateVector = exactBuffer(session.encodeStateVector());
@@ -551,6 +620,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
             ...(result === undefined ? {} : { result }),
             mirror: { version, proposals: registry.exportState() },
             changedStories,
+            projectionStories,
             updates,
             stateVector,
             geometry,
@@ -726,16 +796,29 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     reply({ id: request.id, ok: true, read: { version: engine.version(), value } });
     return;
   }
+  if (request.type === 'layoutJson') {
+    if (!retainedRegions || request.layoutRevision !== layoutRevision ||
+      retainedLayoutVersion !== session.proposalEngine.version()) {
+      reply({ id: request.id, ok: true, layoutJsonStatus: 'stale' });
+    } else {
+      reply({ id: request.id, ok: true, layoutJsonStatus: 'ok',
+        layoutRevision, layoutJson: session.retainedLayoutJson() });
+    }
+    return;
+  }
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
     previewFinalPages = null;
     clearProvisionalFinalPages();
     setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
-    const { layoutJson, provisional } = hydrate(
+    const { layoutJson, layoutMeta, provisional } = hydrate(
       request.snapshot,
       request.provisionalPages,
-      request.layoutExtras !== undefined
+      request.layoutExtras !== undefined,
+      true,
+      request.layoutReply,
+      request.headersFootersEpoch
     );
     if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
@@ -751,7 +834,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(
-      frameExtras(request.extras, request.layoutExtras, layoutJson),
+      frameExtras(request.extras, request.layoutExtras, layoutMeta ? headersFootersPayload : undefined),
       request.expectedFrameEpoch
     );
     await replyFrame(
@@ -763,7 +846,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       started,
       false,
       request.paintCaret,
-      request.layoutExtras === undefined ? undefined : (layoutJson ?? undefined),
+      request.layoutExtras === undefined ? undefined : (layoutMeta ?? layoutJson ?? undefined),
       provisional
     );
     return;
@@ -886,11 +969,23 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     );
     return;
   }
-  if (request.type === 'applyUpdate') {
+  if (request.type === 'applyUpdate' || request.type === 'syncUpdate') {
     noteDocumentChange();
     fontRequirements = null;
-    session.applyUpdate(request.update);
-    if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
+    if (request.update.length > 0 || request.type === 'applyUpdate') session.applyUpdate(request.update);
+    if (request.type === 'applyUpdate') {
+      if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
+    } else {
+      const repair = exactBuffer(session.encodeStateAsUpdate(request.stateVector));
+      const stateVector = exactBuffer(session.encodeStateVector());
+      reply({
+        id: request.id,
+        ok: true,
+        version: session.proposalEngine.version(),
+        stateVector,
+        repair,
+      }, [stateVector, repair]);
+    }
     return;
   }
   if (request.type === 'attachCanvases') {
@@ -1016,8 +1111,10 @@ function hydrate(
   snapshot: YrsResidentWorkerSnapshot,
   provisionalPages?: number,
   reply = true,
-  loadState = true
-): { layoutJson: string | null; provisional: boolean } {
+  loadState = true,
+  replyMode?: 'meta',
+  knownHeadersFootersEpoch?: number
+): { layoutJson: string | null; layoutMeta?: LayoutMetaV1; provisional: boolean } {
   if (!session) throw new Error('Resident engine worker is not initialized');
   validateFontsBaseRevision(snapshot);
   supersedeSlicedCompletion();
@@ -1052,6 +1149,7 @@ function hydrate(
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   let layoutJson: string | null = null;
+  let metadata: RetainedLayoutMeta | undefined;
   let provisional = false;
   let pageCount: number | null = null;
   if (snapshot.layoutWithRegions && provisionalPages !== undefined) {
@@ -1067,6 +1165,10 @@ function hydrate(
     pageCount = layout.layout.pages.length;
   } else if (snapshot.layoutWithRegions && !reply) {
     session.layoutDocumentWithRegionsRetained(snapshot.layoutInput);
+  } else if (snapshot.layoutWithRegions && replyMode === 'meta') {
+    metadata = session.layoutDocumentWithRegionsRetainedMeta(snapshot.layoutInput);
+    provisional = metadata.provisional;
+    pageCount = metadata.pageCount;
   } else if (snapshot.layoutWithRegions) {
     // the retained reply leaves out the tens-of-MB measured arena
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
@@ -1080,6 +1182,8 @@ function hydrate(
     session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   }
   layoutRevision = snapshot.layoutRevision;
+  retainedRegions = snapshot.layoutWithRegions;
+  retainedLayoutVersion = session.proposalEngine.version();
   pendingUpdates = [];
   previewFinalPages = finalPreviewPageCount(
     snapshot.partialDocument,
@@ -1090,7 +1194,32 @@ function hydrate(
   provisionalFinalPages = provisional && snapshot.partialDocument !== true
     ? provisionalPages ?? null
     : null;
-  return { layoutJson, provisional };
+  return {
+    layoutJson,
+    ...(metadata ? { layoutMeta: layoutMetaReply(metadata, knownHeadersFootersEpoch) } : {}),
+    provisional,
+  };
+}
+
+function retainedHeadersFootersPayload(): string {
+  const payload = session?.retainedHeadersFootersJson() ?? 'null';
+  if (payload !== headersFootersPayload) {
+    headersFootersPayload = payload;
+    headersFootersEpoch += 1;
+  }
+  return payload;
+}
+
+function layoutMetaReply(meta: RetainedLayoutMeta, knownEpoch = sentHeadersFootersEpoch): LayoutMetaV1 {
+  const payload = retainedHeadersFootersPayload();
+  const changed = knownEpoch !== headersFootersEpoch;
+  return {
+    v: LAYOUT_META_VERSION,
+    layoutRevision,
+    ...meta,
+    headersFootersEpoch,
+    ...(changed ? { headersFooters: payload } : {}),
+  };
 }
 
 function forgetRequirementsCache(): void {
@@ -1229,7 +1358,7 @@ async function replyCompletedLayout(
   pendingUpdates = [];
   const started = performance.now();
   const frame = session.buildDisplayListFrame(
-    frameExtras(completed.extras, completed.layoutExtras, null, completed.headersFootersJson),
+    frameExtras(completed.extras, completed.layoutExtras, completed.headersFootersJson),
     expectedFrameEpoch
   );
   await replyFrame(
@@ -1393,19 +1522,18 @@ function supersedeSlicedCompletion(): void {
 /**
  * The extras a frame is built with. For a layout this worker owns, the host
  * sends them without the header/footer payload, which only this layout has:
- * the session retains it after a region layout (`layoutJson` is its reply),
+ * the session retains it after a region layout,
  * or a completed layout captured it.
  */
 function frameExtras(
   extras: string,
   layoutExtras: string | undefined,
-  layoutJson: string | null,
   headersFootersJson?: string
 ): string {
   if (layoutExtras === undefined) return extras;
   const retained =
     headersFootersJson ??
-    (layoutJson === null ? undefined : session?.retainedHeadersFootersJson());
+    (retainedRegions ? retainedHeadersFootersPayload() : undefined);
   const headersFooters =
     retained === undefined
       ? undefined
@@ -1490,12 +1618,17 @@ function destroySession(keepSurfaces = false): void {
   session = null;
   positionIndex = null;
   openedDocument = null;
+  openedSource = null;
+  editorSaves = { full: false };
   openedVersion = undefined;
   previewing = false;
   previewFinalPages = null;
   clearProvisionalFinalPages();
   pendingUpdates = [];
   layoutRevision = 0;
+  retainedRegions = false;
+  retainedLayoutVersion = null;
+  sentHeadersFootersEpoch = 0;
   fontsRevision = -1;
   supersedeSlicedCompletion();
   incompleteLayout = null;
@@ -1541,13 +1674,16 @@ async function replyFrame(
   requestStarted = performance.now(),
   requireCaret = false,
   paintCaret = false,
-  layoutJson?: string,
+  layoutReply?: string | LayoutMetaV1,
   layoutProvisional = false,
   deletedUnits?: number,
   precedingPageFrames: Uint8Array[] = [],
   selectionCursor: CollaborationCursor | null = null
 ): Promise<void> {
+  const layoutJson = typeof layoutReply === 'string' ? layoutReply : undefined;
+  const layoutMeta = typeof layoutReply === 'object' ? layoutReply : undefined;
   const documentVersion = session?.proposalEngine.version();
+  if (layoutReply !== undefined) retainedLayoutVersion = documentVersion ?? null;
   const documentPreview = previewing;
   if (!previewing && openedVersion === undefined && documentVersion !== undefined) {
     openedVersion = documentVersion;
@@ -1600,6 +1736,7 @@ async function replyFrame(
   const pageFrames = precedingPageFrames.map(exactBuffer);
   const updateBuffers = updates.map(exactBuffer);
   const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
+  if (layoutMeta) sentHeadersFootersEpoch = layoutMeta.headersFootersEpoch;
   reply(
     {
       id,
@@ -1623,9 +1760,11 @@ async function replyFrame(
       ...(deletedUnits === undefined ? {} : { deletedUnits }),
       ...(stateVector ? { stateVector } : {}),
       ...(layoutJson !== undefined ? { layoutJson } : {}),
+      ...(layoutMeta ? { layoutMeta } : {}),
       ...(layoutProvisional ? { layoutProvisional } : {}),
     },
-    [frame, ...pageFrames, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
+    [frame, ...pageFrames, ...updateBuffers, ...(stateVector ? [stateVector] : []),
+      ...(layoutMeta ? [layoutMeta.pageSizes.buffer as ArrayBuffer] : [])]
   );
 }
 
