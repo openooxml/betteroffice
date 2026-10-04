@@ -267,8 +267,12 @@ mod tests {
     fn sliced_graph_matches_build_names_edges_volatility_and_spills() {
         let empty = Workbook::default();
         let mut metadata_only = Workbook::default();
-        metadata_only.defined_names.push(defined("Clock", "=NOW()", None));
-        metadata_only.tables.push(table("Detached", SheetId(0), "A1:B4"));
+        metadata_only
+            .defined_names
+            .push(defined("Clock", "=NOW()", None));
+        metadata_only
+            .tables
+            .push(table("Detached", SheetId(0), "A1:B4"));
         let model = workbook();
         for model in [&empty, &metadata_only, &model] {
             let expected = DepGraph::build(model);
@@ -302,8 +306,16 @@ mod tests {
                     );
                     assert!(!actual.is_formula(SheetId(0), a1("G1")));
                     assert!(!actual.is_formula(SheetId(0), a1("H1")));
-                    assert!(actual.volatile.contains(&NodeKey::new(SheetId(0), a1("E2"))));
-                    assert!(!actual.volatile.contains(&NodeKey::new(SheetId(0), a1("C1"))));
+                    assert!(
+                        actual
+                            .volatile
+                            .contains(&NodeKey::new(SheetId(0), a1("E2")))
+                    );
+                    assert!(
+                        !actual
+                            .volatile
+                            .contains(&NodeKey::new(SheetId(0), a1("C1")))
+                    );
                     assert_eq!(actual.spills.len(), 3);
                     assert_eq!(
                         actual.spills_by_sheet[&SheetId(0)],
@@ -313,7 +325,9 @@ mod tests {
                         ]
                     );
                     assert_eq!(
-                        actual.dependents_of(SheetId(0), a1("D2")).collect::<Vec<_>>(),
+                        actual
+                            .dependents_of(SheetId(0), a1("D2"))
+                            .collect::<Vec<_>>(),
                         expected
                             .dependents_of(SheetId(0), a1("D2"))
                             .collect::<Vec<_>>()
@@ -399,7 +413,10 @@ mod tests {
             assert!(builder.graph.tables.is_empty());
             assert!(builder.graph.deps.is_empty());
         }
-        assert_eq!(builder.graph.defined_name_indices[&(None, "named".into())], 0);
+        assert_eq!(
+            builder.graph.defined_name_indices[&(None, "named".into())],
+            0
+        );
         for table in &model.tables {
             assert!(!builder.advance(&model, one));
             assert_eq!(builder.graph.tables.len(), 1);

@@ -51,10 +51,7 @@ impl PackageFactsEncoder {
                 }
                 index if index <= sheets + references.len() => {
                     writer.uint(2);
-                    encode_reference(
-                        &mut writer,
-                        &references[index - sheets - 1].package_facts(),
-                    );
+                    encode_reference(&mut writer, &references[index - sheets - 1].package_facts());
                 }
                 index if index <= sheets + references.len() + charts.len() => {
                     writer.uint(3);

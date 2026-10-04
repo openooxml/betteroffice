@@ -49,7 +49,9 @@ impl PackageSlot {
     pub(crate) fn materialize(&self) -> Result<&PreservedPackage> {
         match self {
             Self::Present(package) => Ok(package),
-            Self::Deferred { source, rebuilt, .. } => rebuilt
+            Self::Deferred {
+                source, rebuilt, ..
+            } => rebuilt
                 .get_or_init(|| rebuild(source))
                 .as_ref()
                 .map_err(|message| Error::Package(message.clone())),
@@ -115,7 +117,10 @@ mod tests {
                 .unwrap();
             worksheet.1 = String::from_utf8(std::mem::take(&mut worksheet.1))
                 .unwrap()
-                .replace("</worksheet>", r#"<sheetProtection sheet="1"/></worksheet>"#)
+                .replace(
+                    "</worksheet>",
+                    r#"<sheetProtection sheet="1"/></worksheet>"#,
+                )
                 .into_bytes();
         }
         parts.extend([
@@ -156,8 +161,8 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
                 "xl/charts/chart1.xml".to_owned(),
                 br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart">
                     <c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/>
-                    <c:cat><c:strRef><c:f>Data!$A$1</c:f><c:strCache>
-                    <c:pt idx="0"><c:v>2</c:v></c:pt></c:strCache></c:strRef></c:cat>
+                    <c:cat><c:numRef><c:f>Data!$A$1</c:f><c:numCache>
+                    <c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:cat>
                     <c:val><c:numRef><c:f>Data!$A$1</c:f><c:numCache>
                     <c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val>
                     </c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#

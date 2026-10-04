@@ -4035,13 +4035,13 @@ impl Workbook {
         } else {
             None
         };
-        let package =
-            self.source_package
-                .as_ref()
-                .ok_or_else(|| RenderError::ChartSourceUnavailable {
-                    part: chart.part.clone(),
-                })?
-                .facts();
+        let package = self
+            .source_package
+            .as_ref()
+            .ok_or_else(|| RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })?
+            .facts();
         let bytes =
             package
                 .chart_part_bytes(&chart.part)

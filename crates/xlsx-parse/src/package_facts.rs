@@ -173,20 +173,18 @@ impl<'a> PackageFactsView<'a> {
     pub fn source_sheet_is_worksheet(&self, index: usize) -> bool {
         match self.0 {
             FactsSource::Package(package) => package.source_sheet_is_worksheet(index),
-            FactsSource::Facts(facts) => facts
-                .sheets
-                .get(index)
-                .is_none_or(|sheet| sheet.worksheet),
+            FactsSource::Facts(facts) => {
+                facts.sheets.get(index).is_none_or(|sheet| sheet.worksheet)
+            }
         }
     }
 
     pub fn source_sheet_is_protected(&self, index: usize) -> bool {
         match self.0 {
             FactsSource::Package(package) => package.source_sheet_is_protected(index),
-            FactsSource::Facts(facts) => facts
-                .sheets
-                .get(index)
-                .is_some_and(|sheet| sheet.protected),
+            FactsSource::Facts(facts) => {
+                facts.sheets.get(index).is_some_and(|sheet| sheet.protected)
+            }
         }
     }
 
@@ -260,7 +258,8 @@ pub(crate) mod tests {
         chart: bool,
         references: bool,
     ) -> PreservedPackage {
-        let mut parts = vec![
+        let mut parts =
+            vec![
             (
                 "xl/workbook.xml".to_owned(),
                 br#"<workbook
@@ -451,14 +450,27 @@ Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
                 }
             }
             for path in ["missing", "xl/charts/chart1.xml", "/xl/charts/chart1.xml"] {
-                assert_eq!(present.chart_part_bytes(path), deferred.chart_part_bytes(path));
+                assert_eq!(
+                    present.chart_part_bytes(path),
+                    deferred.chart_part_bytes(path)
+                );
             }
             if flags.2 {
                 assert!(!facts.charts.is_empty());
             }
             if flags.3 {
-                assert!(facts.references.iter().any(|reference| reference.areas.is_some()));
-                assert!(facts.references.iter().any(|reference| reference.areas.is_none()));
+                assert!(
+                    facts
+                        .references
+                        .iter()
+                        .any(|reference| reference.areas.is_some())
+                );
+                assert!(
+                    facts
+                        .references
+                        .iter()
+                        .any(|reference| reference.areas.is_none())
+                );
             }
         }
     }

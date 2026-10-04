@@ -102,7 +102,10 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
         let mut values = Self::new();
         for _ in 0..count {
             let key = K::read(r)?;
-            if values.last_key_value().is_some_and(|(last, _)| last >= &key) {
+            if values
+                .last_key_value()
+                .is_some_and(|(last, _)| last >= &key)
+            {
                 return Err(SnapshotError::new("snapshot map keys are not increasing"));
             }
             values.insert(key, V::read(r)?);
@@ -181,25 +184,94 @@ impl Codec for SheetId {
     }
 }
 
-struct_codec!(CellRef { row, col, abs_row, abs_col });
+struct_codec!(CellRef {
+    row,
+    col,
+    abs_row,
+    abs_col
+});
 struct_codec!(CellRange { start, end });
-struct_codec!(FreezePane { rows, cols, top_left });
-struct_codec!(DefinedName { name, formula, local_sheet, hidden });
-struct_codec!(Table { name, sheet, range, header_rows, totals_rows, columns });
-struct_codec!(Hyperlink { range, external_target, location, tooltip, display });
-struct_codec!(SheetFormat { default_row_height_pt, custom_height, zero_height });
+struct_codec!(FreezePane {
+    rows,
+    cols,
+    top_left
+});
+struct_codec!(DefinedName {
+    name,
+    formula,
+    local_sheet,
+    hidden
+});
+struct_codec!(Table {
+    name,
+    sheet,
+    range,
+    header_rows,
+    totals_rows,
+    columns
+});
+struct_codec!(Hyperlink {
+    range,
+    external_target,
+    location,
+    tooltip,
+    display
+});
+struct_codec!(SheetFormat {
+    default_row_height_pt,
+    custom_height,
+    zero_height
+});
 struct_codec!(ColStyle { first, last, xf });
-struct_codec!(HiddenDimensions { col_widths, row_heights });
-struct_codec!(Font { name, size_pt, bold, italic, underline, strike, color });
+struct_codec!(HiddenDimensions {
+    col_widths,
+    row_heights
+});
+struct_codec!(Font {
+    name,
+    size_pt,
+    bold,
+    italic,
+    underline,
+    strike,
+    color
+});
 struct_codec!(BorderEdge { style, color });
-struct_codec!(Border { left, right, top, bottom });
-struct_codec!(Alignment { h, v, wrap_text, shrink_to_fit });
-struct_codec!(Xf { font, fill, border, num_fmt_id, alignment });
-struct_codec!(AnchorCell { col, col_off, row, row_off });
+struct_codec!(Border {
+    left,
+    right,
+    top,
+    bottom
+});
+struct_codec!(Alignment {
+    h,
+    v,
+    wrap_text,
+    shrink_to_fit
+});
+struct_codec!(Xf {
+    font,
+    fill,
+    border,
+    num_fmt_id,
+    alignment
+});
+struct_codec!(AnchorCell {
+    col,
+    col_off,
+    row,
+    row_off
+});
 struct_codec!(AnchorExtent { cx, cy });
 struct_codec!(AnchorPos { x, y });
 struct_codec!(ChartRef { kind, formula });
-struct_codec!(SheetChart { part, drawing, anchor_index, anchor, refs });
+struct_codec!(SheetChart {
+    part,
+    drawing,
+    anchor_index,
+    anchor,
+    refs
+});
 
 impl Codec for Color {
     fn write(&self, w: &mut Writer) {
@@ -575,11 +647,17 @@ impl AuthoritySnapshotEncoder {
             undo_stack: _,
             redo_stack: _,
         } = a;
-        let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         let split = split_or_whole_v1(&update, budget.max_bytes());
         let (parts, split_fallback) = if let Some(reason) = split.fallback {
             (split.parts, Some(reason.reason().to_owned()))
-        } else if split.parts.iter().any(|part| part.len() > budget.max_bytes()) {
+        } else if split
+            .parts
+            .iter()
+            .any(|part| part.len() > budget.max_bytes())
+        {
             (vec![update], Some("oversized_struct".to_owned()))
         } else {
             (split.parts, None)
@@ -633,7 +711,11 @@ impl WorkbookAuthority {
             undo_stack: _,
             redo_stack: _,
         } = self;
-        (doc.client_id().get(), doc.guid().to_string(), *next_sheet_id)
+        (
+            doc.client_id().get(),
+            doc.guid().to_string(),
+            *next_sheet_id,
+        )
     }
 }
 
@@ -685,8 +767,14 @@ impl BaseBuilder {
                 1 => base.defined_names.push(Codec::read(&mut r)?),
                 2 => {
                     let key = Codec::read(&mut r)?;
-                    if self.cursor.fingerprint_key.is_some_and(|previous| previous >= key) {
-                        return Err(SnapshotError::new("snapshot fingerprints are not increasing"));
+                    if self
+                        .cursor
+                        .fingerprint_key
+                        .is_some_and(|previous| previous >= key)
+                    {
+                        return Err(SnapshotError::new(
+                            "snapshot fingerprints are not increasing",
+                        ));
                     }
                     base.fingerprints.insert(key, Codec::read(&mut r)?);
                     self.cursor.fingerprint_key = Some(key);
@@ -722,7 +810,8 @@ impl BaseBuilder {
         if !self.is_complete() {
             return Err(SnapshotError::new("authority base is incomplete"));
         }
-        self.base.ok_or_else(|| SnapshotError::new("authority base is missing"))
+        self.base
+            .ok_or_else(|| SnapshotError::new("authority base is missing"))
     }
 }
 
@@ -835,16 +924,24 @@ impl AuthorityHydrator {
             || self.base_chunks != self.expected_base_chunks
             || self.yrs_chunks != self.expected_yrs_chunks
         {
-            return Err(SnapshotError::new("authority snapshot chunks are incomplete"));
+            return Err(SnapshotError::new(
+                "authority snapshot chunks are incomplete",
+            ));
         }
         if !self.pending_base.is_empty() {
-            return Err(SnapshotError::new("authority snapshot has pending base records"));
+            return Err(SnapshotError::new(
+                "authority snapshot has pending base records",
+            ));
         }
         if !self.base_stream.is_complete() {
-            return Err(SnapshotError::new("authority snapshot base record is truncated"));
+            return Err(SnapshotError::new(
+                "authority snapshot base record is truncated",
+            ));
         }
         if has_pending(&self.doc) {
-            return Err(SnapshotError::new("authority snapshot has pending Yrs state"));
+            return Err(SnapshotError::new(
+                "authority snapshot has pending Yrs state",
+            ));
         }
         let base = self.base.finish()?;
         let authority = WorkbookAuthority {
@@ -856,7 +953,9 @@ impl AuthorityHydrator {
             redo_stack: Vec::new(),
         };
         if authority.encode_state_vector_v1() != self.state_vector {
-            return Err(SnapshotError::new("authority snapshot state vector differs"));
+            return Err(SnapshotError::new(
+                "authority snapshot state vector differs",
+            ));
         }
         Ok(authority)
     }
@@ -975,7 +1074,10 @@ mod tests {
         base.date_system = DateSystem::V1904;
         base.fingerprint = "kept-verbatim".into();
         base.fingerprints = BTreeMap::from([
-            (i64::MIN, vec!["later".into(), "first".into(), "later".into()]),
+            (
+                i64::MIN,
+                vec!["later".into(), "first".into(), "later".into()],
+            ),
             (3, Vec::new()),
             (i64::MAX, vec![String::new()]),
         ]);
@@ -1012,8 +1114,16 @@ mod tests {
         ];
         base.col_styles = vec![
             vec![
-                ColStyle { first: 4, last: 6, xf: 1 },
-                ColStyle { first: 0, last: 7, xf: 0 },
+                ColStyle {
+                    first: 4,
+                    last: 6,
+                    xf: 1,
+                },
+                ColStyle {
+                    first: 0,
+                    last: 7,
+                    xf: 0,
+                },
             ],
             Vec::new(),
         ];
@@ -1049,7 +1159,10 @@ mod tests {
                 },
                 ChartAnchor::Absolute {
                     pos: AnchorPos { x: i64::MIN, y: 1 },
-                    extent: AnchorExtent { cx: 0, cy: i64::MAX },
+                    extent: AnchorExtent {
+                        cx: 0,
+                        cy: i64::MAX,
+                    },
                 },
             ]
             .into_iter()
@@ -1059,8 +1172,14 @@ mod tests {
                 anchor_index: usize::MAX,
                 anchor,
                 refs: vec![
-                    ChartRef { kind: ChartRefKind::Title, formula: String::new() },
-                    ChartRef { kind: ChartRefKind::Values, formula: "Data!$B$2".into() },
+                    ChartRef {
+                        kind: ChartRefKind::Title,
+                        formula: String::new(),
+                    },
+                    ChartRef {
+                        kind: ChartRefKind::Values,
+                        formula: "Data!$B$2".into(),
+                    },
                 ],
             })
             .collect(),
@@ -1093,9 +1212,15 @@ mod tests {
             Fill::Solid(Color::Auto),
         ];
         base.styles.borders = vec![Border {
-            left: Some(BorderEdge { style: BorderStyle::Double, color: None }),
+            left: Some(BorderEdge {
+                style: BorderStyle::Double,
+                color: None,
+            }),
             right: None,
-            top: Some(BorderEdge { style: BorderStyle::Hair, color: Some(Color::Auto) }),
+            top: Some(BorderEdge {
+                style: BorderStyle::Hair,
+                color: Some(Color::Auto),
+            }),
             bottom: None,
         }];
         base.styles.cell_xfs = vec![
@@ -1113,7 +1238,11 @@ mod tests {
             },
             Xf::default(),
         ];
-        base.styles.num_fmts = vec![(u16::MAX, "0.0".into()), (0, String::new()), (0, "x".into())];
+        base.styles.num_fmts = vec![
+            (u16::MAX, "0.0".into()),
+            (0, String::new()),
+            (0, "x".into()),
+        ];
         base.styles.theme.colors = std::array::from_fn(|index| format!("color-{index}"));
         base.styles.indexed_colors = vec!["#112233".into(), String::new(), "#112233".into()];
         base.tables = vec![Table {
@@ -1137,7 +1266,10 @@ mod tests {
         assert_eq!(restored.base.shared_strings, a.base.shared_strings);
         assert_eq!(restored.base.styles.cell_xfs, a.base.styles.cell_xfs);
         assert_eq!(restored.base.styles.num_fmts, a.base.styles.num_fmts);
-        assert_eq!(restored.base.styles.indexed_colors, a.base.styles.indexed_colors);
+        assert_eq!(
+            restored.base.styles.indexed_colors,
+            a.base.styles.indexed_colors
+        );
         assert_eq!(restored.base.tables, a.base.tables);
         assert_eq!(
             restored.base.styles.fonts[0].size_pt.unwrap().to_bits(),
@@ -1226,7 +1358,10 @@ mod tests {
         push_all(&mut encoder, &mut hydrator, budget);
         let restored = hydrator.finish().unwrap();
         assert_eq!(restored.snapshot_identity(), a.snapshot_identity());
-        assert_eq!(restored.encode_state_vector_v1(), a.encode_state_vector_v1());
+        assert_eq!(
+            restored.encode_state_vector_v1(),
+            a.encode_state_vector_v1()
+        );
         let txn = restored.doc.transact();
         assert_eq!(
             txn.get_map("snapshot-fallback").unwrap().get(&txn, "value"),
@@ -1240,13 +1375,19 @@ mod tests {
         let a = source();
         let budget = SnapshotBudget::new(1, 1).unwrap();
         let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
-        assert_eq!(encoder.split_fallback().as_deref(), Some("oversized_struct"));
+        assert_eq!(
+            encoder.split_fallback().as_deref(),
+            Some("oversized_struct")
+        );
         let header = header(&a, &encoder, budget);
         assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
         let mut hydrator = AuthorityHydrator::new(&header).unwrap();
         push_all(&mut encoder, &mut hydrator, budget);
         let restored = hydrator.finish().unwrap();
-        assert_eq!(restored.encode_state_as_update_v1(), a.encode_state_as_update_v1());
+        assert_eq!(
+            restored.encode_state_as_update_v1(),
+            a.encode_state_as_update_v1()
+        );
     }
 
     #[test]
@@ -1288,13 +1429,17 @@ mod tests {
         assert!(hydrator.base.base.is_some());
         while !hydrator.advance(step).unwrap().is_ready() {}
         let restored = hydrator.finish().unwrap();
-        assert_eq!(restored.encode_state_as_update_v1(), a.encode_state_as_update_v1());
+        assert_eq!(
+            restored.encode_state_as_update_v1(),
+            a.encode_state_as_update_v1()
+        );
     }
 
     #[test]
     fn hydration_rejects_pending_structs_and_delete_sets() {
         let foreign = Doc::with_client_id(99);
-        let map = foreign.get_or_insert_map("foreign");
+        let root = foreign.get_or_insert_map("foreign");
+        let map = root.insert(&mut foreign.transact_mut(), "nested", MapPrelim::default());
         map.insert(&mut foreign.transact_mut(), "first", "kept");
         let before_second = foreign.transact().state_vector();
         map.insert(&mut foreign.transact_mut(), "second", "pending");
@@ -1307,6 +1452,7 @@ mod tests {
             let budget = SnapshotBudget::new(100, usize::MAX).unwrap();
             let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
             let mut header = header(&a, &encoder, budget);
+            assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
             header.state_vector = StateVector::default().encode_v1();
             let mut hydrator = AuthorityHydrator::new(&header).unwrap();
             while let Some(chunk) = encoder.next(budget).unwrap() {
@@ -1321,12 +1467,18 @@ mod tests {
                 let txn = hydrator.doc.transact();
                 if expect_structs {
                     assert!(txn.store().pending_update().is_some());
+                    assert!(txn.store().pending_ds().is_none());
                 } else {
                     assert!(txn.store().pending_ds().is_some());
+                    assert!(txn.store().pending_update().is_none());
                 }
+                assert!(txn.state_vector().is_empty());
             }
             assert!(hydrator.advance(budget).unwrap().is_ready());
-            assert!(hydrator.finish().is_err());
+            assert_eq!(
+                hydrator.finish().err().unwrap().to_string(),
+                "authority snapshot has pending Yrs state"
+            );
         }
     }
 }

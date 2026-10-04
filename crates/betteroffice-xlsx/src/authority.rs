@@ -3860,9 +3860,18 @@ mod tests {
             second.apply_ops(ops.clone(), options).unwrap(),
         );
         assert!(!first_updates.lock().unwrap().is_empty());
-        assert_eq!(*first_updates.lock().unwrap(), *second_updates.lock().unwrap());
-        assert_eq!(first.encode_state_vector_v1(), second.encode_state_vector_v1());
-        assert_eq!(first.encode_state_as_update_v1(), second.encode_state_as_update_v1());
+        assert_eq!(
+            *first_updates.lock().unwrap(),
+            *second_updates.lock().unwrap()
+        );
+        assert_eq!(
+            first.encode_state_vector_v1(),
+            second.encode_state_vector_v1()
+        );
+        assert_eq!(
+            first.encode_state_as_update_v1(),
+            second.encode_state_as_update_v1()
+        );
         assert_eq!(first.save().unwrap(), second.save().unwrap());
 
         let mut first = WorkbookAuthority::from_model_with_client_id(&source_model, 71).unwrap();
@@ -3878,8 +3887,12 @@ mod tests {
             },
         ]);
         assert_eq!(
-            first.apply_ops(&ops, SyncOrigin::User, &source_model.styles).unwrap(),
-            second.apply_ops(&ops, SyncOrigin::User, &source_model.styles).unwrap(),
+            first
+                .apply_ops(&ops, SyncOrigin::User, &source_model.styles)
+                .unwrap(),
+            second
+                .apply_ops(&ops, SyncOrigin::User, &source_model.styles)
+                .unwrap(),
         );
     }
 

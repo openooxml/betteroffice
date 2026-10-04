@@ -31,13 +31,20 @@ impl CellCursor {
             };
             let range = CellRange {
                 start: CellRef::new(row, col),
-                end: CellRef::new(u32::MAX, u32::MAX),
+                end: CellRef::new(row, u32::MAX),
             };
+            let later_rows = row.checked_add(1).into_iter().flat_map(|next_row| {
+                sheet.cells_in_range(CellRange {
+                    start: CellRef::new(next_row, 0),
+                    end: CellRef::new(u32::MAX, u32::MAX),
+                })
+            });
+            let cells = sheet.cells_in_range(range).chain(later_rows);
             let base = self.after.unwrap_or((0, 0));
             let mut previous = base;
             let mut records = Writer::new();
             let mut count = 0;
-            for (at, cell) in sheet.cells_in_range(range) {
+            for (at, cell) in cells {
                 let mut record = Writer::new();
                 record.var_u32(at.row - previous.0);
                 record.var_u32(if at.row == previous.0 {
@@ -72,7 +79,11 @@ impl CellCursor {
                 payload.var_u32(base.1);
                 payload.var_usize(count);
                 payload.raw(&records.into_bytes());
-                return Ok(Some(frame(ChunkKind::Cells, ordinal, &payload.into_bytes())));
+                return Ok(Some(frame(
+                    ChunkKind::Cells,
+                    ordinal,
+                    &payload.into_bytes(),
+                )));
             }
             self.sheet += 1;
             self.after = None;

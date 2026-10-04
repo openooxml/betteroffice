@@ -66,7 +66,9 @@ impl ModelSnapshotEncoder {
                 if frame(ChunkKind::Model, self.ordinal, &[]).len() + payload.len()
                     > budget.max_bytes()
                 {
-                    return Err(SnapshotError::new("snapshot model header exceeds byte budget"));
+                    return Err(SnapshotError::new(
+                        "snapshot model header exceeds byte budget",
+                    ));
                 }
                 self.started = true;
                 count = 1;
@@ -78,14 +80,15 @@ impl ModelSnapshotEncoder {
                     self.metadata_done = true;
                     break;
                 }
-                let length = frame(ChunkKind::Model, self.ordinal, &[]).len()
-                    + payload.len()
-                    + record.len();
+                let length =
+                    frame(ChunkKind::Model, self.ordinal, &[]).len() + payload.len() + record.len();
                 if length > budget.max_bytes() {
                     if count != 0 {
                         break;
                     }
-                    return Err(SnapshotError::new("snapshot metadata record exceeds byte budget"));
+                    return Err(SnapshotError::new(
+                        "snapshot metadata record exceeds byte budget",
+                    ));
                 }
                 payload.raw(&record.into_bytes());
                 self.metadata = cursor;
@@ -110,7 +113,9 @@ fn exact_len(iter: impl Iterator) -> SnapshotResult<usize> {
     if upper == Some(lower) {
         Ok(lower)
     } else {
-        Err(SnapshotError::new("snapshot model iterator has no exact size"))
+        Err(SnapshotError::new(
+            "snapshot model iterator has no exact size",
+        ))
     }
 }
 
@@ -438,7 +443,9 @@ impl ModelSnapshotBuilder {
     fn push_inner(&mut self, chunk: &[u8]) -> SnapshotResult<()> {
         let (kind, ordinal, payload) = unframe(chunk)?;
         if ordinal != self.ordinal || payload.is_empty() {
-            return Err(SnapshotError::new("snapshot model chunk is missing or reordered"));
+            return Err(SnapshotError::new(
+                "snapshot model chunk is missing or reordered",
+            ));
         }
         let mut r = Reader::new(payload);
         match kind {
@@ -460,7 +467,9 @@ impl ModelSnapshotBuilder {
             }
             ChunkKind::Cells => {
                 if !self.started || self.remaining_records != 0 || !self.runs.is_empty() {
-                    return Err(SnapshotError::new("snapshot cells precede complete metadata"));
+                    return Err(SnapshotError::new(
+                        "snapshot cells precede complete metadata",
+                    ));
                 }
                 self.read_cells(&mut r)?;
             }
@@ -513,7 +522,9 @@ impl ModelSnapshotBuilder {
             return Err(SnapshotError::new("extra snapshot metadata record"));
         };
         if tag != *expected || self.remaining_records == 0 {
-            return Err(SnapshotError::new("snapshot metadata records are reordered"));
+            return Err(SnapshotError::new(
+                "snapshot metadata records are reordered",
+            ));
         }
         *remaining -= 1;
         if *remaining == 0 {
@@ -527,7 +538,11 @@ impl ModelSnapshotBuilder {
             FILL => self.model.styles.fills.push(read_fill(r)?),
             BORDER => self.model.styles.borders.push(read_border(r)?),
             XF => self.model.styles.cell_xfs.push(read_xf(r)?),
-            NUM_FMT => self.model.styles.num_fmts.push((read_u16(r)?, r.str()?.to_owned())),
+            NUM_FMT => self
+                .model
+                .styles
+                .num_fmts
+                .push((read_u16(r)?, r.str()?.to_owned())),
             THEME => {
                 self.model.styles.theme.colors[self.theme_index] = r.str()?.to_owned();
                 self.theme_index += 1;
@@ -558,7 +573,9 @@ impl ModelSnapshotBuilder {
                 return Err(SnapshotError::new("snapshot model counts do not match"));
             }
         } else if self.runs.is_empty() {
-            return Err(SnapshotError::new("snapshot model has excess metadata count"));
+            return Err(SnapshotError::new(
+                "snapshot model has excess metadata count",
+            ));
         }
         Ok(())
     }
@@ -573,7 +590,8 @@ impl ModelSnapshotBuilder {
         }
         add_count(&mut self.declared_cells, counts[7])?;
         if counts[7] != 0 {
-            self.sheet_cells.push_back((self.model.sheets.len(), counts[7]));
+            self.sheet_cells
+                .push_back((self.model.sheets.len(), counts[7]));
         }
         self.model.sheets.push(sheet);
         self.array_key = None;
@@ -610,7 +628,10 @@ impl ModelSnapshotBuilder {
                 } else {
                     &mut sheet.row_heights
                 };
-                if map.last_key_value().is_some_and(|(&previous, _)| key <= previous) {
+                if map
+                    .last_key_value()
+                    .is_some_and(|(&previous, _)| key <= previous)
+                {
                     return Err(SnapshotError::new("snapshot dimensions are reordered"));
                 }
                 map.insert(key, value);
@@ -658,14 +679,18 @@ impl ModelSnapshotBuilder {
             return Err(SnapshotError::new("extra snapshot cell block"));
         };
         if sheet_index != expected_sheet || count == 0 || count > remaining {
-            return Err(SnapshotError::new("snapshot cell block is missing or reordered"));
+            return Err(SnapshotError::new(
+                "snapshot cell block is missing or reordered",
+            ));
         }
         if sheet_index != self.cell_cursor.sheet {
             self.cell_cursor.sheet = sheet_index;
             self.cell_cursor.after = None;
         }
         if base != self.cell_cursor.after.unwrap_or((0, 0)) {
-            return Err(SnapshotError::new("snapshot cell block is missing or reordered"));
+            return Err(SnapshotError::new(
+                "snapshot cell block is missing or reordered",
+            ));
         }
         let sheet = &mut self.model.sheets[sheet_index];
         let mut previous = base;
@@ -1330,7 +1355,11 @@ mod tests {
             num_fmt_id: Some(u16::MAX),
             alignment: Some(Alignment::default()),
         });
-        styles.num_fmts = vec![(165, "code".into()), (164, String::new()), (165, "code".into())];
+        styles.num_fmts = vec![
+            (165, "code".into()),
+            (164, String::new()),
+            (165, "code".into()),
+        ];
         styles.indexed_colors = vec![String::new(), "#123456".into(), String::new()];
         styles.theme.colors = std::array::from_fn(|index| format!("slot{index}"));
         let mut sheet = Sheet::new("");
@@ -1359,7 +1388,9 @@ mod tests {
         sheet.col_widths = [(9, 9.5), (0, -0.0), (u32::MAX, f64::INFINITY)]
             .into_iter()
             .collect();
-        sheet.row_heights = [(u32::MAX, f64::NEG_INFINITY), (1, 0.0)].into_iter().collect();
+        sheet.row_heights = [(u32::MAX, f64::NEG_INFINITY), (1, 0.0)]
+            .into_iter()
+            .collect();
         sheet.format = SheetFormat {
             default_row_height_pt: Some(-0.0),
             custom_height: true,
@@ -1408,10 +1439,7 @@ mod tests {
                 extent,
             },
             ChartAnchor::Absolute {
-                pos: AnchorPos {
-                    x: i64::MIN,
-                    y: -1,
-                },
+                pos: AnchorPos { x: i64::MIN, y: -1 },
                 extent,
             },
         ];
@@ -1511,7 +1539,14 @@ mod tests {
         assert_eq!(decoded.styles.cell_xfs[1].num_fmt_id, Some(0));
         assert_eq!(decoded.styles.fonts[0].name, None);
         assert_eq!(decoded.styles.fonts[1].name.as_deref(), Some(""));
-        assert_eq!(decoded.sheets[0].format.default_row_height_pt.unwrap().to_bits(), 1 << 63);
+        assert_eq!(
+            decoded.sheets[0]
+                .format
+                .default_row_height_pt
+                .unwrap()
+                .to_bits(),
+            1 << 63
+        );
         assert_eq!(decoded.styles.fonts[1].size_pt.unwrap().to_bits(), 1 << 63);
         assert_eq!(encode(&decoded, budget), chunks);
     }
@@ -1577,7 +1612,62 @@ mod tests {
             assert_eq!(emitted, 16);
             let decoded = decode(&chunks);
             assert_eq!(decoded, model);
-            assert_eq!(decoded.sheets[1].cell(CellRef::new(0, 4)), Some(&Cell::default()));
+            assert_eq!(
+                decoded.sheets[1].cell(CellRef::new(0, 4)),
+                Some(&Cell::default())
+            );
+            assert_eq!(encode(&decoded, budget), chunks);
+        }
+    }
+
+    #[test]
+    fn cell_continuations_preserve_row_and_sheet_boundaries() {
+        let mut sheet = Sheet::new("Boundary");
+        for (index, (row, col)) in [
+            (0, 3),
+            (1, 0),
+            (1, u32::MAX),
+            (2, 0),
+            (u32::MAX, 0),
+            (u32::MAX, u32::MAX),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sheet.set_cell(
+                CellRef::new(row, col),
+                Cell {
+                    value: CellValue::Text {
+                        value: format!("cell-{index}"),
+                    },
+                    formula: None,
+                    style: None,
+                },
+            );
+        }
+        let mut tail = Sheet::new("Tail");
+        tail.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Bool { value: false },
+                formula: Some(String::new()),
+                style: Some(0),
+            },
+        );
+        let model = Workbook {
+            sheets: vec![Sheet::new("Empty"), sheet, Sheet::new("Gap"), tail],
+            date_system: DateSystem::V1900,
+            defined_names: Vec::new(),
+            shared_strings: Vec::new(),
+            styles: Stylesheet::default(),
+            tables: Vec::new(),
+        };
+        for (records, bytes) in [(1, 80), (3, 80), (100, 48)] {
+            let budget = SnapshotBudget::new(records, bytes).unwrap();
+            let chunks = encode(&model, budget);
+            assert!(chunks.iter().all(|chunk| chunk.len() <= bytes));
+            let decoded = decode(&chunks);
+            assert_eq!(decoded, model);
             assert_eq!(encode(&decoded, budget), chunks);
         }
     }
@@ -1600,7 +1690,11 @@ mod tests {
             (CellRef::new(0, 0), 900.0, Some("SEQUENCE(2,2)".into())),
             (CellRef::new(0, 1), -0.0, None),
             (CellRef::new(1, 0), 0.0, None),
-            (CellRef::new(1, 1), f64::from_bits(0x7ff8_0000_0000_007b), None),
+            (
+                CellRef::new(1, 1),
+                f64::from_bits(0x7ff8_0000_0000_007b),
+                None,
+            ),
         ] {
             sheet.set_cell(
                 at,
@@ -1628,6 +1722,16 @@ mod tests {
             decoded.sheets[0].cell(CellRef::new(0, 0)).unwrap().value,
             CellValue::Number { value: 900.0 }
         );
+        for (at, bits) in [
+            (CellRef::new(0, 1), (-0.0_f64).to_bits()),
+            (CellRef::new(1, 0), 0.0_f64.to_bits()),
+            (CellRef::new(1, 1), 0x7ff8_0000_0000_007b),
+        ] {
+            let CellValue::Number { value } = &decoded.sheets[0].cell(at).unwrap().value else {
+                panic!("expected numeric cache");
+            };
+            assert_eq!(value.to_bits(), bits);
+        }
         assert_eq!(encode(&decoded, budget), chunks);
     }
 
@@ -1639,7 +1743,9 @@ mod tests {
             idx: 0,
             tint: f64::from_bits(0xfff8_0000_0000_5678),
         });
-        model.sheets[0].col_widths.insert(7, f64::from_bits(0x7ff0_0000_0000_0001));
+        model.sheets[0]
+            .col_widths
+            .insert(7, f64::from_bits(0x7ff0_0000_0000_0001));
         model.sheets[0].format.default_row_height_pt = Some(f64::from_bits(0x7ff8_0000_0000_0042));
         for col in 0..160 {
             model.sheets[2].set_cell(
@@ -1755,7 +1861,11 @@ mod tests {
             tables: Vec::new(),
         };
         let mut encoder = ModelSnapshotEncoder::new();
-        assert!(encoder.next(&model, SnapshotBudget::new(3, 1).unwrap()).is_err());
+        assert!(
+            encoder
+                .next(&model, SnapshotBudget::new(3, 1).unwrap())
+                .is_err()
+        );
         let mut chunks = Vec::new();
         loop {
             match encoder.next(&model, SnapshotBudget::new(3, 80).unwrap()) {
@@ -1806,7 +1916,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            opened.model().sheets[0].cell(CellRef::new(0, 1)).unwrap().value,
+            opened.model().sheets[0]
+                .cell(CellRef::new(0, 1))
+                .unwrap()
+                .value,
             CellValue::Number { value: 6.0 }
         );
         let budget = SnapshotBudget::new(2, 120).unwrap();

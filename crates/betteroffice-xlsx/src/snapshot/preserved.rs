@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::ops::Bound::{Excluded, Unbounded};
 
-use xlsx_parse::{SheetAxes, SharedStringCells};
+use xlsx_parse::{SharedStringCells, SheetAxes};
 
 use crate::workbook::PreservedSheetState;
 
@@ -47,7 +47,9 @@ impl PreservedSnapshotEncoder {
             if frame(ChunkKind::Preserved, self.ordinal, &[]).len() + payload.len()
                 > budget.max_bytes()
             {
-                return Err(SnapshotError::new("snapshot preservation header exceeds byte budget"));
+                return Err(SnapshotError::new(
+                    "snapshot preservation header exceeds byte budget",
+                ));
             }
             self.started = true;
             count = 1;
@@ -59,14 +61,15 @@ impl PreservedSnapshotEncoder {
                 self.cursor = cursor;
                 break;
             }
-            let length = frame(ChunkKind::Preserved, self.ordinal, &[]).len()
-                + payload.len()
-                + record.len();
+            let length =
+                frame(ChunkKind::Preserved, self.ordinal, &[]).len() + payload.len() + record.len();
             if length > budget.max_bytes() {
                 if count != 0 {
                     break;
                 }
-                return Err(SnapshotError::new("snapshot preservation record exceeds byte budget"));
+                return Err(SnapshotError::new(
+                    "snapshot preservation record exceeds byte budget",
+                ));
             }
             payload.raw(&record.into_bytes());
             self.cursor = cursor;
@@ -88,7 +91,12 @@ fn write_header(w: &mut Writer, state: &PreservedSheetState) -> SnapshotResult<(
         axes,
         created,
     } = state;
-    let counts = [origins.len(), shared_string_cells.len(), axes.len(), created.len()];
+    let counts = [
+        origins.len(),
+        shared_string_cells.len(),
+        axes.len(),
+        created.len(),
+    ];
     let mut total = 1usize;
     for count in counts
         .into_iter()
@@ -222,7 +230,9 @@ impl PreservedSnapshotBuilder {
 
     pub(crate) fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         if self.failed {
-            return Err(SnapshotError::new("snapshot preservation builder has failed"));
+            return Err(SnapshotError::new(
+                "snapshot preservation builder has failed",
+            ));
         }
         let result = self.push_inner(payload);
         if result.is_err() {
@@ -234,14 +244,18 @@ impl PreservedSnapshotBuilder {
     fn push_inner(&mut self, chunk: &[u8]) -> SnapshotResult<()> {
         let (kind, ordinal, payload) = unframe(chunk)?;
         if kind != ChunkKind::Preserved || ordinal != self.ordinal || payload.is_empty() {
-            return Err(SnapshotError::new("snapshot preservation chunk is missing or reordered"));
+            return Err(SnapshotError::new(
+                "snapshot preservation chunk is missing or reordered",
+            ));
         }
         let mut r = Reader::new(payload);
         while !r.is_empty() {
             let tag = r.u8()?;
             if !self.started {
                 if tag != HEADER {
-                    return Err(SnapshotError::new("snapshot preservation header is missing"));
+                    return Err(SnapshotError::new(
+                        "snapshot preservation header is missing",
+                    ));
                 }
                 self.read_header(&mut r)?;
             } else {
@@ -265,7 +279,9 @@ impl PreservedSnapshotBuilder {
             }
         }
         if self.runs.is_empty() != (self.remaining == 0) {
-            return Err(SnapshotError::new("snapshot preservation counts do not match"));
+            return Err(SnapshotError::new(
+                "snapshot preservation counts do not match",
+            ));
         }
         self.started = true;
         Ok(())
@@ -276,7 +292,9 @@ impl PreservedSnapshotBuilder {
             return Err(SnapshotError::new("extra snapshot preservation record"));
         };
         if tag != *expected || self.remaining == 0 {
-            return Err(SnapshotError::new("snapshot preservation records are reordered"));
+            return Err(SnapshotError::new(
+                "snapshot preservation records are reordered",
+            ));
         }
         *remaining -= 1;
         if *remaining == 0 {
@@ -287,7 +305,9 @@ impl PreservedSnapshotBuilder {
             ORIGIN => self.state.origins.push(r.option(Reader::var_usize)?),
             STRINGS => {
                 let count = r.var_usize()?;
-                self.state.shared_string_cells.push(SharedStringCells::new());
+                self.state
+                    .shared_string_cells
+                    .push(SharedStringCells::new());
                 if count != 0 {
                     self.runs.push_front((STRING_CELL, count));
                 }
@@ -300,24 +320,34 @@ impl PreservedSnapshotBuilder {
                     .shared_string_cells
                     .last_mut()
                     .ok_or_else(|| SnapshotError::new("snapshot SST cell has no sheet"))?;
-                if cells.last_key_value().is_some_and(|(&previous, _)| key <= previous) {
+                if cells
+                    .last_key_value()
+                    .is_some_and(|(&previous, _)| key <= previous)
+                {
                     return Err(SnapshotError::new("snapshot SST cells are reordered"));
                 }
                 cells.insert(key, index);
             }
-            AXES => self.state.axes.push(r.option(|_| Ok(SheetAxes::default()))?),
+            AXES => self
+                .state
+                .axes
+                .push(r.option(|_| Ok(SheetAxes::default()))?),
             CREATED => self.state.created.push(r.bool()?),
             _ => return Err(SnapshotError::new("invalid snapshot preservation tag")),
         }
         if self.runs.is_empty() != (self.remaining == 0) {
-            return Err(SnapshotError::new("snapshot preservation counts do not match"));
+            return Err(SnapshotError::new(
+                "snapshot preservation counts do not match",
+            ));
         }
         Ok(())
     }
 
     pub(crate) fn finish(self) -> SnapshotResult<PreservedSheetState> {
         if self.failed || !self.started || self.remaining != 0 || !self.runs.is_empty() {
-            return Err(SnapshotError::new("snapshot preservation state is incomplete"));
+            return Err(SnapshotError::new(
+                "snapshot preservation state is incomplete",
+            ));
         }
         Ok(self.state)
     }
@@ -365,7 +395,10 @@ mod tests {
             assert_eq!(encode(&decoded, budget), chunks);
         }
         let mut builder = PreservedSnapshotBuilder::new();
-        for chunk in encode(&PreservedSheetState::default(), SnapshotBudget::new(1, 80).unwrap()) {
+        for chunk in encode(
+            &PreservedSheetState::default(),
+            SnapshotBudget::new(1, 80).unwrap(),
+        ) {
             builder.push(&chunk).unwrap();
         }
         assert!(builder.finish().unwrap().origins.is_empty());
@@ -421,12 +454,20 @@ mod tests {
             created: Vec::new(),
         };
         let mut encoder = PreservedSnapshotEncoder::new();
-        assert!(encoder.next(&state, SnapshotBudget::new(1, 1).unwrap()).is_err());
+        assert!(
+            encoder
+                .next(&state, SnapshotBudget::new(1, 1).unwrap())
+                .is_err()
+        );
         let header = encoder
             .next(&state, SnapshotBudget::new(1, 80).unwrap())
             .unwrap()
             .unwrap();
-        assert!(encoder.next(&state, SnapshotBudget::new(1, 3).unwrap()).is_err());
+        assert!(
+            encoder
+                .next(&state, SnapshotBudget::new(1, 3).unwrap())
+                .is_err()
+        );
         let origin = encoder
             .next(&state, SnapshotBudget::new(1, 80).unwrap())
             .unwrap()

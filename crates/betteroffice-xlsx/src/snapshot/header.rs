@@ -108,7 +108,11 @@ impl SnapshotHeader {
         let snapshot_id = r.var_u64()?;
         let mode = match r.u8()? {
             0 => SnapshotMode::Standalone,
-            _ => return Err(SnapshotError::new("only standalone snapshots are supported")),
+            _ => {
+                return Err(SnapshotError::new(
+                    "only standalone snapshots are supported",
+                ));
+            }
         };
         let edited_since_open = r.bool()?;
         let recalculated_since_open = r.bool()?;
@@ -250,7 +254,9 @@ mod tests {
                 assert_eq!(decoded.rand_seed, seed);
                 assert_eq!(decoded.chunk_count(ChunkKind::Yrs), 3);
                 assert_eq!(
-                    decoded.calculation_context.map(|options| options.now_serial.map(f64::to_bits)),
+                    decoded
+                        .calculation_context
+                        .map(|options| options.now_serial.map(f64::to_bits)),
                     context.map(|options| options.now_serial.map(f64::to_bits)),
                 );
             }

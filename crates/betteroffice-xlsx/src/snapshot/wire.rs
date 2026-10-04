@@ -28,7 +28,11 @@ impl ChunkKind {
             7 => Self::Facts,
             8 => Self::Source,
             9 => Self::End,
-            _ => return Err(SnapshotError::new(format!("unknown snapshot chunk kind {tag}"))),
+            _ => {
+                return Err(SnapshotError::new(format!(
+                    "unknown snapshot chunk kind {tag}"
+                )));
+            }
         })
     }
 }
@@ -46,7 +50,9 @@ pub(crate) fn unframe(chunk: &[u8]) -> SnapshotResult<(ChunkKind, u64, &[u8])> {
     let mut r = Reader::new(chunk);
     let version = r.u8()?;
     if version != FORMAT_VERSION {
-        return Err(SnapshotError::new(format!("unsupported snapshot format {version}")));
+        return Err(SnapshotError::new(format!(
+            "unsupported snapshot format {version}"
+        )));
     }
     let kind = ChunkKind::from_u8(r.u8()?)?;
     let ordinal = r.var_u64()?;
@@ -212,7 +218,8 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn var_u32(&mut self) -> SnapshotResult<u32> {
-        u32::try_from(self.var_u64()?).map_err(|_| SnapshotError::new("snapshot varint overflows u32"))
+        u32::try_from(self.var_u64()?)
+            .map_err(|_| SnapshotError::new("snapshot varint overflows u32"))
     }
 
     pub(crate) fn var_usize(&mut self) -> SnapshotResult<usize> {
@@ -242,7 +249,9 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             0 => Ok(None),
             1 => read(self).map(Some),
-            tag => Err(SnapshotError::new(format!("invalid snapshot option tag {tag}"))),
+            tag => Err(SnapshotError::new(format!(
+                "invalid snapshot option tag {tag}"
+            ))),
         }
     }
 }
