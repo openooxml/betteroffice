@@ -4,7 +4,7 @@ import { createSessionHost } from './host';
 import { deferReply, isClientMessage, isHostMessage, transferable, type HostMessage } from './protocol';
 import type { SchedulerTask, TaskExecutor } from './scheduler';
 import { createInProcessPair } from './testing/inProcessTransport';
-import { SESSION_SUPERSEDED, SessionFailure, type MethodPolicies, type SessionScheduler } from './types';
+import { SESSION_SUPERSEDED, SessionFailure, type MethodPolicies, type SessionFailureCode, type SessionScheduler } from './types';
 
 type Methods = {
   echo(value: unknown): unknown;
@@ -373,7 +373,7 @@ describe('session host and cloned transport', () => {
 
   it('replies to throwing policy functions and fails the session on terminal ones', async () => {
     type Methods = { read(value: string): string; echo(): string };
-    const cases: Array<[Error, string | undefined]> = [
+    const cases: Array<[Error, SessionFailureCode | undefined]> = [
       [new Error('policy'), undefined],
       [new WebAssembly.RuntimeError('policy'), 'trap'],
       [new SessionFailure('out-of-memory', 'policy'), 'out-of-memory'],
