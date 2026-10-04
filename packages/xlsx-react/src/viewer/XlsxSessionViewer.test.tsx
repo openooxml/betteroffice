@@ -102,6 +102,22 @@ async function opened() {
   await tick();
 }
 
+function clampScrolling(scroll: HTMLElement) {
+  for (const [property, dimension, size] of [
+    ['scrollLeft', 'width', 'clientWidth'], ['scrollTop', 'height', 'clientHeight'],
+  ] as const) {
+    let value = 0;
+    Object.defineProperty(scroll, property, {
+      configurable: true,
+      get: () => value,
+      set: (next: number) => {
+        const spacer = scroll.firstElementChild as HTMLElement;
+        value = Math.max(0, Math.min(next, Math.max(0, parseFloat(spacer.style[dimension]) - scroll[size])));
+      },
+    });
+  }
+}
+
 beforeEach(() => {
   painted = [];
   animationFrames = new Map();
@@ -134,7 +150,7 @@ beforeEach(() => {
   }
   const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
     return { canvas: this } as unknown as CanvasRenderingContext2D;
-  } as HTMLCanvasElement['getContext']);
+  } as unknown as HTMLCanvasElement['getContext']);
   const paint = spyOn(xlsx, 'paintDisplayList').mockImplementation((ctx, list, scale) => {
     painted.push({ canvas: ctx.canvas, list, scale });
   });
@@ -154,13 +170,13 @@ describe('workbook session viewer', () => {
     const { viewer, call } = session();
     const opener = open(viewer);
     const ready = mock((_api: XlsxWorkerViewerApi) => {});
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} clientId={42} />);
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(call.sheetView).toHaveBeenCalledWith(0));
     expect(ready).not.toHaveBeenCalled();
     await opened();
     expect(painted).toHaveLength(1);
     expect(ready).toHaveBeenCalledTimes(1);
-    expect(opener).toHaveBeenCalledWith(file, { clientId: 42 });
+    expect(opener).toHaveBeenCalledWith(file, expect.anything());
     expect(call.frame).toHaveBeenCalledWith(viewport, { sheet: 0 });
     expect(view.getByRole('grid').textContent).toContain('Sheet 0');
     fireEvent.scroll(view.getByTestId('xlsx-scroll'));
@@ -168,6 +184,28 @@ describe('workbook session viewer', () => {
     expect(ready).toHaveBeenCalledTimes(1);
     expect(xlsx.openWorkbook).not.toHaveBeenCalled();
     expect(xlsx.initWasm).not.toHaveBeenCalled();
+  });
+
+  it('ignores legacy clientId props without forwarding collaboration options or reopening', async () => {
+    const { viewer } = session();
+    const opener = open(viewer).mockImplementation(async (_bytes, options) => {
+      if (options?.clientId !== undefined) throw new Error('clientId requires collaborative mode');
+      return viewer;
+    });
+    const ready = mock((_api: XlsxWorkerViewerApi) => {});
+    const errors = mock((_error: Error) => {});
+    const legacy = { clientId: 42, collaborative: true };
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen {...legacy}
+      onReady={ready} onError={errors} />);
+    await opened();
+    expect(opener.mock.calls[0][1]).not.toHaveProperty('clientId');
+    expect(opener.mock.calls[0][1]).not.toHaveProperty('collaborative');
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(errors).not.toHaveBeenCalled();
+    view.rerender(<XlsxEditor file={file} readOnly experimentalWorkerOpen {...{ ...legacy, clientId: 43 }}
+      onReady={ready} onError={errors} />);
+    await tick();
+    expect(opener).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the synchronous sentinels and forwards async reads and saving', async () => {
@@ -194,17 +232,16 @@ describe('workbook session viewer', () => {
     expect(call.applyEdits).not.toHaveBeenCalled();
   });
 
-  for (const replacement of ['file', 'clientId'] as const) it(`disposes on ${replacement} replacement and unmount and clears ready`, async () => {
+  it('disposes on file replacement and unmount and clears ready', async () => {
     const old = session();
     const next = session();
     const opener = open(old.viewer);
     const disposeReady = mock(() => {});
     const ready = mock((_api: XlsxWorkerViewerApi) => disposeReady);
-    const view = render(<XlsxEditor file={file} clientId={1} readOnly experimentalWorkerOpen onReady={ready} />);
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} />);
     await opened();
     opener.mockResolvedValue(next.viewer);
-    view.rerender(<XlsxEditor file={replacement === 'file' ? new Uint8Array([4]) : file}
-      clientId={replacement === 'clientId' ? 2 : 1} readOnly experimentalWorkerOpen onReady={ready} />);
+    view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} />);
     await waitFor(() => expect(next.call.sheetView).toHaveBeenCalled());
     await tick();
     expect(old.viewer.dispose).toHaveBeenCalledTimes(1);
@@ -214,6 +251,72 @@ describe('workbook session viewer', () => {
     expect(next.viewer.dispose).toHaveBeenCalledTimes(1);
     expect(disposeReady).toHaveBeenCalledTimes(2);
     expect(animationFrames.size).toBe(0);
+  });
+
+  for (const close of ['replace', 'unmount'] as const) {
+    for (const settle of ['resolve', 'reject'] as const) {
+      it(`cancels an in-flight open on ${close} and ignores a late ${settle}`, async () => {
+        const old = session();
+        const next = session();
+        const opening = deferred<WorkbookSession>();
+        const stopped = mock(() => {});
+        let signal!: AbortSignal;
+        const opener = open(old.viewer).mockImplementationOnce((_bytes, options) => {
+          signal = options!.signal!;
+          signal.addEventListener('abort', stopped, { once: true });
+          return opening.promise;
+        });
+        const ready = mock((_api: XlsxWorkerViewerApi) => {});
+        const errors = mock((_error: Error) => {});
+        const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+        expect(signal.aborted).toBe(false);
+        if (close === 'unmount') view.unmount();
+        else {
+          opener.mockResolvedValue(next.viewer);
+          view.rerender(<XlsxEditor file={new Uint8Array([4])} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+          await opened();
+        }
+        expect(signal.aborted).toBe(true);
+        expect(stopped).toHaveBeenCalledTimes(1);
+        expect(old.viewer.dispose).not.toHaveBeenCalled();
+        await act(async () => {
+          if (settle === 'resolve') opening.resolve(old.viewer);
+          else opening.reject(new Error('Obsolete open failed'));
+        });
+        expect(old.viewer.dispose).toHaveBeenCalledTimes(settle === 'resolve' ? 1 : 0);
+        expect(old.call.sheetView).not.toHaveBeenCalled();
+        expect(old.call.frame).not.toHaveBeenCalled();
+        expect(ready).toHaveBeenCalledTimes(close === 'replace' ? 1 : 0);
+        expect(errors).not.toHaveBeenCalled();
+        expect(painted).toHaveLength(close === 'replace' ? 1 : 0);
+        expect(view.queryByRole('alert')).toBeNull();
+      });
+    }
+  }
+
+  it('terminates an opening worker and removes its transport listeners before it is ready', async () => {
+    const openSession = workbookSessionOpener.open;
+    const worker = Object.assign(new EventTarget(), {
+      postMessage: mock((_message: unknown) => {}), terminate: mock(() => {}),
+    });
+    const removed = spyOn(worker, 'removeEventListener');
+    restorers.push(() => removed.mockRestore());
+    let opening!: Promise<WorkbookSession>;
+    open(session().viewer).mockImplementationOnce((bytes, options) => {
+      opening = openSession(bytes, { ...options, worker: () => worker as unknown as Worker });
+      return opening;
+    });
+    const ready = mock((_api: XlsxWorkerViewerApi) => {});
+    const errors = mock((_error: Error) => {});
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={ready} onError={errors} />);
+    expect(worker.postMessage).toHaveBeenCalledTimes(1);
+    view.unmount();
+    expect(worker.terminate).toHaveBeenCalledTimes(1);
+    expect(removed.mock.calls.map(([type]) => type)).toEqual(['message', 'error', 'messageerror']);
+    await act(async () => { await opening.catch(() => {}); });
+    expect(ready).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+    expect(painted).toHaveLength(0);
   });
 
   it('disposes an opening that completes after replacement and drops a late frame', async () => {
@@ -397,6 +500,63 @@ describe('workbook session viewer', () => {
     expect(await api.selectCellsAsync(0, { ...selection, focus: { row: -1, col: 0 } })).toBe(false);
   });
 
+  it('extends an A1-only sheet to reveal Y91 before completing async selection', async () => {
+    const { viewer, call } = session();
+    call.sheetView.mockResolvedValue({ ...sheetView(0), contentWidth: 96, contentHeight: 24 });
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    clampScrolling(scroll);
+    const target = deferred<WorkbookFrame>();
+    call.frame.mockImplementationOnce(() => target.promise);
+    let completed = false;
+    let selected!: Promise<boolean>;
+    await act(async () => {
+      selected = api.selectCellsAsync(0, xlsx.selectionAt({ row: 90, col: 24 }))
+        .then((value) => { completed = true; return value; });
+    });
+    const spacer = scroll.firstElementChild as HTMLElement;
+    expect(spacer.style.width).toBe('2400px');
+    expect(spacer.style.height).toBe('2184px');
+    expect(scroll.scrollLeft).toBe(1600);
+    expect(scroll.scrollTop).toBe(1584);
+    await tick();
+    expect(completed).toBe(false);
+    const requested = call.frame.mock.calls[1][0];
+    expect(requested).toEqual({ ...viewport, x: 1600, y: 1584 });
+    await act(async () => target.resolve({
+      ...frame(0, requested),
+      displayList: { ...frame(0, requested).displayList,
+        grid: { startRow: 90, startCol: 24, rowOffsets: [576, 600], colOffsets: [704, 800] } },
+    }));
+    expect(await selected).toBe(true);
+    const outline = view.getByTestId('xlsx-selection') as HTMLElement;
+    expect(outline.style.left).toBe('704px');
+    expect(outline.style.top).toBe('576px');
+  });
+
+  it('returns false when a matching paint does not visibly contain the target geometry', async () => {
+    const { viewer, call } = session();
+    call.sheetView.mockResolvedValue({ ...sheetView(0), contentWidth: 96, contentHeight: 24 });
+    open(viewer);
+    let api!: XlsxWorkerViewerApi;
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    const scroll = view.getByTestId('xlsx-scroll');
+    for (const property of ['scrollLeft', 'scrollTop']) {
+      Object.defineProperty(scroll, property, { configurable: true, get: () => 0, set: () => {} });
+    }
+    let selected!: Promise<boolean>;
+    await act(async () => { selected = api.selectCellsAsync(0, xlsx.selectionAt({ row: 90, col: 24 })); });
+    await tick();
+    expect(call.frame.mock.calls[1][0]).toEqual(viewport);
+    expect(painted).toHaveLength(2);
+    expect(await selected).toBe(false);
+    expect(view.queryByTestId('xlsx-selection')).toBeNull();
+  });
+
   it('cancels an async selection replaced by a newer navigation', async () => {
     const { viewer, call } = session();
     open(viewer);
@@ -575,7 +735,8 @@ describe('workbook session viewer', () => {
 
   it('reports unsupported collaboration without opening a session', async () => {
     const opener = open(session().viewer);
-    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen collaboration={{ clientId: 1 }} />);
+    const collaboration = { collaboration: { clientId: 1 } };
+    const view = render(<XlsxEditor file={file} readOnly experimentalWorkerOpen {...collaboration} />);
     await waitFor(() => expect(view.getByRole('alert').textContent).toContain('Collaboration is unavailable'));
     expect(opener).not.toHaveBeenCalled();
   });

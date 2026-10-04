@@ -251,10 +251,9 @@ export interface XlsxEditorProps extends XlsxEditorPluginProps {
 }
 
 /** @experimental */
-export type XlsxWorkerViewerProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly'> & {
+export type XlsxWorkerViewerProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly' | 'collaboration'> & {
   readOnly: true;
   experimentalWorkerOpen: true;
-  clientId?: number;
   onError?: (error: Error) => void;
   onReady?: (api: XlsxWorkerViewerApi) => void | (() => void);
 };

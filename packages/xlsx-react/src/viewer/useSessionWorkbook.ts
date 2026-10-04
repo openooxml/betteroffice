@@ -3,7 +3,7 @@ import type {
   Selection, Viewport, WorkbookFrame, WorkbookSession, WorkbookSheetView,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
+import type { XlsxEditorProps, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
 import type { XlsxCommandStore } from '../commands/types';
 
 export const workbookSessionOpener = { open: openWorkbookSession };
@@ -112,7 +112,7 @@ export class ViewerSession {
     const navigation = this.beginNavigation();
     this.viewRequest += 1;
     try {
-      const [view, , geometry] = await Promise.all([
+      const [view, anchor, geometry] = await Promise.all([
         this.view?.sheet === sheet ? Promise.resolve(this.view) : this.session.call.sheetView(sheet),
         this.session.call.cellGeometry(sheet, next.anchor.row, next.anchor.col),
         this.session.call.cellGeometry(sheet, next.focus.row, next.focus.col),
@@ -121,8 +121,23 @@ export class ViewerSession {
       this.active = sheet;
       this.selection = next;
       const painted = new Promise<boolean>((resolve) => this.waiters.add({ request: null, resolve }));
-      this.presentView(view, geometry.scrollPosition);
-      return await painted && this.current && navigation === this.navigation;
+      this.presentView({
+        ...view,
+        contentWidth: Math.max(view.contentWidth, anchor.rect.x + anchor.rect.w, geometry.rect.x + geometry.rect.w),
+        contentHeight: Math.max(view.contentHeight, anchor.rect.y + anchor.rect.h, geometry.rect.y + geometry.rect.h),
+      }, geometry.scrollPosition);
+      if (!await painted || !this.current || navigation !== this.navigation) return false;
+      const request = this.painted?.request;
+      if (!request || !sameRequest(this.surface?.capture() ?? null, request)) return false;
+      const { viewport } = request;
+      const frozenCol = next.focus.col < view.frozenCols;
+      const frozenRow = next.focus.row < view.frozenRows;
+      const { rect } = geometry;
+      const x = rect.x - (frozenCol ? 0 : viewport.x);
+      const y = rect.y - (frozenRow ? 0 : viewport.y);
+      return rect.w > 0 && rect.h > 0 &&
+        x >= (frozenCol ? 0 : view.frozenWidth) && x + rect.w <= viewport.width &&
+        y >= (frozenRow ? 0 : view.frozenHeight) && y + rect.h <= viewport.height;
     } catch {
       if (this.current && navigation === this.navigation) {
         if (this.view) this.schedule();
@@ -285,6 +300,7 @@ export function useSessionWorkbook(
   const [, setRevision] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const collaboration = (props as XlsxWorkerViewerProps & Pick<XlsxEditorProps, 'collaboration'>).collaboration;
   const reportError = useCallback((value: unknown) => {
     const error = value instanceof Error ? value : new Error(
       value && typeof value === 'object' && 'message' in value ? String(value.message) : String(value)
@@ -295,22 +311,22 @@ export function useSessionWorkbook(
 
   useEffect(() => {
     const token = ++generation.current;
+    const controller = new AbortController();
     let disposed = false;
     let opened: ViewerSession | undefined;
     let offFailure = () => {};
     let cleanup: void | (() => void);
-    const current = () => !disposed && token === generation.current &&
-      latest.current.props.file === props.file && latest.current.props.clientId === props.clientId;
+    const current = () => !disposed && token === generation.current && latest.current.props.file === props.file;
     const changed = () => { if (current()) setRevision((revision) => revision + 1); };
     setRun(null);
     setError(null);
     setLoading(Boolean(props.file));
-    if (props.collaboration) {
+    if (collaboration) {
       reportError(new Error('Collaboration is unavailable in the worker viewer'));
       setLoading(false);
     } else if (props.file) void (async () => {
       try {
-        const session = await workbookSessionOpener.open(props.file!, { clientId: props.clientId });
+        const session = await workbookSessionOpener.open(props.file!, { signal: controller.signal });
         if (!current()) { void session.dispose().catch(() => {}); return; }
         opened = new ViewerSession(session, changed,
           (error) => { if (current()) reportError(error); }, () => {
@@ -358,11 +374,12 @@ export function useSessionWorkbook(
     return () => {
       disposed = true;
       generation.current += 1;
+      controller.abort();
       offFailure();
       try { if (typeof cleanup === 'function') cleanup(); }
       finally { opened?.dispose(); }
     };
-  }, [props.file, props.clientId, props.collaboration, commands, reportError]);
+  }, [props.file, collaboration, commands, reportError]);
 
   return { run: run?.current ? run : null, error, loading, reportError };
 }

@@ -748,4 +748,20 @@ describe('workbook sessions', () => {
     await expect(createWorkbookSession(fixture, {}, transport)).rejects.toThrow('attach');
     expect(closed).toBe(1);
   });
+
+  test('an aborted signal closes the transport of an open in flight', async () => {
+    const pair = createInProcessPair();
+    let closed = 0;
+    const transport: SessionTransport = {
+      post: (message, transfer) => pair.client.post(message, transfer),
+      listen: (listener) => pair.client.listen(listener),
+      onError: (listener) => pair.client.onError(listener),
+      close() { closed += 1; pair.client.close(); },
+    };
+    const controller = new AbortController();
+    const opening = createWorkbookSession(fixture, { signal: controller.signal }, transport);
+    controller.abort();
+    await expect(opening).rejects.toThrow();
+    expect(closed).toBeGreaterThan(0);
+  });
 });

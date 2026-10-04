@@ -27,6 +27,8 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
 export interface OpenWorkbookSessionOptions extends OpenWorkbookOptions {
   worker?: () => Worker;
   wasm?: ArrayBuffer | WebAssembly.Module;
+  /** Aborting closes the session worker while the open is still in flight. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -117,12 +119,19 @@ export async function createWorkbookSession(
   let state: WorkbookSessionState;
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });
+  const signal = options.signal;
+  const abort = () => {
+    void client.dispose().catch(() => {});
+    try { transport.close(); } catch {}
+  };
   try {
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
     state = await client.callWithTransfer('open', [document, input], transfer);
   } catch (error) {
     await client.dispose();
     throw error;
-  }
+  } finally { signal?.removeEventListener('abort', abort); }
 
   const {
     version, readCells, findText, validateEdits, applyEdits, frame, sheetView, cellGeometry,

@@ -112,7 +112,7 @@ async function installMainWasmProbe(page: Page) {
     WebAssembly.compile = function (...args: Parameters<typeof compile>) {
       probe.compile += 1;
       return Reflect.apply(compile, WebAssembly, args);
-    };
+    } as typeof compile;
     const compileStreaming = WebAssembly.compileStreaming;
     WebAssembly.compileStreaming = function (...args: Parameters<typeof compileStreaming>) {
       probe.compileStreaming += 1;
@@ -138,7 +138,7 @@ async function installMainWasmProbe(page: Page) {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes('xlsx_wasm_bg.wasm')) probe.fetches.push(url);
       return Reflect.apply(nativeFetch, window, args);
-    };
+    } as typeof nativeFetch;
     const NativeWorker = window.Worker;
     window.Worker = class extends NativeWorker {
       constructor(url: string | URL, options?: WorkerOptions) {
