@@ -569,8 +569,13 @@ test('eager worker open preserves input and command order after first paint unti
 });
 
 test('a viewer command preserves select-all while its worker read is pending', async () => {
+  let heldUnit = false;
   const { posted, replies, reply } = installWorker({
-    holdReply: (request) => request.type === 'documentRead' && request.read.kind === 'selectionUnit',
+    holdReply: (request) => {
+      if (heldUnit || request.type !== 'documentRead' || request.read.kind !== 'selectionUnit') return false;
+      heldUnit = true;
+      return true;
+    },
   });
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
     value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
@@ -2337,7 +2342,8 @@ const workerProposalProps: HarnessProps = {
 
 async function openWorkerProposals(props: HarnessProps = workerProposalProps) {
   const harness = renderHook(useHarness, { initialProps: props });
-  await waitFor(() => expect(harness.result.current.core.workerProposalsReady).toBe(true));
+  await waitFor(() => expect({ workerProposalsReady: harness.result.current.core.workerProposalsReady })
+    .toEqual({ workerProposalsReady: true }));
   await act(async () => {
     await harness.result.current.ref.current!.whenLayoutComplete({ timeoutMs: 5000 });
   });
@@ -3012,8 +3018,10 @@ test('a worker that fails while idle after load is replaced once and keeps paint
     await failIdleWorker(workers[0], 'worker lost');
     await waitFor(() => expect(workers).toHaveLength(2));
     await waitFor(() => expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(2));
-    await waitFor(() => expect(result.current.renderer.workerSurfacesActive).toBe(true));
-    await waitFor(() => expect(result.current.renderer.queries?.isReady()).toBe(true));
+    await waitFor(() => expect({ workerSurfacesActive: result.current.renderer.workerSurfacesActive })
+      .toEqual({ workerSurfacesActive: true }));
+    await waitFor(() => expect({ queriesReady: result.current.renderer.queries?.isReady() })
+      .toEqual({ queriesReady: true }));
     expect(result.current.renderer.frame).not.toBeNull();
     expect(result.current.renderer.queries!.pageCount()).toBeGreaterThan(0);
     const read = await result.current.ref.current!.readParagraphs({ view: 'accepted' });

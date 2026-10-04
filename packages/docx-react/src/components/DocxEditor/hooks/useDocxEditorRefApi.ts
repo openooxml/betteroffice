@@ -650,7 +650,11 @@ export function useDocxEditorRefApi({
     modeRef.current !== 'viewing' || allowHostProposalsRef.current === true;
   const proposalAuthority = () => {
     const session = pagedEditorRef.current?.getYrsSession();
-    return experimentalWorkerOpen && session ? workerProposalAuthority(session) : null;
+    return experimentalWorkerOpen && session
+      ? workerOpenDocumentHeld(session)
+        ? registeredWorkerProposalAuthority(session)
+        : workerProposalAuthority(session)
+      : null;
   };
   /** A proposal call on the worker's registry while it holds them, else on the main session. */
   const routedProposalCall = <R extends { expectVersion: string }>(
