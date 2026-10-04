@@ -11,6 +11,7 @@ export class ViewerSession {
   alive = true;
   failed = false;
   active: number;
+  navigation = 0;
   readonly images = frameImages();
   readonly visible = new Set<number>();
   private readonly cache = new Map<string, PresentationFrame>();
@@ -58,6 +59,7 @@ export class ViewerSession {
     if (this.active !== slide - 1) {
       this.finish(false);
       this.active = slide - 1;
+      this.navigation += 1;
       this.painted = undefined;
       const frame = this.frame(this.active);
       if (frame) {
@@ -65,6 +67,7 @@ export class ViewerSession {
         this.cache.delete(key);
         this.cache.set(key, frame);
       } else this.pending.add(this.active);
+      this.trim();
       this.changed();
     }
     void this.drain();
@@ -84,6 +87,7 @@ export class ViewerSession {
       this.visible.add(index);
     } else {
       this.visible.delete(index);
+      this.trim();
       if (index !== this.active) this.pending.delete(index);
     }
     this.changed();
@@ -129,6 +133,15 @@ export class ViewerSession {
     this.waiters.clear();
   }
 
+  private trim(): void {
+    while (this.cache.size > 25) {
+      const oldest = [...this.cache].find(([, cached]) =>
+        cached.slideIndex !== this.active && !this.visible.has(cached.slideIndex));
+      if (!oldest) break;
+      this.cache.delete(oldest[0]);
+    }
+  }
+
   private async drain(): Promise<void> {
     if (this.running || !this.current) return;
     this.running = true;
@@ -146,12 +159,7 @@ export class ViewerSession {
           if (frame.slideIndex !== index) throw new Error('Unexpected slide frame');
           const id = this.session.state.slides[index].id;
           this.cache.set(JSON.stringify([id, frame.version]), frame);
-          while (this.cache.size > 25) {
-            const oldest = [...this.cache].find(([, cached]) =>
-              cached.slideIndex !== this.active && !this.visible.has(cached.slideIndex));
-            if (!oldest) break;
-            this.cache.delete(oldest[0]);
-          }
+          this.trim();
           this.changed();
         } catch (error) {
           if (!this.current) break;

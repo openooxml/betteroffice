@@ -173,6 +173,28 @@ describe('session viewer', () => {
     await waitFor(() => expect(view.container.querySelector('[aria-current="page"]')?.getAttribute('data-slide-index')).toBe('0'));
   });
 
+  it('resolves batched round-trip navigation and continues visible thumbnails', async () => {
+    const { viewer, call } = session();
+    open(viewer);
+    let api!: PptxWorkerViewerApi;
+    const view = render(<PptxEditor file={file} fonts={[]} readOnly experimentalWorkerOpen
+      onReady={(value) => { api = value; }} />);
+    await waitFor(() => expect(api).toBeDefined());
+    let navigation!: Promise<boolean>;
+    let completed = false;
+    act(() => {
+      api.goToSlide(2);
+      navigation = api.goToSlideAsync(1).then((value) => { completed = true; return value; });
+    });
+    await waitFor(() => expect(completed).toBe(true), { timeout: 1000 });
+    expect(await navigation).toBe(true);
+    expect(view.container.querySelector('[aria-current="page"]')?.getAttribute('data-slide-index')).toBe('0');
+    await waitFor(() => expect(observed).toHaveLength(4));
+    await act(async () => visible([2, 3]));
+    await waitFor(() => expect(call.frame.mock.calls.map(([index]) => index)).toEqual([0, 1, 2, 3]));
+    await waitFor(() => expect(view.container.querySelectorAll('aside canvas')).toHaveLength(2));
+  });
+
   it('requeues superseded visible work with only one frame request in flight', async () => {
     const { viewer, call } = session();
     open(viewer);
@@ -407,6 +429,21 @@ describe('session viewer', () => {
     for (let index = 1; index < 30; index += 1) run.visibility(index, true);
     await waitFor(() => expect(viewer.call.frame).toHaveBeenCalledTimes(30));
     for (let index = 0; index < 30; index += 1) expect(run.frame(index)).toBeDefined();
+    run.dispose();
+  });
+
+  it('trims cached frames when visible rows are hidden while retaining the active frame', async () => {
+    const { viewer } = session(31);
+    const run = new ViewerSession(viewer, 1, () => {}, () => {}, () => {});
+    run.start();
+    await waitFor(() => expect(run.frame(0)).toBeDefined());
+    run.didPaint(run.frame(0)!);
+    for (let index = 0; index < 30; index += 1) run.visibility(index, true);
+    await waitFor(() => expect(run.frame(29)).toBeDefined());
+    expect(Array.from({ length: 31 }, (_, index) => run.frame(index) !== undefined).filter(Boolean)).toHaveLength(30);
+    for (let index = 1; index < 30; index += 1) run.visibility(index, false);
+    expect(Array.from({ length: 31 }, (_, index) => run.frame(index) !== undefined).filter(Boolean).length).toBeLessThanOrEqual(25);
+    expect(run.frame(0)).toBeDefined();
     run.dispose();
   });
 

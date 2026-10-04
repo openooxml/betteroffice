@@ -30,6 +30,7 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
   const focus = useCallback(() => stageRef.current?.focus(), []);
   const { run, loading, error, notes, reportError } = useSessionPresentation(props, commands.store, focus);
   const frame = run?.current ? run.frame(run.active) : undefined;
+  const navigation = run?.navigation;
   const latest = useRef({ run, props, zoom, loading, t, reportError });
   latest.current = { run, props, zoom, loading, t, reportError };
   const pendingSave = useRef<{ run: ViewerSession; promise: Promise<PptxCommandResult> } | null>(null);
@@ -133,7 +134,7 @@ export function PptxSessionViewer(props: PptxWorkerViewerProps) {
     }).then(() => { if (current()) run.didPaint(frame); })
       .catch((error) => { if (current()) run.fail(error); });
     return () => { cancelled = true; };
-  }, [run, frame, scale, dpr]);
+  }, [run, frame, scale, dpr, navigation]);
 
   useEffect(() => {
     const rail = railRef.current;
