@@ -53,7 +53,7 @@ const STORIES = ['body', 'hf:rIdH1', 'fn:1'] as const;
 type Story = (typeof STORIES)[number];
 type Topology = 'A/editor' | 'B/viewer';
 type Action =
-  | 'insert' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
+  | 'insert' | 'split' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
   | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save';
 interface Operation {
   action: Action;
@@ -481,6 +481,20 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
   const { action, story } = operation;
   const session = arms.main.session;
   switch (action) {
+    case 'split': {
+      if (!arms.peer) {
+        await applyOperation(arms, { action: 'insert', story }, random);
+        return;
+      }
+      const { at, paragraph } = focus(arms, story, random);
+      session.addUndoBoundary();
+      const offset = random.int(paragraph.text.length + 1);
+      arms.log.push(`peer split ${story}/${at.paraId}:${offset}`);
+      const receipt = session.splitParagraph({ ...at, offset });
+      if (receipt.secondParaId) session.setSelection({ story, paraId: receipt.secondParaId, offset: 0 });
+      arms.main.publishDirectInput();
+      return;
+    }
     case 'insert':
     case 'delete': {
       const text = random.pick([' x', 'Y', '  z ', 'q&']);
@@ -589,12 +603,13 @@ function operations(topology: Topology, random: Random): Operation[] {
       { action: 'insert', story: 'hf:rIdH1' },
     ],
     group(random.pick(STORIES), ['insert', 'undo', 'redo']),
+    group(random.pick(STORIES), ['split', 'save', 'save']),
     group(random.pick(STORIES), ['save', 'save'])
   );
   const required = random.shuffle(groups).flat();
   const weighted: Action[] = ['insert', 'insert', 'delete', 'delete', 'addComment', 'addComment',
     'reply', 'reply', 'deleteComment', 'workerDeleteComment', 'proposal', 'decide', 'withdraw', 'flush', 'save',
-    ...(topology === 'A/editor' ? ['project', 'undo', 'redo'] as const : [])];
+    ...(topology === 'A/editor' ? ['project', 'split', 'undo', 'redo'] as const : [])];
   while (required.length < OPS) {
     const action = random.pick(weighted);
     required.push({
@@ -716,12 +731,14 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   let savesCompared = 0;
   let handbackRemoteUpdates = 0;
   let otherRemoteUpdates = 0;
+  let editorSeeds = 0;
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const random = new Random(seed);
     const topology: Topology = random.int(2) === 0 ? 'A/editor' : 'B/viewer';
     const log: string[] = [`open seed=${seed} topology=${topology}`];
     let arms: Arms | undefined;
     seedsRun += 1;
+    if (topology === 'A/editor') editorSeeds += 1;
     try {
       arms = await openArms(seed, topology, log);
       const current = arms;
@@ -815,4 +832,5 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   );
   if (failures.length > 0) console.error(failures.join('\n\n'));
   expect(failures.length).toBe(0);
+  if (editorSeeds > 0) expect(handbackRemoteUpdates).toBeGreaterThan(0);
 }, Math.max(120_000, SEEDS * OPS * 30));
