@@ -4,11 +4,21 @@ import { SessionFailure, type Promisified, type SessionEvents, type SessionMetho
 
 export const OFFICE_SESSION_SILENCE_MS = 60_000;
 
+export function requestWasmCompile(transport: SessionTransport): void {
+  try {
+    transport.post({ protocol: 1, kind: 'wasm-compile' });
+  } catch (error) {
+    try { transport.close(); } catch {}
+    throw error;
+  }
+}
+
 export interface SessionClientOptions<M extends SessionMethods> {
   methods: { readonly [K in keyof M]-?: true };
   silenceMs?: number;
   now?(): number;
   timer?(callback: () => void, ms: number): () => void;
+  onWasmModule?(url: string, module: WebAssembly.Module): void;
 }
 
 export interface SessionClient<M extends SessionMethods, E extends SessionEvents> {
@@ -99,9 +109,13 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     if (failure) return;
     arm();
     if (!isHostMessage(message)) {
+      if (message !== null && typeof message === 'object' &&
+        'kind' in message && message.kind === 'wasm-module') return;
       end(new SessionFailure('message', 'Session received a malformed host message'));
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
+    } else if (message.kind === 'wasm-module') {
+      try { options.onWasmModule?.(message.url, message.module); } catch {}
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);
