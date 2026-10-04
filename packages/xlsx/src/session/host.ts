@@ -5,7 +5,9 @@ import {
   type SessionHost,
   type SessionTransport,
 } from '../../../../shared/office-session';
-import { initWasm, openWorkbook, type SheetInfo, type WorkbookHandle } from '../wasm/loader';
+import {
+  initWasm, openWorkbook, workbookDisplayListJson, type SheetInfo, type WorkbookHandle,
+} from '../wasm/loader';
 import {
   WORKBOOK_SESSION_POLICIES,
   type WorkbookSessionEvents,
@@ -27,6 +29,8 @@ export function createWorkbookSessionHost(
   let disposed = false;
   let version = 0;
   let dirty = false;
+  let epoch = 0;
+  const encoder = new TextEncoder();
 
   function workbook(): WorkbookHandle {
     if (disposed) throw new Error('Workbook session is disposed');
@@ -74,6 +78,19 @@ export function createWorkbookSessionHost(
         host.emit('changed', { version, dirty });
       }
       return result;
+    },
+    frame(_, viewport, options = {}) {
+      const opened = workbook();
+      const info = opened.sheetInfo();
+      const sheet = options.sheet === undefined ? info.activeSheet : options.sheet;
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= info.sheetIds.length) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      const buffer = encoder.encode(workbookDisplayListJson(opened, viewport, options.sheet)).buffer;
+      epoch += 1;
+      return transferable({
+        displayList: buffer, version: opened.version(), epoch, sheet, viewport,
+      }, [buffer]);
     },
     sheets: () => sheets(workbook().sheetInfo()),
     calculationStatus: () => workbook().calculationStatus(),

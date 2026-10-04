@@ -8,7 +8,23 @@ import type {
   PptxReadResult,
   PptxValidationResult,
 } from '../edits';
+import type { SlideDisplayList } from '../types';
 import type { OpenPresentationOptions } from '../wasm/loader';
+
+/** @experimental */
+export interface PresentationFrame {
+  displayList: SlideDisplayList;
+  version: string;
+  epoch: number;
+  slideIndex: number;
+  media: ReadonlyMap<string, Uint8Array>;
+}
+
+/** @experimental */
+export type PresentationWireFrame = Omit<PresentationFrame, 'displayList' | 'media'> & {
+  displayList: ArrayBuffer;
+  media: { assetId: string; bytes: ArrayBuffer }[];
+};
 
 /**
  * A transferable font face.
@@ -73,6 +89,7 @@ export type PresentationSessionMethods = {
   findText(request: PptxFindRequest): PptxFindResult;
   validateEdits(request: PptxEditRequest): PptxValidationResult;
   applyEdits(request: PptxEditRequest): PptxEditResult;
+  frame(slideIndex: number): PresentationWireFrame;
   slides(): PresentationSlideSummary[];
   slideSize(): { width: number; height: number };
   save(): ArrayBuffer;
@@ -87,6 +104,7 @@ export const PRESENTATION_SESSION_METHODS = {
   findText: true,
   validateEdits: true,
   applyEdits: true,
+  frame: true,
   slides: true,
   slideSize: true,
   save: true,
@@ -101,6 +119,7 @@ export const PRESENTATION_SESSION_POLICIES: MethodPolicies<PresentationSessionMe
   findText: { lane: 'interactive' },
   validateEdits: { lane: 'interactive' },
   applyEdits: { lane: 'input', mutates: true, userInput: true },
+  frame: { lane: 'interactive', reframes: true, key: 'frame', replaceableBy: 'frame' },
   slides: { lane: 'interactive' },
   slideSize: { lane: 'interactive' },
   save: { lane: 'interactive' },
