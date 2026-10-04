@@ -874,9 +874,14 @@ function mergedTextRuns(xml: string): string {
   return result + xml.slice(offset);
 }
 
+function commentReferenceIds(xml: string): string[] {
+  return [...xml.replace(XML_OPAQUE, '').matchAll(/<w:commentReference\b[^>]*\bw:id="([^"]+)"/g)].map((match) => match[1]!);
+}
+
 function staleMainPartExempt(workerXml: string, mainXml: string, liveIds: ReadonlySet<string>): boolean {
   const ids = new Set(danglingRangeMarkers(mainXml, liveIds));
   return ids.size > 0 && danglingRangeMarkers(workerXml, liveIds).length === 0 &&
+    !commentReferenceIds(workerXml).some((id) => ids.has(id)) &&
     mergedTextRuns(withoutStaleCommentMarkers(mainXml, ids)) === mergedTextRuns(workerXml);
 }
 
@@ -976,6 +981,11 @@ test('the stale comment marker exemption merges cached text runs without hiding 
   expect(staleMainPartExempt(worker.replace('</w:p>', `${cdata}</w:p>`), cdataMain, liveIds)).toBe(true);
   expect(staleMainPartExempt(worker.replace('</w:p>', '<w:r><w:t><![CDATA[]]></w:t></w:r></w:p>'), cdataMain, liveIds))
     .toBe(false);
+  for (const opaque of ['<!--keep-->', '<?keep?>']) {
+    const opaqueReference = `<w:r><w:rPr>${opaque}</w:rPr><w:commentReference w:id="5"/></w:r>`;
+    expect(staleMainPartExempt(worker.replace('</w:p>', `${opaqueReference}</w:p>`),
+      main.replace('</w:p>', `${opaqueReference}</w:p>`), liveIds)).toBe(false);
+  }
   expect(staleMainPartExempt(worker, main.replace('gamma', 'gamma!'), liveIds)).toBe(false);
   const formatted = main.replace('<w:r><w:t>Y</w:t></w:r>',
     '<w:r><w:rPr><w:b/></w:rPr><w:t>Y</w:t></w:r>');
