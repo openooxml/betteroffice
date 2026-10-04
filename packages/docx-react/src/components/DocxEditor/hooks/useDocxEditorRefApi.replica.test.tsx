@@ -60,6 +60,7 @@ function apiFor(
 ) {
   const events: string[] = [];
   const inputRef = { current: null as YrsInputRef | null };
+  const openingRef = { current: false };
   const project = () => {
     const base = session.materializeDocx();
     return base ? yrsToDocument(session, base) : null;
@@ -94,6 +95,7 @@ function apiFor(
       documentFromYrs: project,
       historyStateRef: { current: document },
       pagedEditorRef,
+      openingRef,
       handleSave: async () => {
         events.push('save');
         return new TextEncoder().encode(session.paragraphs('body').map((paragraph) => paragraph.text).join('\n')).buffer;
@@ -149,7 +151,7 @@ function apiFor(
   });
   const api = hook.result.current.current;
   if (!api) throw new Error('The ref API is not mounted');
-  return { api, events, pagedEditorRef };
+  return { api, events, pagedEditorRef, openingRef };
 }
 
 async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, hydrateOnDemand = false) {
@@ -575,6 +577,60 @@ test.each(SYNC_REPLICA_CALLS.filter(([member]) => DOCX_REF_REPLICA_LOADING_MUTAT
     await act(async () => { release(); await replica.ready; });
     const readyVersion = session.version();
     act(() => { check(Reflect.apply(api[member], api, args)); });
+    expect(session.version()).not.toBe(readyVersion);
+    expect(replica.pending).toBe(false);
+    expect(opens).toEqual([false]);
+    expect(fallbackReasons).toEqual([]);
+    expect(warning).not.toHaveBeenCalled();
+  }
+);
+
+test.each(SYNC_REPLICA_CALLS.filter(([member]) => DOCX_REF_REPLICA_LOADING_MUTATIONS.has(member)))(
+  '%s throws DocxReplicaNotReadyError during the preview-to-full handoff and applies after readiness',
+  async (member, args, _loading, check) => {
+    const { api, session, replica, release, opens, fallbackReasons, events, openingRef } = await pendingReplica('editing');
+    const warning = spyOn(console, 'warn').mockImplementation(() => {});
+    const version = session.version();
+    openingRef.current = true;
+    expect(api.getDocument()).toBeNull();
+    expect(api.getEditorRef()).toBeNull();
+    expect(api.findInDocument('map')).toEqual([]);
+    expect(api.scrollToParaId('00000001')).toBe(false);
+    const call = () => Reflect.apply(api[member], api, args);
+    let caught: unknown;
+    try { call(); } catch (error) { caught = error; }
+    expect(caught).toBeInstanceOf(DocxReplicaNotReadyError);
+    expect(caught).toMatchObject({ member, message: expect.stringContaining('await flushPendingInput()') });
+    expect((caught as Error).message).toContain(member);
+    if (member in DOCX_REF_ASYNC_TWINS) {
+      const twin = DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS];
+      expect((caught as Error).message).toContain(typeof twin === 'string' ? twin : twin.join(' or '));
+    } else {
+      expect((caught as Error).message).not.toContain(', or use ');
+    }
+    await act(async () => {});
+    expect(session.version()).toBe(version);
+    expect(session.storyIds()).toEqual([]);
+    expect(replica.started).toBe(false);
+    expect(replica.pending).toBe(true);
+    expect(opens).toEqual([]);
+    expect(events).toEqual([]);
+    expect(fallbackReasons).toEqual([]);
+    expect(warning).not.toHaveBeenCalled();
+    replica.start();
+    await act(async () => {});
+    expect(call).toThrow(DocxReplicaNotReadyError);
+    expect(session.version()).toBe(version);
+    expect(session.storyIds()).toEqual([]);
+    expect(opens).toEqual([]);
+    expect(events).toEqual([]);
+    await act(async () => {
+      release();
+      await replica.ready;
+      openingRef.current = false;
+    });
+    const readyVersion = session.version();
+    act(() => { check(call()); });
     expect(session.version()).not.toBe(readyVersion);
     expect(replica.pending).toBe(false);
     expect(opens).toEqual([false]);

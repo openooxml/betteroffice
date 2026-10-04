@@ -92,6 +92,28 @@ function options(overrides: Partial<UsePagesPointerOptions> = {}) {
   return { opts, selections, words, paragraphs, kept, projection, focused: () => focused };
 }
 
+function queuedOptions(overrides: Partial<UsePagesPointerOptions> = {}) {
+  const queries = fakeQueries();
+  queries.isReady = () => true;
+  queries.whenReady = async () => {};
+  const result = options({ readOnly: false, queueInput: true, inputQueries: queries, ...overrides });
+  const entries: Array<{ prepare: () => Promise<() => void>; inTable?: () => boolean }> = [];
+  const input = result.opts.yrsInputRef.current!;
+  input.queueSelection = (prepare, _force, inTable) => {
+    entries.push({ prepare, inTable });
+    return true;
+  };
+  input.captureSelectionFromDisplay = (anchor, head, story) =>
+    () => input.setSelectionFromDisplay(anchor, head, story);
+  const replay = async () => {
+    result.opts.replicaReady = true;
+    await act(async () => {
+      for (const entry of entries.splice(0)) (await entry.prepare())();
+    });
+  };
+  return { ...result, queries, entries, replay };
+}
+
 function mouse(type: string, clientX: number, clientY = 400, detail = 1): void {
   act(() => {
     const target = type === 'mousedown' || type === 'click' ? host.firstElementChild! : window;
@@ -177,6 +199,81 @@ test('a single click during replica loading replays the caret', () => {
   opts.replicaReady = true;
   view.rerender();
   expect(selections).toEqual([[20, 20, 'body']]);
+});
+
+test.each([false, true])('a queued opening click exposes its table target without the replica: %s', async (inTable) => {
+  const { opts, queries, entries, selections, replay } = queuedOptions();
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'text', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 100,
+    cell: inTable ? { row: 0, col: 0, rowSpan: 1, colSpan: 1 } : undefined,
+  }];
+  const projection = mock(() => { throw new Error('Replica projection is unavailable'); });
+  const readyProjection = opts.getYrsPositionProjection;
+  opts.getYrsPositionProjection = projection;
+  renderHook(() => usePagesPointer(opts));
+  click(1);
+  expect(entries).toHaveLength(1);
+  expect(entries[0].inTable!()).toBe(inTable);
+  expect(projection).not.toHaveBeenCalled();
+  expect(selections).toEqual([]);
+  opts.getYrsPositionProjection = readyProjection;
+  await replay();
+  expect(selections).toEqual([[20, 20, 'body']]);
+});
+
+test('a queued opening external link activates during the click and still replays selection', async () => {
+  let clicking = false;
+  const onHyperlinkClick = mock(() => { expect(clicking).toBe(true); });
+  const { opts, queries, entries, selections, replay } = queuedOptions({
+    displayListQueries: undefined, canvasOverlayTarget: host, onHyperlinkClick,
+  });
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 100,
+    href: 'https://example.com/',
+  }];
+  renderHook(() => usePagesPointer(opts));
+  clicking = true;
+  click(1, 200, 405);
+  clicking = false;
+  expect(onHyperlinkClick).toHaveBeenCalledTimes(1);
+  expect(onHyperlinkClick).toHaveBeenCalledWith(expect.objectContaining({
+    href: 'https://example.com/', displayText: 'link',
+  }));
+  expect(entries).toHaveLength(1);
+  expect(selections).toEqual([]);
+  await replay();
+  expect(selections).toEqual([[20, 20, 'body']]);
+  expect(onHyperlinkClick).toHaveBeenCalledTimes(1);
+});
+
+test.each(['bookmark', 'double-click', 'drag'])('a queued opening %s keeps link activation suppressed', async (kind) => {
+  const onHyperlinkClick = mock(() => {});
+  const scrollToPositionImpl = mock(() => {});
+  const { opts, queries, entries, selections, replay } = queuedOptions({
+    canvasOverlayTarget: host, onHyperlinkClick, scrollToPositionImpl,
+  });
+  queries.displayList.pages[0]!.primitives = [{
+    kind: 'text', text: 'link', x: 0, baselineY: 410, width: 800,
+    font: '400 16px Calibri', color: '#000000', docStart: 1, docEnd: 100,
+    href: kind === 'bookmark' ? '#bookmark' : 'https://example.com/',
+  }];
+  renderHook(() => usePagesPointer(opts));
+  if (kind === 'drag') {
+    mouse('mousedown', 200, 405);
+    mouse('mousemove', 350, 405);
+    mouse('mouseup', 350, 405);
+    mouse('click', 350, 405);
+  } else click(kind === 'double-click' ? 2 : 1, 200, 405);
+  expect(entries).toHaveLength(1);
+  expect(onHyperlinkClick).not.toHaveBeenCalled();
+  expect(scrollToPositionImpl).not.toHaveBeenCalled();
+  expect(selections).toEqual([]);
+  await replay();
+  expect(selections).toHaveLength(1);
+  expect(onHyperlinkClick).not.toHaveBeenCalled();
+  expect(scrollToPositionImpl).not.toHaveBeenCalled();
 });
 
 test.each(['click', 'double-click', 'drag'])('a replayed %s keeps its selection in place', (gesture) => {

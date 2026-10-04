@@ -1291,6 +1291,30 @@ test('clicks interleaved with held and hydrating input keep their original posit
   }
 });
 
+test('a click during hydration preserves A, ArrowLeft, B in order and places the final caret', async () => {
+  const opened = await openingEditor();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    opened.click(6);
+    opened.type('A');
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowLeft' });
+    opened.type('B');
+    opened.click(2);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('FirstBA paragraph');
+    const caret = { story: 'body', paraId: full.paragraphs('body')[0].paraId, offset: 1 };
+    expect(full.selection()).toEqual({ anchor: caret, head: caret });
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
 test('a ready click binds its position before an outstanding resident edit reply', async () => {
   const zip = await JSZip.loadAsync(await longFixture(1));
   const xml = await zip.file('word/document.xml')!.async('string');

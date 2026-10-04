@@ -85,10 +85,10 @@ function inputFor(
     'holdInput' | 'inputScope' | 'seedSelection'
   >> = {}
 ) {
-  const map = () =>
+  const map = (story = 'body') =>
     createYrsInputPositionMap(
-      'body',
-      session.paragraphs('body').map((p) => ({
+      story,
+      session.paragraphs(story).map((p) => ({
         paraId: p.paraId,
         length: p.text.length,
       }))
@@ -100,8 +100,8 @@ function inputFor(
       readOnly={false}
       session={session}
       inputPositionMap={map}
-      displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
-      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(), loc)}
+      displayPositionToLoc={(position, story) => displayPositionToYrsLoc(map(story), position)}
+      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
       onStateChange={() => {}}
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
@@ -214,6 +214,70 @@ test('held navigation replays between text on the full session', async () => {
   expect(full.selection()?.head.offset).toBe(4);
   expect(input.current!.hasPendingInput()).toBe(false);
   expect(resident.mock.calls).toEqual([['A'], ['B']]);
+});
+
+test.each([false, true])('held table Tab between text matches ready input with shift=%s', async (shift) => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const paraId = full.paragraphs('body')[0]!.paraId;
+  full.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
+  const cells = [0, 1].map((column) => `body:t0:r0c${column}`);
+  const story = cells[shift ? 1 : 0];
+  const loc = { story, paraId: full.paragraphs(story)[0]!.paraId, offset: 0 };
+  const ready = await createYrsSession();
+  sessions.push(ready);
+  ready.loadState(full.encodeState());
+  ready.setSelection(loc);
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(preview, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  act(() => {
+    expect(input.current!.queueSelection!(async () => () => full.setSelection(loc), false, () => true)).toBe(true);
+  });
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  expect(text(preview)).toBe('Seed');
+  expect(cells.map((cell) => full.paragraphs(cell)[0]!.text)).toEqual(['', '']);
+  view.rerender(inputFor(full, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  const replayed = cells.map((cell) => full.paragraphs(cell)[0]!.text);
+  expect(replayed).toEqual(shift ? ['B', 'A'] : ['A', 'B']);
+  expect(full.selection()?.head.story).toBe(cells[shift ? 0 : 1]);
+  expect(full.selection()?.head.offset).toBe(1);
+  expect(input.current!.hasPendingInput()).toBe(false);
+  view.unmount();
+  const loaded = render(inputFor(ready, input, undefined, undefined, props));
+  const loadedTextarea = loaded.getByTestId('yrs-input');
+  fireEvent.input(loadedTextarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(loadedTextarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+  fireEvent.input(loadedTextarea, { target: { value: 'B' } });
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(cells.map((cell) => ready.paragraphs(cell)[0]!.text)).toEqual(replayed);
+  expect(ready.paragraphs('body').map((paragraph) => paragraph.text))
+    .toEqual(full.paragraphs('body').map((paragraph) => paragraph.text));
+  expect(ready.selection()).toEqual(full.selection());
+  expect(ready.cellSelection()).toEqual(full.cellSelection());
+});
+
+test.each([false, true])('opening body Tab keeps native focus movement with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  expect(text(session)).toBe('Seed');
+  view.rerender(inputFor(session, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(text(session)).toBe('SeedAB');
+  expect(session.selection()?.head.offset).toBe(6);
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
 });
 
 test('held selection deletion follows select-all on the full session', async () => {

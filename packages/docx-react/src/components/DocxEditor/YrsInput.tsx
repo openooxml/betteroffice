@@ -70,7 +70,7 @@ export interface YrsInputRef {
   runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
   hasPendingInput(): boolean;
   hasHeldInput?(): boolean;
-  queueSelection?(prepare: () => Promise<() => void>, force?: boolean): boolean;
+  queueSelection?(prepare: () => Promise<() => void>, force?: boolean, inTable?: () => boolean): boolean;
   captureSelectionFromDisplay?(
     anchor: number, head: number, story: string, kind: 'caret' | 'range' | 'word' | 'paragraph'
   ): () => void;
@@ -185,6 +185,7 @@ interface HeldSelection {
   kind: 'selection';
   prepare: () => Promise<() => void>;
   apply?: () => void;
+  inTable?: () => boolean;
   inputTime?: number;
 }
 
@@ -196,6 +197,7 @@ type HeldInput = (
   | HeldSelection
   | { kind: 'navigation'; direction: NavigationDirection; extend: boolean; wholeDocument: boolean; byWord: boolean }
   | { kind: 'text' | 'composition'; text: string }
+  | { kind: 'tab'; shift: boolean }
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
   | { kind: 'delete-selection' }
@@ -491,7 +493,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
         const scrolled = readerScrolled();
         const superseded = replicaInputRef.current.inputEpoch?.() !== epoch;
-        if (!isCurrentInput(admitted, queue) || (kind === 'selection' && superseded)) {
+        if (!isCurrentInput(admitted, queue) || (readOnly && kind === 'selection' && superseded)) {
           onDropped?.();
           return;
         }
@@ -504,17 +506,17 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
       });
     },
-    [isCurrentInput, preparePendingSelections, replicaReadyRef, sealInputBatches, session, watchReaderScroll]
+    [isCurrentInput, preparePendingSelections, readOnly, replicaReadyRef, sealInputBatches, session, watchReaderScroll]
   );
 
   const replaySelection = useCallback((entry: HeldSelection): void => {
     enqueueInputOperation(() => entry.apply?.(), 'mutation');
   }, [enqueueInputOperation]);
   const queueSelection = useCallback(
-    (prepare: HeldSelection['prepare'], force = false): boolean => {
+    (prepare: HeldSelection['prepare'], force = false, inTable?: () => boolean): boolean => {
       if (!force && !holdInput && replicaReadyRef?.current !== false && !inputOperationQueueRef.current?.hasPending()) return false;
       if (readOnly) return true;
-      const entry: HeldSelection = { kind: 'selection', prepare };
+      const entry: HeldSelection = { kind: 'selection', prepare, inTable };
       pendingSelectionsRef.current.push(entry);
       if (!holdOperation(entry)) replaySelection(entry);
       return true;
@@ -1238,12 +1240,77 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ]
   );
 
-  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection });
-  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection };
+  const moveTableCell = useCallback(
+    (backward: boolean, apply = true): boolean => {
+      if (!session) return false;
+      const current = ensureSelection();
+      const focused = current ? yrsCellLocFromStory(current.head.story) : null;
+      if (!focused) return false;
+      const tableRange = yrsTableSelectionRange(session, focused, 'table');
+      if (!tableRange) return false;
+      if (!apply) return true;
+      verticalCaretGoalRef.current.reset();
+
+      let row = focused.row;
+      let column = focused.column + (backward ? -1 : 1);
+      const lastRow = tableRange.head.row;
+      const lastColumn = tableRange.head.column;
+      if (column > lastColumn) {
+        row += 1;
+        column = 0;
+      } else if (column < 0) {
+        row -= 1;
+        column = lastColumn;
+      }
+
+      if (row < 0 || row > lastRow) {
+        if (backward) return true;
+        const nearby = yrsSelectionNearTable(session, {
+          story: focused.story,
+          tableIndex: focused.tableIndex,
+        });
+        if (nearby) {
+          setSelection(nearby);
+          return true;
+        }
+        // Terminal-Tab behavior when the document has no trailing paragraph:
+        // append a row and enter its first cell.
+        session.insertRow(focused, 'below');
+        row = lastRow + 1;
+        column = 0;
+      }
+
+      const next = { ...focused, row, column };
+      const nextStory = yrsCellStory(session, next);
+      const paragraph = nextStory ? session.paragraphs(nextStory)[0] : null;
+      if (!nextStory || !paragraph) return true;
+      session.setCellSelection({ anchor: next, head: next });
+      setSelection({ story: nextStory, paraId: paragraph.paraId, offset: 0 });
+      return true;
+    },
+    [ensureSelection, session, setSelection]
+  );
+
+  const handleTab = useCallback((shift: boolean): boolean => {
+    if (readOnly) return false;
+    if (holdInput) {
+      const selection = pendingSelectionsRef.current[pendingSelectionsRef.current.length - 1];
+      const inTable = selection?.inTable?.();
+      holdOperation({ kind: 'tab', shift });
+      return inTable ?? !!yrsCellLocFromStory(readSelection()?.head.story ?? story);
+    }
+    if (!moveTableCell(shift, false)) return false;
+    enqueueInputOperation(() => { moveTableCell(shift); }, 'mutation');
+    return true;
+  }, [enqueueInputOperation, holdInput, holdOperation, moveTableCell, readOnly, readSelection, story]);
+
+  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab });
+  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab };
   const replayHeldEntry = useCallback((entry: HeldInput, handlers = inputHandlersRef.current): void => {
     if (entry.kind === 'selection') handlers.replaySelection(entry);
     else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
     else if (entry.kind === 'text' || entry.kind === 'composition') handlers.insertText(entry.text);
+    else if (entry.kind === 'tab') handlers.handleTab(entry.shift);
     else if (entry.kind === 'split') handlers.splitParagraph();
     else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
     else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
@@ -1336,56 +1403,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     for (const notify of heldInputWaitersRef.current) notify();
   }, [enabled, holdInput, inputScope, readOnly, session]);
 
-  const moveTableCell = useCallback(
-    (backward: boolean): boolean => {
-      verticalCaretGoalRef.current.reset();
-      if (!session) return false;
-      const current = ensureSelection();
-      const focused = current ? yrsCellLocFromStory(current.head.story) : null;
-      if (!focused) return false;
-      const tableRange = yrsTableSelectionRange(session, focused, 'table');
-      if (!tableRange) return false;
-
-      let row = focused.row;
-      let column = focused.column + (backward ? -1 : 1);
-      const lastRow = tableRange.head.row;
-      const lastColumn = tableRange.head.column;
-      if (column > lastColumn) {
-        row += 1;
-        column = 0;
-      } else if (column < 0) {
-        row -= 1;
-        column = lastColumn;
-      }
-
-      if (row < 0 || row > lastRow) {
-        if (backward) return true;
-        const nearby = yrsSelectionNearTable(session, {
-          story: focused.story,
-          tableIndex: focused.tableIndex,
-        });
-        if (nearby) {
-          setSelection(nearby);
-          return true;
-        }
-        // Terminal-Tab behavior when the document has no trailing paragraph:
-        // append a row and enter its first cell.
-        session.insertRow(focused, 'below');
-        row = lastRow + 1;
-        column = 0;
-      }
-
-      const next = { ...focused, row, column };
-      const nextStory = yrsCellStory(session, next);
-      const paragraph = nextStory ? session.paragraphs(nextStory)[0] : null;
-      if (!nextStory || !paragraph) return true;
-      session.setCellSelection({ anchor: next, head: next });
-      setSelection({ story: nextStory, paraId: paragraph.paraId, offset: 0 });
-      return true;
-    },
-    [ensureSelection, session, setSelection]
-  );
-
   const handleBeforeInput = useCallback(
     (event: React.FormEvent<HTMLTextAreaElement>): void => {
       const native = event.nativeEvent as InputEvent;
@@ -1471,10 +1488,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
-      if (holdInput && event.key === 'Tab') {
-        event.preventDefault();
-        return;
-      }
       if (mod && key === 'a') {
         event.preventDefault();
         selectAll();
@@ -1484,7 +1497,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (event.key === 'Enter') {
         event.preventDefault();
         splitParagraph();
-      } else if (event.key === 'Tab' && !readOnly && moveTableCell(event.shiftKey)) {
+      } else if (event.key === 'Tab' && handleTab(event.shiftKey)) {
         event.preventDefault();
       } else if (event.key === 'Backspace') {
         event.preventDefault();
@@ -1511,11 +1524,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [
       copyAfterReplica,
       deleteDirection,
-      holdInput,
+      handleTab,
       moveSelection,
-      moveTableCell,
       primeCopy,
-      readOnly,
       selectAll,
       splitParagraph,
     ]

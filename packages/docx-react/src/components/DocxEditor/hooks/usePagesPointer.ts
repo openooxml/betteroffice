@@ -504,7 +504,16 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         await currentQueries.whenReady();
       }
       return gestureScopeRef.current === scope ? prepareQueuedGestureRef.current(gesture) : () => {};
-    }, !displayListQueries || queries.isReady?.() === false);
+    }, !displayListQueries || queries.isReady?.() === false, () => {
+      const point = gesture.head;
+      const hit = point.hit ?? gesture.queries.hitTestRegions(point.pageIndex, point.x, point.y);
+      const position = hit?.region === 'body' ? hit.pos : null;
+      if (position == null) return false;
+      return gesture.queries.displayList.pages[point.pageIndex]?.primitives.some((primitive) =>
+        primitive.cell && !primitive.cell.continuation && primitive.docStart != null &&
+        primitive.docEnd != null && primitive.docStart <= position && position <= primitive.docEnd
+      ) === true;
+    });
     if (!queued) return false;
     queuedGestureRef.current = gesture;
     focusInput();
@@ -1029,18 +1038,23 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // selection remains keyboard-ready even when the canvas host is outside
       // PagedEditor's React subtree.
       focusInput();
-      if (queuedGestureRef.current) return;
-      const projection = viewerSelection ? null : getYrsPositionProjection(yrsRootStory);
-      const queries = displayListQueries;
+      const queuedGesture = queuedGestureRef.current;
+      const projection = viewerSelection || queuedGesture ? null : getYrsPositionProjection(yrsRootStory);
+      const queries = queuedGesture?.queries ?? displayListQueries;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
-      const point = resolveCanvasHit(e.clientX, e.clientY, false);
+      const point = queuedGesture && queries && host
+        ? resolveCanvasPoint(host, queries, e.clientX, e.clientY)
+        : resolveCanvasHit(e.clientX, e.clientY, false);
       // read-only selection wins over a link: a drag that ends on one, or a double or triple click
       const pending = pendingGestureRef.current;
-      const selecting =
-        readOnly &&
-        (e.detail > 1 ||
-          (pending?.epoch === inputEpochRef.current && pending.kind === 'range') ||
-          selectionUnder(e.clientX, e.clientY));
+      const selecting = queuedGesture
+        ? e.detail > 1 || queuedGesture.kind !== 'caret' ||
+          queuedGesture.anchor.pageIndex !== queuedGesture.head.pageIndex ||
+          queuedGesture.anchor.x !== queuedGesture.head.x || queuedGesture.anchor.y !== queuedGesture.head.y
+        : readOnly &&
+          (e.detail > 1 ||
+            (pending?.epoch === inputEpochRef.current && pending.kind === 'range') ||
+            selectionUnder(e.clientX, e.clientY));
       // An external link needs only the display list, so it opens before the replica has loaded.
       if (queries && host && point && !selecting) {
         // Hyperlink primitives are indexed by band, so an open note — whose
@@ -1066,9 +1080,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           href &&
           (projection || replicaPending?.() || resolveBookmarkPosition || !href.startsWith('#'))
         ) {
+          if (queuedGesture && href.startsWith('#')) return;
           e.preventDefault();
           if (viewerSelection) bumpInputEpoch();
-          const linkPosition = getPositionFromMouse(e.clientX, e.clientY);
+          const linkPosition = queuedGesture ? null : getPositionFromMouse(e.clientX, e.clientY);
           if (href.startsWith('#') && replicaPending?.()) {
             if (linkPosition != null) {
               pendingGestureRef.current = {
@@ -1082,7 +1097,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
             }
             return;
           }
-          if (pendingGestureRef.current?.kind !== 'caret' || !replicaPending?.()) {
+          if (!queuedGesture && (pendingGestureRef.current?.kind !== 'caret' || !replicaPending?.())) {
             clearPendingGesture();
           }
           if (linkPosition != null) setTextSelection(linkPosition, linkPosition,
@@ -1109,7 +1124,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
             }
             return;
           }
-          const selection = yrsInputRef.current?.displaySelection();
+          const selection = queuedGesture ? null : yrsInputRef.current?.displaySelection();
           if (onHyperlinkClick && selection?.anchor === selection?.head) {
             const pageSize = queries.pageSize(point.pageIndex);
             const pageRect = resolveDisplayPageClientRect(host, queries, point.pageIndex);
@@ -1139,6 +1154,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
+      if (queuedGesture) return;
       if (e.detail === 2 && !readOnly && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (

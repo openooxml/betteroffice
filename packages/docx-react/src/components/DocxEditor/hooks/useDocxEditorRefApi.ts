@@ -299,6 +299,7 @@ const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
 function gateReplicaAccess(
   api: DocxEditorRef,
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  hostEditorRef: React.RefObject<PagedEditorRef | null>,
   enabled: boolean
 ): DocxEditorRef {
   if (!enabled) return api;
@@ -309,7 +310,8 @@ function gateReplicaAccess(
     if ((access !== 'await' && access !== 'sync') || typeof call !== 'function') continue;
     Object.defineProperty(gated, key, {
       value: (...args: unknown[]) => {
-        const session = pagedEditorRef.current?.getYrsSession();
+        const editor = DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key) ? hostEditorRef.current : pagedEditorRef.current;
+        const session = editor?.getYrsSession();
         if (session) {
           if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
             return Reflect.apply(call, api, args);
@@ -323,7 +325,7 @@ function gateReplicaAccess(
             }
             if (workerOpenReplicaPending(session)) {
               if (DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key)) {
-                if (isWorkerViewer(pagedEditorRef.current)) return key === 'addComment' ? null : false;
+                if (isWorkerViewer(editor)) return key === 'addComment' ? null : false;
                 throw new DocxReplicaNotReadyError(key);
               }
               if (key in DOCX_REF_REPLICA_LOADING_ANSWERS) {
@@ -1108,7 +1110,7 @@ export function useDocxEditorRefApi({
       },
       ...hostSearch,
     };
-    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen);
+    const api = gateReplicaAccess(direct, pagedEditorRef, hostEditorRef, experimentalWorkerOpen);
     const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
       const session = pagedEditorRef.current?.getYrsSession();
       return session ? modeRefusal(session, modeRef.current, request) : null;
