@@ -9,6 +9,8 @@
 export { openWorkbookSession } from './session/client';
 /** @experimental */
 export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
+/** @internal */
+export { createWorkbookEditPeer } from './session/editPeer';
 /** @experimental */
 export type {
   WorkbookCellGeometry,
@@ -110,6 +112,7 @@ export {
 export type {
   WasmInitInput,
   OpenWorkbookOptions,
+  WorkbookCalculationContext,
   Viewport,
   PrintMetrics,
   SheetInfo,
