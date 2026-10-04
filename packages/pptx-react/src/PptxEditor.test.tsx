@@ -71,6 +71,70 @@ describe('shortcut matching', () => {
 });
 
 describe('PptxEditor slide layout cache', () => {
+  it('computes one active key and at most one layout per typed character in a 50-slide deck', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const peer = pptx.openPresentation(fixture, { clientId: 9410, fonts });
+    let count = peer.snapshot().slides.length;
+    while (count < 50) peer.insertSlide(count++);
+    const seed = peer.encodeStateAsUpdate();
+    const paint = spyOn(pptx, 'paintSlide').mockResolvedValue(undefined);
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      setTransform() {}, drawImage() {},
+    } as unknown as CanvasRenderingContext2D);
+    let api: PptxEditorApi | undefined;
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      view = render(<PptxEditor file={fixture} fonts={fonts}
+        collaboration={{ clientId: 9411, initialUpdate: seed }}
+        onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      await waitFor(() => expect(view!.container.querySelectorAll('aside canvas')).toHaveLength(50), {
+        timeout: 15_000,
+      });
+      const slide = api!.handle.snapshot().slides[0];
+      const shape = slide.shapes.find((shape) => shape.textStories.length)!;
+      const story = shape.textStories[0];
+      await act(async () => {
+        expect(api!.selectText({ slide: 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 })).toBe(true);
+      });
+      const cache = (api!.handle as unknown as Record<symbol, {
+        snapshot(): unknown;
+        key(index: number): string;
+      }>)[Symbol.for('@betteroffice/pptx/slide-layout-cache')];
+      const key = spyOn(cache, 'key');
+      const snapshot = spyOn(cache, 'snapshot');
+      const layout = spyOn(api!.handle, 'layoutSlide');
+      try {
+        for (const character of 'abcde') {
+          key.mockClear();
+          snapshot.mockClear();
+          layout.mockClear();
+          await act(async () => {
+            fireEvent.keyDown(view!.getByRole('application'), { key: character });
+            await api!.flushPendingInput();
+          });
+          expect(key.mock.calls.map((call) => call[0])).toEqual([0]);
+          expect(snapshot).not.toHaveBeenCalled();
+          expect(layout.mock.calls.length).toBeLessThanOrEqual(1);
+          expect(layout.mock.calls.map((call) => call[0])).toEqual([0]);
+          expect(view.container.querySelectorAll('aside canvas')).toHaveLength(50);
+        }
+        const text = api!.handle.story(story.id).paragraphs.flatMap((paragraph) =>
+          paragraph.runs.map((run) => run.text)).join('');
+        expect(text.startsWith('abcde')).toBe(true);
+      } finally {
+        layout.mockRestore();
+        snapshot.mockRestore();
+        key.mockRestore();
+      }
+    } finally {
+      view?.unmount();
+      peer.dispose();
+      paint.mockRestore();
+      context.mockRestore();
+    }
+  }, 60_000);
+
   it('paints the active slide first and lays out only damaged slides in a 50-slide deck', async () => {
     const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
     const originalOpen = pptx.openPresentation;

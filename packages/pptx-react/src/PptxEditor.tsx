@@ -241,10 +241,12 @@ interface EditorModel {
   frame: SlideDisplayList | null;
   thumbnails: Map<string, SlideDisplayList>;
   layoutKeys: Record<string, string>;
+  refreshAll: boolean;
 }
 
 interface SlideLayoutCache {
   snapshot(): { snapshot: DeckSnapshot; keys: Record<string, string> };
+  key(index: number): string;
   activate(slideId: string, key: string): boolean;
   hitTest(slideId: string, x: number, y: number): HitTestResult | null;
 }
@@ -597,31 +599,47 @@ function PptxEditorContent({
   const refreshAt = useCallback(
     (
       requestedIndex?: number,
-      notify = false
+      notify = false,
+      refreshAll = false,
+      editedSlideId?: string
     ): EditorModel | null => {
       const handle = handleRef.current;
       if (!handle) return null;
       try {
         caretGoalRef.current = null;
         const cache = slideLayoutCache(handle);
-        const { snapshot, keys: layoutKeys } = cache.snapshot();
+        const full = refreshAll ? cache.snapshot() : null;
+        const snapshot = full?.snapshot ?? handle.snapshot();
+        const layoutKeys = full?.keys ?? { ...modelRef.current?.layoutKeys };
         const index = clampSlideIndex(
           requestedIndex ?? modelRef.current?.slideIndex ?? 0,
           snapshot.slides.length
         );
         const thumbnails = new Map<string, SlideDisplayList>();
-        for (const slide of snapshot.slides) {
+        for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
+          const slide = snapshot.slides[slideIndex];
+          if (slideIndex === index) continue;
           const cached = modelRef.current?.thumbnails.get(slide.id);
-          if (cached && modelRef.current?.layoutKeys[slide.id] === layoutKeys[slide.id])
+          if (!refreshAll) {
+            if (slide.id === editedSlideId) {
+              layoutKeys[slide.id] = cache.key(slideIndex);
+              thumbnails.set(slide.id, handle.layoutSlide(slideIndex));
+            } else if (cached) thumbnails.set(slide.id, cached);
+          } else if (cached && modelRef.current?.layoutKeys[slide.id] === layoutKeys[slide.id]) {
             thumbnails.set(slide.id, cached);
+          }
         }
         const slideId = snapshot.slides[index]?.id;
+        if (slideId && !refreshAll) layoutKeys[slideId] = cache.key(index);
         const retained = slideId && cache.activate(slideId, layoutKeys[slideId]);
+        const cachedFrame = slideId && modelRef.current?.layoutKeys[slideId] === layoutKeys[slideId]
+          ? modelRef.current?.thumbnails.get(slideId)
+          : undefined;
         const frame = slideId
-          ? (retained && thumbnails.get(slideId)) || handle.layoutSlide(index)
+          ? (retained && cachedFrame) || handle.layoutSlide(index)
           : null;
         if (frame && slideId) thumbnails.set(slideId, frame);
-        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails, layoutKeys };
+        const next = { snapshot, version: handle.version(), slideIndex: index, frame, thumbnails, layoutKeys, refreshAll };
         const activeSlide = snapshot.slides[index];
         setSelection((current) =>
           current && activeSlide && findShape(activeSlide.shapes, current.shapeId) ? current : null
@@ -667,7 +685,7 @@ function PptxEditorContent({
   );
 
   const refresh = useCallback(() => {
-    refreshAt();
+    refreshAt(undefined, false, true);
   }, [refreshAt]);
 
   /** The editor's batch path, after pending input: `authorize`, read-only, apply, one refresh. */
@@ -683,7 +701,7 @@ function PptxEditorContent({
       const refused = readOnlyRefusal(opened);
       if (refused) return refused;
       const result = commit(() => opened.applyEdits(request));
-      if (result.ok && result.applied) refreshAt(undefined, true);
+      if (result.ok && result.applied) refreshAt(undefined, true, true);
       return result;
     },
     [readOnlyRefusal, refreshAt]
@@ -790,7 +808,7 @@ function PptxEditorContent({
     if (!handle) throw new Error('Presentation is no longer open');
     try {
       handle.acceptProposal(id, { force });
-      refreshAt(undefined, true);
+      refreshAt(undefined, true, true);
       return 'accepted';
     } catch (value) {
       refreshProposals();
@@ -933,13 +951,15 @@ function PptxEditorContent({
           });
           handleRef.current = handle;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
-            if (origin === 'remote') refreshAt(undefined, true);
+            if (origin === 'remote') refreshAt(undefined, true, true);
           });
           const requestedSlide = initialSlideRef.current;
           refreshAt(
             typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
               ? requestedSlide - 1
-              : 0
+              : 0,
+            false,
+            true
           );
           setLoading(false);
           setCollaborationReplica(handle);
@@ -1086,7 +1106,7 @@ function PptxEditorContent({
   useEffect(() => {
     const handle = handleRef.current;
     const pending = model;
-    if (!handle || !pending) return;
+    if (!handle || !pending?.refreshAll) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let index = 0;
@@ -1265,7 +1285,7 @@ function PptxEditorContent({
         text: '',
         style: textStyleRef.current,
       });
-      const next = refreshAt(undefined, true);
+      const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
@@ -1337,7 +1357,7 @@ function PptxEditorContent({
         },
         fill: '#d9eaf7',
       });
-      const next = refreshAt(undefined, true);
+      const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
@@ -1404,7 +1424,7 @@ function PptxEditorContent({
         contentType,
         mediaBase64,
       });
-      const next = refreshAt(undefined, true);
+      const next = refreshAt(undefined, true, false, slide.id);
       setActiveTool('select');
       setDragPreview(null);
       setTextBoxPreview(null);
@@ -2154,7 +2174,7 @@ function PptxEditorContent({
     recentClickRef.current = null;
     resizeRef.current = null;
     setResizeDelta(null);
-    refreshAt(index, true);
+    refreshAt(index, true, true);
     return true;
   };
 
