@@ -16826,7 +16826,7 @@ mod tests {
                 .unwrap()
                 .pages
                 .iter()
-                .any(|page| !page.float_bands.is_empty())
+                .any(docx_layout::types::Page::has_float_bands)
         );
         for decision in ["accepted", "rejected"] {
             request["renderEnv"]["revisionPreview"] = json!({"1": decision});
