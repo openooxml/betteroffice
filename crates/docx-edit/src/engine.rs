@@ -13239,10 +13239,18 @@ mod tests {
             .unwrap();
         let pages = output["layout"]["pages"].as_array().unwrap();
         assert!(pages.len() > 1);
-        assert!(output["headersFooters"]["variants"].as_array().unwrap().len() >= 2);
-        assert!(pages.iter().any(|page| page["noteAreas"]
-            .as_array()
-            .is_some_and(|areas| !areas.is_empty())));
+        assert!(
+            output["headersFooters"]["variants"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 2
+        );
+        assert!(pages.iter().any(|page| {
+            page["noteAreas"]
+                .as_array()
+                .is_some_and(|areas| !areas.is_empty())
+        }));
         assert_eq!(meta.page_count, pages.len());
         assert_eq!(
             meta.partial,

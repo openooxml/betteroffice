@@ -241,6 +241,7 @@ function classify(request: ResidentEngineWorkerRequest): SchedulerMessage {
     case 'fontRequirements':
     case 'encodeState':
     case 'revisionCount':
+    case 'layoutJson':
       return { lane: 'interactive', run };
     case 'buildPages':
       return {

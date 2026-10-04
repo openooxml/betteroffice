@@ -2379,7 +2379,7 @@ test.each([true, false])('viewer=%s selects the reply mode across decisions and 
       expect(laidOut.layout.summaryOnly).toBe(viewer ? true : undefined);
       if (viewer) {
         expect(() => laidOut.layout.pages[0]!.fragments).toThrow('summary');
-        expect(getLayoutKernelInputs(laidOut.layout)?.headersFooters).toEqual({ parts: [] });
+        expect(getLayoutKernelInputs(laidOut.layout)?.headersFooters as unknown).toEqual({ parts: [] });
       } else {
         expect(laidOut.layout.pages[0]!.fragments.length).toBeGreaterThan(0);
       }
