@@ -68,6 +68,18 @@ function replay(session: WorkbookSession, envelope: WorkbookReplayEnvelope) {
   return internal.replay(envelope);
 }
 
+function recordReplays(envelopes: WorkbookReplayEnvelope[]): (transport: SessionTransport) => SessionTransport {
+  return (transport) => ({
+    ...transport,
+    listen: (listener) => transport.listen((message) => {
+      if (isClientMessage(message) && message.kind === 'call' && message.method === 'replay') {
+        envelopes.push(structuredClone(message.args[0]) as WorkbookReplayEnvelope);
+      }
+      listener(message);
+    }),
+  });
+}
+
 describe('workbook edit peers', () => {
   test('keeps replay internal, ordered and never replaceable', () => {
     expect(WORKBOOK_SESSION_METHODS).not.toHaveProperty('replay');
@@ -277,6 +289,121 @@ describe('workbook edit peers', () => {
       expect(sequences).toEqual([1, 2, 3, 4]);
       expect((await session.call.frame(viewport)).sequence).toBe(4);
     } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('replays listener overwrites in local commit order before an immediate frame', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    let nested = false;
+    let nestedApplied = false;
+    let sentDuringUpdate = -1;
+    const offUpdate = peer.onUpdate(() => {
+      if (nested) return;
+      nested = true;
+      nestedApplied = edits.editCell(0, 0, 0, '2').applied;
+      sentDuringUpdate = edits.sentSequence;
+    });
+    try {
+      expect(edits.editCell(0, 0, 0, '1').applied).toBe(true);
+      const pendingFrame = session.call.frame(viewport);
+      expect(nestedApplied).toBe(true);
+      expect(sentDuringUpdate).toBe(0);
+      expect(peer.cell(0, 0, 0).input).toBe('2');
+      expect(peer.readCells({ ranges: [target('A1')] })).toMatchObject({
+        ok: true, ranges: [{ cells: [[{ value: { kind: 'number', value: 2 } }]] }],
+      });
+      expect(edits.sentSequence).toBe(2);
+      expect(edits.acknowledgedSequence).toBe(0);
+      await matchingDigest(1, 'editCell', edits, peer, session);
+      expect(envelopes.map(({ sequence, op }) => ({ sequence, op }))).toEqual([
+        { sequence: 1, op: { method: 'editCell', args: [0, 0, 0, '1'] } },
+        { sequence: 2, op: { method: 'editCell', args: [0, 0, 0, '2'] } },
+      ]);
+      const frame = await pendingFrame;
+      expect(frame.sequence).toBe(2);
+      expect(frame.displayList).toEqual(peer.displayList(viewport));
+      expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('2');
+    } finally {
+      offUpdate();
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('omits nested peer refusals and throws without sequence gaps', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    let nested = false;
+    let refusal: ReturnType<WorkbookEditPeer['applyEdits']> | undefined;
+    let thrown: unknown;
+    let nestedApplied = false;
+    const offUpdate = peer.onUpdate(() => {
+      if (nested) return;
+      nested = true;
+      refusal = edits.applyEdits({ ...request(peer, 'B1', '2'), expectVersion: 'stale' });
+      try { edits.moveChart(0, 'missing-chart', 1, 0); } catch (cause) { thrown = cause; }
+      nestedApplied = edits.editCell(0, 0, 1, '3').applied;
+    });
+    try {
+      expect(edits.editCell(0, 0, 0, '1').applied).toBe(true);
+      expect(refusal).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      expect(thrown).toBeInstanceOf(Error);
+      expect(nestedApplied).toBe(true);
+      expect(edits.sentSequence).toBe(2);
+      await matchingDigest(1, 'editCell', edits, peer, session);
+      expect(envelopes.map(({ sequence, op }) => ({ sequence, op }))).toEqual([
+        { sequence: 1, op: { method: 'editCell', args: [0, 0, 0, '1'] } },
+        { sequence: 2, op: { method: 'editCell', args: [0, 0, 1, '3'] } },
+      ]);
+      expect(edits.editCell(0, 0, 2, '4').applied).toBe(true);
+      await matchingDigest(2, 'editCell', edits, peer, session);
+      expect(envelopes.map((envelope) => envelope.sequence)).toEqual([1, 2, 3]);
+      expect(edits.state).toBe('ready');
+    } finally {
+      offUpdate();
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('snapshots outer arguments before a listener can mutate them', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    const input = request(peer, 'A1', '1');
+    const original = structuredClone(input);
+    let mutated = false;
+    const offUpdate = peer.onUpdate(() => {
+      const first = input.steps[0];
+      if (first.op !== 'setCellInputs') throw new Error('Missing input step');
+      first.inputs[0][0] = '2';
+      first.target.sheetId = 'missing-sheet';
+      input.expectVersion = 'stale';
+      mutated = true;
+    });
+    try {
+      expect(edits.applyEdits(input)).toMatchObject({ ok: true, applied: true });
+      expect(mutated).toBe(true);
+      expect(input).not.toEqual(original);
+      expect(peer.cell(0, 0, 0).input).toBe('1');
+      expect(edits.sentSequence).toBe(1);
+      await matchingDigest(1, 'applyEdits', edits, peer, session);
+      expect(envelopes).toHaveLength(1);
+      expect(envelopes[0].op).toEqual({ method: 'applyEdits', args: [original] });
+      expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('1');
+    } finally {
+      offUpdate();
       edits.dispose();
       peer.dispose();
       await session.dispose();

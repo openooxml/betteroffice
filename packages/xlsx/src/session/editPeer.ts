@@ -61,10 +61,13 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   let disposed = false;
   let tail = Promise.resolve();
   let offFailure = () => {};
+  const pending: { resolved: boolean; envelope?: Omit<WorkbookReplayEnvelope, 'sequence'> }[] = [];
+  let dispatching = false;
 
   function fail(cause: unknown, notify = true): void {
     if (error) return;
     error = cause instanceof Error ? cause : new Error(String(cause));
+    pending.length = 0;
     offFailure();
     if (notify) {
       try { options.onError?.(error); } catch {}
@@ -90,6 +93,25 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     }).catch((cause: unknown) => { fail(cause); });
   }
 
+  function dispatch(): void {
+    if (dispatching) return;
+    dispatching = true;
+    try {
+      synchronizeFailure();
+      while (!error && pending[0]?.resolved) {
+        const envelope = pending.shift()?.envelope;
+        if (!envelope) continue;
+        sentSequence += 1;
+        try {
+          enqueue({ sequence: sentSequence, ...envelope });
+        } catch (cause) { fail(cause); }
+        synchronizeFailure();
+      }
+    } finally {
+      dispatching = false;
+    }
+  }
+
   const mutators = {} as Pick<WorkbookHandle, WorkbookReplayMethod>;
   for (const method of Object.keys(WORKBOOK_REPLAY_MUTATORS) as WorkbookReplayMethod[]) {
     Object.defineProperty(mutators, method, { enumerable: true, value: (
@@ -100,16 +122,26 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
         nowSerial: now() / 86_400_000 + 25_569,
         randSeed: seed(),
       };
-      peer.setCalculationContext(calculation);
       const op = { method, args } as WorkbookReplayOp;
-      const result = applyWorkbookReplayOp(peer, op);
-      if (!workbookReplayRefused(result)) {
-        sentSequence += 1;
+      const slot: typeof pending[number] = { resolved: false };
+      pending.push(slot);
+      try {
+        let envelope: typeof slot.envelope;
+        let snapshotFailure: unknown;
         try {
-          enqueue(structuredClone({ sequence: sentSequence, calculation, op }));
-        } catch (cause) { fail(cause); }
+          envelope = structuredClone({ calculation, op });
+        } catch (cause) { snapshotFailure = cause; }
+        peer.setCalculationContext(calculation);
+        const result = applyWorkbookReplayOp(peer, op);
+        if (!workbookReplayRefused(result)) {
+          if (envelope) slot.envelope = envelope;
+          else fail(snapshotFailure);
+        }
+        return result;
+      } finally {
+        slot.resolved = true;
+        dispatch();
       }
-      return result;
     } });
   }
 
