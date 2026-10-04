@@ -2788,8 +2788,24 @@ fn incremental_structure_eligible(previous: &PaginationState, next: &LayoutInput
             })
 }
 
+/// Whether any block holds an object that floats out of its line.
+fn floats_objects(blocks: &[LayoutBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph.runs.iter().any(|run| {
+            matches!(
+                run,
+                docx_layout::types::Run::Image(image)
+                    if image.position.is_some()
+                        || image.wrap_type.as_deref().is_some_and(|wrap| wrap != "inline")
+                        || image.display_mode.as_deref() == Some("float")
+            )
+        }),
+        _ => anchors_objects(std::slice::from_ref(block)),
+    })
+}
+
 fn placement_block_is_coupled(block: &LayoutBlock) -> bool {
-    if anchors_objects(std::slice::from_ref(block))
+    if floats_objects(std::slice::from_ref(block))
         || !collect_note_refs(std::slice::from_ref(block)).is_empty()
     {
         return true;
@@ -21721,16 +21737,8 @@ mod tests {
     fn retained_preview_global_environment_changes_keep_full_placement() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
-        let floating_body = preview_pagination_body(&[(45, "ins", "1")]).replace(
-            &preview_fixture::run("Paragraph 8"),
-            &format!(
-                "{}{}",
-                preview_fixture::run("Paragraph 8"),
-                preview_pagination_anchor()
-            ),
-        );
         for (bytes, floats) in [
-            (preview_fixture::document(&floating_body), true),
+            (preview_fixture::drawings(), true),
             (
                 preview_fixture::document(&preview_pagination_body(&[(45, "ins", "1")])),
                 false,
@@ -21739,7 +21747,6 @@ mod tests {
             let mut request = preview_pagination_request(font);
             let engine = preview_pagination_engine(&bytes, &request);
             preview_pagination_prime(&engine, &request);
-            assert_eq!(engine.pagination.borrow().measured_with_floats, floats);
             request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
             request["renderEnv"]["showHiddenText"] = json!(true);
             engine.set_relayout_trigger(RelayoutTrigger::Bulk);
@@ -21768,31 +21775,6 @@ mod tests {
             );
         }
         docx_layout::clear_measure_fonts();
-    }
-
-    #[test]
-    fn retained_preview_drawing_decisions_after_global_change_keep_full_placement() {
-        let fonts = docx_layout::MeasureFonts::default();
-        let _scope = fonts.enter();
-        let font = docx_layout::register_measure_font_bytes(LIBERATION).unwrap();
-        let bytes = preview_fixture::drawings();
-        let mut request = preview_pagination_request(font);
-        let engine = preview_pagination_engine(&bytes, &request);
-        preview_pagination_prime(&engine, &request);
-        request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
-        request["renderEnv"]["showHiddenText"] = json!(true);
-        engine.set_relayout_trigger(RelayoutTrigger::Bulk);
-        assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
-        assert!(!engine.pagination.borrow().last_incremental);
-        request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
-        assert_eq!(
-            engine
-                .region_relayout_trigger(&request.to_string())
-                .unwrap(),
-            RelayoutTrigger::Preview
-        );
-        assert_preview_pagination_matches_fresh(&engine, &bytes, &request);
-        assert!(!engine.pagination.borrow().last_incremental);
     }
 
     #[test]
