@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use ooxml_drawingml::chart::ChartSpace;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
+use xlsx_calc::{RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_seed};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
     FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
@@ -33,6 +33,7 @@ use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
     chart_at_point, display_text, moved_chart_anchor, resolve_chart_anchor,
+    visible_merged_ranges_with_geometry,
 };
 
 use crate::authority::{
@@ -318,6 +319,7 @@ pub struct Workbook {
     active_sheet: SheetId,
     undo: UndoStack,
     graph: Option<DepGraph>,
+    rand_seed: Option<u32>,
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
@@ -399,6 +401,25 @@ impl Workbook {
         let mut workbook = Self::open_internal(bytes, false, None)?;
         workbook.recalculate(options);
         Ok(workbook)
+    }
+
+    pub fn open_recalculated_with_seed(
+        bytes: &[u8],
+        options: CalculationOptions,
+        rand_seed: Option<u32>,
+    ) -> Result<Self> {
+        let mut workbook = Self::open_internal(bytes, false, None)?;
+        workbook.set_rand_seed(rand_seed);
+        workbook.recalculate(options);
+        Ok(workbook)
+    }
+
+    pub fn set_rand_seed(&mut self, seed: Option<u32>) {
+        self.rand_seed = seed;
+    }
+
+    pub fn rand_seed(&self) -> Option<u32> {
+        self.rand_seed
     }
 
     /// Opens and recalculates a replica with a peer-unique client ID.
@@ -517,6 +538,7 @@ impl Workbook {
             active_sheet,
             undo: UndoStack::new(),
             graph,
+            rand_seed: None,
             proposals: ProposalSet::new(),
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
@@ -636,7 +658,8 @@ impl Workbook {
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
-        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
@@ -793,7 +816,8 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let (graph, recalc) =
+            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
@@ -1008,6 +1032,44 @@ impl Workbook {
             (geometry.col_x(cell.col) - geometry.col_x(frozen_cols)).max(0.0),
             (geometry.row_y(cell.row) - geometry.row_y(frozen_rows)).max(0.0),
         ))
+    }
+
+    pub fn sheet_info_for(&self, sheet: SheetId) -> Result<SheetInfo> {
+        if sheet == self.active_sheet {
+            return self.sheet_info();
+        }
+        let sheet_ref = self.sheet(sheet)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let content = sheet_content(sheet_ref.used_range(), sheet_ref.freeze_pane, &geometry);
+        Ok(SheetInfo {
+            sheet_ids: self.sheet_keys(),
+            sheet_names: self
+                .model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect(),
+            active_sheet: sheet,
+            content_width: content.width,
+            content_height: content.height,
+            frozen_rows: content.frozen_rows,
+            frozen_cols: content.frozen_cols,
+            initial_scroll_x: content.initial_scroll_x,
+            initial_scroll_y: content.initial_scroll_y,
+        })
+    }
+
+    pub fn cell_rect(&self, sheet: SheetId, cell: CellRef) -> Result<xlsx_render::Rect> {
+        validate_cell_ref(cell)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        let x = geometry.col_x(cell.col);
+        let y = geometry.row_y(cell.row);
+        Ok(xlsx_render::Rect {
+            x,
+            y,
+            w: geometry.col_x(cell.col + 1) - x,
+            h: geometry.row_y(cell.row + 1) - y,
+        })
     }
 
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
@@ -1245,6 +1307,20 @@ impl Workbook {
             .collect())
     }
 
+    pub fn visible_merged_ranges(
+        &self,
+        sheet: SheetId,
+        viewport: &Viewport,
+    ) -> Result<Vec<CellRange>> {
+        let sheet_ref = self.sheet(sheet)?;
+        validate_viewport(viewport)?;
+        let geometry = self.sheet_geometry(sheet)?;
+        validate_display_region(sheet_ref, &geometry, viewport)?;
+        Ok(visible_merged_ranges_with_geometry(
+            sheet_ref, viewport, &geometry,
+        ))
+    }
+
     pub fn edit_cell(
         &mut self,
         sheet: SheetId,
@@ -1300,11 +1376,12 @@ impl Workbook {
         );
         mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
@@ -1377,11 +1454,12 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
@@ -1694,7 +1772,7 @@ impl Workbook {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
         }
-        rebuild_and_recalc_all(&mut preview, options.now_serial);
+        rebuild_and_recalc_all_with_seed(&mut preview, options.now_serial, self.rand_seed);
 
         let mut edits = Vec::with_capacity(request.edits.len());
         for edit in request.edits {
@@ -1803,7 +1881,7 @@ impl Workbook {
         }
         if !force {
             let mut review = preview.clone();
-            rebuild_and_recalc_all(&mut review, options.now_serial);
+            rebuild_and_recalc_all_with_seed(&mut review, options.now_serial, self.rand_seed);
             let mut refreshed = proposal.clone();
             for edit in &mut refreshed.edits {
                 edit.new_text = display_text_at(
@@ -1850,11 +1928,12 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after(
+        let result = recalc_after_with_seed(
             &mut self.model,
             self.graph.as_mut().expect("graph initialized"),
             &seeds,
             options.now_serial,
+            self.rand_seed,
         );
         let mutation = self.mutation_result(true, result, &seeds);
         self.proposals.remove(id);
@@ -2487,7 +2566,8 @@ impl Workbook {
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
-        let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
+        let (graph, result) =
+            rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
         self.graph = Some(graph);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
@@ -4080,6 +4160,72 @@ fn invalidates_proposals(op: &Op) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_merged_ranges_include_viewport_edges_and_exclude_frozen_gaps() {
+        let mut sheet = Sheet::new("Frozen");
+        sheet.freeze_pane = Some(FreezePane::new(2, 2, CellRef::new(10, 10)));
+        let expected: Vec<_> = [
+            "A1:B1", "L9:L11", "I12:K12", "N13:P13", "M14:M16", "I9:K11", "B2:K2", "A2:A11",
+            "L12:M12",
+        ]
+        .into_iter()
+        .map(|range| CellRange::parse_a1(range).unwrap())
+        .collect();
+        sheet.merges = expected.clone();
+        sheet.merges.extend(
+            ["D4:E5", "L4:L5", "D13:E13", "Q17:R18"]
+                .into_iter()
+                .map(|range| CellRange::parse_a1(range).unwrap()),
+        );
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
+        let col_width = geometry.col_x(11) - geometry.col_x(10);
+        let row_height = geometry.row_y(11) - geometry.row_y(10);
+        let viewport = Viewport {
+            x: geometry.col_x(10) - geometry.col_x(2) + col_width / 4.0,
+            y: geometry.row_y(10) - geometry.row_y(2) + row_height / 4.0,
+            width: geometry.col_x(2) + geometry.col_x(14) - geometry.col_x(10) - col_width / 2.0,
+            height: geometry.row_y(2) + geometry.row_y(14) - geometry.row_y(10) - row_height / 2.0,
+        };
+        let workbook = Workbook::from_model(WorkbookModel {
+            sheets: vec![Sheet::new("First"), sheet],
+            ..Default::default()
+        })
+        .unwrap();
+        let version = workbook.version();
+        let saved = workbook.save().unwrap();
+        let grid = workbook
+            .display_list_for(SheetId(1), &viewport)
+            .unwrap()
+            .grid;
+        assert_eq!(grid.row_indices.unwrap(), [0, 1, 10, 11, 12, 13]);
+        assert_eq!(grid.col_indices.unwrap(), [0, 1, 10, 11, 12, 13]);
+        assert_eq!(
+            workbook
+                .visible_merged_ranges(SheetId(1), &viewport)
+                .unwrap(),
+            expected
+        );
+        assert!(
+            workbook
+                .visible_merged_ranges(SheetId(2), &viewport)
+                .is_err()
+        );
+        assert!(
+            workbook
+                .visible_merged_ranges(
+                    SheetId(1),
+                    &Viewport {
+                        width: 0.0,
+                        ..viewport
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(workbook.active_sheet(), SheetId(0));
+        assert_eq!(workbook.version(), version);
+        assert_eq!(workbook.save().unwrap(), saved);
+    }
 
     #[test]
     fn contains_lowercased_matches_std_lowercase_semantics() {

@@ -121,7 +121,7 @@ export interface XlsxEditRequest {
   source?: XlsxEditSource;
   /** Defaults to `separate`. */
   history?: XlsxEditHistory;
-  /** Without `nowSerial`, volatile functions such as NOW() have no clock. */
+  /** Overrides the handle clock for this request; without either clock, NOW() has no clock. */
   calculation?: { nowSerial?: number };
   steps: readonly XlsxEditStep[];
 }

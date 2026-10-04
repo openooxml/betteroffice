@@ -8,6 +8,8 @@ export type {
   XlsxEditorProps,
   XlsxEditorApi,
   XlsxEditorCollaborationOptions,
+  XlsxWorkerViewerApi,
+  XlsxWorkerViewerProps,
 } from './XlsxEditor';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
