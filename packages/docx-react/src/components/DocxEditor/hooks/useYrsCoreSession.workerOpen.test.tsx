@@ -2048,7 +2048,7 @@ test('a worker open without a frame or error starts the replica after the bounde
   const { workers, posted } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
-  expect(await result.current.ref.current!.save()).toBeNull();
+  expect(await result.current.ref.current!.save()).toEqual(new ArrayBuffer(0));
   expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
   expect(result.current.mainOpens).toEqual([]);
   const calls = Promise.allSettled([

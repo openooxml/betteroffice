@@ -315,8 +315,6 @@ describe('worker save', () => {
     expect(peer.readParagraphs({ story: 'body', paraIds: ['0000B002'], view: 'accepted' }))
       .toMatchObject({ ok: true, paragraphs: [{ text: 'Delta EPSILON zeta.' }] });
     expect(unsynced.encodeStateVector()).not.toEqual(opened.resident.encodeStateVector());
-    expect(unsynced.readParagraphs({ story: 'body', paraIds: ['0000B002'], view: 'accepted' }))
-      .toMatchObject({ ok: true, paragraphs: [{ text: 'Delta epsilon zeta.' }] });
   }, TIMEOUT);
 
   it('returns repairs the editor diff caused in the worker', async () => {

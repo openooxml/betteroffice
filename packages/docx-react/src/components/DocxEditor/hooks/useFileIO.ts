@@ -21,7 +21,7 @@ import {
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
-import { workerOpenSave } from '../internals/workerOpenSave';
+import { workerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave';
 import { isWorkerViewer } from '../internals/workerViewer';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
@@ -32,19 +32,31 @@ const INSERT_IMAGE_MAX_WIDTH_PX = 612;
  * Saves in the document's worker; null when the save falls back to the main
  * thread. A viewer whose copy has not loaded saves in its worker or not at all.
  */
-async function saveInWorker(
+function saveInWorker(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   session: YrsSession,
   viewer: boolean,
   comments: Comment[],
   assertCurrent: () => void
-): Promise<ArrayBuffer | null> {
+): Promise<ArrayBuffer | null> | null {
   const saver = workerOpenSave(session);
   const workerOnly = viewer && workerOpenReplicaPending(session);
   if (!saver || (!viewer && !saver.available())) {
     if (workerOnly) throw new ResidentWorkerSaveUnavailableError('No document worker');
     return null;
   }
+  return saveWithWorker(pagedEditorRef, session, saver, viewer, workerOnly, comments, assertCurrent);
+}
+
+async function saveWithWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  saver: WorkerOpenSave,
+  viewer: boolean,
+  workerOnly: boolean,
+  comments: Comment[],
+  assertCurrent: () => void
+): Promise<ArrayBuffer | null> {
   let peer: YrsSession | undefined;
   if (!viewer && workerOpenReplicaStarted(session)) {
     await awaitWorkerOpenReplica(session);
@@ -193,7 +205,8 @@ export function useFileIO({
           }
         };
         if (initialSession) {
-          const inWorker = await saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
+          const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
+          const inWorker = pending && (await pending);
           if (inWorker) {
             onSave?.(inWorker);
             return inWorker;
