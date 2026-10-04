@@ -1441,6 +1441,8 @@ impl EditingDoc {
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, origin: UpdateOrigin) -> EditResult<()> {
+        let _host_edit = matches!(origin, UpdateOrigin::Host)
+            .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
         let result = match origin {
