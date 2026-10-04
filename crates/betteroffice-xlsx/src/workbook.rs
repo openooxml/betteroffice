@@ -4278,15 +4278,17 @@ impl Workbook {
                 origins: (0..model.sheets.len())
                     .map(|index| (index < package.source_sheet_count()).then_some(index))
                     .collect(),
-                shared_string_cells: (0..model.sheets.len())
-                    .map(|index| package.source_shared_string_cells(index))
-                    .collect(),
+                shared_string_cells: Arc::new(
+                    (0..model.sheets.len())
+                        .map(|index| package.source_shared_string_cells(index))
+                        .collect(),
+                ),
                 axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
-                shared_string_cells: vec![Default::default(); model.sheets.len()],
+                shared_string_cells: Arc::new(vec![Default::default(); model.sheets.len()]),
                 axes: vec![None; model.sheets.len()],
                 created: vec![false; model.sheets.len()],
             },

@@ -4227,14 +4227,7 @@ impl WorkbookAuthority {
             },
         };
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
-        let authority = Self {
-            doc,
-            base: Arc::new(base),
-            history: SheetOrderHistory::default(),
-            next_sheet_id: 0,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-        };
+        let authority = Self::hydrated(doc, Arc::new(base), 0);
         authority
             .materialize_internal_oracle(true)
             .map_err(AuthorityError::InvalidState)?;
@@ -4415,6 +4408,7 @@ impl WorkbookAuthority {
                 .collect(),
             shared_types,
         };
+        self.projection_valid.store(true, Ordering::Relaxed);
         Ok((model, structure))
     }
 }
