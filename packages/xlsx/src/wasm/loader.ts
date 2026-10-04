@@ -366,6 +366,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Observe owned update bytes from local commits and accepted remote updates. */
   onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
+  sheetCount(): number;
   /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
   sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
@@ -425,6 +426,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   captureFormat(sheet: number, range: string): CapturedFormat;
   applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
   mergedRanges(sheet: number, range: string): MergedRange[];
+  visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
   /**
    * render the current sheet viewport to png bytes via the native raster
@@ -725,8 +727,13 @@ export function openWorkbook(
     sheetInfo(): SheetInfo {
       return parseJson(() => doc.sheetInfoJson());
     },
+    sheetCount(): number {
+      return wasmCall(() =>
+        (doc as XlsxDocument & { sheetCount(): number }).sheetCount()
+      );
+    },
     sheetInfoFor(sheet: number): SheetInfo {
-      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetInfo().sheetIds.length) {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
         throw new RangeError('Sheet index is out of range');
       }
       return parseJson(() =>
@@ -853,6 +860,13 @@ export function openWorkbook(
     mergedRanges(sheet: number, range: string): MergedRange[] {
       const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
         doc.mergedRangesJson(JSON.stringify({ sheet, range }))
+      );
+      return parsed.ranges;
+    },
+    visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[] {
+      const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
+        (doc as XlsxDocument & { visibleMergedRangesJson(sheet: number, viewport: string): string })
+          .visibleMergedRangesJson(sheet, JSON.stringify(viewport))
       );
       return parsed.ranges;
     },

@@ -449,6 +449,10 @@ impl Session {
         serde_json::to_string(&self.sheet_info()?).map_err(|error| error.to_string())
     }
 
+    pub fn sheet_count(&self) -> usize {
+        self.workbook.sheet_count()
+    }
+
     pub fn sheet_info_for_json(&self, sheet: u32) -> Result<String, String> {
         let info = self
             .workbook
@@ -754,6 +758,20 @@ impl Session {
         let ranges = self
             .workbook
             .merged_ranges(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
+    }
+
+    pub fn visible_merged_ranges_json(
+        &self,
+        sheet: u32,
+        viewport_json: &str,
+    ) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let ranges = self
+            .workbook
+            .visible_merged_ranges(SheetId(sheet), &viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&MergedRanges { ranges }).map_err(|error| error.to_string())
     }

@@ -5,10 +5,9 @@ import {
   type SessionHost,
   type SessionTransport,
 } from '../../../../shared/office-session';
-import type { DisplayList, GridMeta } from '../display-list/types';
 import {
   initWasm, openWorkbook, workbookDisplayListJson,
-  type MergedRange, type SheetInfo, type WorkbookHandle,
+  type SheetInfo, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_POLICIES,
@@ -21,23 +20,6 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
   return info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] }));
-}
-
-function frameMergedRanges(opened: WorkbookHandle, sheet: number, grid?: GridMeta): MergedRange[] {
-  const rows = (grid?.rowOffsets.length ?? 0) - 1;
-  const cols = (grid?.colOffsets.length ?? 0) - 1;
-  if (!grid || rows <= 0 || cols <= 0) return [];
-  const from = opened.cell(sheet,
-    grid.rowIndices?.[0] ?? grid.startRow, grid.colIndices?.[0] ?? grid.startCol
-  ).a1;
-  const to = opened.cell(sheet,
-    grid.rowIndices?.[rows - 1] ?? grid.startRow + rows - 1,
-    grid.colIndices?.[cols - 1] ?? grid.startCol + cols - 1
-  ).a1;
-  return opened.mergedRanges(sheet, `${from}:${to}`).filter(({ start, end }) =>
-    (!grid.rowIndices || grid.rowIndices.some((row) => row >= start.row && row <= end.row)) &&
-    (!grid.colIndices || grid.colIndices.some((col) => col >= start.col && col <= end.col))
-  );
 }
 
 export function createWorkbookSessionHost(
@@ -65,7 +47,7 @@ export function createWorkbookSessionHost(
   }
 
   function checkSheet(opened: WorkbookHandle, sheet: number): void {
-    if (!Number.isInteger(sheet) || sheet < 0 || sheet >= opened.sheetInfo().sheetIds.length) {
+    if (!Number.isInteger(sheet) || sheet < 0 || sheet >= opened.sheetCount()) {
       throw new RangeError('Sheet index is out of range');
     }
   }
@@ -106,12 +88,10 @@ export function createWorkbookSessionHost(
     },
     frame(_, viewport, options = {}) {
       const opened = workbook();
-      const info = opened.sheetInfo();
-      const sheet = options.sheet === undefined ? info.activeSheet : options.sheet;
+      const sheet = options.sheet === undefined ? opened.sheetInfo().activeSheet : options.sheet;
       checkSheet(opened, sheet);
       const json = workbookDisplayListJson(opened, viewport, options.sheet);
-      const grid = (JSON.parse(json) as DisplayList).grid;
-      const mergedRanges = frameMergedRanges(opened, sheet, grid);
+      const mergedRanges = opened.visibleMergedRanges(sheet, viewport);
       const buffer = encoder.encode(json).buffer;
       epoch += 1;
       return transferable({

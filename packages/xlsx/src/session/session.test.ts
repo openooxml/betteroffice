@@ -108,33 +108,15 @@ async function matchingSheetView(
   const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
     main.sheetInfo();
   const grid = main.displayList(viewport).grid;
+  if (!grid) throw new Error('Missing frame grid');
   const view = await worker.call.sheetView(sheet);
   expect(view).toEqual({
     sheet, version: await worker.call.version(), contentWidth, contentHeight, frozenRows, frozenCols,
     initialScrollX, initialScrollY,
-    frozenWidth: frozenCols === 0 ? 0 : grid?.colOffsets[frozenCols],
-    frozenHeight: frozenRows === 0 ? 0 : grid?.rowOffsets[frozenRows],
+    frozenWidth: frozenCols === 0 ? 0 : grid.colOffsets[frozenCols],
+    frozenHeight: frozenRows === 0 ? 0 : grid.rowOffsets[frozenRows],
   });
   return view;
-}
-
-function matchingMergedRanges(frame: WorkbookFrame, main: WorkbookHandle): void {
-  const grid = frame.displayList.grid;
-  if (!grid) throw new Error('Missing frame grid');
-  const rows = grid.rowOffsets.length - 1;
-  const cols = grid.colOffsets.length - 1;
-  const from = main.cell(frame.sheet,
-    grid.rowIndices?.[0] ?? grid.startRow, grid.colIndices?.[0] ?? grid.startCol
-  ).a1;
-  const to = main.cell(frame.sheet,
-    grid.rowIndices?.[rows - 1] ?? grid.startRow + rows - 1,
-    grid.colIndices?.[cols - 1] ?? grid.startCol + cols - 1
-  ).a1;
-  const expected = main.mergedRanges(frame.sheet, `${from}:${to}`).filter(({ start, end }) =>
-    (!grid.rowIndices || grid.rowIndices.some((row) => row >= start.row && row <= end.row)) &&
-    (!grid.colIndices || grid.colIndices.some((col) => col >= start.col && col <= end.col))
-  );
-  expect(frame.mergedRanges).toEqual(expected);
 }
 
 describe('workbook sessions', () => {
@@ -185,12 +167,11 @@ describe('workbook sessions', () => {
           for (const window of [viewport, { ...viewport, x: 1500, y: 1500 }]) {
             const frame = await worker.call.frame(window, { sheet: sheet.index });
             expect(frame.displayList).toEqual(main.displayList(window));
-            matchingMergedRanges(frame, main);
-            if (name === 'sample.xlsx' && sheet.index === 0 && window === viewport) {
-              expect(frame.mergedRanges).toContainEqual({
+            const expected = name === 'sample.xlsx' && sheet.index === 0 && window === viewport
+              ? [{
                 start: { row: 0, col: 0 }, end: { row: 0, col: 3 },
-              });
-            }
+              }] : [];
+            expect(frame.mergedRanges).toEqual(expected);
           }
         }
         main.setActiveSheet(state.activeSheet);
@@ -243,7 +224,9 @@ describe('workbook sessions', () => {
       }
       expect(inputs.cells[0][0]).toMatchObject({ input: '=1+2', isFormula: true });
       const frame = await matchingFrame(worker, main);
-      matchingMergedRanges(frame, main);
+      expect(frame.mergedRanges).toEqual([
+        { start: { row: 0, col: 0 }, end: { row: 0, col: 3 } },
+      ]);
       expect(frame.version).toBe(applied.version);
     } finally {
       main.dispose();
@@ -251,23 +234,49 @@ describe('workbook sessions', () => {
     }
   });
 
-  test('frame merges include frozen and scrolled cells and exclude the intervening gap', async () => {
+  test('frame merges cross every viewport edge and exclude frozen gaps', async () => {
     const main = openWorkbook(chartFixture);
     let worker: WorkbookSession | undefined;
     try {
-      const pinned = { start: { row: 0, col: 0 }, end: { row: 0, col: 1 } };
-      const body = { start: { row: 19, col: 3 }, end: { row: 20, col: 4 } };
-      const gap = { start: { row: 4, col: 1 }, end: { row: 5, col: 2 } };
-      main.applyOps([pinned, body, gap].map((range) => ({ type: 'mergeCells', sheet: 0, range })));
+      const expected = [
+        { start: { row: 0, col: 0 }, end: { row: 0, col: 1 } },
+        { start: { row: 8, col: 11 }, end: { row: 10, col: 11 } },
+        { start: { row: 11, col: 8 }, end: { row: 11, col: 10 } },
+        { start: { row: 12, col: 13 }, end: { row: 12, col: 15 } },
+        { start: { row: 13, col: 12 }, end: { row: 15, col: 12 } },
+        { start: { row: 8, col: 8 }, end: { row: 10, col: 10 } },
+        { start: { row: 1, col: 1 }, end: { row: 1, col: 10 } },
+        { start: { row: 1, col: 0 }, end: { row: 10, col: 0 } },
+        { start: { row: 11, col: 11 }, end: { row: 11, col: 12 } },
+      ];
+      const excluded = [
+        { start: { row: 3, col: 3 }, end: { row: 4, col: 4 } },
+        { start: { row: 3, col: 11 }, end: { row: 4, col: 11 } },
+        { start: { row: 12, col: 3 }, end: { row: 12, col: 4 } },
+        { start: { row: 16, col: 16 }, end: { row: 17, col: 17 } },
+      ];
+      expect(main.applyOps([
+        { type: 'setFreezePane', sheet: 0, pane: {
+          rows: 2, cols: 2, top_left: { row: 10, col: 10 },
+        } },
+        ...[...expected, ...excluded].map((range) => ({ type: 'mergeCells', sheet: 0, range })),
+      ]).applied).toBe(true);
       worker = await session(main.save());
-      const position = main.cellPosition(0, 19, 3);
-      const window = { ...viewport, ...position };
+      const position = main.cellPosition(0, 10, 10);
+      const frozen = main.cellRect(0, 1, 1);
+      const first = main.cellRect(0, 10, 10);
+      const end = main.cellRect(0, 14, 14);
+      const window = {
+        x: position.x + first.w / 4,
+        y: position.y + first.h / 4,
+        width: frozen.x + frozen.w + end.x - first.x - first.w / 2,
+        height: frozen.y + frozen.h + end.y - first.y - first.h / 2,
+      };
       const frame = await worker.call.frame(window, { sheet: 0 });
       expect(frame.displayList).toEqual(main.displayList(window));
-      expect(frame.mergedRanges).toHaveLength(2);
-      expect(frame.mergedRanges).toContainEqual(pinned);
-      expect(frame.mergedRanges).toContainEqual(body);
-      expect(frame.mergedRanges).not.toContainEqual(gap);
+      expect(frame.displayList.grid?.rowIndices).toEqual([0, 1, 10, 11, 12, 13]);
+      expect(frame.displayList.grid?.colIndices).toEqual([0, 1, 10, 11, 12, 13]);
+      expect(frame.mergedRanges).toEqual(expected);
     } finally {
       main.dispose();
       await worker?.dispose();
