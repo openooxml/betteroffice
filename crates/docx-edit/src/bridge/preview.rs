@@ -406,7 +406,7 @@ pub(crate) fn replay(
     env: &RenderEnv,
     units: &PreviewUnits,
     changed: &BTreeSet<String>,
-    current: &[LayoutBlock],
+    current: &[Rc<LayoutBlock>],
 ) -> Option<Vec<Replay>> {
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
@@ -472,8 +472,11 @@ pub(crate) fn replay(
             || output.tables.iter().any(|(pm, ..)| !record.pm.contains(pm))
             || units.sequences
                 && current.get(record.blocks.clone()).is_none_or(|previous| {
-                    docx_layout::sequence_fields::reads_sequence_fields(previous)
-                        || docx_layout::sequence_fields::reads_sequence_fields(&replacement)
+                    previous.iter().any(|block| {
+                        docx_layout::sequence_fields::reads_sequence_fields(std::slice::from_ref(
+                            block.as_ref(),
+                        ))
+                    }) || docx_layout::sequence_fields::reads_sequence_fields(&replacement)
                 })
         {
             return None;
@@ -491,7 +494,7 @@ pub(crate) fn replay(
 
 pub(crate) fn splice(
     replays: Vec<Replay>,
-    blocks: &mut Vec<LayoutBlock>,
+    blocks: &mut Vec<Rc<LayoutBlock>>,
     map: &mut LoweringMap,
     revealable: &mut Vec<LayoutBlock>,
     units: &mut PreviewUnits,
@@ -517,7 +520,10 @@ pub(crate) fn splice(
         revealable_shift += replay.revealable.len() as isize - record.revealable.len() as isize;
         let block_end = record.blocks.start + replay.blocks.len();
         let revealable_end = record.revealable.start + replay.revealable.len();
-        blocks.splice(record.blocks.clone(), replay.blocks);
+        blocks.splice(
+            record.blocks.clone(),
+            replay.blocks.into_iter().map(Rc::new),
+        );
         revealable.splice(record.revealable.clone(), replay.revealable);
         map.stories
             .splice(record.stories.clone(), replay.map.stories);
