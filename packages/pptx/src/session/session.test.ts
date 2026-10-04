@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { runInNewContext } from 'node:vm';
@@ -12,6 +12,7 @@ import type { PptxEditRequest, PptxReadResult } from '../edits';
 import {
   decodeTiffImage, initWasm, openPresentation, type PresentationHandle,
 } from '../wasm/loader';
+import { PptxDocument } from '../wasm/generated/pptx_wasm.js';
 import { createPresentationSession, type PresentationSession } from './client';
 import { createPresentationSessionHost } from './host';
 import {
@@ -106,6 +107,108 @@ async function matchingFrame(
 }
 
 describe('presentation sessions', () => {
+  test('opens and frames every slide without snapshot JSON', async () => {
+    for (const bytes of [fixture, tiffFixture]) {
+      const main = openPresentation(bytes, {
+        clientId: 9691, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+      });
+      let worker: PresentationSession | undefined;
+      const snapshot = main.snapshot();
+      const summaries = snapshot.slides.map((slide, index) => ({
+        id: slide.id, index, name: slide.name, layoutPartPath: slide.layoutPartPath,
+      }));
+      const snapshotSpy = spyOn(PptxDocument.prototype, 'snapshotJson');
+      try {
+        worker = await session(9691, bytes);
+        expect(worker.state).toEqual({
+          format: 'pptx', stage: 'ready', version: 0, dirty: false,
+          slides: summaries, size: { width: snapshot.widthEmu, height: snapshot.heightEmu },
+        });
+        await matchingFrame(worker, main, 0);
+        expect(snapshotSpy).not.toHaveBeenCalled();
+        for (const slide of summaries.slice(1)) await matchingFrame(worker, main, slide.index);
+        expect(await worker.call.slides()).toEqual(summaries);
+        expect(await worker.call.slideSize()).toEqual(worker.state.size);
+        await expect(worker.call.frame(summaries.length)).rejects.toThrow('out of range');
+        await expect(worker.call.frame(-1)).rejects.toThrow('out of range');
+        await expect(worker.call.frame(0.5)).rejects.toThrow('out of range');
+        const request = editBatch(main, await worker.call.version());
+        snapshotSpy.mockClear();
+        expect(await worker.call.applyEdits(request)).toMatchObject({ ok: true, applied: true });
+        expect(main.applyEdits({ ...request, expectVersion: main.version() }))
+          .toMatchObject({ ok: true, applied: true });
+        for (const slide of summaries) await matchingFrame(worker, main, slide.index);
+        expect(snapshotSpy).not.toHaveBeenCalled();
+      } finally {
+        snapshotSpy.mockRestore();
+        main.dispose();
+        await worker?.dispose();
+      }
+    }
+  });
+
+  test('refreshes frame bounds after slide insertion, deletion and remote updates', async () => {
+    const main = openPresentation(fixture, {
+      clientId: 9692, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    });
+    const snapshot = main.snapshot();
+    const open = PptxDocument.openCollaborative;
+    const documents: PptxDocument[] = [];
+    const openSpy = spyOn(PptxDocument, 'openCollaborative').mockImplementation((...args) => {
+      const document = open(...args);
+      documents.push(document);
+      return document;
+    });
+    const snapshotSpy = spyOn(PptxDocument.prototype, 'snapshotJson');
+    let worker: PresentationSession | undefined;
+    try {
+      worker = await session(9692);
+      const openedDocument = documents[0];
+      if (!openedDocument) throw new Error('Session document was not captured');
+      await matchingFrame(worker, main, 0);
+      const index = snapshot.slides.length;
+      const inserted = main.insertSlide(index);
+      expect(JSON.parse(openedDocument.insertSlideJson(JSON.stringify({ index }))).slideId)
+        .toBe(inserted.slideId);
+      await matchingFrame(worker, main, index);
+      const summaries = await worker.call.slides();
+      expect(summaries).toHaveLength(index + 1);
+      expect(summaries[index]).toEqual({
+        id: inserted.slideId, index, name: `Slide ${index + 1}`, layoutPartPath: null,
+      });
+      main.deleteSlide(inserted.slideId);
+      openedDocument.deleteSlideJson(JSON.stringify({ slideId: inserted.slideId }));
+      await expect(worker.call.frame(index)).rejects.toThrow('out of range');
+      await matchingFrame(worker, main, 0);
+      expect(snapshotSpy).not.toHaveBeenCalled();
+
+      const peer = openPresentation(fixture, { clientId: 9693 });
+      try {
+        peer.applyUpdate(main.encodeStateAsUpdate());
+        peer.insertSlide(index);
+        const update = peer.encodeStateAsUpdate();
+        main.applyUpdate(update);
+        openedDocument.applyUpdateJson(update);
+        snapshotSpy.mockClear();
+        await matchingFrame(worker, main, index);
+        for (const slide of await worker.call.slides()) {
+          peer.deleteSlide(slide.id);
+        }
+        const emptyUpdate = peer.encodeStateAsUpdate();
+        main.applyUpdate(emptyUpdate);
+        openedDocument.applyUpdateJson(emptyUpdate);
+        expect(await worker.call.slides()).toEqual([]);
+        await expect(worker.call.frame(0)).rejects.toThrow('out of range');
+        expect(snapshotSpy).not.toHaveBeenCalled();
+      } finally { peer.dispose(); }
+    } finally {
+      openSpy.mockRestore();
+      snapshotSpy.mockRestore();
+      main.dispose();
+      await worker?.dispose();
+    }
+  });
+
   test('declares ordered methods and marks edits as user input', () => {
     expect(Object.keys(PRESENTATION_SESSION_METHODS)).toEqual(Object.keys(PRESENTATION_SESSION_POLICIES));
     expect(PRESENTATION_SESSION_POLICIES.applyEdits).toEqual({
@@ -465,6 +568,7 @@ describe('presentation sessions', () => {
     const source = openPresentation(fixture, { clientId: 9705 });
     try {
       source.setSlideNotes(source.snapshot().slides[0].id, 'Restored notes');
+      source.insertSlide(0);
       const update = source.encodeStateAsUpdate();
       const updateBuffer = new Uint8Array(update.byteLength + 16);
       updateBuffer.set(update, 8);
@@ -476,6 +580,8 @@ describe('presentation sessions', () => {
         clientId: 9706, initialUpdate, fonts: faces, fallbackFonts: faces,
       });
       let worker: PresentationSession | undefined;
+      const snapshot = main.snapshot();
+      const snapshotSpy = spyOn(PptxDocument.prototype, 'snapshotJson');
       try {
         const pair = createInProcessPair();
         createPresentationSessionHost(pair.host);
@@ -495,8 +601,18 @@ describe('presentation sessions', () => {
         expect(fontBytes.byteLength).toBeGreaterThan(0);
         expect(content(await worker.call.readContent())).toEqual(content(main.readContent()));
         expect(await worker.save()).toEqual(main.save());
-        expect(worker.state).toMatchObject({ version: 0, dirty: false });
+        expect(worker.state).toEqual({
+          format: 'pptx', stage: 'ready', version: 0, dirty: false,
+          slides: snapshot.slides.map((slide, index) => ({
+            id: slide.id, index, name: slide.name, layoutPartPath: slide.layoutPartPath,
+          })),
+          size: { width: snapshot.widthEmu, height: snapshot.heightEmu },
+        });
+        await matchingFrame(worker, main, 0);
+        await matchingFrame(worker, main, snapshot.slides.length - 1);
+        expect(snapshotSpy).not.toHaveBeenCalled();
       } finally {
+        snapshotSpy.mockRestore();
         main.dispose();
         await worker?.dispose();
       }

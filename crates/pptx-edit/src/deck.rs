@@ -9,6 +9,8 @@ use ooxml_drawingml::{
 use pptx_parse::{
     ChartAxis, ChartSpace, GraphicFrameData, Placeholder, PptxPackage, ShapeBase, ShapeNode, Slide,
 };
+#[cfg(any(feature = "wasm", test))]
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use yrs::updates::decoder::Decode;
 use yrs::{
@@ -39,6 +41,30 @@ const MAX_ADJUSTMENTS: usize = 32;
 const MAX_ADJUSTMENT_INDEX: usize = 32;
 /// Stays well under the 16 MiB collaboration frame cap once base64-encoded.
 const MAX_PENDING_PICTURE_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(any(feature = "wasm", test))]
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SlideMetadata {
+    id: String,
+    index: usize,
+    name: Option<String>,
+    layout_part_path: Option<String>,
+}
+
+#[cfg(any(feature = "wasm", test))]
+#[derive(Debug, PartialEq, Serialize)]
+pub(crate) struct DeckSize {
+    width: i64,
+    height: i64,
+}
+
+#[cfg(any(feature = "wasm", test))]
+#[derive(Debug, PartialEq, Serialize)]
+pub(crate) struct DeckMetadata {
+    slides: Vec<SlideMetadata>,
+    size: DeckSize,
+}
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
     let package_json =
@@ -245,6 +271,38 @@ fn insert_json<T: serde::Serialize>(
 impl DeckSession {
     pub fn snapshot(&self) -> EditResult<DeckSnapshot> {
         snapshot_doc(&self.doc, &self.package)
+    }
+
+    #[cfg(any(feature = "wasm", test))]
+    pub(crate) fn session_metadata(&self) -> EditResult<DeckMetadata> {
+        let txn = self.doc.transact();
+        let meta = required_map(&txn, META)?;
+        let order = required_order(&txn)?;
+        let slides = required_map(&txn, SLIDES)?;
+        let mut seen_slides = HashSet::new();
+        let mut summaries = Vec::new();
+        for slide_id in string_array_ref(&order, &txn) {
+            if !seen_slides.insert(slide_id.clone()) {
+                continue;
+            }
+            let slide = slides
+                .get(&txn, &slide_id)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
+            summaries.push(SlideMetadata {
+                id: slide_id,
+                index: summaries.len(),
+                name: map_string(&slide, &txn, "name"),
+                layout_part_path: map_string(&slide, &txn, "layoutPartPath"),
+            });
+        }
+        Ok(DeckMetadata {
+            slides: summaries,
+            size: DeckSize {
+                width: required_i64(&meta, &txn, "widthEmu")?,
+                height: required_i64(&meta, &txn, "heightEmu")?,
+            },
+        })
     }
 
     /// Slide ids in deck order, matching `snapshot().slides` without walking shapes.
@@ -2666,6 +2724,118 @@ mod tests {
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const HIDDEN_FIXTURE: &[u8] = include_bytes!("../tests/fixtures/hidden-shapes.pptx");
+
+    fn assert_metadata_matches_snapshot(session: &DeckSession) {
+        let snapshot = session.snapshot().unwrap();
+        let slides: Vec<_> = snapshot
+            .slides
+            .iter()
+            .enumerate()
+            .map(|(index, slide)| {
+                serde_json::json!({
+                    "id": slide.id,
+                    "index": index,
+                    "name": slide.name,
+                    "layoutPartPath": slide.layout_part_path,
+                })
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(session.session_metadata().unwrap()).unwrap(),
+            serde_json::json!({
+                "slides": slides,
+                "size": { "width": snapshot.width_emu, "height": snapshot.height_emu },
+            })
+        );
+    }
+
+    #[test]
+    fn session_metadata_matches_snapshots_for_fixtures_and_updates() {
+        let files: &[&[u8]] = &[
+            FIXTURE,
+            HIDDEN_FIXTURE,
+            include_bytes!("../tests/fixtures/blip-shadow.pptx"),
+            include_bytes!("../tests/fixtures/chart-text-overflow.pptx"),
+            include_bytes!("../tests/fixtures/deck-schema-v2-connectors.pptx"),
+            include_bytes!("../tests/fixtures/deck-schema-v2-nested-connectors.pptx"),
+            include_bytes!("../tests/fixtures/deck-schema-v2.1-defaults.pptx"),
+            include_bytes!("../tests/fixtures/deck-schema-v2.1-edits.pptx"),
+            include_bytes!("../tests/fixtures/metafile-tracking.pptx"),
+            include_bytes!("../tests/fixtures/modern-comments.pptx"),
+            include_bytes!("../tests/fixtures/run-spacing-shadow.pptx"),
+            include_bytes!("../../../packages/pptx/src/render/fixtures/tiff-image.pptx"),
+        ];
+        let context = EditCtx::local("test");
+        for bytes in files {
+            let session = DeckSession::open(bytes, 101).unwrap();
+            assert_metadata_matches_snapshot(&session);
+            let restored =
+                DeckSession::open_from_update(&session.encode_state_as_update_v1(), 102).unwrap();
+            assert_metadata_matches_snapshot(&restored);
+            assert_eq!(
+                session.session_metadata().unwrap(),
+                restored.session_metadata().unwrap()
+            );
+
+            let layout = session
+                .package()
+                .layouts
+                .first()
+                .map(|layout| layout.part_path.as_str());
+            let inserted = session.insert_slide(&context, 0, layout).unwrap();
+            assert_metadata_matches_snapshot(&session);
+            let last = session.slide_ids().unwrap().len() as u32 - 1;
+            session
+                .move_slide(&context, &inserted.slide_id, last)
+                .unwrap();
+            assert_metadata_matches_snapshot(&session);
+            session.delete_slide(&context, &inserted.slide_id).unwrap();
+            assert_metadata_matches_snapshot(&session);
+
+            let restored =
+                DeckSession::open_from_update(&session.encode_state_as_update_v1(), 102).unwrap();
+            assert_metadata_matches_snapshot(&restored);
+            assert_eq!(
+                session.session_metadata().unwrap(),
+                restored.session_metadata().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn session_metadata_matches_duplicate_order_and_optional_fields() {
+        let session = DeckSession::open(FIXTURE, 103).unwrap();
+        let id = session.slide_ids().unwrap()[0].clone();
+        {
+            let mut txn = session.doc.transact_mut();
+            let order = required_order(&txn).unwrap();
+            order.push_back(&mut txn, id.as_str());
+            let slide = slide_ref(&txn, &id).unwrap();
+            slide.remove(&mut txn, "name");
+            slide.remove(&mut txn, "layoutPartPath");
+        }
+        assert_metadata_matches_snapshot(&session);
+        {
+            let mut txn = session.doc.transact_mut();
+            let slide = slide_ref(&txn, &id).unwrap();
+            slide.insert(&mut txn, "name", "Slide \"α\"\n");
+            slide.insert(&mut txn, "layoutPartPath", "");
+        }
+        assert_metadata_matches_snapshot(&session);
+    }
+
+    #[test]
+    fn session_metadata_tracks_empty_decks() {
+        let session = DeckSession::open(FIXTURE, 104).unwrap();
+        let context = EditCtx::local("test");
+        for id in session.slide_ids().unwrap() {
+            session.delete_slide(&context, &id).unwrap();
+            assert_metadata_matches_snapshot(&session);
+        }
+        assert!(session.session_metadata().unwrap().slides.is_empty());
+        session.insert_slide(&context, 0, None).unwrap();
+        assert_metadata_matches_snapshot(&session);
+    }
 
     #[test]
     fn a_reattached_source_restores_the_series_lines_a_stored_package_lacks() {
