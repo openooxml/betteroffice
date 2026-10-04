@@ -8,7 +8,13 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
-import { EditorDirtyStories, hostSaveMetadata, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
+import {
+  EditorDirtyStories,
+  ResidentWorkerSaveUnavailableError,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  serialWorkerSaves,
+} from '@betteroffice/docx/yrs';
 import type { DocxEditorCollaborationOptions } from '../types';
 import type { OpenInWorker, OpenPreviewInWorker, WorkerOpenedDocument } from './useDisplayList';
 import { markLayoutQueued } from '../internals/layoutProvenance';
@@ -653,20 +659,19 @@ export function useYrsCoreSession(
                 return worker.exportStructuredWithPages(next, options, context);
               },
             });
+            const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: async (comments, peer) => {
+              save: (comments, peer) => saveInOrder(async (stories) => {
                 if (stale()) throw new Error('The document changed while saving');
+                if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
                 const currentHost = documentRef.current ?? host?.document;
-                const dirty = peer ? dirtyStoriesRef.current.captureWorkerSave() : undefined;
-                const saved = await worker.save({
+                return worker.save({
                   comments,
                   ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
-                  ...(dirty ? { stories: dirty.stories } : {}),
+                  ...(peer ? { stories } : {}),
                 }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
-                dirty?.clear();
-                return saved;
-              },
+              }),
             });
             const gate = { reached: false, wanted: false };
             let recoveredRendering = false;

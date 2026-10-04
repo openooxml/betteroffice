@@ -13,6 +13,7 @@ import {
   hostSaveMetadata,
   mergeDocxHostMetadata,
   saveEditorDocument,
+  serialWorkerSaves,
 } from './editorSave';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
 import type { DocxProposalInput, DocxProposalResult } from './proposals';
@@ -32,16 +33,40 @@ import { yrsToDocument } from './yrsToDocument';
  * Projection roots/empty-set fallback: DocxEditor/hooks/useYrsCoreSession.ts:1060-1098.
  */
 
-async function saveWorkerArm(arms: Arms) {
-  const dirty = arms.peer ? arms.editorStories.captureWorkerSave() : undefined;
-  arms.log.push(`worker save stories=${dirty ? JSON.stringify([...dirty.stories].sort()) : 'resident'}`);
-  const saved = await arms.client.save({
-    comments: hostComments(arms.workerHost),
-    host: hostSaveMetadata(arms.workerHost),
-    ...(arms.peer && dirty ? { stateVector: arms.peer.encodeStateVector(), stories: dirty.stories } : {}),
+async function saveWorkerArm(arms: Arms, oracle: () => Promise<Uint8Array>) {
+  if (arms.peer) return arms.workerSaves!(async (stories) => {
+    arms.log.push(`worker save stories=${JSON.stringify([...stories].sort())}`);
+    const actual = await arms.client.save({
+      comments: hostComments(arms.workerHost),
+      host: hostSaveMetadata(arms.workerHost),
+      stateVector: arms.peer!.encodeStateVector(), stories,
+    });
+    const expected = await oracle();
+    if (actual.updates.length !== 1) throw new Error('Editor save did not return exactly one diff');
+    arms.adoptingWorkerSaveUpdates = true;
+    try {
+      arms.editorStories.adoptWorkerSaveUpdates(() => {
+        for (const update of actual.updates) arms.peer!.applyUpdate(update);
+      });
+    } finally {
+      arms.adoptingWorkerSaveUpdates = false;
+    }
+    return { actual, expected };
   });
-  dirty?.clear();
-  return saved;
+  const peerlessSave = async (_stories: string[]) => {
+    arms.log.push('worker save stories=resident');
+    if (arms.replica) {
+      expect(arms.replica.hasStory('body')).toBe(false);
+      expect(arms.worker.requests.some((type) => type === 'encodeState' || type === 'applyUpdate')).toBe(false);
+    }
+    const actual = await arms.client.save({
+      comments: hostComments(arms.workerHost),
+      host: hostSaveMetadata(arms.workerHost),
+    });
+    if (actual.updates.length !== 0) throw new Error('Peerless save returned peer updates');
+    return { actual, expected: await oracle() };
+  };
+  return arms.workerSaves!(peerlessSave);
 }
 
 const DATE = '2026-10-02T12:00:00Z';
@@ -51,13 +76,16 @@ const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/mai
   'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
 const STORIES = ['body', 'hf:rIdH1', 'fn:1'] as const;
 type Story = (typeof STORIES)[number];
-type Topology = 'A/editor' | 'B/viewer';
+type Topology = 'A/editor' | 'B/viewer' | 'C/hydrate';
+type HydrationMode = 'viewer' | 'unloaded' | 'loading';
 type Action =
   | 'insert' | 'split' | 'delete' | 'addComment' | 'reply' | 'deleteComment' | 'workerDeleteComment'
-  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save';
+  | 'proposal' | 'decide' | 'withdraw' | 'flush' | 'project' | 'undo' | 'redo' | 'save' | 'overlapSave'
+  | 'hydrate' | 'hydrateSave' | 'hostChange';
 interface Operation {
   action: Action;
   story: Story;
+  autoSave?: false;
 }
 
 const SEEDS = integerEnv('BO_DIFF_SEEDS', 200);
@@ -237,7 +265,10 @@ interface Arms {
   workerHost: Document;
   main: MainArm;
   editorStories: EditorDirtyStories;
+  workerSaves?: ReturnType<typeof serialWorkerSaves>;
   peer?: YrsSession;
+  replica?: YrsSession;
+  hydration?: Promise<void>;
   unsubscribe?: () => void;
   adoptingWorkerSaveUpdates: boolean;
   handbackRemoteUpdates: number;
@@ -255,14 +286,16 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
   const worker = startWorker(clientId);
   const client = new ResidentEngineWorkerClient(worker);
   let session: YrsSession | undefined;
+  let replica: YrsSession | undefined;
   try {
     const { hostJson } = await client.open(source, { generation });
     session = await createYrsSession({ clientId: clientId + (topology === 'A/editor' ? 1 : 0) });
-    const { document: host } = session.openDocx(source.slice(), topology === 'B/viewer', { generation });
+    const { document: host } = session.openDocx(source.slice(), topology !== 'A/editor', { generation });
     if (topology === 'A/editor') {
       session.loadState(await client.encodeState());
       session.beginUndoCapture();
     }
+    if (topology === 'C/hydrate') replica = await createYrsSession({ clientId: clientId + 1 });
     session.setSelection({ story: 'body', paraId: '0000B002', offset: 0 });
     if (session.listComments().some(({ id }) => id === '1')) {
       throw new Error('The zero-length source comment unexpectedly has seeded anchors');
@@ -281,28 +314,103 @@ async function openArms(seed: number, topology: Topology, log: string[]): Promis
       main: new MainArm(session, host, topology === 'A/editor'
         ? (story) => editorStories.add(story) : undefined),
       editorStories,
+      replica,
+      workerSaves: serialWorkerSaves(editorStories),
       adoptingWorkerSaveUpdates: false, handbackRemoteUpdates: 0, otherRemoteUpdates: 0,
       ...(topology === 'A/editor' ? { peer: session } : {}),
       commentStories: new Map<number, Story>([[1, 'body'], [2, 'hf:rIdH1']]),
       nextComment: 3, nextProposal: 1,
     };
-    if (topology === 'A/editor') {
-      const session = arms.main.session;
-      // PagedEditor remote listener -> publishDirectInput(undefined).
-      arms.unsubscribe = session.onUpdate((_update, origin) => {
-        if (origin !== 'remote') return;
-        if (arms.adoptingWorkerSaveUpdates) arms.handbackRemoteUpdates += 1;
-        else arms.otherRemoteUpdates += 1;
-        if (!session.hasStory('body')) return;
-        editorStories.add(dirtyProjectionStory(session.selection()?.head.story ?? 'body'));
-      });
-    }
+    if (arms.peer) listenToPeer(arms);
     return arms;
   } catch (error) {
     client.destroy();
+    replica?.destroy();
     session?.destroy();
     throw error;
   }
+}
+
+function listenToPeer(arms: Arms): void {
+  const session = arms.peer!;
+  // PagedEditor remote listener -> publishDirectInput(undefined).
+  arms.unsubscribe = session.onUpdate((_update, origin) => {
+    if (origin !== 'remote') return;
+    if (arms.adoptingWorkerSaveUpdates) arms.handbackRemoteUpdates += 1;
+    else arms.otherRemoteUpdates += 1;
+    if (!session.hasStory('body')) return;
+    arms.editorStories.add(dirtyProjectionStory(session.selection()?.head.story ?? 'body'));
+  });
+}
+
+function hydrateArms(arms: Arms): Promise<void> {
+  if (arms.hydration) return arms.hydration;
+  const replica = arms.replica;
+  if (!replica || arms.peer) throw new Error('Hydration requires an unloaded editing copy');
+  arms.log.push('start editing copy hydration');
+  const state = arms.mirror
+    ? arms.client.handOver().then((handover) => ({ state: handover.state, mirror: handover }))
+    : arms.client.encodeState().then((state) => ({ state, mirror: null }));
+  arms.hydration = state.then((handover) => {
+    replica.openDocx(source.slice(), false);
+    replica.loadState(handover.state);
+    if (handover.mirror) {
+      replica.mirrorWorkerDocument({ version: handover.mirror.version, proposals: handover.mirror.proposals });
+      replica.mirrorWorkerDocument(null);
+    }
+    for (const story of STORIES) {
+      expect(replica.paragraphs(story)).toEqual(arms.main.session.paragraphs(story));
+      expect(replica.storyChecksum(story)).toBe(arms.main.session.storyChecksum(story));
+      for (const view of ['accepted', 'original'] as const) {
+        const actual = replica.readParagraphs({ story, view });
+        const expected = arms.main.session.readParagraphs({ story, view });
+        if (!actual.ok || !expected.ok) throw new Error('Cannot read the hydrated story');
+        expect(actual.paragraphs).toEqual(expected.paragraphs);
+      }
+    }
+    expect(replica.listComments()).toEqual(arms.main.session.listComments());
+    for (const { id } of replica.listComments()) {
+      expect(replica.resolveComment(id)).toEqual(arms.main.session.resolveComment(id));
+    }
+    expect(replica.getProposals().proposals).toEqual(arms.main.session.getProposals().proposals);
+    expect(replica.getProposals().previewVersion).toBe(arms.main.session.getProposals().previewVersion);
+    expect(hostComments(arms.workerHost)).toEqual(hostComments(arms.main.host));
+    const selection = arms.main.session.selection();
+    if (selection) replica.setSelection(selection.anchor, selection.head);
+    arms.peer = replica;
+    listenToPeer(arms);
+    replica.beginUndoCapture();
+    arms.log.push(`editing copy hydrated clientId=${replica.clientId}`);
+  });
+  return arms.hydration;
+}
+
+function editPeer<T>(arms: Arms, edit: (session: YrsSession) => T): T {
+  const peer = arms.peer!;
+  const updates: Uint8Array[] = [];
+  const unsubscribe = peer !== arms.main.session
+    ? peer.onUpdate((update, origin) => {
+        if (origin === 'local') updates.push(update);
+      })
+    : undefined;
+  try {
+    const result = edit(peer);
+    for (const update of updates) arms.main.session.applyLocalUpdate(update);
+    return result;
+  } finally {
+    unsubscribe?.();
+  }
+}
+
+function publishPeerInput(arms: Arms, stories?: readonly string[]): void {
+  if (arms.peer && arms.peer !== arms.main.session) {
+    const selection = arms.peer.selection();
+    if (selection) arms.main.session.setSelection(selection.anchor, selection.head);
+    for (const story of stories ?? [selection?.head.story ?? 'body']) {
+      arms.editorStories.add(dirtyProjectionStory(story));
+    }
+  }
+  arms.main.publishDirectInput(stories);
 }
 
 async function bootstrap(arms: Arms): Promise<void> {
@@ -347,12 +455,15 @@ async function workerMutation(
       if (stories.size > 0) arms.main.publishDirectInput([...stories]);
     }
   }
+  if (!arms.peer) {
+    for (const story of reply.projectionStories ?? []) arms.editorStories.add(story);
+  }
   arms.mirror = reply.mirror;
   return reply;
 }
 
 function target(arms: Arms, story: Story, random: Random) {
-  const paragraphs = arms.main.session.paragraphs(story);
+  const paragraphs = (arms.peer ?? arms.main.session).paragraphs(story);
   const editable = story === 'body' ? paragraphs.filter(({ paraId }) => paraId !== '0000B004') : paragraphs;
   const paragraph = random.pick(editable);
   const offset = random.int(paragraph.text.length + 1);
@@ -363,6 +474,7 @@ function target(arms: Arms, story: Story, random: Random) {
 function focus(arms: Arms, story: Story, random: Random) {
   const chosen = target(arms, story, random);
   arms.main.session.setSelection(chosen.at);
+  if (arms.peer && arms.peer !== arms.main.session) arms.peer.setSelection(chosen.at);
   return chosen;
 }
 
@@ -390,11 +502,11 @@ function addComment(arms: Arms, story: Story, random: Random): number {
   if (arms.peer) {
     const span = arms.peer.locateParagraph(story, at.paraId);
     const start = span.start + Math.min(at.offset, Math.max(0, paragraph.text.length - 1));
-    arms.peer.applyRawOps(story, [{
+    editPeer(arms, (session) => session.applyRawOps(story, [{
       op: 'setComment', id: String(comment.id), ranges: [[start, start + 1]],
       author: comment.author, date: comment.date, body: comment.content,
-    }]);
-    arms.main.publishDirectInput();
+    }]));
+    publishPeerInput(arms);
   }
   changeComments(arms, (comments) => [...comments, structuredClone(comment)]);
   arms.commentStories.set(comment.id, story);
@@ -457,7 +569,8 @@ async function decideOrWithdraw(arms: Arms, random: Random, withdraw: boolean): 
   arms.mirror = snapshot.mirror;
   const entries = snapshot.mirror.proposals.entries;
   if (entries.length === 0) {
-    await textProposal(arms, random.pick(STORIES), random, ' proposed');
+    const stories = arms.replica && !arms.peer ? ['hf:rIdH1', 'fn:1'] as const : STORIES;
+    await textProposal(arms, random.pick(stories), random, ' proposed');
     return;
   }
   const id = random.pick(entries).record.id;
@@ -479,7 +592,7 @@ async function decideOrWithdraw(arms: Arms, random: Random, withdraw: boolean): 
 
 async function applyOperation(arms: Arms, operation: Operation, random: Random): Promise<void> {
   const { action, story } = operation;
-  const session = arms.main.session;
+  const session = arms.peer ?? arms.main.session;
   switch (action) {
     case 'split': {
       if (!arms.peer) {
@@ -487,12 +600,14 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
         return;
       }
       const { at, paragraph } = focus(arms, story, random);
-      session.addUndoBoundary();
       const offset = random.int(paragraph.text.length + 1);
       arms.log.push(`peer split ${story}/${at.paraId}:${offset}`);
-      const receipt = session.splitParagraph({ ...at, offset });
-      if (receipt.secondParaId) session.setSelection({ story, paraId: receipt.secondParaId, offset: 0 });
-      arms.main.publishDirectInput();
+      editPeer(arms, (session) => {
+        session.addUndoBoundary();
+        const receipt = session.splitParagraph({ ...at, offset });
+        if (receipt.secondParaId) session.setSelection({ story, paraId: receipt.secondParaId, offset: 0 });
+      });
+      publishPeerInput(arms);
       return;
     }
     case 'insert':
@@ -503,25 +618,27 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
         return;
       }
       const { at, paragraph } = focus(arms, story, random);
-      session.addUndoBoundary();
-      if (action === 'delete' && paragraph.text.length > 0) {
-        const start = Math.min(at.offset, paragraph.text.length - 1);
-        const end = Math.min(paragraph.text.length, start + 1 + random.int(3));
-        arms.log.push(`peer delete ${story}/${at.paraId} [${start},${end})`);
-        const receipt = session.deleteRange({
-          story,
-          start: { paraId: at.paraId, offset: start },
-          end: { paraId: at.paraId, offset: end },
-        });
-        session.setSelection(receipt.range ? { story, ...receipt.range.start } : { ...at, offset: start });
-      } else {
-        arms.log.push(`peer insert ${story}/${at.paraId}:${at.offset} ${JSON.stringify(text)}`);
-        const receipt = session.insertText(at, text);
-        session.setSelection(
-          receipt.range ? { story, ...receipt.range.end } : { ...at, offset: at.offset + text.length }
-        );
-      }
-      arms.main.publishDirectInput();
+      editPeer(arms, (session) => {
+        session.addUndoBoundary();
+        if (action === 'delete' && paragraph.text.length > 0) {
+          const start = Math.min(at.offset, paragraph.text.length - 1);
+          const end = Math.min(paragraph.text.length, start + 1 + random.int(3));
+          arms.log.push(`peer delete ${story}/${at.paraId} [${start},${end})`);
+          const receipt = session.deleteRange({
+            story,
+            start: { paraId: at.paraId, offset: start },
+            end: { paraId: at.paraId, offset: end },
+          });
+          session.setSelection(receipt.range ? { story, ...receipt.range.start } : { ...at, offset: start });
+        } else {
+          arms.log.push(`peer insert ${story}/${at.paraId}:${at.offset} ${JSON.stringify(text)}`);
+          const receipt = session.insertText(at, text);
+          session.setSelection(
+            receipt.range ? { story, ...receipt.range.end } : { ...at, offset: at.offset + text.length }
+          );
+        }
+      });
+      publishPeerInput(arms);
       return;
     }
     case 'addComment':
@@ -552,9 +669,14 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
         await flushPeer(arms);
         await workerMutation(arms, { kind: 'removeComment', id: String(id) });
       }
-      if (!arms.peer || action === 'deleteComment') {
+      if (arms.peer && action === 'deleteComment') {
         try {
-          session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
+          editPeer(arms, (session) => session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]));
+          publishPeerInput(arms);
+        } catch {}
+      } else if (!arms.peer) {
+        try {
+          arms.main.session.applyRawOps('body', [{ op: 'removeComment', id: String(id) }]);
           arms.main.publishDirectInput();
         } catch {}
       }
@@ -578,18 +700,46 @@ async function applyOperation(arms: Arms, operation: Operation, random: Random):
       return;
     case 'undo':
     case 'redo': {
-      const changed = action === 'undo' ? session.undo() : session.redo();
+      const changed = editPeer(arms, (session) => action === 'undo' ? session.undo() : session.redo());
       const stories = changed ? session.historyStories() : [];
       arms.log.push(`${action} ${changed} ${JSON.stringify(stories)}`);
-      if (changed) arms.main.publishDirectInput(stories);
+      if (changed) publishPeerInput(arms, stories);
+      return;
+    }
+    case 'hostChange': {
+      for (const host of [arms.main.host, arms.workerHost]) {
+        const body = host.package.document;
+        const properties = body.finalSectionProperties;
+        body.finalSectionProperties = {
+          ...properties, marginTop: (properties?.marginTop ?? 1440) + 120,
+        };
+      }
+      arms.log.push('host margin change (no story marks)');
       return;
     }
   }
 }
 
-function operations(topology: Topology, random: Random): Operation[] {
+function operations(topology: Topology, random: Random, hydrationMode?: HydrationMode): Operation[] {
   const group = (story: Story, actions: Action[]): Operation[] =>
     actions.map((action) => ({ action, story }));
+  if (topology === 'C/hydrate') {
+    const peerless = random.shuffle([
+      group('hf:rIdH1', hydrationMode === 'viewer'
+        ? ['insert', 'delete', 'addComment'] : ['insert', 'delete']),
+      group('fn:1', ['proposal', 'decide', 'withdraw']),
+    ]).flat();
+    const transition = [
+      ...group('hf:rIdH1', ['proposal', 'save']),
+      ...group('body', hydrationMode === 'loading'
+        ? ['hydrateSave', 'save'] : ['hydrate', 'hostChange', 'save', 'save']),
+    ];
+    const workerOnly: Action[] = ['proposal', 'decide', 'withdraw', 'workerDeleteComment'];
+    return [
+      ...[...peerless, ...transition].map((operation) => ({ ...operation, autoSave: false as const })),
+      ...operations('A/editor', random).filter(({ action }) => !workerOnly.includes(action)),
+    ];
+  }
   const groups = [
     ...STORIES.map((story) => group(story, ['insert', 'delete', 'proposal'])),
     ...(['body', 'hf:rIdH1'] as const).map((story) => group(story, ['addComment', 'reply', 'deleteComment'])),
@@ -604,12 +754,13 @@ function operations(topology: Topology, random: Random): Operation[] {
     ],
     group(random.pick(STORIES), ['insert', 'undo', 'redo']),
     group(random.pick(STORIES), ['split', 'save', 'save']),
+    group(random.pick(STORIES), ['split', 'overlapSave']),
     group(random.pick(STORIES), ['save', 'save'])
   );
   const required = random.shuffle(groups).flat();
   const weighted: Action[] = ['insert', 'insert', 'delete', 'delete', 'addComment', 'addComment',
     'reply', 'reply', 'deleteComment', 'workerDeleteComment', 'proposal', 'decide', 'withdraw', 'flush', 'save',
-    ...(topology === 'A/editor' ? ['project', 'split', 'undo', 'redo'] as const : [])];
+    ...(topology === 'A/editor' ? ['project', 'split', 'overlapSave', 'undo', 'redo'] as const : [])];
   while (required.length < OPS) {
     const action = random.pick(weighted);
     required.push({
@@ -652,51 +803,122 @@ function liveCommentIds(parts: Record<string, Uint8Array>): ReadonlySet<string> 
   );
 }
 
-function danglingRangeMarkers(parts: Record<string, Uint8Array>, part: string): string[] {
-  const xml = parts[part] ? new TextDecoder().decode(parts[part]) : '';
-  const ids = liveCommentIds(parts);
-  return [...xml.matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
+function liveSaveCommentIds(commentsXmlIds: ReadonlySet<string>, saveCommentIds: readonly string[]): ReadonlySet<string> {
+  return new Set(saveCommentIds.filter((id) => commentsXmlIds.has(id)));
+}
+
+const XML_OPAQUE = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>/g;
+
+function danglingRangeMarkers(xml: string, liveIds: ReadonlySet<string>): string[] {
+  return [...xml.replace(XML_OPAQUE, '').matchAll(/<w:commentRange(?:Start|End)\b[^>]*\bw:id="([^"]+)"/g)]
     .map((match) => match[1]!)
-    .filter((id) => !ids.has(id));
+    .filter((id) => !liveIds.has(id));
 }
 
 const COMMENT_RANGE_MARKER = /<w:commentRange(?:Start|End)\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>/g;
 const COMMENT_REFERENCE_RUN =
   /<w:r\b[^<>]*>\s*(?:<w:rPr\b[^<>]*>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>\s*)?<w:commentReference\b[^<>]*\bw:id="([^"]+)"[^<>]*\/>\s*<\/w:r>/g;
 
-function withoutStaleCommentMarkers(xml: string, liveIds: ReadonlySet<string>): string {
-  return [COMMENT_REFERENCE_RUN, COMMENT_RANGE_MARKER].reduce((text, pattern) =>
-    text.replace(pattern, (marker, id: string) => liveIds.has(id) ? marker : ''), xml
+function withoutStaleCommentMarkers(xml: string, ids: ReadonlySet<string>): string {
+  const strip = (text: string) => [COMMENT_REFERENCE_RUN, COMMENT_RANGE_MARKER].reduce((result, pattern) =>
+    result.replace(pattern, (marker, id: string) => ids.has(id) ? '' : marker), text
   );
+  let result = '';
+  let offset = 0;
+  for (const opaque of xml.matchAll(XML_OPAQUE)) {
+    result += strip(xml.slice(offset, opaque.index)) + opaque[0];
+    offset = opaque.index! + opaque[0].length;
+  }
+  return result + strip(xml.slice(offset));
 }
 
-// Deferred: after a host projection, the main-thread save keeps the range markers of a comment
-// deleted outside the selection's story; the worker writes the story as it is.
+function mergedTextRuns(xml: string): string {
+  const pattern = /^<w:r>(<w:rPr>(?:(?!<\/?w:r\b|<\/w:rPr>)[\s\S])*<\/w:rPr>)?<w:t( xml:space="preserve")?>([^<]*)<\/w:t><\/w:r>$/;
+  let result = '';
+  let offset = 0;
+  let runStart = 0;
+  let runDepth = 0;
+  let previous: { start: number; end: number; properties: string; text: string; count: number } | undefined;
+  const flush = () => {
+    if (!previous) return;
+    result += xml.slice(offset, previous.start);
+    const space = /^\s|\s$/.test(previous.text) ? ' xml:space="preserve"' : '';
+    result += previous.count === 1 ? xml.slice(previous.start, previous.end)
+      : `<w:r>${previous.properties}<w:t${space}>${previous.text}</w:t></w:r>`;
+    offset = previous.end;
+  };
+  for (const tag of xml.matchAll(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<\/?w:r\b[^<>]*>/g)) {
+    if (/^<w:r\b/.test(tag[0])) {
+      if (runDepth === 0) runStart = tag.index!;
+      if (!tag[0].endsWith('/>')) runDepth += 1;
+      continue;
+    }
+    if (tag[0] !== '</w:r>' || runDepth === 0) continue;
+    runDepth -= 1;
+    if (runDepth !== 0) continue;
+    const start = runStart;
+    const end = tag.index! + tag[0].length;
+    const match = xml.slice(start, end).match(pattern);
+    if (!match || match[3]!.includes('&#') || (!match[2] && /^\s|\s$/.test(match[3]!))) continue;
+    const properties = match[1] ?? '';
+    if (previous && previous.end === start && previous.properties === properties) {
+      previous.end = end;
+      previous.text += match[3]!;
+      previous.count += 1;
+    } else {
+      flush();
+      previous = { start, end, properties, text: match[3]!, count: 1 };
+    }
+  }
+  flush();
+  return result + xml.slice(offset);
+}
+
+function commentReferenceIds(xml: string): string[] {
+  return [...xml.replace(XML_OPAQUE, '').matchAll(/<w:commentReference\b[^>]*\bw:id="([^"]+)"/g)].map((match) => match[1]!);
+}
+
+function staleMainPartExempt(workerXml: string, mainXml: string, liveIds: ReadonlySet<string>): boolean {
+  const ids = new Set(danglingRangeMarkers(mainXml, liveIds));
+  return ids.size > 0 && danglingRangeMarkers(workerXml, liveIds).length === 0 &&
+    !commentReferenceIds(workerXml).some((id) => ids.has(id)) &&
+    mergedTextRuns(withoutStaleCommentMarkers(mainXml, ids)) === mergedTextRuns(workerXml);
+}
+
+// Deferred: main-thread saves can retain deleted comment range markers.
 function staleMainCommentMarkers(
-  worker: Uint8Array, main: Uint8Array, parts: readonly string[], log: string[]
+  worker: Uint8Array, main: Uint8Array, parts: readonly string[], saveCommentIds: readonly string[], log: string[]
 ): boolean {
   const actual = unzipContainer(worker);
   const expected = unzipContainer(main);
-  const liveIds = liveCommentIds(expected);
-  const matches = parts.length > 0 && parts.every((part) =>
-    /^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) &&
-    danglingRangeMarkers(actual, part).length === 0 &&
-    danglingRangeMarkers(expected, part).length > 0 &&
-    actual[part] !== undefined && expected[part] !== undefined &&
-    withoutStaleCommentMarkers(new TextDecoder().decode(expected[part]), liveIds) ===
-      new TextDecoder().decode(actual[part])
-  );
+  const liveIds = liveSaveCommentIds(liveCommentIds(expected), saveCommentIds);
+  const matches = parts.length > 0 && parts.every((part) => {
+    if (!/^word\/(document|header\d+|footer\d+|footnotes|endnotes)\.xml$/.test(part) ||
+      actual[part] === undefined || expected[part] === undefined) return false;
+    const workerXml = new TextDecoder().decode(actual[part]);
+    const mainXml = new TextDecoder().decode(expected[part]);
+    return staleMainPartExempt(workerXml, mainXml, liveIds);
+  });
   if (matches) {
     for (const part of parts) {
       const xml = new TextDecoder().decode(expected[part]);
-      const ids = [COMMENT_RANGE_MARKER, COMMENT_REFERENCE_RUN].flatMap((pattern) =>
-        [...xml.matchAll(pattern)].map((match) => match[1]!).filter((id) => !liveIds.has(id))
-      );
-      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...new Set(ids)])}`);
+      const workerXml = new TextDecoder().decode(actual[part]);
+      const ids = new Set(danglingRangeMarkers(xml, liveIds));
+      const strippedMain = withoutStaleCommentMarkers(xml, ids);
+      const merged = mergedTextRuns(strippedMain) !== strippedMain || mergedTextRuns(workerXml) !== workerXml;
+      log.push(`stale main-thread comment markers in ${part}: ids=${JSON.stringify([...ids])} ` +
+        `comments=${JSON.stringify(saveCommentIds)} merged runs=${merged}`);
     }
   }
   return matches;
 }
+
+test('live save comment ids intersect comments XML with the save list', () => {
+  const commentsXmlIds = new Set(['1', '5']);
+  expect(liveSaveCommentIds(commentsXmlIds, [])).toEqual(new Set<string>());
+  expect(liveSaveCommentIds(commentsXmlIds, ['5'])).toEqual(new Set(['5']));
+  expect(liveSaveCommentIds(new Set(['1']), ['1', '9'])).toEqual(new Set(['1']));
+});
 
 test('the stale comment marker exemption removes only dangling markers', () => {
   const worker = '<w:p><w:r><w:t>text</w:t></w:r></w:p>';
@@ -706,19 +928,116 @@ test('the stale comment marker exemption removes only dangling markers', () => {
     '<w:commentReference w:id="7"/></w:r>';
   const main = worker.replace('</w:p>', `${range}${reference}${formattedReference}</w:p>`);
   const liveIds = new Set<string>();
-  expect(withoutStaleCommentMarkers(main, liveIds)).toBe(worker);
-  expect(withoutStaleCommentMarkers(main.replace('text', 'text!'), liveIds)).not.toBe(worker);
-  expect(withoutStaleCommentMarkers(main.replace('</w:p>', '<x:foreign/></w:p>'), liveIds))
-    .not.toBe(worker);
-  expect(withoutStaleCommentMarkers(main, new Set(['7']))).toBe(main);
+  const ids = new Set(['7']);
+  expect(staleMainPartExempt(worker, main, liveIds)).toBe(true);
+  expect(staleMainPartExempt(worker, main.replace('text', 'text!'), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main.replace('</w:p>', '<x:foreign/></w:p>'), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main, new Set(['7']))).toBe(false);
+  expect(staleMainPartExempt(worker, worker, liveIds)).toBe(false);
+  expect(staleMainPartExempt(main, main, liveIds)).toBe(false);
+  expect(withoutStaleCommentMarkers(main, ids)).toBe(worker);
+  expect(withoutStaleCommentMarkers(main, new Set<string>())).toBe(main);
   const mixed = '<w:r><w:commentReference w:id="7"/><w:t>keep</w:t></w:r>';
-  expect(withoutStaleCommentMarkers(mixed, liveIds)).toBe(mixed);
+  expect(withoutStaleCommentMarkers(mixed, ids)).toBe(mixed);
+  expect(staleMainPartExempt(worker, main.replace(reference, mixed), liveIds)).toBe(false);
   const foreign = reference.replace('</w:r>', '<x:foreign/></w:r>');
-  expect(withoutStaleCommentMarkers(foreign, liveIds)).toBe(foreign);
+  expect(withoutStaleCommentMarkers(foreign, ids)).toBe(foreign);
+  expect(staleMainPartExempt(worker, main.replace(reference, foreign), liveIds)).toBe(false);
   const mixedMarkers = `<w:r>${range}<w:commentReference w:id="7"/></w:r>`;
-  expect(withoutStaleCommentMarkers(mixedMarkers, liveIds)).toBe(reference);
+  expect(withoutStaleCommentMarkers(mixedMarkers, ids)).toBe(reference);
   const bare = '<w:commentReference w:id="7"/>';
-  expect(withoutStaleCommentMarkers(bare, liveIds)).toBe(bare);
+  expect(withoutStaleCommentMarkers(bare, ids)).toBe(bare);
+  expect(staleMainPartExempt(worker, main.replace(reference, bare), liveIds)).toBe(false);
+  const liveRange = range.replaceAll('"7"', '"8"');
+  expect(withoutStaleCommentMarkers(`${main}${liveRange}`, ids)).toBe(`${worker}${liveRange}`);
+  expect(staleMainPartExempt(worker, `${main}${liveRange}`, new Set(['8']))).toBe(false);
+  expect(staleMainPartExempt(`${worker}${liveRange}`, `${main}${liveRange}`, new Set(['8']))).toBe(true);
+});
+
+test('the stale comment marker exemption merges cached text runs without hiding differences', () => {
+  const reference = '<w:r><w:commentReference w:id="1"/></w:r>';
+  const worker = `<w:p><w:r><w:t>Alpa betaY gamma.</w:t></w:r>${reference}</w:p>`;
+  const main = '<w:p><w:r><w:t>Alpa beta</w:t></w:r><w:commentRangeStart w:id="5"/>' +
+    '<w:r><w:t>Y</w:t></w:r><w:commentRangeEnd w:id="5"/>' +
+    '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:commentReference w:id="5"/></w:r>' +
+    `<w:r><w:t xml:space="preserve"> gamma.</w:t></w:r>${reference}</w:p>`;
+  const commentsXmlIds = liveCommentIds({
+    'word/comments.xml': toBytes('<w:comments><w:comment w:id="1"/><w:comment w:id="5"/></w:comments>'),
+  });
+  const liveIds = liveSaveCommentIds(commentsXmlIds, []);
+  expect(staleMainPartExempt(worker, main, liveIds)).toBe(true);
+  const splitWorker = worker.replace('<w:r><w:t>Alpa betaY gamma.</w:t></w:r>',
+    '<w:r><w:t xml:space="preserve">Alpa </w:t></w:r><w:r><w:t>betaY gamma.</w:t></w:r>');
+  expect(staleMainPartExempt(splitWorker, main, liveIds)).toBe(true);
+  const unpreservedWorker = splitWorker.replace(' xml:space="preserve"', '');
+  expect(staleMainPartExempt(unpreservedWorker, main, liveIds)).toBe(false);
+  expect(mergedTextRuns(unpreservedWorker)).toBe(unpreservedWorker);
+  const encodedMain = main.replace('<w:t>Alpa beta</w:t>', '<w:t xml:space="preserve">&#32;Alpa beta</w:t>');
+  const encodedWorker = worker.replace('<w:t>Alpa betaY gamma.</w:t>', '<w:t>&#32;Alpa betaY gamma.</w:t>');
+  expect(staleMainPartExempt(encodedWorker, encodedMain, liveIds)).toBe(false);
+  const cdata = '<w:r><w:t><![CDATA[<w:commentRangeStart w:id="5"/>]]></w:t></w:r>';
+  expect(withoutStaleCommentMarkers(cdata, new Set(['5']))).toBe(cdata);
+  const cdataMain = main.replace('</w:p>', `${cdata}</w:p>`);
+  expect(staleMainPartExempt(worker.replace('</w:p>', `${cdata}</w:p>`), cdataMain, liveIds)).toBe(true);
+  expect(staleMainPartExempt(worker.replace('</w:p>', '<w:r><w:t><![CDATA[]]></w:t></w:r></w:p>'), cdataMain, liveIds))
+    .toBe(false);
+  for (const opaque of ['<!--keep-->', '<?keep?>']) {
+    const opaqueReference = `<w:r><w:rPr>${opaque}</w:rPr><w:commentReference w:id="5"/></w:r>`;
+    expect(staleMainPartExempt(worker.replace('</w:p>', `${opaqueReference}</w:p>`),
+      main.replace('</w:p>', `${opaqueReference}</w:p>`), liveIds)).toBe(false);
+  }
+  expect(staleMainPartExempt(worker, main.replace('gamma', 'gamma!'), liveIds)).toBe(false);
+  const formatted = main.replace('<w:r><w:t>Y</w:t></w:r>',
+    '<w:r><w:rPr><w:b/></w:rPr><w:t>Y</w:t></w:r>');
+  expect(staleMainPartExempt(worker, formatted, liveIds)).toBe(false);
+  const extraReference = reference.replace('"1"', '"2"');
+  expect(staleMainPartExempt(worker, main.replace('</w:p>', `${extraReference}</w:p>`), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main.replace('</w:p>', '<w:r><w:tab/></w:r></w:p>'), liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker.replace(reference, ''), main, liveIds)).toBe(false);
+  expect(staleMainPartExempt(worker, main, liveSaveCommentIds(commentsXmlIds, ['5']))).toBe(false);
+});
+
+test('text run merging preserves formatting, whitespace and other children', () => {
+  const first = '<w:r><w:t>one</w:t></w:r>';
+  const second = '<w:r><w:t>two</w:t></w:r>';
+  expect(mergedTextRuns(`${first}${second}${first}`)).toBe('<w:r><w:t>onetwoone</w:t></w:r>');
+  const spaced = '<w:r><w:t xml:space="preserve"> two </w:t></w:r>';
+  expect(mergedTextRuns(`${spaced}${first}`)).toBe('<w:r><w:t xml:space="preserve"> two one</w:t></w:r>');
+  expect(mergedTextRuns(`${first}${spaced}`)).toBe('<w:r><w:t xml:space="preserve">one two </w:t></w:r>');
+  expect(mergedTextRuns(`${first}${spaced}${second}`)).toBe('<w:r><w:t>one two two</w:t></w:r>');
+  expect(mergedTextRuns(spaced)).toBe(spaced);
+  const properties = '<w:rPr><w:b/></w:rPr>';
+  const boldFirst = first.replace('<w:r>', `<w:r>${properties}`);
+  const boldSecond = second.replace('<w:r>', `<w:r>${properties}`);
+  expect(mergedTextRuns(`${boldFirst}${boldSecond}`)).toBe(`<w:r>${properties}<w:t>onetwo</w:t></w:r>`);
+  expect(mergedTextRuns(`${boldFirst}${second}`)).toBe(`${boldFirst}${second}`);
+  const otherProperties = boldSecond.replace('<w:b/>', '<w:b />');
+  expect(mergedTextRuns(`${boldFirst}${otherProperties}`)).toBe(`${boldFirst}${otherProperties}`);
+  for (const separator of [' ', '\n', '<w:bookmarkStart w:id="1"/>', '<!--keep-->', '</w:p><w:p>']) {
+    const xml = `<w:p>${first}${separator}${second}</w:p>`;
+    expect(mergedTextRuns(xml)).toBe(xml);
+  }
+  for (const run of [
+    '<w:r><w:t> keep</w:t></w:r>',
+    '<w:r><w:t>keep </w:t></w:r>',
+    '<w:r><w:t> keep </w:t></w:r>',
+    '<w:r><w:t xml:space="preserve">&#32;keep</w:t></w:r>',
+    '<w:r><w:tab/></w:r>',
+    '<w:r><w:t>keep</w:t><w:tab/></w:r>',
+    '<w:r><w:t>keep</w:t><w:br/></w:r>',
+    '<w:r><w:fldChar w:fldCharType="begin"/><w:t>keep</w:t></w:r>',
+    '<w:r><w:instrText>keep</w:instrText></w:r>',
+    '<w:r><x:foreign/><w:t>keep</w:t></w:r>',
+    '<w:r w:rsidR="1"><w:t>keep</w:t></w:r>',
+    '<w:r><w:t xml:lang="en">keep</w:t></w:r>',
+    '<w:r><w:t>keep</w:t><w:t>more</w:t></w:r>',
+    `<w:r><x:foreign>${first}${second}${first}</x:foreign></w:r>`,
+    `<!--${first}${second}-->`,
+    `<![CDATA[${first}${second}]]>`,
+  ]) {
+    const xml = `${first}${run}${second}`;
+    expect(mergedTextRuns(xml)).toBe(xml);
+  }
 });
 
 test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => {
@@ -732,30 +1051,35 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
   let handbackRemoteUpdates = 0;
   let otherRemoteUpdates = 0;
   let editorSeeds = 0;
+  const hydrationSeeds: Record<HydrationMode, number> = { viewer: 0, unloaded: 0, loading: 0 };
   for (let seed = 1; seed <= SEEDS; seed += 1) {
     const random = new Random(seed);
-    const topology: Topology = random.int(2) === 0 ? 'A/editor' : 'B/viewer';
+    const topology: Topology = seed % 3 === 0 ? 'C/hydrate'
+      : seed % 3 === 1 ? 'A/editor' : 'B/viewer';
+    const hydrationMode = topology === 'C/hydrate'
+      ? (['viewer', 'unloaded', 'loading'] as const)[(seed / 3 - 1) % 3]!
+      : undefined;
     const log: string[] = [`open seed=${seed} topology=${topology}`];
     let arms: Arms | undefined;
     seedsRun += 1;
     if (topology === 'A/editor') editorSeeds += 1;
+    if (hydrationMode) {
+      hydrationSeeds[hydrationMode] += 1;
+      log.push(`peerless ${hydrationMode === 'viewer' ? 'viewer session' : 'editable session, copy unloaded'}`);
+    }
     try {
       arms = await openArms(seed, topology, log);
       const current = arms;
       let saveNumber = 0;
-      const compareSave = async () => {
-        await flushPeer(current);
-        const dirty = JSON.stringify([...current.main.dirtyStories].sort());
-        const comments = JSON.stringify(hostComments(current.main.host).map(({ id }) => id));
-        log.push(`save ${++saveNumber} dirty=${dirty} comments=${comments}`);
-        const actual = await saveWorkerArm(current);
-        const expected = await current.main.save();
+      const compareSaved = (
+        { actual, expected }: Awaited<ReturnType<typeof saveWorkerArm>>, saveCommentIds: readonly string[]
+      ) => {
         savesCompared += 1;
         const differences = partDifferences(new Uint8Array(actual.bytes), expected);
         if (differences.length > 0) {
           const parts = differences.map(({ part }) => part);
           const exemptions: string[] = [];
-          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, exemptions)) {
+          if (staleMainCommentMarkers(new Uint8Array(actual.bytes), expected, parts, saveCommentIds, exemptions)) {
             staleMainSeeds.add(seed);
             staleMainSaves += 1;
             log.push(...exemptions);
@@ -768,36 +1092,71 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
             );
           }
         }
-        if (current.peer) {
-          if (actual.updates.length !== 1) throw new Error('Editor save did not return exactly one diff');
-          current.adoptingWorkerSaveUpdates = true;
-          try {
-            current.editorStories.adoptWorkerSaveUpdates(() => {
-              for (const update of actual.updates) current.peer!.applyUpdate(update);
-            });
-          } finally {
-            current.adoptingWorkerSaveUpdates = false;
-          }
-        } else if (actual.updates.length !== 0) {
+        if (!current.peer && actual.updates.length !== 0) {
           throw new Error('Viewer save returned peer updates without a peer');
         }
       };
-      await compareSave();
-      await compareSave();
+      const compareSave = async () => {
+        if (!current.peer && current.hydration) {
+          log.push('editor save requested during hydration; wait for editing copy');
+          await current.hydration;
+        }
+        await flushPeer(current);
+        const dirty = JSON.stringify([...current.main.dirtyStories].sort());
+        const comments = hostComments(current.main.host).map(({ id }) => id);
+        log.push(`save ${++saveNumber} dirty=${dirty} comments=${JSON.stringify(comments)}`);
+        compareSaved(await saveWorkerArm(current, () => current.main.save()), comments.map(String));
+      };
+      if (topology !== 'C/hydrate') {
+        await compareSave();
+        await compareSave();
+      }
       await bootstrap(current);
-      const planned = operations(topology, random);
-      const forcedSave = random.int(planned.length);
+      const planned = operations(topology, random, hydrationMode);
+      const automatic = planned.map((operation, index) => operation.autoSave === false ? -1 : index)
+        .filter((index) => index >= 0);
+      const forcedSave = random.pick(automatic);
       for (let index = 0; index < planned.length; index += 1) {
         log.push(`op ${index + 1}/${planned.length}: ${JSON.stringify(planned[index])}`);
         const operation = planned[index]!;
-        if (operation.action === 'save') {
-          focus(current, operation.story, random);
-          await compareSave();
+        if (operation.action === 'hydrate') {
+          log.push(`${hydrationMode === 'viewer' ? 'switch viewer to editing' : 'load editable copy'} (same session)`);
+          await hydrateArms(current);
+        } else if (operation.action === 'hydrateSave') {
+          const posted = current.worker.requests.length;
+          current.worker.hold();
+          const ready = hydrateArms(current);
+          await applyOperation(current, { action: 'hostChange', story: 'body' }, random);
+          const saving = compareSave();
+          try {
+            await Promise.resolve();
+            expect(current.peer).toBeUndefined();
+            expect(current.worker.requests.slice(posted)).toEqual(['encodeState']);
+          } finally {
+            current.worker.release();
+            await Promise.all([ready, saving]);
+          }
+        } else if (operation.action === 'save' || operation.action === 'overlapSave') {
+          if (current.peer || topology !== 'C/hydrate') focus(current, operation.story, random);
+          if (operation.action === 'overlapSave' && current.peer) {
+            await flushPeer(current);
+            const dirty = JSON.stringify([...current.main.dirtyStories].sort());
+            const comments = hostComments(current.main.host).map(({ id }) => id);
+            log.push(`overlap save dirty=${dirty} comments=${JSON.stringify(comments)}`);
+            const oracle = () => current.main.save();
+            const saves = await Promise.all([saveWorkerArm(current, oracle), saveWorkerArm(current, oracle)]);
+            for (const [part, saved] of saves.entries()) {
+              log.push(`overlap save ${++saveNumber} (${part + 1}/2)`);
+              compareSaved(saved, comments.map(String));
+            }
+          } else {
+            await compareSave();
+          }
         } else {
           await applyOperation(current, operation, random);
         }
         if (current.peer && random.int(4) === 0) await flushPeer(current);
-        if (index === forcedSave || random.int(6) === 0) {
+        if (operation.autoSave !== false && (index === forcedSave || random.int(6) === 0)) {
           await compareSave();
           if (random.int(4) === 0) await compareSave();
         }
@@ -808,6 +1167,9 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
         (type) => type === 'applyUpdate' || type === 'encodeState'
       )) {
         throw new Error('The viewer arm received peer state');
+      }
+      if (topology === 'C/hydrate' && (!current.peer || !current.hydration)) {
+        throw new Error('The hydration arm never loaded its editing copy');
       }
     } catch (error) {
       erroredSeeds += 1;
@@ -820,6 +1182,7 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
       handbackRemoteUpdates += arms?.handbackRemoteUpdates ?? 0;
       otherRemoteUpdates += arms?.otherRemoteUpdates ?? 0;
       arms?.client.destroy();
+      arms?.replica?.destroy();
       arms?.main.session.destroy();
     }
   }
@@ -829,6 +1192,10 @@ test('seeded resident DOCX saves match the 0.4.2 main-thread save', async () => 
     `stale main-thread comment markers: ${staleMainSaves} saves in ${staleMainSeeds.size} seeds ` +
     `[${[...staleMainSeeds].join(',')}], ` +
     `handback remote updates=${handbackRemoteUpdates}, other remote updates=${otherRemoteUpdates}`
+  );
+  console.log(
+    `resident save hydration: seeds run=${hydrationSeeds.viewer + hydrationSeeds.unloaded + hydrationSeeds.loading}, ` +
+    `viewer=${hydrationSeeds.viewer}, unloaded=${hydrationSeeds.unloaded}, loading=${hydrationSeeds.loading}`
   );
   if (failures.length > 0) console.error(failures.join('\n\n'));
   expect(failures.length).toBe(0);

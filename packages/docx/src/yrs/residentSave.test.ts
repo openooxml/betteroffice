@@ -11,10 +11,12 @@ import { preloadOpcWasm, unzipContainer } from '../wasm/opc';
 import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import {
   DirtyProjectionStories,
+  EditorDirtyStories,
   hostSaveMetadata,
   mergeDocxHostMetadata,
   proposalProjectionStories,
   saveEditorDocument,
+  serialWorkerSaves,
 } from './editorSave';
 import type { DocxEditRequest } from './edits';
 import { createYrsSession, decodeDocxHostJson, type YrsSession } from './index';
@@ -641,6 +643,76 @@ describe('worker save', () => {
     const saved = await compareSave(opened);
     expect(commentMarkers(opened.bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
     expect(commentMarkers(saved, 1)).toEqual(commentMarkers(opened.bytes, 1));
+  }, TIMEOUT);
+
+  it('matches consecutive editor saves for overlapping worker saves after a header and host edit', async () => {
+    const opened = await open(zeroLengthBodyComment());
+    const peer = await peerReplica(opened);
+    expect(hostComments(opened).map((comment) => comment.id)).toEqual([1]);
+    expect(peer.listComments()).toEqual([]);
+    const editorStories = new EditorDirtyStories();
+    editHeader(peer);
+    editorStories.add('hf:rIdH1');
+    opened.replica.dirtyStories.add('hf:rIdH1');
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const save = serialWorkerSaves(editorStories);
+    const run = async (stories: string[]) => {
+      const saved = await opened.client.save({
+        comments: hostComments(opened), host: hostSaveMetadata(opened.host),
+        stories, stateVector: peer.encodeStateVector(),
+      });
+      editorStories.adoptWorkerSaveUpdates(() => {
+        for (const update of saved.updates) peer.applyUpdate(update);
+      });
+      return new Uint8Array(saved.bytes);
+    };
+    const [first, second] = await Promise.all([save(run), save(run)]);
+    const expectedFirst = await opened.replica.save(hostComments(opened));
+    const expectedSecond = await opened.replica.save(hostComments(opened));
+    expect(difference(first, expectedFirst)).toBeNull();
+    expect(first).toEqual(expectedFirst);
+    expect(commentMarkers(first, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    expect(difference(second, expectedSecond)).toBeNull();
+    expect(second).toEqual(expectedSecond);
+    expect(commentMarkers(expectedSecond, 1)).not.toContain('RangeStart');
+    expect(commentMarkers(expectedSecond, 1)).not.toContain('RangeEnd');
+    expect(commentMarkers(second, 1)).toEqual(commentMarkers(expectedSecond, 1));
+  }, TIMEOUT);
+
+  it('matches the editor bytes for a loaded copy header proposal and host margin change', async () => {
+    const opened = await open(zeroLengthBodyComment());
+    const peer = await peerReplica(opened);
+    expect(hostComments(opened).map((comment) => comment.id)).toEqual([1]);
+    expect(peer.listComments()).toEqual([]);
+    expect(opened.replica.proposal((session) => session.proposeChanges({
+      expectVersion: session.version(),
+      proposals: [{
+        id: 'header-proposal',
+        paragraph: {
+          kind: 'persisted', story: { kind: 'header', partUri: '/word/header1.xml' }, paraId: '0000A001',
+        },
+        suggest: SUGGEST, op: 'replaceText', search: 'Header', replaceWith: 'Changed header',
+      }],
+    })).ok).toBe(true);
+    const stories = opened.replica.dirtyStories.capture().stories;
+    expect(stories).toEqual(['hf:rIdH1']);
+    opened.client.invalidate(peer.encodeStateAsUpdate(opened.client.remoteStateVector()!), null);
+    const body = opened.host.package.document;
+    body.finalSectionProperties = { ...body.finalSectionProperties, marginTop: 2000 };
+    const saved = await opened.client.save({
+      comments: hostComments(opened), host: hostSaveMetadata(opened.host),
+      stories, stateVector: peer.encodeStateVector(),
+    });
+    for (const update of saved.updates) peer.applyUpdate(update);
+    const bytes = new Uint8Array(saved.bytes);
+    const expected = await opened.replica.save(hostComments(opened));
+    expect(difference(bytes, expected)).toBeNull();
+    expect(bytes).toEqual(expected);
+    expect(commentMarkers(bytes, 1)).toEqual(['RangeStart', 'RangeEnd', 'Reference']);
+    expect(new TextDecoder().decode(unzipContainer(bytes)['word/header1.xml'])).toContain('Changed header');
+    expect(new TextDecoder().decode(unzipContainer(bytes)['word/document.xml'])).toContain('w:top="2000"');
   }, TIMEOUT);
 
   for (const owner of ['peer', 'worker'] as const) {

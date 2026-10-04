@@ -93,6 +93,27 @@ export class EditorDirtyStories {
   }
 }
 
+/**
+ * @internal
+ * Runs one session's worker saves in call order. Each save captures its stories once the
+ * previous save settled and clears them on success, as consecutive main-thread saves project.
+ */
+export function serialWorkerSaves(
+  dirty: EditorDirtyStories
+): <T>(save: (stories: string[]) => Promise<T>) => Promise<T> {
+  let previous: Promise<unknown> = Promise.resolve();
+  return <T>(save: (stories: string[]) => Promise<T>): Promise<T> => {
+    const saving = previous.then(async () => {
+      const captured = dirty.captureWorkerSave();
+      const saved = await save(captured.stories);
+      captured.clear();
+      return saved;
+    });
+    previous = saving.catch(() => undefined);
+    return saving;
+  };
+}
+
 /** @internal */
 export function proposalProjectionStories(
   known: ReadonlySet<string>,
