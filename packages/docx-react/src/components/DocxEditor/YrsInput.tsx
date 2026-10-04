@@ -185,8 +185,11 @@ interface HeldSelection {
   apply?: () => void;
 }
 
+type NavigationDirection = 'left' | 'right' | 'up' | 'down' | 'home' | 'end';
+
 type HeldInput =
   | HeldSelection
+  | { kind: 'navigation'; direction: NavigationDirection; extend: boolean; wholeDocument: boolean; byWord: boolean }
   | { kind: 'text'; text: string }
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
@@ -1005,22 +1008,25 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const moveSelection = useCallback(
     (
-      direction: 'left' | 'right' | 'up' | 'down' | 'home' | 'end',
+      direction: NavigationDirection,
       extend: boolean,
       wholeDocument: boolean,
-      byWord = false
+      byWord = false,
+      replayed = false
     ): void => {
+      if (holdOperation({ kind: 'navigation', direction, extend, wholeDocument, byWord })) return;
       const verticalDirection = direction === 'up' || direction === 'down' ? direction : null;
       let interactionEpoch = verticalDirection
         ? inputOperationQueueRef.current?.captureInteractionEpoch()
         : undefined;
       enqueueInputOperation(async (waited) => {
         // The gesture applied before input that waited is older than it.
-        if (waited && verticalDirection) {
+        if ((waited || replayed) && verticalDirection) {
           interactionEpoch = inputOperationQueueRef.current?.captureInteractionEpoch();
         }
         if (!verticalDirection) verticalCaretGoalRef.current.reset();
         if (!session) return;
+        if (replayed && !ensureSelection()) return;
         const queryResolver = resolveDisplayListQueriesRef.current;
         const currentQueries = displayListQueriesRef.current;
         const querySnapshot = verticalDirection
@@ -1127,6 +1133,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       displayPositionToLoc,
       enqueueInputOperation,
       ensureSelection,
+      holdOperation,
       inputPositionMap,
       isCurrentInput,
       locToDisplayPosition,
@@ -1177,8 +1184,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ]
   );
 
-  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection });
-  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection };
+  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection });
+  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection };
   useLayoutEffect(() => {
     if ((readOnly || !enabled || (!holdInput && !session)) &&
       (heldInputRef.current.entries.length > 0 || pendingSelectionsRef.current.length > 0 || compositionHeldRef.current)) {
@@ -1201,6 +1208,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       for (const entry of entries) {
         const handlers = inputHandlersRef.current;
         if (entry.kind === 'selection') handlers.replaySelection(entry);
+        else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
         else if (entry.kind === 'text') handlers.insertText(entry.text);
         else if (entry.kind === 'split') handlers.splitParagraph();
         else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
@@ -1346,8 +1354,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
-      if (holdInput &&
-        ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab'].includes(event.key)) {
+      if (holdInput && event.key === 'Tab') {
         event.preventDefault();
         return;
       }

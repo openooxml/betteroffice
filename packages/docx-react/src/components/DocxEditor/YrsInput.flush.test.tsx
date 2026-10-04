@@ -162,11 +162,33 @@ test('opening input holds both text paths, select-all, deletes and splits until 
   expect(input.current!.hasPendingInput()).toBe(true);
   view.rerender(inputFor(full, input, resident, undefined, { holdInput: false, inputScope: 1 }));
   await act(async () => { await input.current!.flushPendingInput(); });
-  expect(full.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(['X', 'P', 'Q']);
+  expect(full.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(['', 'P', 'QY']);
   expect(full.selection()?.head.offset).toBe(1);
   expect(text(preview)).toBe('Seed');
   expect(input.current!.hasPendingInput()).toBe(false);
   expect(resident.mock.calls).toEqual([['AB'], ['XY']]);
+});
+
+test('held navigation replays between text on the full session', async () => {
+  const preview = await seededSession();
+  const full = await createYrsSession();
+  sessions.push(full);
+  const { paraId } = full.createStory('body', 'abc');
+  full.setSelection({ story: 'body', paraId, offset: 3 });
+  const input = createRef<YrsInputRef>();
+  const resident = mock(async (_text: string) => null);
+  const view = render(inputFor(preview, input, resident, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input');
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(textarea, { key: 'ArrowLeft' })).toBe(false);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  expect(text(preview)).toBe('Seed');
+  view.rerender(inputFor(full, input, resident, undefined, { inputScope: 1 }));
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(text(full)).toBe('abcBA');
+  expect(full.selection()?.head.offset).toBe(4);
+  expect(input.current!.hasPendingInput()).toBe(false);
+  expect(resident.mock.calls).toEqual([['A'], ['B']]);
 });
 
 test('held selection deletion follows select-all on the full session', async () => {

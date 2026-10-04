@@ -323,6 +323,7 @@ export function useYrsCoreSession(
   const [session, setSession] = useState<YrsSession | null>(null);
   const [sessionGeneration, setSessionGeneration] = useState<number | null>(null);
   const [replicaReady, setReplicaReady] = useState(true);
+  const [replicaRequestVersion, setReplicaRequestVersion] = useState(0);
   const [workerProposalsReady, setWorkerProposalsReady] = useState(false);
   const workerOpenRef = useRef(workerOpen);
   workerOpenRef.current = workerOpen;
@@ -629,7 +630,10 @@ export function useYrsCoreSession(
             const source = bytes;
             const gate = { reached: false, wanted: eagerReplica };
             const request = (): void => {
-              gate.wanted = true;
+              if (!gate.wanted) {
+                gate.wanted = true;
+                setReplicaRequestVersion((version) => version + 1);
+              }
               if (gate.reached) startReplicaRef.current?.();
             };
             const pending = deferWorkerOpenReplica(
@@ -845,7 +849,8 @@ export function useYrsCoreSession(
       session !== sessionRef.current ||
       !pending?.pending ||
       !startReplicaRef.current ||
-      previewing
+      previewing ||
+      (hydrateOnDemandRef.current && !replicaGateRef.current?.wanted)
     ) return;
     const visibilityDocument = globalThis.document;
     const controller = new AbortController();
@@ -889,6 +894,7 @@ export function useYrsCoreSession(
     session,
     hasOwnWorkerFrame,
     openReplicaGate,
+    replicaRequestVersion,
     workerOpen?.hydrateOnDemand,
     previewing,
     handoffFrom,
@@ -909,6 +915,9 @@ export function useYrsCoreSession(
     }
     const retiring = retiringRef.current;
     if (retiring && engine === sessionRef.current && engine !== retiring) retirePreview(retiring);
+    if (engine === sessionRef.current && !previewingRef.current && hydrateOnDemandRef.current) {
+      revisionQueryRef.current?.();
+    }
   }, [retirePreview]);
 
   const failOpening = useCallback(
