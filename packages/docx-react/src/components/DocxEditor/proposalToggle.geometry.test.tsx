@@ -1,20 +1,16 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef, useLayoutEffect } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
-import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
-import type {
-  ResidentEngineWorkerHostModule,
-  ResidentEngineWorkerRequest,
-  ResidentEngineWorkerResponse,
-} from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { takePreloadedResidentEngineWorker, type YrsSession } from '@betteroffice/docx/yrs';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
-  createResidentEngineSession,
-  type ResidentEngineSession,
-} from '../../../../docx/src/yrs/residentEngineSession';
+  residentWorkerFactory,
+  type InProcessResidentWorker,
+} from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 import {
   DocxEditor,
   defineDocxPlugin,
@@ -27,58 +23,47 @@ import { awaitWorkerOpenReplica, requestWorkerOpenReplica } from './internals/wo
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
-const originalWorker = globalThis.Worker;
 const restores: Array<() => void> = [];
-const nativeSessions: ResidentEngineSession[] = [];
-
-type WorkerScope = {
-  onmessage: ((event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => void) | null;
-  onmessageerror: (() => void) | null;
-  postMessage(response: ResidentEngineWorkerResponse): void;
-};
-let startWorker: (scope: WorkerScope, harness: {
-  createSession: typeof createResidentEngineSession;
-}) => void;
+const workers: InProcessResidentWorker[] = [];
+const sessions: YrsSession[] = [];
+let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
+const font = readFileSync(resolve(
+  import.meta.dir, '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+));
 
 beforeAll(async () => {
+  await preloadEditWasm(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
+  ))));
+  startWorker = await residentWorkerFactory();
+});
+
+beforeEach(() => {
+  const originalWorker = globalThis.Worker;
+  restores.push(() => { globalThis.Worker = originalWorker; });
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  restores.push(() => {
+    if (fonts) Object.defineProperty(document, 'fonts', fonts);
+    else Reflect.deleteProperty(document, 'fonts');
+  });
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
     configurable: true,
     value: { addEventListener() {}, removeEventListener() {}, ready: Promise.resolve() },
   });
-  await preloadEditWasm(new Uint8Array(readFileSync(resolve(
-    import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
-  ))));
-  const replacements: Record<string, string> = {
-    './residentEngineSession': 'export const createResidentEngineSession = (...args) => harness.createSession(...args);',
-    './wasm/index': 'export const preloadEditWasm = async () => {}; export const preloadEditWasmFrom = async () => {};',
-  };
-  const bundle = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, '../../../../docx/src/yrs/residentEngineWorker.ts')],
-    target: 'bun',
-    format: 'iife',
-    plugins: [{
-      name: 'proposal-toggle-worker',
-      setup(build) {
-        build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
-          importer.endsWith('/residentEngineWorker.ts') && path in replacements
-            ? { path, namespace: 'toggle-worker' } : undefined
-        );
-        build.onLoad({ filter: /.*/, namespace: 'toggle-worker' }, ({ path }) => ({
-          contents: replacements[path]!, loader: 'js',
-        }));
-      },
-    }],
-  });
-  if (!bundle.success) throw new AggregateError(bundle.logs, 'Worker test bundle failed');
-  startWorker = new Function('self', 'harness', await bundle.outputs[0]!.text()) as typeof startWorker;
 });
 
 afterEach(() => {
-  cleanup();
-  takePreloadedResidentEngineWorker()?.destroy();
-  globalThis.Worker = originalWorker;
-  for (const restore of restores.splice(0).reverse()) restore();
-  for (const session of nativeSessions.splice(0)) session.destroy();
+  try {
+    cleanup();
+  } finally {
+    takePreloadedResidentEngineWorker()?.destroy();
+    for (const worker of workers.splice(0)) {
+      worker.terminate();
+      for (const session of worker.sessions) session.destroy();
+    }
+    for (const session of sessions.splice(0)) session.destroy();
+    for (const restore of restores.splice(0).reverse()) restore();
+  }
 });
 
 afterAll(async () => {
@@ -86,39 +71,17 @@ afterAll(async () => {
 });
 
 function installWorker() {
-  const posted: ResidentEngineWorkerRequest[] = [];
-  class InProcessWorker {
-    onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
-    onerror: ((event: ErrorEvent) => void) | null = null;
-    onmessageerror: ((event: MessageEvent) => void) | null = null;
-    private stopped = false;
-    private scope: WorkerScope = {
-      onmessage: null,
-      onmessageerror: null,
-      postMessage: (response) => queueMicrotask(() => {
-        if (!this.stopped) this.onmessage?.({ data: response } as MessageEvent<ResidentEngineWorkerResponse>);
-      }),
-    };
+  const compile = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  restores.push(() => compile.mockRestore());
+  globalThis.Worker = class {
     constructor() {
-      startWorker(this.scope, {
-        createSession: async (limit, clientId) => {
-          const session = await createResidentEngineSession(limit, clientId);
-          nativeSessions.push(session);
-          return session;
-        },
-      });
+      const worker = startWorker();
+      workers.push(worker);
+      return worker;
     }
-    postMessage(message: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule): void {
-      if ('id' in message) posted.push(message);
-      queueMicrotask(() => { if (!this.stopped) this.scope.onmessage?.({ data: message }); });
-    }
-    terminate(): void {
-      this.scope.onmessage?.({ data: { id: -1, type: 'destroy' } });
-      this.stopped = true;
-    }
-  }
-  globalThis.Worker = InProcessWorker as unknown as typeof Worker;
-  return posted;
+  } as unknown as typeof Worker;
 }
 
 function documentBuffer(): ArrayBuffer {
@@ -160,7 +123,7 @@ type Sample = {
 };
 
 test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geometry with a distant caret on page %s', async (caretPage) => {
-  const posted = installWorker();
+  installWorker();
   const ref = createRef<DocxEditorRef>();
   let geometry: DocxPluginGeometry | null = null;
   let recording = false;
@@ -212,9 +175,12 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
   const host = document.createElement('div');
   document.body.append(host);
   restores.push(() => host.remove());
+  const provider = { resolve: () => () => Promise.resolve(font.buffer.slice(
+    font.byteOffset, font.byteOffset + font.byteLength
+  ) as ArrayBuffer) };
   render(<DocxEditor
     ref={ref} documentBuffer={documentBuffer()} allowHostProposals experimentalWorkerOpen
-    plugins={[plugin]} onPluginError={(error) => errors.push(error)}
+    measurementFontProvider={provider} plugins={[plugin]} onPluginError={(error) => errors.push(error)}
   />, { container: host });
   const scrollElement = await waitFor(() => {
     const element = host.querySelector<HTMLElement>('.docx-editor__scroll-container');
@@ -234,12 +200,18 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
   });
   await waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy());
   await act(async () => { await ref.current!.whenLayoutComplete(); });
+  const worker = workers.find((worker) => worker.requests.includes('open'))!;
+  expect(worker).toBeDefined();
+  const assertWorkerAvailable = () => expect(ref.current!.getMemoryStats().worker).not.toBeNull();
+  assertWorkerAvailable();
   const editor = ref.current!.getEditorRef()!;
   const session = editor.getYrsSession()!;
+  sessions.push(session);
   await act(async () => {
     requestWorkerOpenReplica(session);
     await awaitWorkerOpenReplica(session);
   });
+  assertWorkerAvailable();
   await act(async () => {
     const caret = session.paragraphs('body')[caretPage]!;
     session.setSelection({ story: 'body', paraId: caret.paraId, offset: 0 });
@@ -274,11 +246,13 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
   const selection = session.selection();
   const failures: unknown[] = [];
   for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
+    assertWorkerAvailable();
     const initialScroll = scrollTop;
     samples.length = 0;
     recording = true;
     sample();
     const before = await ref.current!.getProposals();
+    const postedBefore = worker.requests.length;
     await act(async () => {
       expect(await ref.current!.setProposalStates({
         expectVersion: before.version, expectPreviewVersion: before.previewVersion,
@@ -289,6 +263,8 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
     await frames();
     sample();
     recording = false;
+    assertWorkerAvailable();
+    expect(worker.requests.length).toBeGreaterThan(postedBefore);
     const settled = samples.at(-1)!;
     expect(settled).toBeDefined();
     expect(settled.previewVersion).toBe(before.previewVersion + 1);
@@ -307,8 +283,9 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
     fireEvent.scroll(scrollElement);
     await frames();
   }
-  expect(posted.some(({ type }) => type === 'open')).toBe(true);
-  expect(posted.some(({ type }) => type === 'sync')).toBe(true);
+  assertWorkerAvailable();
+  expect(worker.requests).toContain('open');
+  expect(worker.requests).toContain('sync');
   expect(errors).toEqual([]);
   expect(failures).toEqual([]);
 }, 30_000);
