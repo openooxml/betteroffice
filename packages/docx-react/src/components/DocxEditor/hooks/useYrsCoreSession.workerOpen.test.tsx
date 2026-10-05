@@ -728,11 +728,14 @@ test('metadata hydration bootstraps the peer and matches compatibility paragraph
   try {
     const { pending } = await peer.start();
     expect(peer.snapshot.metadata).toBeDefined();
+    const snapshot = peer.snapshot;
+    const host = peer.result.current.host;
+    if (snapshot.metadata === undefined || host === null) throw new Error('Expected peer metadata and host');
     expect(peer.bootstrap).toHaveBeenCalledTimes(1);
-    expect(peer.bootstrap.mock.calls[0]![0]).toBe(peer.snapshot.state);
-    expect(peer.bootstrap.mock.calls[0]![1]).toBe(peer.snapshot.metadata);
+    expect(peer.bootstrap.mock.calls[0]![0]).toBe(snapshot.state);
+    expect(peer.bootstrap.mock.calls[0]![1]).toBe(snapshot.metadata);
     expect(peer.bootstrap.mock.calls[0]![2]).toEqual(peer.source);
-    expect(peer.bootstrap.mock.calls[0]![3]).toBe(peer.result.current.host);
+    expect(peer.bootstrap.mock.calls[0]![3]).toBe(host);
     expect(peer.open).not.toHaveBeenCalled();
     expect(peer.load).not.toHaveBeenCalled();
     expect(peer.result.current.core.replicaReady).toBe(false);
@@ -771,7 +774,7 @@ test('metadata absence uses the captured state and warns exactly once with the r
     const { pending } = await peer.start();
     expect(peer.bootstrap).not.toHaveBeenCalled();
     expect(peer.open).toHaveBeenCalledTimes(1);
-    expect(peer.open).toHaveBeenCalledWith(peer.source, false, undefined);
+    expect(peer.open).toHaveBeenCalledWith(peer.source, false);
     expect(peer.load).not.toHaveBeenCalled();
     await peer.finish(pending);
     expect(peer.load).toHaveBeenCalledTimes(1);
@@ -798,7 +801,7 @@ test.each(['bootstrap-rejection', 'unsupported-version', 'shape-mismatch'] as co
       }
       const { pending } = await peer.start();
       expect(peer.bootstrap).toHaveBeenCalledTimes(1);
-      expect(peer.open).toHaveBeenCalledWith(peer.source, false, undefined);
+      expect(peer.open).toHaveBeenCalledWith(peer.source, false);
       expect(peer.load).not.toHaveBeenCalled();
       await peer.finish(pending);
       expect(peer.load).toHaveBeenCalledTimes(1);

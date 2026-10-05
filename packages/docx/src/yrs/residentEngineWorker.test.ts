@@ -3856,6 +3856,7 @@ describe('resident worker opening', () => {
     expect(reply).toEqual({
       id: reply.id, ok: true, state: new Uint8Array([7, 8]).buffer,
       version: 'opened', proposals: { previewVersion: 0, entries: [] },
+      memory: w.harness.memories,
     });
     expect(metadata).not.toHaveBeenCalled();
     expect(w.transfers.get(reply.id)).toEqual([reply.state]);
