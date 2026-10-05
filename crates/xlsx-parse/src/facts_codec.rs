@@ -8,7 +8,8 @@ use crate::package_facts::{
 };
 use crate::{ParseError, PreservedPackage, SheetVisibility, SourceSheetKind};
 
-const MAX_RECORD_BYTES: usize = 512 * 1024 * 1024;
+#[doc(hidden)]
+pub const SNAPSHOT_RECORD_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Default)]
 #[doc(hidden)]
@@ -17,6 +18,7 @@ pub struct PackageFactsEncoder {
     record_index: usize,
     pending: Vec<u8>,
     offset: usize,
+    preflight_done: bool,
 }
 
 impl PackageFactsEncoder {
@@ -35,6 +37,25 @@ impl PackageFactsEncoder {
         let charts = self
             .chart_parts
             .get_or_insert_with(|| chart_part_indices(package));
+        if !self.preflight_done {
+            for index in 0..package.source_sheet_count() {
+                let mut writer = Writer::default();
+                writer.uint(1);
+                encode_sheet(&mut writer, &sheet_facts(package, index));
+                check_record_length(writer.0.len())?;
+            }
+            for reference in package.unpatchable_references() {
+                let mut writer = Writer::default();
+                writer.uint(2);
+                encode_reference(&mut writer, &reference.package_facts());
+                check_record_length(writer.0.len())?;
+            }
+            for &index in charts.iter() {
+                let (path, bytes) = &package.parts[index];
+                check_record_length(chart_record_length(path.len(), bytes.len()))?;
+            }
+            self.preflight_done = true;
+        }
         if self.offset == self.pending.len() {
             let sheets = package.source_sheet_count();
             let references = package.unpatchable_references();
@@ -79,6 +100,24 @@ impl PackageFactsEncoder {
         if max_bytes == 0 {
             return Err(malformed("facts byte budget must be positive"));
         }
+        if !self.preflight_done {
+            for sheet in &facts.sheets {
+                let mut writer = Writer::default();
+                writer.uint(1);
+                encode_sheet(&mut writer, sheet);
+                check_record_length(writer.0.len())?;
+            }
+            for reference in &facts.references {
+                let mut writer = Writer::default();
+                writer.uint(2);
+                encode_reference(&mut writer, reference);
+                check_record_length(writer.0.len())?;
+            }
+            for (path, bytes) in &facts.charts {
+                check_record_length(chart_record_length(path.len(), bytes.len()))?;
+            }
+            self.preflight_done = true;
+        }
         if self.offset == self.pending.len() {
             let sheets = facts.sheets.len();
             let references = facts.references.len();
@@ -114,9 +153,7 @@ impl PackageFactsEncoder {
     }
 
     fn set_record(&mut self, writer: Writer) -> Result<(), ParseError> {
-        if writer.0.len() > MAX_RECORD_BYTES {
-            return Err(malformed("facts record exceeds byte limit"));
-        }
+        check_record_length(writer.0.len())?;
         let mut framed = Writer::default();
         framed.bytes(&writer.0);
         self.pending = framed.0;
@@ -130,6 +167,30 @@ impl PackageFactsEncoder {
         let payload = self.pending[self.offset..end].to_vec();
         self.offset = end;
         payload
+    }
+}
+
+fn chart_record_length(path: usize, bytes: usize) -> usize {
+    let var_length = |mut value: usize| {
+        let mut length = 1;
+        while value >= 128 {
+            value >>= 7;
+            length += 1;
+        }
+        length
+    };
+    1usize
+        .saturating_add(var_length(path))
+        .saturating_add(path)
+        .saturating_add(var_length(bytes))
+        .saturating_add(bytes)
+}
+
+fn check_record_length(length: usize) -> Result<(), ParseError> {
+    if length > SNAPSHOT_RECORD_MAX_BYTES {
+        Err(malformed("facts record exceeds byte limit"))
+    } else {
+        Ok(())
     }
 }
 
@@ -281,7 +342,7 @@ impl PackageFactsBuilder {
                 if byte & 0x80 == 0 {
                     let length = usize::try_from(self.length)
                         .map_err(|_| malformed("facts length overflows"))?;
-                    if length == 0 || length > MAX_RECORD_BYTES {
+                    if length == 0 || length > SNAPSHOT_RECORD_MAX_BYTES {
                         return Err(malformed("invalid facts record length"));
                     }
                     self.record_length = Some(length);
@@ -762,5 +823,28 @@ mod tests {
             assert!(builder.finish().is_err());
         }
         assert!(PackageFactsEncoder::new().next(&package, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_oversized_facts_record_refuses_capture_before_chunks() {
+        let facts = PackageFacts {
+            sheets: Vec::new(),
+            references: Vec::new(),
+            any_uncached_formula: false,
+            charts: vec![(
+                "xl/charts/chart1.xml".to_owned(),
+                vec![0; SNAPSHOT_RECORD_MAX_BYTES + 1],
+            )],
+        };
+        let mut encoder = PackageFactsEncoder::new();
+        assert!(encoder.next_from_facts(&facts, 16_384).is_err());
+        assert_eq!(encoder.record_index, 0);
+        assert!(encoder.pending.is_empty());
+        assert_eq!(encoder.offset, 0);
     }
 }

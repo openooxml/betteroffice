@@ -31,6 +31,7 @@ use yrs::{
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod snapshot;
+pub(crate) mod snapshot_validation;
 
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";

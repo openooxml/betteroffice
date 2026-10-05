@@ -33,6 +33,7 @@ pub(crate) enum SplitError {
     MissingDependency,
     RetainedDeletion,
     OversizedStruct,
+    SharedText,
 }
 
 impl SplitError {
@@ -48,6 +49,7 @@ impl SplitError {
             Self::MissingDependency => "missing_dependency",
             Self::RetainedDeletion => "retained_deletion",
             Self::OversizedStruct => "oversized_struct",
+            Self::SharedText => "shared_text_is_not_supported",
         }
     }
 }
@@ -60,10 +62,12 @@ struct Client {
     delete_count: u32,
 }
 
-struct Struct {
+struct Struct<'a> {
     len: u32,
     kind: u8,
     dependencies: [Option<(u64, u32)>; 3],
+    root: Option<&'a str>,
+    key: Option<&'a str>,
 }
 
 pub(crate) fn split_update_v1(
@@ -411,7 +415,16 @@ impl UpdateCursor {
         max_records: usize,
         max_bytes: usize,
     ) -> Result<Option<UpdatePart>, SplitError> {
-        self.next_inner(update, max_records, max_bytes, false)
+        self.next_inner(update, max_records, max_bytes, false, false)
+    }
+
+    pub(crate) fn next_admitted(
+        &mut self,
+        update: &[u8],
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<Option<UpdatePart>, SplitError> {
+        self.next_inner(update, max_records, max_bytes, false, true)
     }
 
     fn next_oversized(
@@ -420,7 +433,7 @@ impl UpdateCursor {
         max_records: usize,
         max_bytes: usize,
     ) -> Result<Option<UpdatePart>, SplitError> {
-        self.next_inner(update, max_records, max_bytes, true)
+        self.next_inner(update, max_records, max_bytes, true, false)
     }
 
     fn next_inner(
@@ -429,6 +442,7 @@ impl UpdateCursor {
         max_records: usize,
         max_bytes: usize,
         allow_oversized: bool,
+        refuse_text: bool,
     ) -> Result<Option<UpdatePart>, SplitError> {
         if max_records == 0 || max_bytes == 0 {
             return Err(SplitError::InvalidLimit);
@@ -437,6 +451,12 @@ impl UpdateCursor {
         let mut scanner = Scanner::new(update);
         scanner.allow_maps = true;
         scanner.pos = next.position;
+        if !allow_oversized {
+            scanner.limit = scanner.pos.saturating_add(max_bytes).min(update.len());
+            scanner.refuse_text = refuse_text;
+            scanner.allocation_left = max_bytes;
+            scanner.measured = refuse_text;
+        }
         if next.phase == 0 {
             next.clients = scanner.count()?;
             next.phase = 1;
@@ -500,7 +520,20 @@ impl UpdateCursor {
             let mut next_clock = clock;
             while count < remaining && (count as usize) < max_records {
                 let length = if next.phase == 1 {
-                    scanner.block()?.len
+                    let overhead = run_size(client, clock, count + 1);
+                    if !allow_oversized {
+                        scanner.limit = start
+                            .saturating_add(max_bytes.saturating_sub(overhead))
+                            .min(update.len());
+                    }
+                    match scanner.block() {
+                        Ok(block) => block.len,
+                        Err(SplitError::OversizedStruct) if count != 0 => {
+                            scanner.pos = end;
+                            break;
+                        }
+                        Err(failure) => return Err(failure),
+                    }
                 } else {
                     scanner.delete_range()?;
                     0
@@ -569,10 +602,32 @@ impl UpdateCursor {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum SnapshotParent {
+    Root(std::sync::Arc<str>),
+    Nested(u64, u32),
+}
+
+impl SnapshotParent {
+    pub(crate) fn branch(&self) -> yrs::BranchID {
+        match self {
+            Self::Root(name) => yrs::BranchID::Root(name.clone()),
+            Self::Nested(client, clock) => {
+                yrs::BranchID::Nested(yrs::ID::new(yrs::block::ClientID::new(*client), *clock))
+            }
+        }
+    }
+}
+
+pub(crate) type SnapshotKeys = BTreeSet<(SnapshotParent, std::sync::Arc<str>)>;
+
 #[derive(Default)]
 pub(crate) struct CausalState {
     clocks: BTreeMap<u64, u32>,
     kinds: BTreeMap<(u64, u32), (u32, u8)>,
+    locations: BTreeMap<(u64, u32), (u32, SnapshotParent, Option<std::sync::Arc<str>>)>,
+    keys: SnapshotKeys,
+    order_seen: bool,
 }
 
 impl CausalState {
@@ -580,7 +635,12 @@ impl CausalState {
         let mut records = 0;
         let mut bytes = 0;
         while records < max_records {
-            let cost = if !self.kinds.is_empty() {
+            let cost = if let Some((_, (_, parent, key))) = self.locations.first_key_value() {
+                96 + match parent {
+                    SnapshotParent::Root(name) => name.len(),
+                    _ => 0,
+                } + key.as_ref().map_or(0, |key| key.len())
+            } else if !self.kinds.is_empty() {
                 std::mem::size_of::<((u64, u32), (u32, u8))>()
             } else if !self.clocks.is_empty() {
                 std::mem::size_of::<(u64, u32)>()
@@ -590,7 +650,7 @@ impl CausalState {
             if cost > max_bytes.saturating_sub(bytes) {
                 break;
             }
-            if self.kinds.pop_first().is_none() {
+            if self.locations.pop_first().is_none() && self.kinds.pop_first().is_none() {
                 self.clocks.pop_first();
             }
             records += 1;
@@ -600,7 +660,7 @@ impl CausalState {
     }
 
     pub(crate) fn final_clock(&self) -> Option<(u64, u32)> {
-        if self.kinds.is_empty() {
+        if self.kinds.is_empty() && self.locations.is_empty() {
             self.clocks
                 .first_key_value()
                 .map(|(&client, &clock)| (client, clock))
@@ -610,7 +670,11 @@ impl CausalState {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.kinds.is_empty() && self.clocks.is_empty()
+        self.kinds.is_empty() && self.clocks.is_empty() && self.locations.is_empty()
+    }
+
+    pub(crate) fn take_keys(&mut self) -> SnapshotKeys {
+        std::mem::take(&mut self.keys)
     }
 
     fn waiting_on(&self, update: &[u8]) -> Result<(u64, u32), SplitError> {
@@ -680,6 +744,44 @@ impl CausalState {
                     {
                         return Err(SplitError::MissingDependency);
                     }
+                }
+                let location = if let Some(root) = block.root {
+                    Some((SnapshotParent::Root(root.into()), block.key.map(Into::into)))
+                } else if let Some((parent, clock)) = block.dependencies[2] {
+                    Some((
+                        SnapshotParent::Nested(parent, clock),
+                        block.key.map(Into::into),
+                    ))
+                } else {
+                    block.dependencies[..2]
+                        .iter()
+                        .flatten()
+                        .find_map(|&(parent, at)| {
+                            self.locations
+                                .range(..=(parent, at))
+                                .next_back()
+                                .filter(|((client, start), (len, _, _))| {
+                                    *client == parent && at - *start < *len
+                                })
+                                .map(|(_, (_, parent, key))| (parent.clone(), key.clone()))
+                        })
+                };
+                if let Some((parent, key)) = location {
+                    if matches!(&parent, SnapshotParent::Root(name) if name.as_ref() == "xlsx:sheet-order")
+                    {
+                        if self.order_seen
+                            || block.kind != BLOCK_ITEM_ANY_REF_NUMBER
+                            || key.is_some()
+                        {
+                            return Err(SplitError::UnsupportedContent(block.kind));
+                        }
+                        self.order_seen = true;
+                    }
+                    if let Some(key) = &key {
+                        self.keys.insert((parent.clone(), key.clone()));
+                    }
+                    self.locations
+                        .insert((client, clock), (block.len, parent, key));
                 }
                 if matches!(block.kind, BLOCK_GC_REF_NUMBER | BLOCK_ITEM_TYPE_REF_NUMBER) {
                     self.kinds.insert((client, clock), (block.len, block.kind));
@@ -809,6 +911,10 @@ struct Scanner<'a> {
     bytes: &'a [u8],
     pos: usize,
     allow_maps: bool,
+    limit: usize,
+    refuse_text: bool,
+    allocation_left: usize,
+    measured: bool,
 }
 
 impl<'a> Scanner<'a> {
@@ -817,19 +923,37 @@ impl<'a> Scanner<'a> {
             bytes,
             pos: 0,
             allow_maps: false,
+            limit: bytes.len(),
+            refuse_text: false,
+            allocation_left: usize::MAX,
+            measured: false,
         }
     }
 
     fn byte(&mut self) -> Result<u8, SplitError> {
         let byte = *self.bytes.get(self.pos).ok_or(SplitError::Malformed)?;
+        if self.pos >= self.limit {
+            return Err(SplitError::OversizedStruct);
+        }
         self.pos += 1;
+        #[cfg(test)]
+        if self.measured {
+            crate::snapshot::step::scan(1);
+        }
         Ok(byte)
     }
 
     fn take(&mut self, len: usize) -> Result<&'a [u8], SplitError> {
         let end = self.pos.checked_add(len).ok_or(SplitError::Malformed)?;
         let bytes = self.bytes.get(self.pos..end).ok_or(SplitError::Malformed)?;
+        if end > self.limit {
+            return Err(SplitError::OversizedStruct);
+        }
         self.pos = end;
+        #[cfg(test)]
+        if self.measured {
+            crate::snapshot::step::scan(len);
+        }
         Ok(bytes)
     }
 
@@ -941,10 +1065,24 @@ impl<'a> Scanner<'a> {
                 if count > self.bytes.len() - self.pos {
                     return Err(SplitError::Malformed);
                 }
+                if tag == 118 {
+                    let allocation = count.checked_mul(256).ok_or(SplitError::OversizedStruct)?;
+                    if allocation > self.allocation_left {
+                        return Err(SplitError::OversizedStruct);
+                    }
+                    self.allocation_left -= allocation;
+                }
                 let mut keys = BTreeSet::new();
                 for _ in 0..count {
-                    if tag == 118 && !keys.insert(self.string()?) {
-                        return Err(SplitError::Malformed);
+                    if tag == 118 {
+                        let key = self.string()?;
+                        #[cfg(test)]
+                        if self.measured {
+                            crate::snapshot::step::allocate(256);
+                        }
+                        if !keys.insert(key) {
+                            return Err(SplitError::Malformed);
+                        }
                     }
                     self.any(depth + 1)?;
                 }
@@ -957,10 +1095,12 @@ impl<'a> Scanner<'a> {
         Ok(())
     }
 
-    fn block(&mut self) -> Result<Struct, SplitError> {
+    fn block(&mut self) -> Result<Struct<'a>, SplitError> {
         let info = self.byte()?;
         let kind = info & 0x0f;
         let mut dependencies = [None; 3];
+        let mut root = None;
+        let mut key = None;
         let len = if info == BLOCK_GC_REF_NUMBER || info == BLOCK_SKIP_REF_NUMBER {
             self.var_u32()?
         } else {
@@ -977,12 +1117,12 @@ impl<'a> Scanner<'a> {
                 match self.var_u32()? {
                     0 => dependencies[2] = Some(self.id()?),
                     1 => {
-                        self.string()?;
+                        root = Some(self.string()?);
                     }
                     _ => return Err(SplitError::Malformed),
                 }
                 if info & HAS_PARENT_SUB != 0 {
-                    self.string()?;
+                    key = Some(self.string()?);
                 }
             }
             match kind {
@@ -999,20 +1139,33 @@ impl<'a> Scanner<'a> {
                     1
                 }
                 BLOCK_ITEM_STRING_REF_NUMBER => {
+                    if self.refuse_text {
+                        return Err(SplitError::SharedText);
+                    }
                     u32::try_from(self.string()?.encode_utf16().count())
                         .map_err(|_| SplitError::Malformed)?
                 }
                 BLOCK_ITEM_EMBED_REF_NUMBER => {
+                    if self.refuse_text {
+                        return Err(SplitError::SharedText);
+                    }
                     self.json()?;
                     1
                 }
                 BLOCK_ITEM_FORMAT_REF_NUMBER => {
+                    if self.refuse_text {
+                        return Err(SplitError::SharedText);
+                    }
                     self.string()?;
                     self.json()?;
                     1
                 }
                 BLOCK_ITEM_TYPE_REF_NUMBER => {
-                    match self.byte()? {
+                    let type_ref = self.byte()?;
+                    if self.refuse_text && matches!(type_ref, TYPE_REFS_TEXT | TYPE_REFS_XML_TEXT) {
+                        return Err(SplitError::SharedText);
+                    }
+                    match type_ref {
                         TYPE_REFS_ARRAY
                         | TYPE_REFS_MAP
                         | TYPE_REFS_TEXT
@@ -1050,6 +1203,8 @@ impl<'a> Scanner<'a> {
             len,
             kind,
             dependencies,
+            root,
+            key,
         })
     }
 

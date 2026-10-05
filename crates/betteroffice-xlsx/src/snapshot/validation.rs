@@ -33,6 +33,8 @@ fn admit(bytes: usize, budget: SnapshotBudget) -> SnapshotResult<usize> {
             "snapshot validation exceeds advance byte budget",
         ))
     } else {
+        #[cfg(test)]
+        crate::snapshot::step::record(1, bytes);
         Ok(bytes)
     }
 }
@@ -41,6 +43,7 @@ impl ModelValidation {
     pub(super) fn advance(
         &mut self,
         model: &Workbook,
+        package_present: bool,
         budget: SnapshotBudget,
     ) -> SnapshotResult<(bool, usize, usize)> {
         if model.sheets.is_empty() {
@@ -86,6 +89,8 @@ impl ModelValidation {
                         budget,
                     )?;
                     check(validate_sheet_name(&sheet.name))?;
+                    #[cfg(test)]
+                    crate::snapshot::step::allocate(bytes);
                     if !self.names.insert(sheet.name.to_lowercase()) {
                         return Err(SnapshotError::new("snapshot has duplicate sheet names"));
                     }
@@ -215,6 +220,12 @@ impl ModelValidation {
                 }
                 7 => {
                     if let Some(chart) = sheet.charts.get(self.index) {
+                        if !package_present {
+                            admit(1, budget)?;
+                            return Err(SnapshotError::new(
+                                "snapshot charts require a source package",
+                            ));
+                        }
                         if self.other == 0 {
                             let bytes = admit(
                                 chart
@@ -224,6 +235,8 @@ impl ModelValidation {
                                     .saturating_add(128),
                                 budget,
                             )?;
+                            #[cfg(test)]
+                            crate::snapshot::step::allocate(bytes);
                             if chart.refs.len() > MAX_CHART_REFS_PER_CHART
                                 || !self
                                     .charts
@@ -256,6 +269,7 @@ impl ModelValidation {
                         }
                         self.index += 1;
                         self.other = 0;
+                        admit(0, budget)?;
                         return Ok((false, 1, 0));
                     }
                     self.phase = 8;
@@ -271,6 +285,153 @@ impl ModelValidation {
                     self.index = 0;
                 }
                 _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsx_model::{
+        AnchorExtent, AnchorPos, CellRange, CellRef, ChartAnchor, ChartRef, ChartRefKind, Sheet,
+    };
+
+    fn chart(index: usize) -> SheetChart {
+        SheetChart {
+            part: "xl/charts/chart1.xml".to_owned(),
+            drawing: "xl/drawings/drawing1.xml".to_owned(),
+            anchor_index: index,
+            anchor: ChartAnchor::Absolute {
+                pos: AnchorPos::default(),
+                extent: AnchorExtent { cx: 1, cy: 1 },
+            },
+            refs: (0..32)
+                .map(|row| ChartRef {
+                    kind: ChartRefKind::Values,
+                    formula: format!("Data!$A${}", row + 1),
+                })
+                .collect(),
+        }
+    }
+
+    fn step(
+        validation: &mut ModelValidation,
+        model: &Workbook,
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<(bool, usize, usize)> {
+        crate::snapshot::step::reset();
+        let result = validation.advance(model, true, budget);
+        let work = crate::snapshot::step::current();
+        assert!(work.records <= budget.max_records(), "{work:?}");
+        assert!(work.bytes <= budget.max_bytes(), "{work:?}");
+        assert!(work.allocated_bytes <= budget.max_bytes(), "{work:?}");
+        if let Ok((_, records, bytes)) = &result {
+            assert_eq!(work.records, *records);
+            assert_eq!(work.bytes, *bytes);
+        }
+        result
+    }
+
+    #[test]
+    fn merge_pairs_validation_visits_and_allocations_are_bounded() {
+        let budget = SnapshotBudget::new(1, 16_384).unwrap();
+        for overlap in [false, true] {
+            let mut sheet = Sheet::new("Data");
+            sheet.merges = (0..32)
+                .map(|row| CellRange {
+                    start: CellRef::new(row * 2, 0),
+                    end: CellRef::new(row * 2, 1),
+                })
+                .collect();
+            if overlap {
+                sheet.merges[31] = sheet.merges[0];
+            }
+            let model = Workbook {
+                sheets: vec![sheet],
+                ..Workbook::default()
+            };
+            let mut validation = ModelValidation::default();
+            let mut pairs = 0;
+            let mut refused = false;
+            loop {
+                let pair = validation.phase == 6 && validation.other < validation.index;
+                match step(&mut validation, &model, budget) {
+                    Ok((ready, _, _)) => {
+                        pairs += usize::from(pair);
+                        if ready {
+                            break;
+                        }
+                    }
+                    Err(failure) => {
+                        assert!(overlap);
+                        assert_eq!(failure.to_string(), "snapshot merged ranges overlap");
+                        refused = true;
+                        break;
+                    }
+                }
+            }
+            assert_eq!(refused, overlap);
+            if !overlap {
+                assert!(pairs >= 32 * 31 / 2);
+                assert!(validation.names.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn chart_headers_references_and_index_retirement_are_bounded() {
+        let budget = SnapshotBudget::new(1, 16_384).unwrap();
+        for invalid in 0..4 {
+            let mut model = Workbook {
+                sheets: (0..32)
+                    .map(|index| Sheet::new(format!("Sheet{index}")))
+                    .collect(),
+                ..Workbook::default()
+            };
+            model.sheets[0].charts = (0..16).map(chart).collect();
+            match invalid {
+                1 => model.sheets[0].charts[15].part.clear(),
+                2 => model.sheets[0].charts[15].refs[31].formula = "\0".to_owned(),
+                3 => model.sheets[0].charts[15].drawing = "x".repeat(budget.max_bytes() + 1),
+                _ => {}
+            }
+            let mut validation = ModelValidation::default();
+            let mut headers = 0;
+            let mut references = 0;
+            let mut charts_retired = 0;
+            let mut names_retired = 0;
+            let mut refused = false;
+            loop {
+                let phase = validation.phase;
+                let charts = validation.charts.len();
+                let names = validation.names.len();
+                let header = phase == 7 && validation.other == 0 && validation.index < 16;
+                let reference = phase == 7 && (1..=32).contains(&validation.other);
+                match step(&mut validation, &model, budget) {
+                    Ok((ready, _, _)) => {
+                        headers += usize::from(header);
+                        references += usize::from(reference);
+                        charts_retired += charts.saturating_sub(validation.charts.len());
+                        names_retired += names.saturating_sub(validation.names.len());
+                        if ready {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        refused = true;
+                        break;
+                    }
+                }
+            }
+            assert_eq!(refused, invalid != 0);
+            if invalid == 0 {
+                assert!(headers >= 15);
+                assert_eq!(references, 16 * 32);
+                assert_eq!(charts_retired, 16);
+                assert_eq!(names_retired, 32);
+                assert!(validation.charts.is_empty());
+                assert!(validation.names.is_empty());
             }
         }
     }

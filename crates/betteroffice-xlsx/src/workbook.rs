@@ -982,7 +982,7 @@ impl Workbook {
     }
 
     /// The committed state a structured export reads.
-    pub(crate) fn export_source(&self) -> Result<ExportSource<'_>> {
+    pub(crate) fn try_export_source(&self) -> Result<ExportSource<'_>> {
         Ok(ExportSource {
             model: &self.model,
             package: self
@@ -999,6 +999,11 @@ impl Workbook {
             part_hashes: &self.source_part_hashes,
             sheet_ids: self.sheet_keys(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn export_source(&self) -> ExportSource<'_> {
+        self.try_export_source().unwrap()
     }
 
     pub fn into_model(self) -> WorkbookModel {

@@ -15,7 +15,7 @@ use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotR
 
 use super::*;
 
-trait Codec: Sized {
+pub(super) trait Codec: Sized {
     fn write(&self, w: &mut Writer);
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self>;
 }
@@ -656,6 +656,14 @@ impl AuthoritySnapshotEncoder {
             undo_stack: _,
             redo_stack: _,
         } = a;
+        let mut preflight = BaseCursor::default();
+        while let Some(record) = preflight.next(base) {
+            if record.len() > xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES {
+                return Err(SnapshotError::new(
+                    "authority base record exceeds byte limit",
+                ));
+            }
+        }
         let update = doc
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
@@ -997,13 +1005,15 @@ impl AuthorityHydrator {
         }
         let cursor = self.yrs_cursor.get_or_insert_with(UpdateCursor::default);
         if let Some(part) = cursor
-            .next(payload, budget.max_records(), budget.max_bytes())
-            .map_err(|failure| {
-                if failure == SplitError::OversizedStruct {
+            .next_admitted(payload, budget.max_records(), budget.max_bytes())
+            .map_err(|failure| match failure {
+                SplitError::OversizedStruct => {
                     SnapshotError::new("Yrs snapshot record exceeds advance byte budget")
-                } else {
-                    SnapshotError::new(format!("invalid Yrs snapshot: {}", failure.reason()))
                 }
+                SplitError::SharedText => {
+                    SnapshotError::new("shared Yrs text is not supported in workbook snapshots")
+                }
+                _ => SnapshotError::new(format!("invalid Yrs snapshot: {}", failure.reason())),
             })?
         {
             if has_pending(&self.doc) {
@@ -1107,6 +1117,10 @@ impl AuthorityHydrator {
         self.advance_base(budget)
     }
 
+    pub(crate) fn take_validation_keys(&mut self) -> crate::snapshot::yrs_split::SnapshotKeys {
+        self.causal.take_keys()
+    }
+
     pub(crate) fn finish_drained(self) -> SnapshotResult<WorkbookAuthority> {
         if !self.causal.is_empty() || !self.vector_validated {
             return Err(SnapshotError::new(
@@ -1187,6 +1201,11 @@ impl AuthorityHydrator {
         {
             crate::snapshot::step::record(records, bytes);
             crate::snapshot::step::drain(records);
+        }
+        if records == 0 && !self.causal.is_empty() {
+            return Err(SnapshotError::new(
+                "snapshot authority retirement exceeds advance byte budget",
+            ));
         }
         if self.causal.is_empty() {
             if self.final_vector_clients != 0 || self.final_vector_offset != self.state_vector.len()
@@ -2171,5 +2190,50 @@ mod tests {
                 "authority snapshot has pending Yrs state"
             );
         }
+    }
+}
+
+impl WorkbookAuthority {
+    pub(crate) fn validate_snapshot_model(
+        &self,
+        model: &WorkbookModel,
+        validation: &mut super::snapshot_validation::SnapshotValidation,
+        keys: &mut crate::snapshot::yrs_split::SnapshotKeys,
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<bool> {
+        validation.advance(self, model, keys, budget)
+    }
+}
+
+#[cfg(test)]
+impl AuthorityHydrator {
+    pub(crate) fn snapshot_vector_for_test(&self) -> StateVector {
+        self.doc.transact().state_vector()
+    }
+}
+
+#[cfg(test)]
+mod ceiling_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_oversized_base_record_refuses_capture_before_chunks() {
+        let workbook = crate::Workbook::from_model(WorkbookModel {
+            sheets: vec![Sheet::new("Data")],
+            ..WorkbookModel::default()
+        })
+        .unwrap();
+        let mut authority = workbook.authority;
+        Arc::make_mut(&mut authority.base)
+            .shared_strings
+            .push("a".repeat(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1));
+        let failure =
+            AuthoritySnapshotEncoder::new(&authority, SnapshotBudget::new(1, 16_384).unwrap())
+                .err()
+                .unwrap();
+        assert_eq!(
+            failure.to_string(),
+            "authority base record exceeds byte limit"
+        );
     }
 }

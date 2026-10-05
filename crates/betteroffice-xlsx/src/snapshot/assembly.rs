@@ -720,6 +720,24 @@ impl<'a> BlockReader<'a> {
         Ok(reader)
     }
 
+    fn identity(&mut self, guid: bool) -> SnapshotResult<()> {
+        let mut value = self.bytes()?;
+        let expected = if guid {
+            crate::snapshot::header::GUID_BYTES
+        } else {
+            crate::snapshot::header::NONCE_BYTES
+        };
+        if value.end - value.position != expected {
+            return Err(error("snapshot identity length is invalid"));
+        }
+        for index in 0..expected {
+            if !crate::snapshot::header::identity_byte(value.u8()?, index, guid) {
+                return Err(error("snapshot identity shape is invalid"));
+            }
+        }
+        Ok(())
+    }
+
     fn finish(self) -> SnapshotResult<()> {
         if self.position == self.end {
             Ok(())
@@ -788,7 +806,7 @@ impl HeaderAdmission {
         reader.var_u32()?;
         reader.option(BlockReader::var_u32)?;
         reader.var_u64()?;
-        reader.bytes()?;
+        reader.identity(false)?;
         reader.var_u64()?;
         for _ in 0..3 {
             if reader.var_usize()? != 0 {
@@ -797,7 +815,7 @@ impl HeaderAdmission {
         }
         reader.option(|reader| reader.option(BlockReader::f64))?;
         reader.var_u64()?;
-        reader.bytes()?;
+        reader.identity(true)?;
         if reader.var_u64()? != 0 {
             return Err(error("snapshot header is invalid"));
         }
@@ -872,7 +890,8 @@ impl StreamAdmission {
         let max_bytes = budget.max_bytes();
         self.records = 0;
         self.bytes = 0;
-        if self.remaining != 0 && self.length > max_bytes.min(logical_byte_limit()) {
+        if self.remaining != 0 && self.length > max_bytes.min(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES)
+        {
             return Err(error("snapshot record exceeds advance byte budget"));
         }
         while !payload.is_empty() {
@@ -903,7 +922,7 @@ impl StreamAdmission {
                     if length == 0 {
                         return Err(error("snapshot record is empty"));
                     }
-                    if length > max_bytes.min(logical_byte_limit()) {
+                    if length > max_bytes.min(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES) {
                         return Err(error("snapshot record exceeds advance byte budget"));
                     }
                     self.remaining = length;
@@ -924,6 +943,7 @@ impl StreamAdmission {
 
 #[doc(hidden)]
 pub struct WorkbookSnapshotBuilder {
+    max_frame_bytes: usize,
     header: Option<HeaderState>,
     admission: Option<HeaderAdmission>,
     snapshot_id: Option<u64>,
@@ -947,6 +967,9 @@ pub struct WorkbookSnapshotBuilder {
     anchors_done: bool,
     validation: validation::ModelValidation,
     validated: bool,
+    authority_validated: bool,
+    authority_validation: crate::authority::snapshot_validation::SnapshotValidation,
+    authority_keys: crate::snapshot::yrs_split::SnapshotKeys,
     ready: Option<HydratedWorkbook>,
     calculation_context: Option<CalculationOptions>,
     base_admission: StreamAdmission,
@@ -956,6 +979,7 @@ pub struct WorkbookSnapshotBuilder {
 impl WorkbookSnapshotBuilder {
     pub fn new() -> Self {
         Self {
+            max_frame_bytes: logical_byte_limit().saturating_add(64),
             header: None,
             admission: None,
             snapshot_id: None,
@@ -979,11 +1003,25 @@ impl WorkbookSnapshotBuilder {
             anchors_done: false,
             validation: validation::ModelValidation::default(),
             validated: false,
+            authority_validated: false,
+            authority_validation:
+                crate::authority::snapshot_validation::SnapshotValidation::default(),
+            authority_keys: crate::snapshot::yrs_split::SnapshotKeys::default(),
             ready: None,
             calculation_context: None,
             base_admission: StreamAdmission::default(),
             facts_admission: StreamAdmission::default(),
         }
+    }
+
+    pub fn with_max_frame_bytes(max_frame_bytes: usize) -> SnapshotResult<Self> {
+        if max_frame_bytes < 64 {
+            return Err(error("snapshot frame limit is too small for framing"));
+        }
+        Ok(Self {
+            max_frame_bytes,
+            ..Self::new()
+        })
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> SnapshotResult<SnapshotProgress> {
@@ -998,6 +1036,11 @@ impl WorkbookSnapshotBuilder {
     }
 
     fn push_inner(&mut self, chunk: &[u8]) -> SnapshotResult<SnapshotProgress> {
+        if chunk.len() > self.max_frame_bytes {
+            return Err(error(
+                "snapshot transport frame exceeds accepted byte limit",
+            ));
+        }
         if self.ended || self.ready.is_some() {
             return Err(error("snapshot has extra chunks"));
         }
@@ -1063,6 +1106,8 @@ impl WorkbookSnapshotBuilder {
         {
             return Err(error("snapshot fragments are missing or reordered"));
         }
+        #[cfg(test)]
+        crate::snapshot::step::allocate(bytes.len());
         for block in bytes.chunks(FRAGMENT_BLOCK_BYTES) {
             fragment
                 .blocks
@@ -1375,6 +1420,22 @@ impl WorkbookSnapshotBuilder {
         if calculation && !self.advance_calculation_capacity(budget)? {
             return Ok(SnapshotProgress::pending());
         }
+        if let Some(chunk) = self.queue.front() {
+            let (kind, _, payload) = unframe(chunk)?;
+            let admission = match kind {
+                ChunkKind::AuthorityBase => Some(&mut self.base_admission),
+                ChunkKind::Facts => Some(&mut self.facts_admission),
+                _ => None,
+            };
+            if let Some(admission) = admission {
+                let mut next = *admission;
+                next.push(payload, budget)?;
+                if kind == ChunkKind::Facts && next.records > 1 {
+                    self.failed = true;
+                    return Err(error("snapshot facts chunk completes multiple records"));
+                }
+            }
+        }
         if self
             .queue
             .front()
@@ -1402,9 +1463,7 @@ impl WorkbookSnapshotBuilder {
                 _ => None,
             };
             if let Some(admission) = admission {
-                let mut next = *admission;
-                next.push(payload, budget)?;
-                *admission = next;
+                admission.push(payload, budget)?;
             }
         }
         let result = self.advance_inner(budget);
@@ -1413,6 +1472,8 @@ impl WorkbookSnapshotBuilder {
                 failure.to_string().as_str(),
                 "snapshot graph record exceeds advance byte budget"
                     | "Yrs snapshot record exceeds advance byte budget"
+                    | "snapshot authority validation exceeds advance byte budget"
+                    | "snapshot authority retirement exceeds advance byte budget"
             )
         });
         result
@@ -1571,6 +1632,7 @@ impl WorkbookSnapshotBuilder {
             if !authority.advance_finalization(budget)?.is_ready() {
                 return Ok(SnapshotProgress::pending());
             }
+            self.authority_keys = authority.take_validation_keys();
             self.complete_parts()?;
             return Ok(SnapshotProgress::pending());
         }
@@ -1579,12 +1641,21 @@ impl WorkbookSnapshotBuilder {
             .as_mut()
             .ok_or_else(|| error("snapshot parts are missing"))?;
         if !self.validated {
-            let (ready, records, bytes) = self.validation.advance(&workbook.model, budget)?;
-            #[cfg(test)]
-            crate::snapshot::step::record(records, bytes);
-            #[cfg(not(test))]
-            let _ = (records, bytes);
+            let (ready, _, _) = self.validation.advance(
+                &workbook.model,
+                workbook.source_package.is_some(),
+                budget,
+            )?;
             self.validated = ready;
+            return Ok(SnapshotProgress::pending());
+        }
+        if !self.authority_validated {
+            self.authority_validated = workbook.authority.validate_snapshot_model(
+                &workbook.model,
+                &mut self.authority_validation,
+                &mut self.authority_keys,
+                budget,
+            )?;
             return Ok(SnapshotProgress::pending());
         }
         if !self.anchors_done {
@@ -1619,6 +1690,8 @@ impl WorkbookSnapshotBuilder {
                         break;
                     }
                     bytes += cost;
+                    #[cfg(test)]
+                    crate::snapshot::step::allocate(cost);
                     workbook
                         .opened_anchors
                         .insert(chart.frame_id(), chart.anchor);

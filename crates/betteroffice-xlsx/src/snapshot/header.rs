@@ -5,6 +5,21 @@ use crate::{CalculationOptions, CalculationResult, CellAddress};
 use super::wire::{ChunkKind, Reader, Writer};
 use super::{SnapshotError, SnapshotResult};
 
+pub(crate) const NONCE_BYTES: usize = 32;
+pub(crate) const GUID_BYTES: usize = 36;
+
+pub(crate) fn identity_byte(byte: u8, index: usize, guid: bool) -> bool {
+    if guid && matches!(index, 8 | 13 | 18 | 23) {
+        byte == b'-'
+    } else if index == if guid { 14 } else { 12 } {
+        byte == b'4'
+    } else if index == if guid { 19 } else { 16 } {
+        matches!(byte, b'8' | b'9' | b'a' | b'b')
+    } else {
+        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SnapshotMode {
     Standalone,

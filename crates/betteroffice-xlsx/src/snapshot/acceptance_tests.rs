@@ -1744,7 +1744,7 @@ fn snapshot_current_state_identity() {
             );
             worker.model.styles.fonts[0].size_pt = Some(-0.0);
             worker.model_epoch = u64::MAX;
-            worker.version_nonce = String::new();
+            worker.version_nonce = crate::workbook::batch::mint_nonce();
             worker.committed_changes = 42;
             worker.rand_seed = Some(0);
             worker.last_calculation.cycle_cells = vec![CellAddress {
@@ -1755,6 +1755,24 @@ fn snapshot_current_state_identity() {
                 sheet: SheetId(0),
                 cell: CellRef::new(8, 0),
             }];
+            let mut authored = worker.model.clone();
+            authored.sheets[0].set_cell(
+                CellRef::new(8, 1),
+                Cell {
+                    value: CellValue::Number { value: 0.0 },
+                    formula: Some(String::new()),
+                    style: None,
+                },
+            );
+            worker.authority = crate::authority::WorkbookAuthority::from_source_with_projection(
+                &authored,
+                None,
+                &[],
+                None,
+            )
+            .unwrap()
+            .0;
+            worker.authority.set_snapshot_projection_valid(valid);
             let peer = hydrate(&worker, budget);
             assert_current_identity(&worker, &peer);
             assert_eq!(peer.authority.snapshot_projection_valid().unwrap(), valid);
@@ -2464,3 +2482,6 @@ fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
     let failure = encoder.next(&worker).unwrap_err();
     assert_eq!(failure.to_string(), "snapshot workbook lineage has changed");
 }
+
+#[path = "invariant_tests.rs"]
+mod invariants;

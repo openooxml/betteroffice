@@ -5,6 +5,8 @@ pub(crate) struct StepWork {
     pub(crate) records: usize,
     pub(crate) bytes: usize,
     pub(crate) initialized_bytes: usize,
+    pub(crate) scanned_bytes: usize,
+    pub(crate) allocated_bytes: usize,
 }
 
 thread_local! {
@@ -69,4 +71,16 @@ pub(crate) fn bytes_at_least(bytes: usize) {
 
 pub(crate) fn current() -> StepWork {
     WORK.get()
+}
+
+pub(crate) fn scan(bytes: usize) {
+    let mut work = WORK.get();
+    work.scanned_bytes += bytes;
+    WORK.set(work);
+}
+
+pub(crate) fn allocate(bytes: usize) {
+    let mut work = WORK.get();
+    work.allocated_bytes += bytes;
+    WORK.set(work);
 }
