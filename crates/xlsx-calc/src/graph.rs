@@ -3,6 +3,7 @@
 
 mod builder;
 mod snapshot;
+mod snapshot_growth;
 
 #[doc(hidden)]
 pub use builder::DepGraphBuilder;

@@ -18,6 +18,7 @@ const MAX_NESTING: u8 = 64;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static WHOLE_UPDATE_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(64 * 1024 * 1024 - 12) };
     static ADMISSION_ATTEMPTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -97,6 +98,17 @@ pub(crate) fn split_update_v1_bounded(
     Ok(bounded)
 }
 
+pub(crate) fn whole_update_limit() -> usize {
+    #[cfg(test)]
+    {
+        WHOLE_UPDATE_LIMIT.get()
+    }
+    #[cfg(not(test))]
+    {
+        64 * 1024 * 1024 - 12
+    }
+}
+
 pub(crate) fn split_fallback_v1_bounded(
     update: &[u8],
     max_records: usize,
@@ -126,7 +138,10 @@ pub(crate) fn split_fallback_v1_bounded(
     if scanner.pos != update.len() {
         return Err(SplitError::Malformed);
     }
-    if !oversized_deletion && CausalState::default().admit(update).is_ok() {
+    if !oversized_deletion
+        && update.len() <= whole_update_limit()
+        && CausalState::default().admit(update).is_ok()
+    {
         return Ok(vec![update.to_vec()]);
     }
     let mut cursor = UpdateCursor::default();
@@ -561,6 +576,43 @@ pub(crate) struct CausalState {
 }
 
 impl CausalState {
+    pub(crate) fn drain(&mut self, max_records: usize, max_bytes: usize) -> (bool, usize, usize) {
+        let mut records = 0;
+        let mut bytes = 0;
+        while records < max_records {
+            let cost = if !self.kinds.is_empty() {
+                std::mem::size_of::<((u64, u32), (u32, u8))>()
+            } else if !self.clocks.is_empty() {
+                std::mem::size_of::<(u64, u32)>()
+            } else {
+                break;
+            };
+            if cost > max_bytes.saturating_sub(bytes) {
+                break;
+            }
+            if self.kinds.pop_first().is_none() {
+                self.clocks.pop_first();
+            }
+            records += 1;
+            bytes += cost;
+        }
+        (self.is_empty(), records, bytes)
+    }
+
+    pub(crate) fn final_clock(&self) -> Option<(u64, u32)> {
+        if self.kinds.is_empty() {
+            self.clocks
+                .first_key_value()
+                .map(|(&client, &clock)| (client, clock))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.kinds.is_empty() && self.clocks.is_empty()
+    }
+
     fn waiting_on(&self, update: &[u8]) -> Result<(u64, u32), SplitError> {
         let mut scanner = Scanner::new(update);
         scanner.allow_maps = true;

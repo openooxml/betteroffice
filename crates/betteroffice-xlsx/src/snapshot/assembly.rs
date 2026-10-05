@@ -20,7 +20,12 @@ use super::{
 };
 use crate::{CalculationOptions, CalculationResult, CellAddress};
 
-const MAX_LOGICAL_BYTES: usize = 64 * 1024 * 1024;
+#[path = "validation.rs"]
+mod validation;
+
+fn logical_byte_limit() -> usize {
+    crate::snapshot::yrs_split::whole_update_limit() + 12
+}
 
 fn index(kind: ChunkKind) -> usize {
     kind as usize - 1
@@ -40,6 +45,7 @@ pub(super) struct Lineage {
     recalculated: bool,
     projection_valid: bool,
     state_vector: Vec<u8>,
+    authority_revision: u64,
 }
 
 impl Lineage {
@@ -134,6 +140,7 @@ impl Lineage {
             recalculated: *recalculated_since_open,
             projection_valid: authority.snapshot_projection_valid()?,
             state_vector: authority.encode_state_vector_v1(),
+            authority_revision: authority.snapshot_revision(),
         })
     }
 
@@ -166,7 +173,7 @@ impl Lineage {
         let mut proposals = workbook.proposals.clone();
         Ok(proposals.next_id() == "p1"
             && self.projection_valid == workbook.authority.snapshot_projection_valid()?
-            && self.state_vector == workbook.authority.encode_state_vector_v1())
+            && self.authority_revision == workbook.authority.snapshot_revision())
     }
 }
 
@@ -224,9 +231,9 @@ impl WorkbookSnapshotEncoder {
         let part_bytes = budget
             .max_bytes()
             .saturating_sub(64)
-            .clamp(1, MAX_LOGICAL_BYTES - 12);
+            .clamp(1, logical_byte_limit() - 12);
         let part_budget = SnapshotBudget::new(1, part_bytes)?;
-        let record_budget = SnapshotBudget::new(1, MAX_LOGICAL_BYTES)?;
+        let record_budget = SnapshotBudget::new(1, logical_byte_limit())?;
         let authority = AuthoritySnapshotEncoder::new(
             &workbook.authority,
             SnapshotBudget::new(budget.max_records(), part_bytes)?,
@@ -307,7 +314,7 @@ impl WorkbookSnapshotEncoder {
             payload.var_usize(count);
         }
         let header_chunk = frame(ChunkKind::Header, 0, &payload.into_bytes());
-        if header_chunk.len() > MAX_LOGICAL_BYTES {
+        if header_chunk.len() > logical_byte_limit() {
             return Err(error("snapshot header exceeds hydration limit"));
         }
         Ok(Self {
@@ -368,7 +375,7 @@ impl WorkbookSnapshotEncoder {
             return Ok(None);
         };
         let (kind, ordinal, _) = unframe(chunk)?;
-        if chunk.len() > MAX_LOGICAL_BYTES {
+        if chunk.len() > logical_byte_limit() {
             return Err(error(format!(
                 "snapshot {kind:?} chunk exceeds hydration limit: {}",
                 self.split_fallback.as_deref().unwrap_or("oversized_record"),
@@ -403,7 +410,7 @@ impl WorkbookSnapshotEncoder {
     }
 
     fn next_logical(&mut self, workbook: &Workbook) -> SnapshotResult<Option<Vec<u8>>> {
-        let record_budget = SnapshotBudget::new(1, MAX_LOGICAL_BYTES)?;
+        let record_budget = SnapshotBudget::new(1, logical_byte_limit())?;
         loop {
             match self.stage {
                 0 => {
@@ -503,7 +510,7 @@ impl WorkbookSnapshotEncoder {
 }
 
 fn count_chunk(counts: &mut [u64; 9], chunk: &[u8]) -> SnapshotResult<()> {
-    if chunk.len() > MAX_LOGICAL_BYTES {
+    if chunk.len() > logical_byte_limit() {
         return Err(error("snapshot logical chunk exceeds hydration limit"));
     }
     let (kind, _, _) = unframe(chunk)?;
@@ -517,7 +524,209 @@ struct Fragment {
     kind: ChunkKind,
     ordinal: u64,
     length: usize,
+    blocks: BTreeMap<usize, FragmentBlock>,
+    received: usize,
+}
+
+const FRAGMENT_BLOCK_BYTES: usize = 4096;
+
+#[cfg(test)]
+thread_local! {
+    static FRAGMENT_ALLOCATED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct FragmentBlock {
     bytes: Vec<u8>,
+}
+
+impl FragmentBlock {
+    fn new(bytes: &[u8]) -> Self {
+        let bytes = bytes.to_vec();
+        #[cfg(test)]
+        FRAGMENT_ALLOCATED_BYTES.set(FRAGMENT_ALLOCATED_BYTES.get() + bytes.capacity());
+        Self { bytes }
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        #[cfg(test)]
+        FRAGMENT_ALLOCATED_BYTES.set(FRAGMENT_ALLOCATED_BYTES.get() - self.bytes.capacity());
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl std::ops::Deref for FragmentBlock {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for FragmentBlock {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        FRAGMENT_ALLOCATED_BYTES.set(FRAGMENT_ALLOCATED_BYTES.get() - self.bytes.capacity());
+    }
+}
+
+struct QueuedChunk {
+    fragment: Option<Fragment>,
+    bytes: Vec<u8>,
+}
+
+impl std::ops::Deref for QueuedChunk {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl QueuedChunk {
+    fn new(mut fragment: Fragment) -> Self {
+        let bytes = if fragment.blocks.len() == 1 {
+            fragment.blocks.pop_first().unwrap().1.into_bytes()
+        } else {
+            Vec::new()
+        };
+        Self {
+            fragment: bytes.is_empty().then_some(fragment),
+            bytes,
+        }
+    }
+
+    fn advance(&mut self, budget: SnapshotBudget) -> SnapshotResult<bool> {
+        let Some(fragment) = &mut self.fragment else {
+            return Ok(true);
+        };
+        if self.bytes.capacity() == 0 {
+            self.bytes
+                .try_reserve_exact(fragment.received)
+                .map_err(|_| error("cannot allocate received snapshot chunk"))?;
+        }
+        let mut records = 0;
+        let mut copied = 0;
+        while records < budget.max_records() && copied < budget.max_bytes() {
+            let Some((&offset, block)) = fragment.blocks.first_key_value() else {
+                break;
+            };
+            let start = self.bytes.len() - offset;
+            let count = (block.len() - start).min(budget.max_bytes() - copied);
+            self.bytes.extend_from_slice(&block[start..start + count]);
+            let complete = start + count == block.len();
+            copied += count;
+            records += 1;
+            if complete {
+                fragment.blocks.pop_first();
+            }
+        }
+        #[cfg(test)]
+        crate::snapshot::step::record(records, copied);
+        if fragment.blocks.is_empty() {
+            self.fragment = None;
+        }
+        Ok(false)
+    }
+}
+
+#[derive(Clone)]
+struct BlockReader<'a> {
+    blocks: &'a BTreeMap<usize, FragmentBlock>,
+    position: usize,
+    end: usize,
+}
+
+impl<'a> BlockReader<'a> {
+    fn new(fragment: &'a Fragment) -> Self {
+        Self {
+            blocks: &fragment.blocks,
+            position: 0,
+            end: fragment.received,
+        }
+    }
+
+    fn u8(&mut self) -> SnapshotResult<u8> {
+        if self.position == self.end {
+            return Err(error("short snapshot fragment"));
+        }
+        let (&offset, block) = self
+            .blocks
+            .range(..=self.position)
+            .next_back()
+            .ok_or_else(|| error("snapshot fragment block is missing"))?;
+        let byte = block[self.position - offset];
+        self.position += 1;
+        Ok(byte)
+    }
+
+    fn var_u64(&mut self) -> SnapshotResult<u64> {
+        let mut value = 0;
+        for shift in (0..=63).step_by(7) {
+            let byte = self.u8()?;
+            if shift == 63 && byte > 1 {
+                return Err(error("snapshot integer overflows"));
+            }
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(error("snapshot integer overflows"))
+    }
+
+    fn var_u32(&mut self) -> SnapshotResult<u32> {
+        u32::try_from(self.var_u64()?).map_err(|_| error("snapshot integer overflows"))
+    }
+
+    fn var_usize(&mut self) -> SnapshotResult<usize> {
+        usize::try_from(self.var_u64()?).map_err(|_| error("snapshot integer overflows"))
+    }
+
+    fn bool(&mut self) -> SnapshotResult<bool> {
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(error("invalid snapshot boolean")),
+        }
+    }
+
+    fn option<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> SnapshotResult<T>,
+    ) -> SnapshotResult<Option<T>> {
+        if self.bool()? {
+            read(self).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn f64(&mut self) -> SnapshotResult<f64> {
+        let mut bytes = [0; 8];
+        for byte in &mut bytes {
+            *byte = self.u8()?;
+        }
+        Ok(f64::from_le_bytes(bytes))
+    }
+
+    fn bytes(&mut self) -> SnapshotResult<Self> {
+        let length = self.var_usize()?;
+        if length > self.end - self.position {
+            return Err(error("short snapshot bytes"));
+        }
+        let mut reader = self.clone();
+        reader.end = self.position + length;
+        self.position += length;
+        Ok(reader)
+    }
+
+    fn finish(self) -> SnapshotResult<()> {
+        if self.position == self.end {
+            Ok(())
+        } else {
+            Err(error("trailing snapshot bytes"))
+        }
+    }
 }
 
 fn write_address(writer: &mut Writer, address: &CellAddress) {
@@ -567,9 +776,8 @@ struct HeaderAdmission {
 }
 
 impl HeaderAdmission {
-    fn decode(payload: &[u8], snapshot_id: u64) -> SnapshotResult<Self> {
-        let mut outer = Reader::new(payload);
-        let mut reader = Reader::new(outer.bytes()?);
+    fn decode(mut outer: BlockReader<'_>, snapshot_id: u64) -> SnapshotResult<Self> {
+        let mut reader = outer.bytes()?;
         if reader.var_u64()? != snapshot_id || reader.u8()? != 0 || reader.bool()? {
             return Err(error("snapshot header is invalid"));
         }
@@ -578,7 +786,7 @@ impl HeaderAdmission {
             return Err(error("snapshot header is invalid"));
         }
         reader.var_u32()?;
-        reader.option(Reader::var_u32)?;
+        reader.option(BlockReader::var_u32)?;
         reader.var_u64()?;
         reader.bytes()?;
         reader.var_u64()?;
@@ -587,7 +795,7 @@ impl HeaderAdmission {
                 return Err(error("snapshot calculation counts differ"));
             }
         }
-        reader.option(|reader| reader.option(Reader::f64))?;
+        reader.option(|reader| reader.option(BlockReader::f64))?;
         reader.var_u64()?;
         reader.bytes()?;
         if reader.var_u64()? != 0 {
@@ -602,7 +810,7 @@ impl HeaderAdmission {
         outer.bool()?;
         outer.bool()?;
         let package_present = outer.bool()?;
-        let source_length = outer.option(Reader::var_usize)?;
+        let source_length = outer.option(BlockReader::var_usize)?;
         for _ in 0..7 {
             outer.var_usize()?;
         }
@@ -664,7 +872,7 @@ impl StreamAdmission {
         let max_bytes = budget.max_bytes();
         self.records = 0;
         self.bytes = 0;
-        if self.remaining != 0 && self.length > max_bytes.min(MAX_LOGICAL_BYTES) {
+        if self.remaining != 0 && self.length > max_bytes.min(logical_byte_limit()) {
             return Err(error("snapshot record exceeds advance byte budget"));
         }
         while !payload.is_empty() {
@@ -695,7 +903,7 @@ impl StreamAdmission {
                     if length == 0 {
                         return Err(error("snapshot record is empty"));
                     }
-                    if length > max_bytes.min(MAX_LOGICAL_BYTES) {
+                    if length > max_bytes.min(logical_byte_limit()) {
                         return Err(error("snapshot record exceeds advance byte budget"));
                     }
                     self.remaining = length;
@@ -722,7 +930,7 @@ pub struct WorkbookSnapshotBuilder {
     ordinals: [u64; 9],
     received: [u64; 9],
     fragment: Option<Fragment>,
-    queue: LinkedList<Vec<u8>>,
+    queue: LinkedList<QueuedChunk>,
     digest: Sha256,
     ended: bool,
     failed: bool,
@@ -737,6 +945,8 @@ pub struct WorkbookSnapshotBuilder {
     anchor_sheet: usize,
     anchor_chart: usize,
     anchors_done: bool,
+    validation: validation::ModelValidation,
+    validated: bool,
     ready: Option<HydratedWorkbook>,
     calculation_context: Option<CalculationOptions>,
     base_admission: StreamAdmission,
@@ -767,6 +977,8 @@ impl WorkbookSnapshotBuilder {
             anchor_sheet: 0,
             anchor_chart: 0,
             anchors_done: false,
+            validation: validation::ModelValidation::default(),
+            validated: false,
             ready: None,
             calculation_context: None,
             base_admission: StreamAdmission::default(),
@@ -807,7 +1019,7 @@ impl WorkbookSnapshotBuilder {
         {
             return Err(error("snapshot lineage differs"));
         }
-        if bytes.is_empty() || length == 0 || length > MAX_LOGICAL_BYTES {
+        if bytes.is_empty() || length == 0 || length > logical_byte_limit() {
             return Err(error("invalid snapshot fragment length"));
         }
         if self.fragment.is_none() {
@@ -831,15 +1043,12 @@ impl WorkbookSnapshotBuilder {
             if logical_ordinal != expected_ordinal {
                 return Err(error("snapshot logical ordinal differs"));
             }
-            let mut storage = Vec::new();
-            storage
-                .try_reserve_exact(length)
-                .map_err(|_| error("cannot allocate snapshot fragment"))?;
             self.fragment = Some(Fragment {
                 kind,
                 ordinal: logical_ordinal,
                 length,
-                bytes: storage,
+                blocks: BTreeMap::new(),
+                received: 0,
             });
         }
         let fragment = self
@@ -849,16 +1058,17 @@ impl WorkbookSnapshotBuilder {
         if fragment.kind != kind
             || fragment.ordinal != logical_ordinal
             || fragment.length != length
-            || fragment.bytes.len() != offset
+            || fragment.received != offset
             || bytes.len() > length - offset
         {
             return Err(error("snapshot fragments are missing or reordered"));
         }
-        fragment
-            .bytes
-            .try_reserve(bytes.len())
-            .map_err(|_| error("cannot allocate snapshot fragment"))?;
-        fragment.bytes.extend_from_slice(bytes);
+        for block in bytes.chunks(FRAGMENT_BLOCK_BYTES) {
+            fragment
+                .blocks
+                .insert(fragment.received, FragmentBlock::new(block));
+            fragment.received += block.len();
+        }
         if kind != ChunkKind::End {
             self.digest.update(bytes);
         }
@@ -866,14 +1076,19 @@ impl WorkbookSnapshotBuilder {
         self.ordinals[index(kind)] = ordinal
             .checked_add(1)
             .ok_or_else(|| error("snapshot ordinal overflows"))?;
-        if fragment.bytes.len() != length {
+        if fragment.received != length {
             return Ok(SnapshotProgress::pending());
         }
         let fragment = self
             .fragment
             .take()
             .ok_or_else(|| error("snapshot fragment is missing"))?;
-        let (inner_kind, inner_ordinal, payload) = unframe(&fragment.bytes)?;
+        let mut payload = BlockReader::new(&fragment);
+        if payload.u8()? != crate::snapshot::wire::FORMAT_VERSION {
+            return Err(error("unsupported snapshot format"));
+        }
+        let inner_kind = payload.u8()?;
+        let inner_ordinal = payload.var_u64()?;
         if let Some(state) = &self.admission {
             let expected = self
                 .received
@@ -890,7 +1105,7 @@ impl WorkbookSnapshotBuilder {
         } else {
             self.received[index(kind)]
         };
-        if inner_kind != kind
+        if inner_kind != kind as u8
             || inner_ordinal != logical_ordinal
             || inner_ordinal != expected_ordinal
         {
@@ -906,19 +1121,23 @@ impl WorkbookSnapshotBuilder {
                     return Err(error("snapshot source length differs"));
                 }
                 let actual = self.digest.clone().finalize();
-                if payload != &actual[..] {
-                    return Err(error("snapshot content digest differs"));
+                for byte in actual {
+                    if payload.u8()? != byte {
+                        return Err(error("snapshot content digest differs"));
+                    }
                 }
+                payload.finish()?;
                 self.ended = true;
+                self.queue.push_back(QueuedChunk::new(fragment));
             }
             _ => {
                 if kind == ChunkKind::Header && inner_ordinal == 0 {
-                    self.admission = Some(HeaderAdmission::decode(payload, snapshot_id)?);
+                    self.admission = Some(HeaderAdmission::decode(payload.clone(), snapshot_id)?);
                 }
                 if kind == ChunkKind::Source {
                     self.source_received_bytes = self
                         .source_received_bytes
-                        .checked_add(payload.len())
+                        .checked_add(payload.end - payload.position)
                         .ok_or_else(|| error("snapshot source length overflows"))?;
                     let expected = self
                         .admission
@@ -929,7 +1148,7 @@ impl WorkbookSnapshotBuilder {
                         return Err(error("snapshot source length differs"));
                     }
                 }
-                self.queue.push_back(fragment.bytes);
+                self.queue.push_back(QueuedChunk::new(fragment));
             }
         }
         self.received[index(kind)] += 1;
@@ -1125,8 +1344,17 @@ impl WorkbookSnapshotBuilder {
         if self.ready.is_some() {
             return Ok(SnapshotProgress::ready());
         }
+        if budget.max_bytes() < size_of::<xlsx_model::Sheet>() {
+            return Err(error("snapshot storage exceeds advance byte budget"));
+        }
+        if let Some(chunk) = self.queue.front_mut()
+            && !chunk.advance(budget)?
+        {
+            return Ok(SnapshotProgress::pending());
+        }
         if let Some(chunk) = self.queue.front()
             && chunk.len() > budget.max_bytes()
+            && unframe(chunk)?.0 != ChunkKind::Yrs
         {
             return Err(error("snapshot logical chunk exceeds advance byte budget"));
         }
@@ -1146,6 +1374,25 @@ impl WorkbookSnapshotBuilder {
                 .unwrap_or(false);
         if calculation && !self.advance_calculation_capacity(budget)? {
             return Ok(SnapshotProgress::pending());
+        }
+        if self
+            .queue
+            .front()
+            .is_some_and(|chunk| unframe(chunk).is_ok_and(|(kind, _, _)| kind == ChunkKind::Facts))
+        {
+            let (ready, records, bytes) = self
+                .facts
+                .as_mut()
+                .ok_or_else(|| error("snapshot facts builder is missing"))?
+                .advance_capacity(budget.max_records(), budget.max_bytes())
+                .map_err(|failure| error(failure.to_string()))?;
+            #[cfg(test)]
+            crate::snapshot::step::record(records, bytes);
+            #[cfg(not(test))]
+            let _ = (records, bytes);
+            if !ready {
+                return Ok(SnapshotProgress::pending());
+            }
         }
         if let Some(chunk) = self.queue.front() {
             let (kind, _, payload) = unframe(chunk)?;
@@ -1304,7 +1551,8 @@ impl WorkbookSnapshotBuilder {
                     crate::snapshot::step::record(1, payload.len());
                 }
                 ChunkKind::End => {
-                    return Err(error("unexpected queued snapshot control chunk"));
+                    #[cfg(test)]
+                    crate::snapshot::step::record(1, chunk.len());
                 }
             }
             return Ok(SnapshotProgress::pending());
@@ -1320,6 +1568,9 @@ impl WorkbookSnapshotBuilder {
             if !authority.advance_bounded(budget)?.is_ready() {
                 return Ok(SnapshotProgress::pending());
             }
+            if !authority.advance_finalization(budget)?.is_ready() {
+                return Ok(SnapshotProgress::pending());
+            }
             self.complete_parts()?;
             return Ok(SnapshotProgress::pending());
         }
@@ -1327,6 +1578,15 @@ impl WorkbookSnapshotBuilder {
             .restored
             .as_mut()
             .ok_or_else(|| error("snapshot parts are missing"))?;
+        if !self.validated {
+            let (ready, records, bytes) = self.validation.advance(&workbook.model, budget)?;
+            #[cfg(test)]
+            crate::snapshot::step::record(records, bytes);
+            #[cfg(not(test))]
+            let _ = (records, bytes);
+            self.validated = ready;
+            return Ok(SnapshotProgress::pending());
+        }
         if !self.anchors_done {
             let mut records = 0;
             let mut bytes = 0usize;
@@ -1374,6 +1634,8 @@ impl WorkbookSnapshotBuilder {
             return Ok(SnapshotProgress::pending());
         }
         if let Some(graph) = self.graph.as_mut() {
+            #[cfg(test)]
+            let migrated = graph.migrated_entries();
             let mut ready = false;
             let mut _records = 0;
             let mut bytes = 0;
@@ -1397,7 +1659,10 @@ impl WorkbookSnapshotBuilder {
                 }
             }
             #[cfg(test)]
-            crate::snapshot::step::record(_records, bytes);
+            {
+                crate::snapshot::step::record(_records, bytes);
+                crate::snapshot::step::migrate(graph.migrated_entries() - migrated);
+            }
             if !ready {
                 return Ok(SnapshotProgress::pending());
             }
@@ -1448,7 +1713,7 @@ impl WorkbookSnapshotBuilder {
             .authority
             .take()
             .ok_or_else(|| error("snapshot authority builder is missing"))?
-            .finish()?;
+            .finish_drained()?;
         authority.set_snapshot_projection_valid(projection_valid);
         let model = self
             .model
@@ -1527,6 +1792,7 @@ impl WorkbookSnapshotBuilder {
             recalculated: recalculated_since_open,
             projection_valid,
             state_vector,
+            authority_revision: authority.snapshot_revision(),
         });
         self.restored = Some(Workbook {
             authority,

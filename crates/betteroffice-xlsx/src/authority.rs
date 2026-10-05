@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
@@ -499,9 +499,15 @@ enum HistoryAction {
     Redo(SheetOrderEntry),
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SNAPSHOT_VECTOR_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
     projection_valid: Arc<AtomicBool>,
+    snapshot_revision: Arc<AtomicU64>,
     base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
@@ -521,10 +527,12 @@ struct SetCellSync {
 
 impl WorkbookAuthority {
     fn hydrated(doc: Doc, base: Arc<WorkbookBase>, next_sheet_id: u64) -> Self {
-        let projection_valid = observe_projection(&doc);
+        let snapshot_revision = Arc::new(AtomicU64::new(0));
+        let projection_valid = observe_projection(&doc, snapshot_revision.clone());
         Self {
             doc,
             projection_valid,
+            snapshot_revision,
             base,
             history: SheetOrderHistory::default(),
             next_sheet_id,
@@ -604,6 +612,10 @@ impl WorkbookAuthority {
 
     pub(crate) fn client_id(&self) -> u64 {
         self.doc.client_id().get()
+    }
+
+    pub(crate) fn snapshot_revision(&self) -> u64 {
+        self.snapshot_revision.load(Ordering::Relaxed)
     }
 
     pub(crate) fn snapshot_projection_valid(&self) -> crate::snapshot::SnapshotResult<bool> {
@@ -809,6 +821,8 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
+        #[cfg(test)]
+        SNAPSHOT_VECTOR_ENCODINGS.set(SNAPSHOT_VECTOR_ENCODINGS.get() + 1);
         let state_vector = self.doc.transact().state_vector();
         let mut entries = state_vector
             .iter()
@@ -1285,7 +1299,8 @@ impl WorkbookAuthority {
         ));
         hydrate_local_doc(&doc, restore).map_err(AuthorityError::InvalidState)?;
         self.doc = doc;
-        self.projection_valid = observe_projection(&self.doc);
+        self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
+        self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
         self.undo_stack = undo_stack;
         self.redo_stack = redo_stack;
         Ok(())
@@ -1884,11 +1899,14 @@ impl WorkbookAuthority {
     }
 }
 
-fn observe_projection(doc: &Doc) -> Arc<AtomicBool> {
+fn observe_projection(doc: &Doc, revision: Arc<AtomicU64>) -> Arc<AtomicBool> {
     let valid = Arc::new(AtomicBool::new(false));
     let observed = valid.clone();
-    doc.observe_after_transaction_with("projection", move |_| {
-        observed.store(false, Ordering::Relaxed)
+    doc.observe_after_transaction_with("projection", move |transaction| {
+        observed.store(false, Ordering::Relaxed);
+        if !transaction.insert_set().is_empty() || !transaction.delete_set().is_empty() {
+            revision.fetch_add(1, Ordering::Relaxed);
+        }
     })
     .expect("authority document has no active transaction");
     valid

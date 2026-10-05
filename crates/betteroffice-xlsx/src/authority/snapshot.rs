@@ -893,6 +893,9 @@ pub(crate) struct AuthorityHydrator {
     failed: bool,
     yrs_cursor: Option<UpdateCursor>,
     causal: CausalState,
+    final_vector_offset: usize,
+    final_vector_clients: usize,
+    vector_validated: bool,
 }
 
 fn hydrate_snapshot_doc(doc: &Doc, payload: &[u8]) -> Result<(), String> {
@@ -926,6 +929,9 @@ impl AuthorityHydrator {
         if expected_base_chunks == 0 || expected_yrs_chunks == 0 {
             return Err(SnapshotError::new("snapshot authority chunks are missing"));
         }
+        let mut vector = Reader::new(&header.state_vector);
+        let final_vector_clients = vector.var_usize()?;
+        let final_vector_offset = header.state_vector.len() - vector.rest().len();
         Ok(Self {
             doc: Doc::with_options(Options::with_guid_and_client_id(
                 header.guid.as_str().into(),
@@ -943,6 +949,9 @@ impl AuthorityHydrator {
             failed: false,
             yrs_cursor: None,
             causal: CausalState::default(),
+            final_vector_offset,
+            final_vector_clients,
+            vector_validated: false,
         })
     }
 
@@ -1088,7 +1097,21 @@ impl AuthorityHydrator {
         self.advance(budget)
     }
 
+    pub(crate) fn finish_drained(self) -> SnapshotResult<WorkbookAuthority> {
+        if !self.causal.is_empty() || !self.vector_validated {
+            return Err(SnapshotError::new(
+                "authority causal metadata is not drained",
+            ));
+        }
+        self.finish_parts()
+    }
+
+    #[cfg(test)]
     pub(crate) fn finish(self) -> SnapshotResult<WorkbookAuthority> {
+        self.finish_parts()
+    }
+
+    fn finish_parts(self) -> SnapshotResult<WorkbookAuthority> {
         if self.failed
             || self.base_chunks != self.expected_base_chunks
             || self.yrs_chunks != self.expected_yrs_chunks
@@ -1114,12 +1137,61 @@ impl AuthorityHydrator {
         }
         let base = self.base.finish()?;
         let authority = WorkbookAuthority::hydrated(self.doc, Arc::new(base), self.next_sheet_id);
-        if authority.encode_state_vector_v1() != self.state_vector {
+        if !self.vector_validated && authority.encode_state_vector_v1() != self.state_vector {
             return Err(SnapshotError::new(
                 "authority snapshot state vector differs",
             ));
         }
         Ok(authority)
+    }
+
+    pub(crate) fn advance_finalization(
+        &mut self,
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        let mut records = 0;
+        let mut bytes = 0;
+        while records < budget.max_records() && !self.causal.is_empty() {
+            let clock = self.causal.final_clock();
+            let (_, count, cost) = self.causal.drain(1, budget.max_bytes() - bytes);
+            if count == 0 {
+                break;
+            }
+            if let Some((client, clock)) = clock {
+                let mut vector = Reader::new(&self.state_vector[self.final_vector_offset..]);
+                if self.final_vector_clients == 0
+                    || vector.var_u64()? != client
+                    || vector.var_u32()? != clock
+                {
+                    return Err(SnapshotError::new(
+                        "authority snapshot state vector differs",
+                    ));
+                }
+                self.final_vector_clients -= 1;
+                self.final_vector_offset = self.state_vector.len() - vector.rest().len();
+            }
+            records += count;
+            bytes += cost;
+        }
+        #[cfg(test)]
+        {
+            crate::snapshot::step::record(records, bytes);
+            crate::snapshot::step::drain(records);
+        }
+        if self.causal.is_empty() {
+            if self.final_vector_clients != 0 || self.final_vector_offset != self.state_vector.len()
+            {
+                return Err(SnapshotError::new(
+                    "authority snapshot state vector differs",
+                ));
+            }
+            self.vector_validated = true;
+        }
+        if self.vector_validated && records == 0 {
+            Ok(SnapshotProgress::ready())
+        } else {
+            Ok(SnapshotProgress::pending())
+        }
     }
 }
 

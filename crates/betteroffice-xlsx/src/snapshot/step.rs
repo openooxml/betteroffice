@@ -10,11 +10,31 @@ pub(crate) struct StepWork {
 thread_local! {
     static WORK: Cell<StepWork> = Cell::new(StepWork::default());
     static DELETED_CLOCKS: Cell<usize> = const { Cell::new(0) };
+    static MIGRATED_ENTRIES: Cell<usize> = const { Cell::new(0) };
+    static DRAINED_ENTRIES: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn reset() {
     WORK.set(StepWork::default());
     DELETED_CLOCKS.set(0);
+    DRAINED_ENTRIES.set(0);
+    MIGRATED_ENTRIES.set(0);
+}
+
+pub(crate) fn migrate(entries: usize) {
+    MIGRATED_ENTRIES.set(MIGRATED_ENTRIES.get() + entries);
+}
+
+pub(crate) fn migrated_entries() -> usize {
+    MIGRATED_ENTRIES.get()
+}
+
+pub(crate) fn drain(entries: usize) {
+    DRAINED_ENTRIES.set(DRAINED_ENTRIES.get() + entries);
+}
+
+pub(crate) fn drained_entries() -> usize {
+    DRAINED_ENTRIES.get()
 }
 
 #[doc(hidden)]

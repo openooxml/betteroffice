@@ -1,12 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet, LinkedList};
 use std::mem::size_of;
 
+use super::snapshot_growth::{MapGrowth, SetGrowth};
 use super::*;
 use crate::reference::table_rect_with_columns;
 
 #[doc(hidden)]
 pub struct SnapshotGraphBuilder {
     graph: DepGraph,
+    names_growth: MapGrowth<String, SheetId>,
+    indices_growth: MapGrowth<(Option<SheetId>, String), usize>,
+    tables_growth: MapGrowth<String, Table>,
+    deps_growth: MapGrowth<NodeKey, NodeEntry>,
+    reverse_growth: MapGrowth<SheetId, Vec<(CellRange, NodeKey)>>,
+    volatile_growth: SetGrowth<NodeKey>,
+    spills_growth: MapGrowth<NodeKey, CellRange>,
+    spill_sheets_growth: MapGrowth<SheetId, Vec<(NodeKey, CellRange)>>,
+    asts_growth: MapGrowth<String, Arc<Expr>>,
+    migrated_entries: usize,
     phase: u8,
     index: usize,
     column: usize,
@@ -121,7 +132,7 @@ fn name_cost(name: &DefinedNameUse) -> usize {
         .saturating_add(16)
 }
 
-fn admit(bytes: usize, max_bytes: usize) -> Result<usize, String> {
+pub(super) fn admit(bytes: usize, max_bytes: usize) -> Result<usize, String> {
     if bytes > max_bytes {
         Err("snapshot graph record exceeds advance byte budget".to_owned())
     } else {
@@ -134,6 +145,16 @@ impl SnapshotGraphBuilder {
     pub fn new() -> Self {
         Self {
             graph: DepGraph::empty(),
+            names_growth: MapGrowth::default(),
+            indices_growth: MapGrowth::default(),
+            tables_growth: MapGrowth::default(),
+            deps_growth: MapGrowth::default(),
+            reverse_growth: MapGrowth::default(),
+            volatile_growth: SetGrowth::default(),
+            spills_growth: MapGrowth::default(),
+            spill_sheets_growth: MapGrowth::default(),
+            asts_growth: MapGrowth::default(),
+            migrated_entries: 0,
             phase: 0,
             index: 0,
             column: 0,
@@ -154,6 +175,10 @@ impl SnapshotGraphBuilder {
         model: &Workbook,
         max_bytes: usize,
     ) -> Result<(bool, usize, usize), String> {
+        if let Some(bytes) = self.advance_capacity(max_bytes)? {
+            self.migrated_entries += 1;
+            return Ok((false, 1, bytes));
+        }
         if let Some(formula) = &mut self.formula {
             if let Some(reference) = formula.references.front() {
                 let bytes = admit(size_of::<(SheetId, CellRange)>(), max_bytes)?;
@@ -519,8 +544,112 @@ impl SnapshotGraphBuilder {
         }
     }
 
+    fn advance_capacity(&mut self, max_bytes: usize) -> Result<Option<usize>, String> {
+        if let Some(bytes) =
+            self.names_growth
+                .ensure(&mut self.graph.names, String::len, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) = self.indices_growth.ensure(
+            &mut self.graph.defined_name_indices,
+            |key| key.1.len(),
+            max_bytes,
+        )? {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) =
+            self.tables_growth
+                .ensure(&mut self.graph.tables, String::len, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) = self
+            .deps_growth
+            .ensure(&mut self.graph.deps, |_| 0, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) =
+            self.reverse_growth
+                .ensure(&mut self.graph.by_sheet, |_| 0, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) = self
+            .volatile_growth
+            .ensure(&mut self.graph.volatile, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) = self
+            .spills_growth
+            .ensure(&mut self.graph.spills, |_| 0, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        if let Some(bytes) =
+            self.spill_sheets_growth
+                .ensure(&mut self.graph.spills_by_sheet, |_| 0, max_bytes)?
+        {
+            return Ok(Some(bytes));
+        }
+        self.asts_growth.ensure(
+            &mut self.graph.asts.lock().expect("parse cache poisoned"),
+            String::len,
+            max_bytes,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn migrated_entries(&self) -> usize {
+        self.migrated_entries
+    }
+
     #[doc(hidden)]
     pub fn finish(self) -> Option<DepGraph> {
         (self.phase == 8).then_some(self.graph)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xlsx_model::{Cell, CellValue, Sheet};
+
+    #[test]
+    fn fifty_thousand_formulas_migrate_graph_storage_within_each_step() {
+        let mut sheet = Sheet::new("Data");
+        for row in 0..50_000 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    formula: Some(format!("B{}+RAND()", row + 1)),
+                    style: None,
+                },
+            );
+        }
+        let model = Workbook {
+            sheets: vec![sheet],
+            ..Workbook::default()
+        };
+        let mut builder = SnapshotGraphBuilder::new();
+        loop {
+            let before = builder.migrated_entries;
+            let (ready, records, bytes) = builder.advance(&model, 16_384).unwrap();
+            let moved = builder.migrated_entries - before;
+            assert!(records <= 1);
+            assert!(bytes <= 16_384);
+            assert!(moved <= records);
+            if ready {
+                break;
+            }
+        }
+        assert!(builder.migrated_entries >= 50_000);
+        let graph = builder.finish().unwrap();
+        assert_eq!(graph.deps.len(), 50_000);
+        assert_eq!(graph.volatile.len(), 50_000);
+        assert_eq!(graph.by_sheet[&SheetId(0)].len(), 50_000);
     }
 }

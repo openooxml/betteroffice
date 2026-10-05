@@ -26,11 +26,15 @@ struct Move<S, T> {
 
 impl<S, T> Migration<S> for Move<S, T> {
     fn advance(&mut self, state: &mut S, budget: SnapshotBudget) -> SnapshotResult<bool> {
+        if size_of::<T>() > budget.max_bytes() {
+            return Err(SnapshotError::new(
+                "snapshot storage exceeds advance byte budget",
+            ));
+        }
         let count = self.records.len().min(
             budget
                 .max_records()
-                .min(budget.max_bytes() / size_of::<T>().max(1))
-                .max(1),
+                .min(budget.max_bytes() / size_of::<T>().max(1)),
         );
         self.storage.extend(self.records.by_ref().take(count));
         #[cfg(test)]
@@ -60,6 +64,11 @@ impl<S: 'static> Growth<S> {
         let values = target(state)?;
         if values.len() < values.capacity() {
             return Ok(true);
+        }
+        if !values.is_empty() && size_of::<T>() > budget.max_bytes() {
+            return Err(SnapshotError::new(
+                "snapshot storage exceeds advance byte budget",
+            ));
         }
         let capacity = values.len().saturating_mul(2).max(1);
         let mut storage = Vec::new();
@@ -119,11 +128,17 @@ mod tests {
     }
 
     #[test]
-    fn storage_migration_moves_one_oversized_record_per_step() {
+    fn storage_migration_requires_a_budget_that_fits_one_record() {
         let mut records: Vec<[u8; 64]> = (0..4).map(|value| [value; 64]).collect();
         records.shrink_to_fit();
-        let budget = SnapshotBudget::new(3, 16).unwrap();
         let mut growth = Growth::default();
+        let too_small = SnapshotBudget::new(3, 16).unwrap();
+        assert!(
+            growth
+                .ensure(&mut records, |records| Ok(records), too_small)
+                .is_err()
+        );
+        let budget = SnapshotBudget::new(1, 64).unwrap();
         let mut steps = 0;
         loop {
             crate::snapshot::step::reset();
@@ -134,6 +149,7 @@ mod tests {
                 break;
             }
             assert_eq!(crate::snapshot::step::current().records, 1);
+            assert!(crate::snapshot::step::current().bytes <= budget.max_bytes());
             steps += 1;
         }
         assert_eq!(steps, 4);

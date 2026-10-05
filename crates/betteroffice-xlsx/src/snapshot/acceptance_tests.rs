@@ -1281,6 +1281,153 @@ fn snapshot_single_million_cell_sheet_cleared_history_steps_respect_budget() {
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
 
+fn short_formula_worker(rows: u32) -> Workbook {
+    let mut sheet = crate::Sheet::new("Data");
+    for row in 0..rows {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                formula: Some(format!("B{}+1", row + 1)),
+                style: None,
+            },
+        );
+    }
+    let mut worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    worker.graph = Some(xlsx_calc::graph::DepGraph::build(worker.model()));
+    worker
+}
+
+fn measure_snapshot_steps(worker: &Workbook, label: &str) {
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(worker, Some(context()), budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    let mut max_push = std::time::Duration::ZERO;
+    let mut max_advance = std::time::Duration::ZERO;
+    let mut push_steps = 0;
+    let mut advance_steps = 0;
+    while let Some(chunk) = encoder.next(worker).unwrap() {
+        let start = std::time::Instant::now();
+        builder.push(&chunk).unwrap();
+        max_push = max_push.max(start.elapsed());
+        assert_step_budget(budget);
+        push_steps += 1;
+        let start = std::time::Instant::now();
+        builder.advance(budget).unwrap();
+        max_advance = max_advance.max(start.elapsed());
+        assert_step_budget(budget);
+        advance_steps += 1;
+    }
+    loop {
+        let start = std::time::Instant::now();
+        let ready = builder.advance(budget).unwrap().is_ready();
+        max_advance = max_advance.max(start.elapsed());
+        assert_step_budget(budget);
+        advance_steps += 1;
+        if ready {
+            break;
+        }
+    }
+    eprintln!(
+        "{label}: max push={max_push:?}, max advance={max_advance:?}, max advance ms={:.3}",
+        max_advance.as_secs_f64() * 1_000.0
+    );
+    eprintln!(
+        "{label}: total steps={}, push steps={push_steps}, advance steps={advance_steps}",
+        push_steps + advance_steps
+    );
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(worker, &peer);
+    assert_eq!(
+        worker.encode_state_as_update_v1(),
+        peer.encode_state_as_update_v1()
+    );
+}
+
+#[test]
+fn snapshot_fifty_thousand_short_formulas_hydrate_with_a_small_budget() {
+    let worker = short_formula_worker(50_000);
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&worker, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    while let Some(chunk) = encoder.next(&worker).unwrap() {
+        builder.push(&chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        assert_step_budget(budget);
+    }
+    let mut graph_steps = 0;
+    let mut migrated = 0;
+    loop {
+        let graph = builder.graph.is_some();
+        let ready = builder.advance(budget).unwrap().is_ready();
+        let work = assert_step_budget(budget);
+        graph_steps += usize::from(graph && work.records != 0);
+        let count = crate::snapshot::step::migrated_entries();
+        assert!(count <= work.records);
+        migrated += count;
+        if ready {
+            break;
+        }
+    }
+    assert!(graph_steps >= 50_000);
+    assert!(migrated >= 50_000);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+}
+
+#[test]
+#[ignore]
+fn snapshot_flat_conflict_history_steps_respect_budget() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, ReadTxn, StateVector, Transact, Update, WriteTxn};
+
+    assert!(
+        !cfg!(debug_assertions),
+        "run this measurement in release mode"
+    );
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for client in 1..=4_000 {
+        let peer = Doc::with_client_id(client);
+        {
+            let mut txn = peer.transact_mut();
+            txn.get_or_insert_map("snapshot-flat-conflicts").insert(
+                &mut txn,
+                "scalar",
+                client as i64,
+            );
+        }
+        let bytes = peer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        worker
+            .authority
+            .snapshot_transaction_for_test()
+            .apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
+    }
+    measure_snapshot_steps(&worker, "4000 flat conflicts");
+}
+
+#[test]
+#[ignore]
+fn snapshot_many_short_formulas_steps_respect_budget() {
+    assert!(
+        !cfg!(debug_assertions),
+        "run this measurement in release mode"
+    );
+    let worker = short_formula_worker(50_000);
+    measure_snapshot_steps(&worker, "50000 short formulas");
+}
+
 #[test]
 fn snapshot_authority_steps_accept_a_smaller_record_budget() {
     let worker = worker(&source(false, false));
@@ -1945,4 +2092,290 @@ fn snapshot_transport_fragments_and_hydration_cap() {
     while !builder.advance(large).unwrap().is_ready() {}
     let (peer, _) = builder.finish().unwrap().into_parts();
     assert_current_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_empty_sheet_authority_finalization_drains_within_each_advance() {
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: (0..20_000)
+            .map(|index| crate::Sheet::new(format!("S{index}")))
+            .collect(),
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let budget = SnapshotBudget::new(1, 1_048_576).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&worker, None, budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    let mut drained = 0;
+    while let Some(chunk) = encoder.next(&worker).unwrap() {
+        builder.push(&chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        assert_step_budget(budget);
+        drained += crate::snapshot::step::drained_entries();
+    }
+    let mut steps = 0;
+    loop {
+        let ready = builder.advance(budget).unwrap().is_ready();
+        let work = assert_step_budget(budget);
+        let count = crate::snapshot::step::drained_entries();
+        assert!(count <= work.records);
+        drained += count;
+        steps += 1;
+        if ready {
+            break;
+        }
+        assert!(steps < 2_000_000);
+    }
+    assert!(drained >= 100_000);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_fragment_declaration_allocates_only_received_bytes_and_releases_them() {
+    let before = FRAGMENT_ALLOCATED_BYTES.get();
+    let mut payload = Writer::new();
+    payload.var_u64(1);
+    payload.var_u64(0);
+    payload.var_usize(64 * 1024 * 1024);
+    payload.var_usize(0);
+    payload.raw(&[1]);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    builder
+        .push(&frame(ChunkKind::Header, 0, &payload.into_bytes()))
+        .unwrap();
+    assert!(FRAGMENT_ALLOCATED_BYTES.get() - before <= 1 + FRAGMENT_BLOCK_BYTES);
+    assert_eq!(builder.fragment.as_ref().unwrap().received, 1);
+    drop(builder);
+    assert_eq!(FRAGMENT_ALLOCATED_BYTES.get(), before);
+}
+
+#[test]
+fn snapshot_fragment_assembly_copies_within_each_advance() {
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let transport = SnapshotBudget::new(1, 64).unwrap();
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let chunks = encode(&worker, transport);
+    let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_large_inline_text_aggregate_uses_bounded_fallback() {
+    struct Limit(usize);
+    impl Drop for Limit {
+        fn drop(&mut self) {
+            crate::snapshot::yrs_split::WHOLE_UPDATE_LIMIT.set(self.0);
+        }
+    }
+    let previous = crate::snapshot::yrs_split::WHOLE_UPDATE_LIMIT.replace(4_084);
+    let _limit = Limit(previous);
+    let mut sheet = crate::Sheet::new("Data");
+    for row in 0..16 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(1_024),
+                },
+                formula: None,
+                style: None,
+            },
+        );
+    }
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    assert!(worker.encode_state_as_update_v1().len() > logical_byte_limit());
+    let transport = SnapshotBudget::new(1, 64).unwrap();
+    let budget = SnapshotBudget::new(1, 65_536).unwrap();
+    let chunks = encode(&worker, transport);
+    let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.encode_state_as_update_v1(),
+        peer.encode_state_as_update_v1()
+    );
+}
+
+#[test]
+fn snapshot_short_cells_accept_a_smaller_receiver_byte_budget() {
+    let mut sheet = crate::Sheet::new("Data");
+    for row in 0..4_000 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Number {
+                    value: f64::from(row),
+                },
+                formula: None,
+                style: None,
+            },
+        );
+    }
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let transport = SnapshotBudget::new(2_048, 65_536).unwrap();
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let chunks = encode(&worker, transport);
+    assert!(decoded_snapshot(&chunks).iter().any(|(kind, _, payload)| {
+        *kind == ChunkKind::Yrs && payload.len() > budget.max_bytes()
+    }));
+    let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_two_empty_sheets_require_a_consistent_storage_minimum() {
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data"), crate::Sheet::new("Other")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let budget = SnapshotBudget::new(1, 256).unwrap();
+    assert!(size_of::<xlsx_model::Sheet>() > budget.max_bytes());
+    let chunks = encode(&worker, budget);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in &chunks {
+        builder.push(chunk).unwrap();
+        let failure = builder.advance(budget).unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "snapshot storage exceeds advance byte budget"
+        );
+        assert_step_budget(budget);
+    }
+    let larger = SnapshotBudget::new(1, 16_384).unwrap();
+    loop {
+        let ready = builder.advance(larger).unwrap().is_ready();
+        assert_step_budget(larger);
+        if ready {
+            break;
+        }
+    }
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_rejects_duplicate_sheet_names_and_invalid_cells_before_ready() {
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    for invalid in 0..5 {
+        let mut worker = Workbook::from_model(WorkbookModel {
+            sheets: vec![crate::Sheet::new("Data"), crate::Sheet::new("Other")],
+            ..WorkbookModel::default()
+        })
+        .unwrap();
+        match invalid {
+            0 => worker.model.sheets[1].name = "data".to_owned(),
+            1 => worker.model.sheets[1].name = "Bad/Name".to_owned(),
+            2 => worker.model.sheets[0].set_cell(
+                CellRef::new(0, 0),
+                Cell {
+                    value: CellValue::Number { value: f64::NAN },
+                    ..Cell::default()
+                },
+            ),
+            3 => worker.model.sheets[0].set_cell(
+                CellRef::new(xlsx_model::MAX_ROWS, 0),
+                Cell {
+                    value: CellValue::Bool { value: true },
+                    ..Cell::default()
+                },
+            ),
+            _ => worker.model.sheets[0].set_cell(
+                CellRef::new(0, 0),
+                Cell {
+                    value: CellValue::Bool { value: true },
+                    style: Some(u32::MAX),
+                    formula: None,
+                },
+            ),
+        }
+        let chunks = encode(&worker, budget);
+        let mut builder = WorkbookSnapshotBuilder::new();
+        for chunk in &chunks {
+            builder.push(chunk).unwrap();
+            builder.advance(budget).unwrap();
+        }
+        assert!(builder.ended);
+        let mut refused = false;
+        for _ in 0..10_000 {
+            match builder.advance(budget) {
+                Ok(progress) => assert!(!progress.is_ready()),
+                Err(_) => {
+                    refused = true;
+                    break;
+                }
+            }
+        }
+        assert!(refused);
+        assert!(builder.finish().is_err());
+    }
+}
+
+#[test]
+fn snapshot_lineage_uses_cached_authority_revision_for_every_fragment() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, ReadTxn, StateVector, Transact, Update, WriteTxn};
+
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    for client in 1..=128 {
+        let peer = Doc::with_client_id(client);
+        {
+            let mut txn = peer.transact_mut();
+            txn.get_or_insert_map("snapshot-lineage").insert(
+                &mut txn,
+                client.to_string(),
+                client as i64,
+            );
+        }
+        let bytes = peer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        worker
+            .authority
+            .snapshot_transaction_for_test()
+            .apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
+    }
+    let transport = SnapshotBudget::new(1, 64).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&worker, None, transport).unwrap();
+    let before = crate::authority::SNAPSHOT_VECTOR_ENCODINGS.get();
+    let mut fragments = 0;
+    while encoder.next(&worker).unwrap().is_some() {
+        fragments += 1;
+    }
+    assert!(fragments > 128);
+    assert_eq!(crate::authority::SNAPSHOT_VECTOR_ENCODINGS.get(), before);
+    let mut encoder = WorkbookSnapshotEncoder::new(&worker, None, transport).unwrap();
+    assert!(encoder.next(&worker).unwrap().is_some());
+    let revision = worker.authority.snapshot_revision();
+    drop(worker.authority.snapshot_transaction_for_test());
+    assert_eq!(worker.authority.snapshot_revision(), revision);
+    assert!(encoder.next(&worker).unwrap().is_some());
+    {
+        let mut txn = worker.authority.snapshot_transaction_for_test();
+        txn.get_or_insert_map("snapshot-lineage")
+            .insert(&mut txn, "changed", 1);
+    }
+    let failure = encoder.next(&worker).unwrap_err();
+    assert_eq!(failure.to_string(), "snapshot workbook lineage has changed");
 }

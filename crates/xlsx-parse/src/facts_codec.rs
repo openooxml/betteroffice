@@ -1,3 +1,5 @@
+use std::mem::size_of;
+
 use xlsx_model::CellRef;
 
 use crate::package_facts::{
@@ -140,6 +142,9 @@ pub struct PackageFactsBuilder {
     record_length: Option<usize>,
     record: Vec<u8>,
     failed: bool,
+    sheets_growth: VectorGrowth<SheetFacts>,
+    references_growth: VectorGrowth<ReferenceFacts>,
+    charts_growth: VectorGrowth<(String, Vec<u8>)>,
 }
 
 impl Default for PackageFactsBuilder {
@@ -157,13 +162,90 @@ impl Default for PackageFactsBuilder {
             record_length: None,
             record: Vec::new(),
             failed: false,
+            sheets_growth: VectorGrowth::default(),
+            references_growth: VectorGrowth::default(),
+            charts_growth: VectorGrowth::default(),
         }
+    }
+}
+
+struct VectorGrowth<T> {
+    pending: Option<(std::vec::IntoIter<T>, Vec<T>)>,
+}
+
+impl<T> Default for VectorGrowth<T> {
+    fn default() -> Self {
+        Self { pending: None }
+    }
+}
+
+impl<T> VectorGrowth<T> {
+    fn ensure(
+        &mut self,
+        target: &mut Vec<T>,
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<Option<(usize, usize)>, ParseError> {
+        if size_of::<T>() > max_bytes || max_records == 0 {
+            return Err(malformed("facts storage exceeds advance budget"));
+        }
+        if self.pending.is_none() {
+            if target.len() < target.capacity() {
+                return Ok(None);
+            }
+            let mut storage = Vec::new();
+            storage
+                .try_reserve_exact(target.len().saturating_mul(2).max(1))
+                .map_err(|_| malformed("cannot allocate facts storage"))?;
+            if target.is_empty() {
+                *target = storage;
+                return Ok(None);
+            }
+            self.pending = Some((std::mem::take(target).into_iter(), storage));
+        }
+        let (entries, storage) = self.pending.as_mut().unwrap();
+        let count = entries
+            .len()
+            .min(max_records)
+            .min(max_bytes / size_of::<T>().max(1));
+        storage.extend(entries.by_ref().take(count));
+        if entries.len() == 0 {
+            *target = self.pending.take().unwrap().1;
+        }
+        Ok(Some((count, count * size_of::<T>())))
     }
 }
 
 impl PackageFactsBuilder {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[doc(hidden)]
+    pub fn advance_capacity(
+        &mut self,
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<(bool, usize, usize), ParseError> {
+        if let Some((records, bytes)) =
+            self.sheets_growth
+                .ensure(&mut self.facts.sheets, max_records, max_bytes)?
+        {
+            return Ok((false, records, bytes));
+        }
+        if let Some((records, bytes)) =
+            self.references_growth
+                .ensure(&mut self.facts.references, max_records, max_bytes)?
+        {
+            return Ok((false, records, bytes));
+        }
+        if let Some((records, bytes)) =
+            self.charts_growth
+                .ensure(&mut self.facts.charts, max_records, max_bytes)?
+        {
+            return Ok((false, records, bytes));
+        }
+        Ok((true, 0, 0))
     }
 
     pub fn push(&mut self, payload: &[u8]) -> Result<(), ParseError> {
@@ -259,6 +341,9 @@ impl PackageFactsBuilder {
         if self.failed
             || self.record_length.is_some()
             || self.shift != 0
+            || self.sheets_growth.pending.is_some()
+            || self.references_growth.pending.is_some()
+            || self.charts_growth.pending.is_some()
             || self.expected != Some((sheets.len(), references.len(), charts.len()))
         {
             return Err(malformed("incomplete facts"));
@@ -511,6 +596,38 @@ mod tests {
             framed.bytes(&record.0);
         }
         framed.0
+    }
+
+    #[test]
+    fn reference_facts_growth_migrates_within_each_advance() {
+        let facts = PackageFacts {
+            sheets: Vec::new(),
+            references: (0..4_097)
+                .map(|index| ReferenceFacts {
+                    part: format!("part{index}"),
+                    areas: None,
+                })
+                .collect(),
+            charts: Vec::new(),
+            any_uncached_formula: false,
+        };
+        let mut encoder = PackageFactsEncoder::new();
+        let mut builder = PackageFactsBuilder::new();
+        let mut migrated = 0;
+        while let Some(payload) = encoder.next_from_facts(&facts, 256).unwrap() {
+            loop {
+                let (ready, records, bytes) = builder.advance_capacity(1, 256).unwrap();
+                assert!(records <= 1);
+                assert!(bytes <= 256);
+                migrated += records;
+                if ready {
+                    break;
+                }
+            }
+            builder.push(&payload).unwrap();
+        }
+        assert!(migrated >= 4_096);
+        assert_eq!(builder.finish().unwrap(), facts);
     }
 
     #[test]
