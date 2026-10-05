@@ -6,19 +6,30 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRange, CellRef};
 
 use crate::axis::{AxisMap, SheetAxes};
-use crate::formula::{Reference, references_match, sheet_name};
+use crate::formula::{Reference, ReferenceStatus, classify_references, sheet_name};
 use crate::package::attributes;
 use crate::xml::{attr, resolve_entity, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
-pub(super) fn unchanged(
+pub(super) fn unchanged_with_defined_names(
+    source: &[u8],
+    axes: Option<&SheetAxes>,
+    sheet_axes: &[(&str, Option<&SheetAxes>)],
+    axes_changed: bool,
+    defined_names: Option<&[&str]>,
+) -> bool {
+    (axes.is_none_or(SheetAxes::is_identity) && !axes_changed)
+        || inspect(source, axes, sheet_axes, defined_names).unwrap_or(false)
+}
+
+#[cfg(test)]
+fn unchanged(
     source: &[u8],
     axes: Option<&SheetAxes>,
     sheet_axes: &[(&str, Option<&SheetAxes>)],
     axes_changed: bool,
 ) -> bool {
-    (axes.is_none_or(SheetAxes::is_identity) && !axes_changed)
-        || inspect(source, axes, sheet_axes).unwrap_or(false)
+    unchanged_with_defined_names(source, axes, sheet_axes, axes_changed, Some(&[]))
 }
 
 fn fixed(axis: &AxisMap, range: Range<u32>) -> bool {
@@ -51,8 +62,9 @@ fn formula(
     value: &str,
     axes: Option<&SheetAxes>,
     sheet_axes: &[(&str, Option<&SheetAxes>)],
-) -> bool {
-    references_match(value, |sheet, reference| {
+    defined_names: Option<&[&str]>,
+) -> ReferenceStatus {
+    classify_references(value, defined_names, |sheet, reference| {
         let axes = match sheet {
             None => axes,
             Some(name) => {
@@ -62,19 +74,26 @@ fn formula(
                     .filter(|(sheet, _)| sheet.eq_ignore_ascii_case(&name));
                 let axes = candidates.next().and_then(|(_, axes)| *axes);
                 if candidates.next().is_some() {
-                    return false;
+                    return ReferenceStatus::Unresolvable;
                 }
                 axes
             }
         };
-        match (axes, reference) {
-            (Some(axes), Some(Reference::Cells(range))) => {
+        let Some(axes) = axes else {
+            return ReferenceStatus::Unresolvable;
+        };
+        let fixed = match reference {
+            Reference::Cells(range) => {
                 fixed(&axes.rows, range.start.row..range.end.row + 1)
                     && fixed(&axes.cols, range.start.col..range.end.col + 1)
             }
-            (Some(axes), Some(Reference::Rows(range))) => fixed(&axes.rows, range),
-            (Some(axes), Some(Reference::Columns(range))) => fixed(&axes.cols, range),
-            _ => false,
+            Reference::Rows(range) => fixed(&axes.rows, range),
+            Reference::Columns(range) => fixed(&axes.cols, range),
+        };
+        if fixed {
+            ReferenceStatus::Unmoved
+        } else {
+            ReferenceStatus::Moved
         }
     })
 }
@@ -97,6 +116,7 @@ fn inspect(
     source: &[u8],
     axes: Option<&SheetAxes>,
     sheet_axes: &[(&str, Option<&SheetAxes>)],
+    defined_names: Option<&[&str]>,
 ) -> Result<bool, ParseError> {
     let formula_axes = axes;
     let identity = SheetAxes::default();
@@ -288,7 +308,8 @@ fn inspect(
             Event::End(element) => {
                 if let Some((name, value)) = positioned_text.take() {
                     let stable = if name == b"f" {
-                        formula(&value, formula_axes, sheet_axes)
+                        formula(&value, formula_axes, sheet_axes, defined_names)
+                            == ReferenceStatus::Unmoved
                     } else {
                         text_coordinates(&name, &value, axes)
                     };
@@ -384,6 +405,67 @@ mod tests {
             "<extLst xmlns:x=\"urn:generic\"><ext><x:f><![CDATA[{value}]]></x:f></ext></extLst>"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn extension_formula_intersections_require_identity_axes() {
+        let identity = SheetAxes::default();
+        let mut moved = SheetAxes::default();
+        moved.rows.insert(3, 1);
+        let source = extension_formula("SUM($E$5 (E:E))");
+        assert!(unchanged(&source, &identity));
+        assert!(!unchanged(&source, &moved));
+        assert!(!super::unchanged(&source, Some(&identity), &[], true));
+    }
+
+    #[test]
+    fn extension_formula_defined_names_require_identity_axes() {
+        let identity = SheetAxes::default();
+        for names in [Some(&["AB1"][..]), None] {
+            let source = extension_formula("ab1");
+            assert!(super::unchanged_with_defined_names(
+                &source,
+                Some(&identity),
+                &[],
+                false,
+                names
+            ));
+            assert!(!super::unchanged_with_defined_names(
+                &source,
+                Some(&identity),
+                &[],
+                true,
+                names
+            ));
+        }
+    }
+
+    #[test]
+    fn extension_formula_sheet_names_need_unique_save_origins() {
+        let identity = SheetAxes::default();
+        for sheets in [
+            vec![("OldData", None), ("View", None), ("Data", None)],
+            vec![("OldData", None), ("View", None), ("Other", None)],
+            vec![("Data", Some(&identity)), ("data", Some(&identity))],
+        ] {
+            assert_eq!(
+                formula("Data!E5", Some(&identity), &sheets, Some(&[])),
+                ReferenceStatus::Unresolvable
+            );
+        }
+    }
+
+    #[test]
+    fn extension_formula_unmoved_function_reference_allows_borrowing() {
+        let identity = SheetAxes::default();
+        let mut moved = SheetAxes::default();
+        moved.rows.insert(3, 1);
+        assert!(super::unchanged(
+            &extension_formula("SUM(E5)"),
+            Some(&identity),
+            &[("Sheet1", Some(&moved)), ("Sheet2", Some(&identity))],
+            true,
+        ));
     }
 
     #[test]
@@ -489,7 +571,7 @@ mod tests {
             "",
             "1+2",
             "1E3+2.5e-4+1E+3",
-            "IF(TRUE,LOG10(100),FALSE)",
+            "IF(TRUE,SQRT(100),FALSE)",
             "_xlfn.FOO(1)",
             r#""A1"&"Sheet2!E5:E6"&"Table1[Column1]"&"A1""E5""#,
             "IFERROR(#REF!,#N/A)",

@@ -394,15 +394,34 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles);
     let empty_provenance = SharedStringCells::new();
     let axes_changed = sheet_axes.iter().flatten().any(|axes| !axes.is_identity());
-    let reference_axes = package
+    let defined_names = package
         .original_workbook
+        .defined_names
+        .iter()
+        .chain(&wb.defined_names)
+        .map(|defined| defined.name.as_str())
+        .collect::<Vec<_>>();
+    let sheet_names_stable = wb.sheets.len() == package.original_workbook.sheets.len()
+        && origins.iter().flatten().collect::<HashSet<_>>().len() == wb.sheets.len()
+        && wb
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.to_ascii_lowercase())
+            .collect::<HashSet<_>>()
+            .len()
+            == wb.sheets.len()
+        && wb.sheets.iter().zip(origins).all(|(sheet, origin)| {
+            origin
+                .and_then(|origin| package.original_workbook.sheets.get(origin))
+                .is_some_and(|original| original.name == sheet.name)
+        });
+    let reference_axes = wb
         .sheets
         .iter()
         .enumerate()
-        .map(|(origin, sheet)| {
-            let axes = origins
-                .iter()
-                .position(|candidate| *candidate == Some(origin))
+        .map(|(index, sheet)| {
+            let axes = sheet_names_stable
+                .then_some(index)
                 .and_then(|index| sheet_axes.get(index))
                 .and_then(Option::as_ref);
             (sheet.name.as_str(), axes)
@@ -427,6 +446,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                                 axes,
                                 &reference_axes,
                                 axes_changed,
+                                Some(&defined_names),
                                 &style_match,
                             )
                         })
@@ -909,9 +929,16 @@ fn sheet_body_matches(
     axes: Option<&SheetAxes>,
     reference_axes: &[(&str, Option<&SheetAxes>)],
     axes_changed: bool,
+    defined_names: Option<&[&str]>,
     styles: &StyleMatch<'_>,
 ) -> bool {
-    if !source_coordinates::unchanged(source, axes, reference_axes, axes_changed) {
+    if !source_coordinates::unchanged_with_defined_names(
+        source,
+        axes,
+        reference_axes,
+        axes_changed,
+        defined_names,
+    ) {
         return false;
     }
     sheet.freeze_pane == original.freeze_pane

@@ -2032,12 +2032,196 @@ fn source_extension_formula_other_sheet_moved_axes_refuse_borrowing() {
 
 #[test]
 fn source_extension_formula_without_references_borrows() {
-    let extension = r#"<extLst xmlns:x="urn:generic"><ext><x:f>IF(TRUE,LOG10(100),&quot;Sheet2!E5:E6&quot;)</x:f></ext></extLst>"#;
+    let extension = r#"<extLst xmlns:x="urn:generic"><ext><x:f>IF(TRUE,SQRT(100),&quot;Sheet2!E5:E6&quot;)</x:f></ext></extLst>"#;
     let mut axes = SheetAxes::default();
     axes.rows.insert(3, 1);
     check_extension_formula_after_unrelated_edit(
         extension,
         [Some(SheetAxes::default()), Some(axes)],
+        true,
+    );
+}
+
+fn extension_formula_package(formula: &str, names: &str) -> Vec<(String, Vec<u8>)> {
+    let grid = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let mut parts = two_sheet_package(
+        grid,
+        &format!(
+            r#"{grid}<extLst xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><xm:f>{formula}</xm:f></ext></extLst>"#
+        ),
+    );
+    let workbook = parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/workbook.xml")
+        .unwrap();
+    workbook.1 = String::from_utf8(workbook.1.clone())
+        .unwrap()
+        .replace("</workbook>", &format!("{names}</workbook>"))
+        .into_bytes();
+    parts
+}
+
+fn check_extension_formula_save(
+    parts: &[(String, Vec<u8>)],
+    parsed: &crate::ParsedWorkbook,
+    workbook: &Workbook,
+    axes: &[Option<SheetAxes>],
+    borrowed: bool,
+) {
+    let origins = (0..workbook.sheets.len()).map(Some).collect::<Vec<_>>();
+    let provenance = (0..workbook.sheets.len())
+        .map(|origin| parsed.package.source_shared_string_cells(origin))
+        .collect::<Vec<_>>();
+    let save = || {
+        serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+            workbook,
+            &parsed.package,
+            &origins,
+            &provenance,
+            axes,
+            SaveEdits {
+                changed: true,
+                moved_references: true,
+            },
+            SheetId(0),
+        )
+        .unwrap()
+    };
+    let saved = save();
+    let (legacy, dispatches) = crate::with_legacy_save_path(save);
+    assert!(dispatches > 0);
+    assert_eq!(saved, legacy);
+    for saved in [&saved, &legacy] {
+        let (_, sheet) = saved
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+            .unwrap();
+        if borrowed {
+            assert!(matches!(sheet, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(
+                sheet.as_ref(),
+                part_bytes(parts, "xl/worksheets/sheet2.xml")
+            );
+        } else {
+            assert!(matches!(sheet, std::borrow::Cow::Owned(_)));
+        }
+        let reopened = parse_workbook(saved).unwrap();
+        assert_eq!(reopened.sheets[1], parsed.workbook.sheets[1]);
+        assert_eq!(&reopened, workbook);
+    }
+}
+
+#[test]
+fn source_extension_formula_parenthesized_intersection_refuses_borrowing() {
+    let extension = r#"<extLst xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><xm:f>SUM($E$5 (E:E))</xm:f></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    assert_eq!(axes.rows.current(4), Some(5));
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        false,
+    );
+}
+
+#[test]
+fn source_extension_formula_renamed_sheet_names_refuse_borrowing() {
+    let mut parts = extension_formula_package("Data!E5", "");
+    for (path, bytes) in &mut parts {
+        let source = String::from_utf8(bytes.clone()).unwrap();
+        if path == "xl/workbook.xml" {
+            *bytes = source
+                .replace("Sheet1", "Data")
+                .replace("Sheet2", "View")
+                .replace(
+                    "</sheets>",
+                    r#"<sheet name="Other" sheetId="3" r:id="rId3"/></sheets>"#,
+                )
+                .into_bytes();
+        } else if path == "xl/_rels/workbook.xml.rels" {
+            *bytes = source
+                .replace(
+                    "</Relationships>",
+                    r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#,
+                )
+                .into_bytes();
+        }
+    }
+    parts.push((
+        "xl/worksheets/sheet3.xml".to_owned(),
+        br#"<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#
+            .to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    assert_eq!(axes.rows.current(4), Some(5));
+    let axes = [
+        Some(SheetAxes::default()),
+        Some(SheetAxes::default()),
+        Some(axes),
+    ];
+    for reuse_name in [false, true] {
+        let mut workbook = parsed.workbook.clone();
+        workbook.sheets[0].name = "OldData".to_owned();
+        if reuse_name {
+            workbook.sheets[2].name = "Data".to_owned();
+        }
+        set_number(&mut workbook, 0, "A1", 2.0);
+        check_extension_formula_save(&parts, &parsed, &workbook, &axes, false);
+    }
+}
+
+#[test]
+fn source_extension_formula_cell_shaped_defined_name_refuses_borrowing() {
+    for scope in ["", r#" localSheetId="0""#, r#" localSheetId="1""#] {
+        let names = format!(
+            r#"<definedNames><definedName name="AB1"{scope}>Sheet1!$E$5</definedName></definedNames>"#
+        );
+        let parts = extension_formula_package("AB1", &names);
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert_eq!(parsed.workbook.defined_names[0].name, "AB1");
+        assert_eq!(parsed.workbook.defined_names[0].formula, "Sheet1!$E$5");
+        let mut workbook = parsed.workbook.clone();
+        workbook.defined_names[0].formula = "Sheet1!$E$6".to_owned();
+        set_number(&mut workbook, 0, "A1", 2.0);
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(3, 1);
+        assert_eq!(axes.rows.current(4), Some(5));
+        check_extension_formula_save(
+            &parts,
+            &parsed,
+            &workbook,
+            &[Some(axes), Some(SheetAxes::default())],
+            false,
+        );
+    }
+}
+
+#[test]
+fn source_extension_formula_identity_intersection_and_name_borrow_byte_identically() {
+    let names = r#"<definedNames><definedName name="AB1">Sheet1!$E$5</definedName></definedNames>"#;
+    let parts = extension_formula_package("SUM($E$5 (E:E))+AB1", names);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    set_number(&mut workbook, 0, "A1", 2.0);
+    check_extension_formula_save(
+        &parts,
+        &parsed,
+        &workbook,
+        &[Some(SheetAxes::default()), Some(SheetAxes::default())],
+        true,
+    );
+}
+
+#[test]
+fn source_extension_formula_unmoved_function_reference_borrows_byte_identically() {
+    let extension = r#"<extLst xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><xm:f>SUM(E5)</xm:f></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(axes), Some(SheetAxes::default())],
         true,
     );
 }
