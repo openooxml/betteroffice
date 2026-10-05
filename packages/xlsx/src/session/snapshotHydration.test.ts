@@ -5,7 +5,9 @@ import { isClientMessage, isHostMessage, type SessionTransport } from '../../../
 import * as workbookWasm from '../wasm/loader';
 import type { WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
 import { hydratePeer, openWorkbookSession, type WorkbookSession } from './client';
+import { workbookPeerSources } from './clientInternals';
 import { createWorkbookEditPeer, type WorkbookEditPeer } from './editPeer';
+import { workbookSessionInternals } from './replay';
 import { createTestWorkbookSession } from './testHelpers';
 
 let bytes: Uint8Array;
@@ -137,6 +139,156 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     edits?.dispose();
     peer?.dispose();
     source.dispose();
+    await session.dispose();
+  }
+});
+
+test.each(['explicit', 'worker-default'] as const)('successful snapshot releases fallback data and attaches with the exact %s calculation context', async (context) => {
+  const session = await createTestWorkbookSession(bytes, undefined, {
+    calculation: context === 'explicit' ? calculation : undefined,
+    wasm: wasm.buffer, retainPeerHydration: true,
+  });
+  const source = workbookPeerSources.get(session);
+  const internal = workbookSessionInternals.get(session);
+  if (!source?.hydration || !internal) throw new Error('Missing retained peer source');
+  expect(source.bytes?.byteLength).toBe(bytes.byteLength);
+  const fallbackHydration = source.hydration;
+  const initial = JSON.parse(fallbackHydration);
+  const expected = { nowSerial: initial.calculation_context.now_serial, randSeed: initial.workbook.rand_seed };
+  if (context === 'explicit') expect(expected).toEqual(calculation);
+  expect(internal.initialCalculation).toEqual(expected);
+  const parsing = spyOn(JSON, 'parse');
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const sourceOpening = spyOn(workbookWasm, 'openWorkbookPeer');
+  let peer: WorkbookHandle | undefined;
+  let edits: WorkbookEditPeer | undefined;
+  try {
+    const hydration = hydratePeer(session);
+    expect(hydratePeer(session)).toBe(hydration);
+    peer = await hydration;
+    expect(source.bytes).toBeUndefined();
+    expect(source.hydration).toBeUndefined();
+    expect(source.pending).toBe(hydration);
+    expect(hydratePeer(session)).toBe(hydration);
+    expect(await hydratePeer(session)).toBe(peer);
+    expect(internal.initialCalculation).toEqual(expected);
+    edits = createWorkbookEditPeer({ session, peer, ...editOptions });
+    await edits.flush();
+    expect(edits.state).toBe('ready');
+    expect(parsing).not.toHaveBeenCalledWith(fallbackHydration);
+    expect(sourceOpening).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+    const setting = spyOn(peer, 'setCalculationContext');
+    try {
+      expect(edits.applyEdits({ expectVersion: 'stale', steps: [{
+        op: 'setCellInputs', target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } },
+        inputs: [['refused']],
+      }] })).toMatchObject({ ok: false });
+      await edits.flush();
+      expect(setting.mock.calls).toEqual([[calculation], [expected]]);
+      expect(edits.sentSequence).toBe(0);
+      await equalPeer(peer, session);
+      expect(edits.editCell(0, 1, 0, '91').applied).toBe(true);
+      await edits.flush();
+      await equalPeer(peer, session);
+      expect(new Uint8Array(await edits.save())).toEqual(await session.save());
+    } finally { setting.mockRestore(); }
+  } finally {
+    parsing.mockRestore();
+    warning.mockRestore();
+    sourceOpening.mockRestore();
+    edits?.dispose();
+    peer?.dispose();
+    await session.dispose();
+  }
+});
+
+test.each(['null', 'missing'] as const)('source-fallback attachment preserves %s initial calculation context', async (context) => {
+  const session = await createTestWorkbookSession(bytes, (transport) => ({
+    ...transport,
+    post(message, transfer) {
+      if (context === 'missing' && isHostMessage(message) && message.kind === 'event' && message.name === 'peerOpened') {
+        const { initialCalculation, ...payload } = message.payload as { version: string; initialCalculation?: unknown };
+        message = { ...message, payload };
+      }
+      transport.post(message, transfer);
+    },
+  }), { collaborative: true, clientId: 41, wasm: wasm.buffer, retainPeerHydration: true });
+  const internal = workbookSessionInternals.get(session);
+  if (!internal) throw new Error('Missing workbook session internals');
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const sourceOpening = spyOn(workbookWasm, 'openWorkbookPeer');
+  let peer: WorkbookHandle | undefined;
+  let edits: WorkbookEditPeer | undefined;
+  try {
+    expect(internal.initialCalculation).toBe(context === 'null' ? null : undefined);
+    peer = await hydratePeer(session);
+    expect(warning).toHaveBeenCalledWith('xlsx worker editor: snapshot hydration fell back: collaborative workbooks cannot be snapshotted');
+    expect(sourceOpening).toHaveBeenCalledTimes(1);
+    expect(workbookPeerSources.get(session)?.bytes).toEqual(bytes);
+    expect(workbookPeerSources.get(session)?.hydration).toBeDefined();
+    expect(internal.initialCalculation).toBe(context === 'null' ? null : undefined);
+    edits = createWorkbookEditPeer({ session, peer });
+    await edits.flush();
+    expect(edits.state).toBe('ready');
+    await equalPeer(peer, session);
+  } finally {
+    warning.mockRestore();
+    sourceOpening.mockRestore();
+    edits?.dispose();
+    peer?.dispose();
+    await session.dispose();
+  }
+});
+
+test('real oversized-cell snapshot refusal discards the worker snapshot and replays source-hydrated edits', async () => {
+  const zip = await JSZip.loadAsync(bytes);
+  const text = 'x'.repeat(20_000);
+  zip.file('xl/worksheets/sheet2.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>${text}</t></is></c></row></sheetData></worksheet>`);
+  const oversized = await zip.generateAsync({ type: 'uint8array' });
+  const open = workbookWasm.openWorkbook;
+  let worker: WorkbookHandle | undefined;
+  const opening = spyOn(workbookWasm, 'openWorkbook').mockImplementation((...args) => {
+    worker = open(...args);
+    return worker;
+  });
+  const discarded: boolean[] = [];
+  let session: WorkbookSession;
+  try {
+    session = await createTestWorkbookSession(oversized, (transport) => ({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'endPeerSnapshot') {
+          discarded.push(message.args[0] as boolean);
+        }
+        listener(message);
+      }),
+    }), { calculation, wasm: wasm.buffer, retainPeerHydration: true });
+  } finally { opening.mockRestore(); }
+  if (!worker) throw new Error('Missing worker workbook');
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const sourceOpening = spyOn(workbookWasm, 'openWorkbookPeer');
+  let peer: WorkbookHandle | undefined;
+  try {
+    expect(worker.cell(1, 0, 0).input).toBe(text);
+    peer = await hydratePeer(session);
+    expect(warning).toHaveBeenCalledWith('xlsx worker editor: snapshot hydration fell back: snapshot logical chunk exceeds advance byte budget');
+    expect(warning).toHaveBeenCalledTimes(1);
+    expect(discarded).toEqual([true]);
+    expect(() => workbookWasm.workbookPeerSnapshot(worker!).next()).toThrow('workbook peer snapshot is not active');
+    expect(session.failure).toBeUndefined();
+    expect(session.state.stage).toBe('ready');
+    expect(sourceOpening).toHaveBeenCalledTimes(1);
+    expect(sourceOpening.mock.calls[0]?.[0]).toEqual(oversized);
+    expect(peer.cell(1, 0, 0).input).toBe(text);
+    expect(workbookPeerSources.get(session)?.bytes).toEqual(oversized);
+    expect(workbookPeerSources.get(session)?.hydration).toBeDefined();
+    await equalPeer(peer, session);
+    await replayEdits(peer, session);
+  } finally {
+    warning.mockRestore();
+    sourceOpening.mockRestore();
+    peer?.dispose();
     await session.dispose();
   }
 });

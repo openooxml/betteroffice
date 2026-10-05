@@ -6,7 +6,7 @@ import { wasmAssetUrl } from '../wasm/asset';
 import {
   initWasm, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   workbookPeerSnapshot,
-  type SheetInfo, type WorkbookHandle,
+  type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_POLICIES,
@@ -25,7 +25,7 @@ import {
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
-  peerOpened: { version: string };
+  peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 
@@ -229,9 +229,17 @@ export function createWorkbookSessionHost(
         calculation,
       });
       try {
+        let initialCalculation: WorkbookCalculationContext | null | undefined;
         if (retainPeerHydration) previewSource = {
           bytes: new Uint8Array(bytes).slice(), hydration: workbookPeerHydration(opened),
         };
+        if (previewSource) {
+          const hydration = JSON.parse(previewSource.hydration);
+          initialCalculation = hydration.calculation_context === undefined ? undefined :
+            hydration.calculation_context === null ? null : {
+              nowSerial: hydration.calculation_context.now_serial, randSeed: hydration.workbook.rand_seed,
+            };
+        }
         if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
           transport.post({
             protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
@@ -241,7 +249,7 @@ export function createWorkbookSessionHost(
         const info = opened.sheetInfo();
         const summaries = sheets(info);
         handle = opened;
-        host.emit('peerOpened', { version: opened.version() });
+        host.emit('peerOpened', { version: opened.version(), initialCalculation });
         return { format: 'xlsx', stage: 'ready', version, dirty,
           sheets: summaries, activeSheet: info.activeSheet };
       } catch (error) {

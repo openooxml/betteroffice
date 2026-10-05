@@ -6,7 +6,7 @@ import { SessionFailure, type MethodPolicy, type Promisified } from '../../../..
 import { wasmAssetUrl } from '../wasm/asset';
 import {
   createWorkbookSnapshotBuilder, initWasm, openWorkbookPeer,
-  type OpenWorkbookOptions, type Viewport, type WorkbookHandle,
+  type OpenWorkbookOptions, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -26,27 +26,14 @@ import {
   type WorkbookReplayEnvelope,
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
+import { workbookPeerSources as peerSources, type WorkbookPeerSource } from './clientInternals';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
-  peerOpened: { version: string };
+  peerOpened: { version: string; initialCalculation?: WorkbookCalculationContext | null };
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 const wasmModules = new Map<string, WebAssembly.Module>();
-const peerSources = new WeakMap<WorkbookSession, WorkbookPeerSource>();
 const PEER_SNAPSHOT_BUDGET = { records: 256, bytes: 16 * 1024 } as const;
-
-interface WorkbookPeerSource {
-  bytes: Uint8Array<ArrayBuffer>;
-  options: OpenWorkbookOptions;
-  module?: WebAssembly.Module;
-  hydration?: string;
-  version?: string;
-  sequence?: number;
-  disposed: boolean;
-  pending?: Promise<WorkbookHandle>;
-  snapshot?: Pick<Promisified<WorkbookInternalSessionMethods>,
-    'beginPeerSnapshot' | 'pullPeerSnapshot' | 'endPeerSnapshot'>;
-}
 
 /**
  * Options for opening a workbook in a dedicated worker.
@@ -150,6 +137,8 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
       if (peer.version() !== pinned.version) throw new Error('Workbook snapshot peer version differs from worker');
       await snapshot.endPeerSnapshot(false);
       if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+      source.bytes = undefined;
+      source.hydration = undefined;
       return peer;
     } catch (error) {
       try { peer?.dispose(); } catch {}
@@ -161,6 +150,10 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
     } finally {
       try { builder?.dispose(); } catch {}
     }
+  }
+  if (source.bytes === undefined || source.hydration === undefined) {
+    throw new WorkbookPeerHydrationError('missing-hydration',
+      'Workbook worker did not retain peer source bytes or calculation state');
   }
   try { return openWorkbookPeer(source.bytes, source.options, source.hydration); } catch (error) {
     throw new WorkbookPeerHydrationError('missing-hydration',
@@ -258,7 +251,10 @@ export async function createWorkbookSession(
   }
   let state: WorkbookSessionState;
   let initialVersion: string | undefined;
-  client.on('peerOpened', (opened) => { initialVersion = opened.version; });
+  client.on('peerOpened', (opened) => {
+    initialVersion = opened.version;
+    if (peerSource) peerSource.initialCalculation = opened.initialCalculation;
+  });
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });
   const signal = options.signal;
@@ -371,13 +367,7 @@ export async function createWorkbookSession(
       return (await client.call.cellInputs(sheet, `${column}${row + 1}`)).cells[0]?.[0]?.input ?? '';
     } : undefined,
     preview: source ? async (viewport, sheet, ops) => decodeFrame(await client.call.preview(viewport, sheet, ops)) : undefined,
-    get initialCalculation() {
-      if (!source?.hydration) return undefined;
-      const snapshot = JSON.parse(source.hydration);
-      return snapshot.calculation_context ? {
-        nowSerial: snapshot.calculation_context.now_serial, randSeed: snapshot.workbook.rand_seed,
-      } : null;
-    },
+    get initialCalculation() { return source?.initialCalculation; },
   });
   if (peerSource) peerSources.set(session, peerSource);
   return session;
