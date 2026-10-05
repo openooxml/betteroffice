@@ -124,6 +124,8 @@ export type {
   CellEdit,
   CellPosition,
   CellInputEdit,
+  WorkbookCellInputEdit,
+  WorkbookFormatEdit,
   EditResult,
   EditProfile,
   ProfiledEditResult,
