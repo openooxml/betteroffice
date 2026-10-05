@@ -115,6 +115,7 @@ fn edit_and_compare(
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let engine = EngineSession::new(75401);
+    engine.layout_document_with_regions_retained("{}").unwrap();
     let seed = docx_edit::EditingDoc::new(75400);
     seed_from_docx(&seed, bytes).unwrap();
     engine
@@ -144,6 +145,9 @@ fn edit_and_compare(
     let edited = snapshot(&engine, &output);
 
     let fresh = EngineSession::new(75402);
+    if class == EditClass::Bulk {
+        fresh.layout_document_with_regions_retained("{}").unwrap();
+    }
     let update = engine.doc().encode_state_as_update_v1();
     match class {
         EditClass::Interactive => fresh.doc().apply_update_v1(&update),
@@ -373,6 +377,7 @@ fn assert_moving_footnote_tail_reuse(class: EditClass) {
     docx_layout::clear_measure_fonts();
     let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
     let engine = EngineSession::new(75403);
+    engine.layout_document_with_regions_retained("{}").unwrap();
     let seed = docx_edit::EditingDoc::new(75405);
     seed_from_docx(&seed, &bytes).unwrap();
     engine

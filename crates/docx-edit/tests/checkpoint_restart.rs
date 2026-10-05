@@ -51,6 +51,7 @@ fn split_document(preceding: u32, lines: usize, height: u32, widow: bool) -> Vec
 
 fn prime(bytes: &[u8], font: u32, slices: &[(usize, usize, usize)]) -> (EngineSession, Value) {
     let engine = EngineSession::new(75301);
+    engine.layout_document_with_regions_retained("{}").unwrap();
     let seed = docx_edit::EditingDoc::new(75300);
     seed_from_docx(&seed, bytes).unwrap();
     engine
@@ -162,28 +163,5 @@ fn an_edit_after_a_split_paragraph_resumes_and_matches_fresh() {
             .apply_host_update_v1(&edit.encode_state_as_update_v1())
             .unwrap();
         assert_resumed_matches_fresh(&engine, &request);
-    }
-}
-
-#[test]
-fn a_preview_decision_after_a_split_paragraph_resumes_and_matches_fresh() {
-    docx_layout::clear_measure_fonts();
-    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
-    for (preceding, lines, height, widow, slices) in [
-        (95, 2, 10, false, vec![(3, 0, 1), (3, 1, 2)]),
-        (90, 2, 10, false, vec![(2, 0, 1), (3, 1, 2)]),
-        (40, 4, 20, true, vec![(2, 0, 2), (3, 2, 4)]),
-    ] {
-        let bytes = split_document(preceding, lines, height, widow);
-        for decision in ["accepted", "rejected"] {
-            let (engine, mut request) = prime(&bytes, font, &slices);
-            let revision = engine.doc().list_revisions().unwrap()[0]
-                .change
-                .revision_id
-                .clone();
-            request["renderEnv"]["revisionPreview"] = json!({});
-            request["renderEnv"]["revisionPreview"][&revision] = json!(decision);
-            assert_resumed_matches_fresh(&engine, &request);
-        }
     }
 }

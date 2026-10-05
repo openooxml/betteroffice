@@ -28,6 +28,7 @@ fn bulk_laid_out(bytes: &[u8], client_id: u64) -> (EngineSession, String) {
     let seed = docx_edit::EditingDoc::new(client_id + 1);
     docx_edit::seed_from_docx(&seed, bytes).unwrap();
     let engine = EngineSession::new(client_id);
+    engine.layout_document_with_regions_retained("{}").unwrap();
     engine
         .doc()
         .apply_host_update_v1(&seed.encode_state_as_update_v1())

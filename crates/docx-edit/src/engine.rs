@@ -198,7 +198,8 @@ struct RegionPass {
     provisional: bool,
 }
 
-const OPEN_USES_REGION_PATH: bool = true;
+const OPEN_USES_REGION_PATH: bool = false;
+const PREVIEW_USES_REGION_PATH: bool = false;
 const BULK_USES_REGION_PATH: bool = true;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -213,7 +214,13 @@ impl RelayoutTrigger {
     fn uses_region_path(self) -> bool {
         match self {
             Self::Interactive => false,
-            Self::Preview => true,
+            Self::Preview => {
+                #[cfg(test)]
+                if let Some(enabled) = PREVIEW_REGION_PATH_OVERRIDE.with(Cell::get) {
+                    return enabled;
+                }
+                PREVIEW_USES_REGION_PATH
+            }
             Self::Bulk => BULK_USES_REGION_PATH,
             Self::Open => {
                 #[cfg(test)]
@@ -239,6 +246,7 @@ struct RegionWorkCounts {
 #[cfg(test)]
 thread_local! {
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
         certification: 0,
         placement: 0,
@@ -8873,7 +8881,11 @@ mod lowering_pages;
 mod preview_fixture;
 
 #[cfg(test)]
+mod trigger_routing_tests;
+
+#[cfg(test)]
 mod tests {
+    use super::trigger_routing_tests::{OpenSwitch, PreviewSwitch};
     use super::*;
     use serde_json::json;
     use yrs::Any;
@@ -9597,6 +9609,7 @@ mod tests {
 
     #[test]
     fn region_layout_operation_stabilizes_and_emits_note_areas() {
+        let _preview = PreviewSwitch::new(Some(true));
         let engine = EngineSession::new(132);
         engine.set_relayout_trigger(RelayoutTrigger::Preview);
         let output: serde_json::Value = serde_json::from_str(
@@ -9622,7 +9635,7 @@ mod tests {
     }
 
     #[test]
-    fn an_early_footnote_bounds_retained_probe_payload_and_matches_fresh() {
+    pub(super) fn an_early_footnote_bounds_retained_probe_payload_and_matches_fresh() {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         let body: String = (0..240)
@@ -9703,6 +9716,7 @@ mod tests {
 
     #[test]
     fn a_last_page_footnote_retains_constant_snapshot_entries_and_resumes_exactly() {
+        let _preview = PreviewSwitch::new(Some(true));
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
         let mut retained_counts = Vec::new();
@@ -10639,6 +10653,7 @@ mod tests {
         request: &mut serde_json::Value,
         decision: &str,
     ) {
+        let _preview = PreviewSwitch::new(Some(true));
         request["renderEnv"]["revisionPreview"] = json!({"1": decision});
         let epoch = engine.doc_epoch();
         let version = engine.doc().version();
@@ -10994,7 +11009,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_note_layout_batches_match_main_frames_and_cold_rebuilds() {
+    pub(super) fn interactive_note_layout_batches_match_main_frames_and_cold_rebuilds() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11077,6 +11092,8 @@ mod tests {
 
     #[test]
     fn inline_image_prefix_measurement_matches_main_on_every_trigger() {
+        let _preview = PreviewSwitch::new(Some(true));
+        let _open = OpenSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11144,7 +11161,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_note_sections_keystrokes_match_cold_without_region_work() {
+    pub(super) fn interactive_note_sections_keystrokes_match_cold_without_region_work() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11320,7 +11337,7 @@ mod tests {
     }
 
     #[test]
-    fn host_proposals_before_initial_layout_keep_the_open_trigger() {
+    pub(super) fn host_proposals_before_initial_layout_keep_the_open_trigger() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11358,13 +11375,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             REGION_WORK_COUNTS.with(Cell::get).certification > 0,
-            OPEN_USES_REGION_PATH
+            RelayoutTrigger::Open.uses_region_path()
         );
         assert_region_state_matches_cold(&engine, &request, "initial proposals");
     }
 
     #[test]
     fn first_preview_after_interactive_layout_reuses_nothing() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11428,19 +11446,11 @@ mod tests {
 
     #[test]
     fn interactive_transactions_win_before_the_first_open_layout() {
-        struct OpenSwitch(Option<bool>);
-        impl Drop for OpenSwitch {
-            fn drop(&mut self) {
-                OPEN_REGION_PATH_OVERRIDE.with(|enabled| enabled.set(self.0));
-            }
-        }
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
         for open_region_path in [false, true] {
-            let _switch = OpenSwitch(
-                OPEN_REGION_PATH_OVERRIDE.with(|enabled| enabled.replace(Some(open_region_path))),
-            );
+            let _switch = OpenSwitch::new(Some(open_region_path));
             assert_eq!(RelayoutTrigger::Open.uses_region_path(), open_region_path);
             for edit in ["typing", "paste", "format", "peer", "undo"] {
                 let engine = paragraphs_engine(9385, 3);
@@ -11721,6 +11731,7 @@ mod tests {
 
     #[test]
     fn interactive_edit_discards_saved_region_certificates() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11746,7 +11757,7 @@ mod tests {
     }
 
     #[test]
-    fn open_and_bulk_region_switches_preserve_cold_note_layouts() {
+    pub(super) fn open_and_bulk_region_switches_preserve_cold_note_layouts() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -11754,11 +11765,11 @@ mod tests {
             let (engine, mut request) = interactive_note_sections_engine(font);
             assert_eq!(
                 !engine.pagination.borrow().retain_matches.is_empty(),
-                OPEN_USES_REGION_PATH
+                RelayoutTrigger::Open.uses_region_path()
             );
             assert_eq!(
                 !engine.pagination.borrow().region_placements.is_empty(),
-                OPEN_USES_REGION_PATH
+                RelayoutTrigger::Open.uses_region_path()
             );
             assert_region_state_matches_cold(&engine, &request.to_string(), "open switch");
             let paragraph = &engine.doc().paragraphs("body").unwrap()[0].para_id;
@@ -11827,6 +11838,7 @@ mod tests {
 
     #[test]
     fn retain_identity_edits_match_a_fresh_full_layout() {
+        let _preview = PreviewSwitch::new(Some(true));
         for case in [
             "formatting",
             "nested text",
@@ -11959,6 +11971,8 @@ mod tests {
 
     #[test]
     fn local_text_patches_preserve_untouched_prefix_identities() {
+        let _preview = PreviewSwitch::new(Some(true));
+        let _open = OpenSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -12025,6 +12039,8 @@ mod tests {
 
     #[test]
     fn explicit_preview_after_interactive_relayout_starts_cold_then_reuses_retention() {
+        let _preview = PreviewSwitch::new(Some(true));
+        let _open = OpenSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -12081,6 +12097,7 @@ mod tests {
 
     #[test]
     fn first_interactive_edit_after_preview_uses_local_lowering() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -12123,6 +12140,7 @@ mod tests {
 
     #[test]
     fn a_failed_resident_walk_restores_moved_blocks_and_extents() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -12166,6 +12184,7 @@ mod tests {
 
     #[test]
     fn retain_identity_preview_decisions_share_unchanged_blocks_and_match_full_layout() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -12846,6 +12865,7 @@ mod tests {
 
     #[test]
     fn first_font_invalidates_resident_measurements_without_a_matching_chain() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let engine = EngineSession::new(9653);
@@ -13139,6 +13159,7 @@ mod tests {
 
     #[test]
     fn resident_section_marks_remeasure_when_the_previous_block_kind_changes() {
+        let _preview = PreviewSwitch::new(Some(true));
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         assert_eq!(
@@ -20951,6 +20972,7 @@ mod tests {
     }
 
     fn preview_pagination_prime(engine: &EngineSession, request: &serde_json::Value) -> usize {
+        let _preview = PreviewSwitch::new(Some(true));
         engine.set_relayout_trigger(RelayoutTrigger::Preview);
         let meta = engine
             .layout_document_with_regions_retained_meta(&request.to_string())
@@ -20964,6 +20986,7 @@ mod tests {
         bytes: &[u8],
         request: &serde_json::Value,
     ) -> RetainedLayoutMeta {
+        let _preview = PreviewSwitch::new(Some(true));
         let meta = engine
             .layout_document_with_regions_retained_meta(&request.to_string())
             .unwrap();
@@ -21779,6 +21802,8 @@ mod tests {
 
     #[test]
     fn preview_local_region_layout_matches_fresh_engine() {
+        let _preview = PreviewSwitch::new(Some(true));
+        let _open = OpenSwitch::new(Some(true));
         let bytes = preview_fixture::breaks();
         let engine = preview_seeded(&bytes);
         let font = docx_layout::register_measure_font(LIBERATION).unwrap();
