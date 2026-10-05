@@ -3,8 +3,8 @@
 
 use xlsx_model::styles::{BorderStyle, Color, Fill, FormatCode, HAlign, VAlign};
 use xlsx_model::{
-    Cell, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
-    SheetId, Workbook,
+    Cell, CellRange, CellRef, CellValue, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane,
+    Hyperlink, SheetId, Workbook,
 };
 
 use crate::write::{
@@ -2030,6 +2030,15 @@ fn row_insert_shifts_preserved_row_and_cell_markup() {
     }
     for (at, cell) in cells {
         workbook.sheets[0].set_cell(CellRef::new(at.row + 1, at.col), cell);
+    }
+    let arrays: Vec<(CellRef, CellRange)> = workbook.sheets[0].array_formulas().collect();
+    for (at, _) in &arrays {
+        workbook.sheets[0].clear_array_formula(*at);
+    }
+    let down = |at: CellRef| CellRef::new(at.row + 1, at.col);
+    for (at, spill) in arrays {
+        workbook.sheets[0]
+            .set_array_formula(down(at), CellRange::new(down(spill.start), down(spill.end)));
     }
     let heights: Vec<(u32, f64)> = workbook.sheets[0]
         .row_heights
