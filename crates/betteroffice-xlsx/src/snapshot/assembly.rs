@@ -27,6 +27,10 @@ fn logical_byte_limit() -> usize {
     crate::snapshot::yrs_split::whole_update_limit() + 12
 }
 
+fn record_budget() -> SnapshotResult<SnapshotBudget> {
+    SnapshotBudget::new(64, logical_byte_limit())
+}
+
 fn index(kind: ChunkKind) -> usize {
     kind as usize - 1
 }
@@ -233,7 +237,7 @@ impl WorkbookSnapshotEncoder {
             .saturating_sub(64)
             .clamp(1, logical_byte_limit() - 12);
         let part_budget = SnapshotBudget::new(1, part_bytes)?;
-        let record_budget = SnapshotBudget::new(1, logical_byte_limit())?;
+        let record_budget = record_budget()?;
         let authority = AuthoritySnapshotEncoder::new(
             &workbook.authority,
             SnapshotBudget::new(budget.max_records(), part_bytes)?,
@@ -410,7 +414,7 @@ impl WorkbookSnapshotEncoder {
     }
 
     fn next_logical(&mut self, workbook: &Workbook) -> SnapshotResult<Option<Vec<u8>>> {
-        let record_budget = SnapshotBudget::new(1, logical_byte_limit())?;
+        let record_budget = record_budget()?;
         loop {
             match self.stage {
                 0 => {
@@ -620,7 +624,6 @@ impl QueuedChunk {
                 fragment.blocks.pop_first();
             }
         }
-        #[cfg(test)]
         crate::snapshot::step::record(records, copied);
         if fragment.blocks.is_empty() {
             self.fragment = None;
@@ -1033,7 +1036,6 @@ impl WorkbookSnapshotBuilder {
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> SnapshotResult<SnapshotProgress> {
-        #[cfg(test)]
         crate::snapshot::step::reset();
         if self.failed {
             return Err(error("snapshot builder has failed"));
@@ -1053,7 +1055,6 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot has extra chunks"));
         }
         let (kind, ordinal, payload) = unframe(chunk)?;
-        #[cfg(test)]
         crate::snapshot::step::record(0, chunk.len());
         if ordinal != self.ordinals[index(kind)] {
             return Err(error("snapshot transport ordinal differs"));
@@ -1137,11 +1138,37 @@ impl WorkbookSnapshotBuilder {
             .take()
             .ok_or_else(|| error("snapshot fragment is missing"))?;
         let mut payload = BlockReader::new(&fragment);
-        if payload.u8()? != crate::snapshot::wire::FORMAT_VERSION {
+        let version = payload.u8()?;
+        if version != crate::snapshot::wire::FORMAT_VERSION
+            && version != crate::snapshot::wire::PACKED_FORMAT_VERSION
+        {
             return Err(error("unsupported snapshot format"));
         }
         let inner_kind = payload.u8()?;
         let inner_ordinal = payload.var_u64()?;
+        if version == crate::snapshot::wire::PACKED_FORMAT_VERSION {
+            let count = payload.var_usize()?;
+            if !matches!(
+                kind,
+                ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved
+            ) || !(2..=64).contains(&count)
+            {
+                return Err(error("invalid packed snapshot chunk"));
+            }
+            let mut length = 0usize;
+            for _ in 0..count {
+                let bytes = payload.var_usize()?;
+                if bytes == 0 {
+                    return Err(error("empty packed snapshot record"));
+                }
+                length = length
+                    .checked_add(bytes)
+                    .ok_or_else(|| error("packed snapshot length overflows"))?;
+            }
+            if length != payload.end - payload.position {
+                return Err(error("packed snapshot length differs"));
+            }
+        }
         if let Some(state) = &self.admission {
             let expected = self
                 .received
@@ -1377,7 +1404,6 @@ impl WorkbookSnapshotBuilder {
             records += 1;
             bytes += size_of::<CellAddress>();
         }
-        #[cfg(test)]
         crate::snapshot::step::record(records, bytes);
         if storage.len() == list.len() {
             *list = state
@@ -1389,7 +1415,6 @@ impl WorkbookSnapshotBuilder {
     }
 
     pub fn advance(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
-        #[cfg(test)]
         crate::snapshot::step::reset();
         if self.failed {
             return Err(error("snapshot builder has failed"));
@@ -1400,6 +1425,50 @@ impl WorkbookSnapshotBuilder {
         if budget.max_bytes() < size_of::<xlsx_model::Sheet>() {
             return Err(error("snapshot storage exceeds advance byte budget"));
         }
+        loop {
+            let work = crate::snapshot::step::current();
+            let Some(remaining) = budget.remaining(work.records, work.bytes) else {
+                return Ok(SnapshotProgress::pending());
+            };
+            let state = self.drain_state();
+            match self.advance_unit(remaining) {
+                Ok(progress) if progress.is_ready() => return Ok(progress),
+                Ok(_) => {}
+                Err(failure)
+                    if remaining.is_partial()
+                        && (failure.is_budget_refusal()
+                            || failure.to_string()
+                                == "snapshot facts chunk completes multiple records") =>
+                {
+                    return Ok(SnapshotProgress::pending());
+                }
+                Err(failure) => return Err(failure),
+            }
+            let next = crate::snapshot::step::current();
+            if next.records == work.records
+                && next.bytes == work.bytes
+                && self.drain_state() == state
+                && (!self.queue.is_empty() || !self.ended || self.fragment.is_some())
+            {
+                return Ok(SnapshotProgress::pending());
+            }
+        }
+    }
+
+    fn drain_state(&self) -> (usize, bool, bool, bool, bool, bool, bool, bool) {
+        (
+            self.queue.len(),
+            self.header.is_some(),
+            self.restored.is_some(),
+            self.validated,
+            self.authority_validated,
+            self.anchors_done,
+            self.graph.is_some(),
+            matches!(self.source, Some(SourceBuilder::Ready(_))),
+        )
+    }
+
+    fn advance_unit(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
         if let Some(chunk) = self.queue.front_mut()
             && !chunk.advance(budget)?
         {
@@ -1408,6 +1477,7 @@ impl WorkbookSnapshotBuilder {
         if let Some(chunk) = self.queue.front()
             && chunk.len() > budget.max_bytes()
             && !matches!(unframe(chunk)?.0, ChunkKind::Yrs | ChunkKind::Model)
+            && chunk.first() != Some(&crate::snapshot::wire::PACKED_FORMAT_VERSION)
         {
             return Err(error("snapshot logical chunk exceeds advance byte budget"));
         }
@@ -1439,7 +1509,7 @@ impl WorkbookSnapshotBuilder {
                 let mut next = *admission;
                 next.push(payload, budget, kind == ChunkKind::Facts)?;
                 if kind == ChunkKind::Facts && next.records > 1 {
-                    self.failed = true;
+                    self.failed = !budget.is_partial();
                     return Err(error("snapshot facts chunk completes multiple records"));
                 }
             }
@@ -1455,10 +1525,7 @@ impl WorkbookSnapshotBuilder {
                 .ok_or_else(|| error("snapshot facts builder is missing"))?
                 .advance_capacity(budget.max_records(), budget.max_bytes())
                 .map_err(|failure| error(failure.to_string()))?;
-            #[cfg(test)]
             crate::snapshot::step::record(records, bytes);
-            #[cfg(not(test))]
-            let _ = (records, bytes);
             if !ready {
                 return Ok(SnapshotProgress::pending());
             }
@@ -1476,13 +1543,14 @@ impl WorkbookSnapshotBuilder {
         }
         let result = self.advance_inner(budget);
         self.failed = result.as_ref().err().is_some_and(|failure| {
-            !matches!(
-                failure.to_string().as_str(),
-                "snapshot graph record exceeds advance byte budget"
-                    | "Yrs snapshot record exceeds advance byte budget"
-                    | "snapshot authority validation exceeds advance byte budget"
-                    | "snapshot authority retirement exceeds advance byte budget"
-            )
+            !(budget.is_partial() && failure.is_budget_refusal())
+                && !matches!(
+                    failure.to_string().as_str(),
+                    "snapshot graph record exceeds advance byte budget"
+                        | "Yrs snapshot record exceeds advance byte budget"
+                        | "snapshot authority validation exceeds advance byte budget"
+                        | "snapshot authority retirement exceeds advance byte budget"
+                )
         });
         result
     }
@@ -1556,7 +1624,6 @@ impl WorkbookSnapshotBuilder {
                 }
                 if let Some(SourceBuilder::Initializing(initializer)) = self.source.as_mut() {
                     let _count = initializer.advance(budget.max_bytes()).map_err(error)?;
-                    #[cfg(test)]
                     crate::snapshot::step::initialize(_count);
                     if initializer.is_ready() {
                         let Some(SourceBuilder::Initializing(initializer)) = self.source.take()
@@ -1582,7 +1649,6 @@ impl WorkbookSnapshotBuilder {
                     } else {
                         self.accept_calculation(payload)?;
                     }
-                    #[cfg(test)]
                     crate::snapshot::step::record(1, chunk.len());
                 }
                 ChunkKind::AuthorityBase => {
@@ -1591,7 +1657,6 @@ impl WorkbookSnapshotBuilder {
                         .as_mut()
                         .ok_or_else(|| error("snapshot header is missing"))?;
                     authority.push_base(payload)?;
-                    #[cfg(test)]
                     crate::snapshot::step::record(1, payload.len());
                 }
                 ChunkKind::Yrs => return Err(error("unexpected queued Yrs chunk")),
@@ -1604,7 +1669,6 @@ impl WorkbookSnapshotBuilder {
                         .ok_or_else(|| error("unexpected snapshot facts"))?
                         .push(payload)
                         .map_err(|failure| error(failure.to_string()))?;
-                    #[cfg(test)]
                     crate::snapshot::step::record(
                         self.facts_admission.records,
                         self.facts_admission.bytes.max(payload.len()),
@@ -1615,11 +1679,9 @@ impl WorkbookSnapshotBuilder {
                         return Err(error("snapshot source builder is missing"));
                     };
                     source.push(payload).map_err(error)?;
-                    #[cfg(test)]
                     crate::snapshot::step::record(1, payload.len());
                 }
                 ChunkKind::End => {
-                    #[cfg(test)]
                     crate::snapshot::step::record(1, chunk.len());
                 }
             }
@@ -1709,7 +1771,6 @@ impl WorkbookSnapshotBuilder {
                 }
                 records += 1;
             }
-            #[cfg(test)]
             crate::snapshot::step::record(records, bytes);
             return Ok(SnapshotProgress::pending());
         }
@@ -1738,11 +1799,9 @@ impl WorkbookSnapshotBuilder {
                     Err(failure) => return Err(error(failure)),
                 }
             }
+            crate::snapshot::step::record(_records, bytes);
             #[cfg(test)]
-            {
-                crate::snapshot::step::record(_records, bytes);
-                crate::snapshot::step::migrate(graph.migrated_entries() - migrated);
-            }
+            crate::snapshot::step::migrate(graph.migrated_entries() - migrated);
             if !ready {
                 return Ok(SnapshotProgress::pending());
             }

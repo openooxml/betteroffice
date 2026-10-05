@@ -33,7 +33,6 @@ fn admit(bytes: usize, budget: SnapshotBudget) -> SnapshotResult<usize> {
             "snapshot validation exceeds advance byte budget",
         ))
     } else {
-        #[cfg(test)]
         crate::snapshot::step::record(1, bytes);
         Ok(bytes)
     }

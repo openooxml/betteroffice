@@ -64,7 +64,6 @@ pub(crate) fn decode_record<T: Codec>(
         state,
     };
     let result = reader.value::<T>();
-    #[cfg(test)]
     crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
     match result {
         Ok(value) => Ok(Some((value, reader.position))),
@@ -1213,7 +1212,6 @@ impl BaseBuilder {
             return Err(SnapshotError::new("unexpected authority base record"));
         }
         let record = BaseRecord::read(&mut reader, section);
-        #[cfg(test)]
         crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
         let record = match record {
             Ok(record) => record,
@@ -1570,9 +1568,9 @@ impl AuthorityHydrator {
                     "authority snapshot has pending Yrs state",
                 ));
             }
+            crate::snapshot::step::record(part.records, part.bytes.len());
             #[cfg(test)]
             {
-                crate::snapshot::step::record(part.records, part.bytes.len());
                 if part.bytes[0] == 0 {
                     crate::snapshot::step::delete(part.records);
                 }
@@ -1615,7 +1613,7 @@ impl AuthorityHydrator {
                     self.pending_base.pop_front();
                 }
                 Err(error) => {
-                    self.failed = true;
+                    self.failed = !budget.is_partial() || !error.is_budget_refusal();
                     return Err(error);
                 }
             }
@@ -1722,11 +1720,9 @@ impl AuthorityHydrator {
             records += count;
             bytes += cost;
         }
+        crate::snapshot::step::record(records, bytes);
         #[cfg(test)]
-        {
-            crate::snapshot::step::record(records, bytes);
-            crate::snapshot::step::drain(records);
-        }
+        crate::snapshot::step::drain(records);
         if records == 0 && !self.causal.is_empty() {
             return Err(SnapshotError::new(
                 "snapshot authority retirement exceeds advance byte budget",

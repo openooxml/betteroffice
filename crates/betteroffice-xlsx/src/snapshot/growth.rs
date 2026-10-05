@@ -37,7 +37,6 @@ impl<S, T> Migration<S> for Move<S, T> {
                 .min(budget.max_bytes() / size_of::<T>().max(1)),
         );
         self.storage.extend(self.records.by_ref().take(count));
-        #[cfg(test)]
         super::step::record(count, count * size_of::<T>());
         if self.records.as_slice().is_empty() {
             *(self.target)(state)? = std::mem::take(&mut self.storage);

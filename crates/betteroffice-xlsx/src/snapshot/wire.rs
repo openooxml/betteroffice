@@ -1,6 +1,7 @@
 use super::{SnapshotError, SnapshotResult};
 
 pub(crate) const FORMAT_VERSION: u8 = 1;
+pub(crate) const PACKED_FORMAT_VERSION: u8 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -49,14 +50,79 @@ pub(crate) fn frame(kind: ChunkKind, ordinal: u64, payload: &[u8]) -> Vec<u8> {
 pub(crate) fn unframe(chunk: &[u8]) -> SnapshotResult<(ChunkKind, u64, &[u8])> {
     let mut r = Reader::new(chunk);
     let version = r.u8()?;
-    if version != FORMAT_VERSION {
+    if version != FORMAT_VERSION && version != PACKED_FORMAT_VERSION {
         return Err(SnapshotError::new(format!(
             "unsupported snapshot format {version}"
         )));
     }
     let kind = ChunkKind::from_u8(r.u8()?)?;
     let ordinal = r.var_u64()?;
+    if version == PACKED_FORMAT_VERSION {
+        let count = r.var_usize()?;
+        if !matches!(
+            kind,
+            ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved
+        ) || !(2..=64).contains(&count)
+        {
+            return Err(SnapshotError::new("invalid packed snapshot chunk"));
+        }
+        let mut length = 0usize;
+        for _ in 0..count {
+            let bytes = r.var_usize()?;
+            if bytes == 0 {
+                return Err(SnapshotError::new("empty packed snapshot record"));
+            }
+            length = length
+                .checked_add(bytes)
+                .ok_or_else(|| SnapshotError::new("packed snapshot length overflows"))?;
+        }
+        if length != r.clone().rest().len() {
+            return Err(SnapshotError::new("packed snapshot length differs"));
+        }
+    }
     Ok((kind, ordinal, r.rest()))
+}
+
+pub(crate) fn frame_records(
+    kind: ChunkKind,
+    ordinal: u64,
+    payload: &[u8],
+    lengths: &[usize],
+) -> Vec<u8> {
+    if lengths.len() < 2 {
+        return frame(kind, ordinal, payload);
+    }
+    let mut w = Writer::with_capacity(payload.len() + lengths.len() * 2 + 12);
+    w.u8(PACKED_FORMAT_VERSION);
+    w.u8(kind as u8);
+    w.var_u64(ordinal);
+    w.var_usize(lengths.len());
+    for length in lengths {
+        w.var_usize(*length);
+    }
+    w.raw(payload);
+    w.into_bytes()
+}
+
+pub(crate) fn packed_record(chunk: &[u8], offset: usize) -> SnapshotResult<Option<&[u8]>> {
+    if chunk.first() != Some(&PACKED_FORMAT_VERSION) {
+        return Ok(None);
+    }
+    let (_, _, payload) = unframe(chunk)?;
+    let mut r = Reader::new(chunk);
+    r.u8()?;
+    r.u8()?;
+    r.var_u64()?;
+    let count = r.var_usize()?;
+    let mut start = 0;
+    for _ in 0..count {
+        let length = r.var_usize()?;
+        if start == offset {
+            return Ok(Some(&payload[start..start + length]));
+        }
+        start += length;
+    }
+    Err(SnapshotError::new("packed snapshot record offset differs"))
 }
 
 #[derive(Debug, Default)]
@@ -326,5 +392,22 @@ mod tests {
         let chunk = frame(ChunkKind::Cells, 7, b"abc");
         let (kind, ordinal, payload) = unframe(&chunk).unwrap();
         assert_eq!((kind, ordinal, payload), (ChunkKind::Cells, 7, &b"abc"[..]));
+    }
+
+    #[test]
+    fn packed_frames_validate_lengths_and_offsets() {
+        let chunk = frame_records(ChunkKind::Cells, 7, b"abcdef", &[3, 3]);
+        assert_eq!(
+            unframe(&chunk).unwrap(),
+            (ChunkKind::Cells, 7, &b"abcdef"[..])
+        );
+        assert_eq!(packed_record(&chunk, 0).unwrap(), Some(&b"abc"[..]));
+        assert_eq!(packed_record(&chunk, 3).unwrap(), Some(&b"def"[..]));
+        assert!(packed_record(&chunk, 1).is_err());
+        assert!(unframe(&frame_records(ChunkKind::Cells, 0, b"abc", &[0, 3])).is_err());
+        assert!(unframe(&frame_records(ChunkKind::Cells, 0, b"abc", &[2, 2])).is_err());
+        assert!(unframe(&frame_records(ChunkKind::Cells, 0, b"", &[usize::MAX, 1])).is_err());
+        assert!(unframe(&frame_records(ChunkKind::Cells, 0, &[0; 65], &[1; 65])).is_err());
+        assert!(unframe(&frame_records(ChunkKind::Source, 0, b"abc", &[1, 2])).is_err());
     }
 }

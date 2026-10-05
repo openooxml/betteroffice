@@ -3,10 +3,12 @@ use super::*;
 fn measure_frames(chunks: &[Vec<u8>], label: &str, budget: SnapshotBudget) -> Workbook {
     let mut builder = WorkbookSnapshotBuilder::new();
     let mut max_advance = std::time::Duration::ZERO;
+    let mut advances = 0;
     for chunk in chunks {
         builder.push(chunk).unwrap();
         let start = std::time::Instant::now();
         let progress = builder.advance(budget).unwrap();
+        advances += 1;
         max_advance = max_advance.max(start.elapsed());
         assert!(!progress.is_ready());
         assert_step_budget(budget);
@@ -14,6 +16,7 @@ fn measure_frames(chunks: &[Vec<u8>], label: &str, budget: SnapshotBudget) -> Wo
     loop {
         let start = std::time::Instant::now();
         let ready = builder.advance(budget).unwrap().is_ready();
+        advances += 1;
         max_advance = max_advance.max(start.elapsed());
         assert_step_budget(budget);
         if ready {
@@ -21,7 +24,7 @@ fn measure_frames(chunks: &[Vec<u8>], label: &str, budget: SnapshotBudget) -> Wo
         }
     }
     eprintln!(
-        "{label}: max advance ms={:.3}",
+        "{label}: max advance ms={:.3}, advances={advances}",
         max_advance.as_secs_f64() * 1_000.0
     );
     let (peer, _) = builder.finish().unwrap().into_parts();

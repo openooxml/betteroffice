@@ -47,7 +47,6 @@ fn allowance(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> Snapsho
         ));
     }
     *meter = bytes;
-    #[cfg(test)]
     crate::snapshot::step::record(1, bytes);
     Ok(bytes)
 }
@@ -58,7 +57,6 @@ fn augment(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> SnapshotR
             "snapshot authority validation exceeds advance byte budget",
         ));
     }
-    #[cfg(test)]
     crate::snapshot::step::record(0, bytes.saturating_sub(*meter));
     *meter = bytes;
     Ok(())
