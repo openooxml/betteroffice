@@ -177,6 +177,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
   const draftOperations = useMemo(() => new WeakMap<InputDraft, WorkbookReplayOp>(), [run]);
+  const draftDiscards = useMemo(() => new WeakMap<InputDraft, () => void>(), [run]);
   const operationPeer = useMemo(() => ({ current: run?.editPeer ?? null }), [run]);
   if (run?.editPeer && !run.recovering) operationPeer.current = run.editPeer;
   const previewOps = useMemo(() => new Map<string, WorkbookReplayOp>(), [run]);
@@ -274,6 +275,31 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (!previewJournal.includes(op)) previewJournal.push(op);
       previewState.sequence = Infinity;
       const revision = ++previewState.revision;
+      if (run.ready) {
+        if (discardOnFailure) draftDiscards.set(draft, () => {
+          if (previewOps.get(key) !== op) return;
+          if (preceding) previewOps.set(key, preceding);
+          else previewOps.delete(key);
+          if (precedingInput !== undefined) acceptedCells.set(key, precedingInput);
+          else acceptedCells.delete(key);
+          const index = previewJournal.indexOf(op);
+          if (index >= 0) previewJournal.splice(index, 1);
+          if (!previewOps.size && revision === previewState.revision && !run.retiring) {
+            setPreviewDraft(null);
+            previewState.request = null;
+          } else if (previewJournal.every((pending) => completedPreviews.has(pending))) {
+            const pending = [...previewOps.keys()].reverse()[0];
+            if (pending) {
+              const [sheet, row, col] = pending.split(':').map(Number);
+              setPreviewDraft({ ...draft, sheet, row, col, value: acceptedCells.get(pending) ?? '' });
+            }
+            previewState.sequence = run.editPeer?.sentSequence ?? Infinity;
+            sourceRef.current?.schedule();
+          }
+        });
+        if (!unpreviewedOps.size) flushSync(() => setPreviewDraft(draft));
+        return;
+      }
       const request = capture();
       if (unpreviewedOps.size) { await boundary(); return; }
       if (request) {
@@ -320,7 +346,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }
     await boundary();
-  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
+  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, draftDiscards, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
   const previewEdits = useCallback(async (sheet: number, edits: readonly CellInputEdit[], operation?: WorkbookReplayOp) => {
     if (operation?.method === 'applyEdits' && operation.args[0].steps.some((step) => step.op !== 'setCellInputs')) {
@@ -793,8 +819,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         markApplied.check();
         const op = draftOperations.get(draft);
         const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer);
-        const result = op ? (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
-          owner.editPeer.editCell(draft.sheet, draft.row, draft.col, draft.value);
+        let result: EditResult;
+        try {
+          result = op ? (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
+            owner.editPeer.editCell(draft.sheet, draft.row, draft.col, draft.value);
+        } catch (error) {
+          if (inputRefusal(error)) draftDiscards.get(draft)?.();
+          throw error;
+        }
         markApplied();
         apply(result, op);
       } else trackCommit(draftOperations.get(draft));

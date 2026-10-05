@@ -161,6 +161,8 @@ export function createWorkbookSessionHost(
           'Workbook worker state differs from retained peer hydration');
       }
       peerAttached = true;
+      previewSource = undefined;
+      committed.length = 0;
     },
     detachPeer() {
       peerAttached = false;

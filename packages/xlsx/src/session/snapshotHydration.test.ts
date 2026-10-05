@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { isClientMessage, isHostMessage, type SessionTransport } from '../../../../shared/office-session';
 import * as workbookWasm from '../wasm/loader';
-import type { WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
+import type { WorkbookCalculationContext, WorkbookHandle, XlsxReadRequest } from '../wasm/loader';
 import { hydratePeer, openWorkbookSession, type WorkbookSession } from './client';
 import { workbookPeerSources } from './clientInternals';
 import { createWorkbookEditPeer, type WorkbookEditPeer } from './editPeer';
-import { workbookSessionInternals } from './replay';
+import { workbookEditPeerOperations } from './editPeerInternals';
+import { applyWorkbookReplayOp, workbookSessionInternals, type WorkbookReplayOp } from './replay';
 import { createTestWorkbookSession } from './testHelpers';
 
 let bytes: Uint8Array<ArrayBuffer>;
@@ -112,6 +113,7 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
   const warning = spyOn(console, 'warn').mockImplementation(() => {});
   let peer: WorkbookHandle | undefined;
   let edits: WorkbookEditPeer | undefined;
+  let restoreReplay: (() => void) | undefined;
   try {
     peer = await hydratePeer(session);
     expect(sourceOpening).not.toHaveBeenCalled();
@@ -120,6 +122,9 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     expect(peer.save()).toEqual(source.save());
     expect(peer.cell(0, 800, 0)).toEqual(source.cell(0, 800, 0));
     expect(peer.cell(0, 800, 1)).toEqual(source.cell(0, 800, 1));
+    const internal = workbookSessionInternals.get(session)!;
+    const replaying = spyOn(internal, 'replay');
+    restoreReplay = () => replaying.mockRestore();
     edits = createWorkbookEditPeer({ session, peer, ...editOptions });
     await edits.flush();
     source.setCalculationContext(calculation);
@@ -127,6 +132,71 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     await edits.flush();
     expect(peer.save()).toEqual(source.save());
     await equalPeer(peer, session);
+    const initialReplays = replaying.mock.calls.length;
+    const operations = workbookEditPeerOperations(edits);
+    const readRequest: XlsxReadRequest = { ranges: [
+      { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:B24' } },
+      { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A801:B801' } },
+    ] };
+    const check = async () => {
+      await edits!.flush();
+      await equalPeer(peer!, session);
+      expect(peer!.version()).toBe(source.version());
+      expect(peer!.save()).toEqual(source.save());
+      const read = peer!.readCells(readRequest);
+      expect(read).toMatchObject({ ok: true });
+      expect(await session.call.readCells(readRequest)).toEqual(read);
+      expect(source.readCells(readRequest)).toEqual(read);
+      expect(await session.call.calculationStatus()).toEqual(peer!.calculationStatus());
+      expect(edits!.acknowledgedSequence).toBe(edits!.sentSequence);
+    };
+    let precedingCalculation = calculation;
+    const apply = async (op: WorkbookReplayOp, refused = false) => {
+      const before = edits!.sentSequence;
+      const calls = replaying.mock.calls.length;
+      source.setCalculationContext(op.calculation!);
+      const expected = applyWorkbookReplayOp(source, op);
+      const result = operations.applyQueuedOp(op);
+      expect(result).toEqual(expected);
+      expect(operations.applyQueuedOp(op)).toBe(result);
+      if (refused) {
+        source.setCalculationContext(precedingCalculation);
+        expect(result).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+        expect(edits!.sentSequence).toBe(before);
+        expect(replaying).toHaveBeenCalledTimes(calls);
+      } else {
+        precedingCalculation = op.calculation!;
+        expect(edits!.sentSequence).toBe(before + 1);
+        expect(replaying).toHaveBeenCalledTimes(calls + 1);
+        expect(replaying.mock.calls[calls][0]).toEqual({ sequence: before + 1, op, calculation: op.calculation });
+      }
+      await check();
+      return result;
+    };
+    for (let index = 0; index < 24; index++) {
+      const context = { nowSerial: calculation.nowSerial + index / 24, randSeed: calculation.randSeed + index };
+      const op: WorkbookReplayOp = { method: 'editCell',
+        args: index === 0 ? [0, 800, 0, '=NOW()+1'] : index === 1 ? [0, 800, 1, '=RAND()+1'] :
+          [0, index - 2, 0, String(100 + index)], calculation: context };
+      await apply(op);
+    }
+    const beforeNoop = edits.sentSequence;
+    const noop: WorkbookReplayOp = { method: 'applyEdits', args: [{ expectVersion: peer.version(), steps: [{
+      op: 'setCellInputs', target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } },
+      inputs: [[peer.cell(0, 0, 0).input]],
+    }] }],
+      calculation: { nowSerial: 47_000, randSeed: 42 } };
+    expect(await apply(noop)).toMatchObject({ ok: true, applied: false });
+    expect(edits.sentSequence).toBe(beforeNoop + 1);
+    expect(replaying).toHaveBeenCalledTimes(initialReplays + 25);
+    await apply({ method: 'applyEdits', args: [{ expectVersion: 'stale', steps: [{
+      op: 'setCellInputs', target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } },
+      inputs: [['refused']],
+    }] }], calculation: { nowSerial: 48_000, randSeed: 43 } }, true);
+    await apply({ method: 'undo', args: [], calculation: { nowSerial: 48_001, randSeed: 44 } });
+    await apply({ method: 'redo', args: [], calculation: { nowSerial: 48_002, randSeed: 45 } });
+    expect(replaying).toHaveBeenCalledTimes(initialReplays + 27);
+    expect(sourceOpening).not.toHaveBeenCalled();
     source.setCalculationContext(calculation);
     expect(edits.applyOps([{ type: 'insertRows', sheet: 1, at: 0, count: 1 }]))
       .toEqual(source.applyOps([{ type: 'insertRows', sheet: 1, at: 0, count: 1 }]));
@@ -134,11 +204,56 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     expect(peer.save()).toEqual(source.save());
     await equalPeer(peer, session);
   } finally {
+    restoreReplay?.();
     sourceOpening.mockRestore();
     warning.mockRestore();
     edits?.dispose();
     peer?.dispose();
     source.dispose();
+    await session.dispose();
+  }
+});
+
+test.each(['snapshot', 'fallback'] as const)('attachment releases worker preview data after %s hydration', async (route) => {
+  const session = await retainedSession();
+  const internal = workbookSessionInternals.get(session)!;
+  const source = workbookPeerSources.get(session)!;
+  const opening = spyOn(workbookWasm, 'openWorkbookPeer');
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const snapshot = route === 'fallback' ? spyOn(source.snapshot!, 'beginPeerSnapshot').mockImplementation(() => {
+    throw new Error('Injected snapshot refusal');
+  }) : undefined;
+  let peer: WorkbookHandle | undefined;
+  let edits: WorkbookEditPeer | undefined;
+  const viewport = { x: 0, y: 0, width: 800, height: 600 };
+  try {
+    expect(await internal.preview!(viewport, 0, [{ method: 'editCell', args: [0, 0, 0, 'cold'], calculation }]))
+      .toMatchObject({ sequence: 0, sheet: 0 });
+    expect(opening).toHaveBeenCalledTimes(1);
+    peer = await hydratePeer(session);
+    expect(opening).toHaveBeenCalledTimes(route === 'fallback' ? 2 : 1);
+    edits = createWorkbookEditPeer({ session, peer, ...editOptions });
+    await edits.flush();
+    await expect(internal.preview!(viewport, 0, [])).rejects.toMatchObject({
+      name: 'Error', message: 'Worker preview requires retained hydration',
+    });
+    expect(opening).toHaveBeenCalledTimes(route === 'fallback' ? 2 : 1);
+    await equalPeer(peer, session);
+    expect(edits.editCell(0, 0, 0, 'ready').applied).toBe(true);
+    await edits.flush();
+    await equalPeer(peer, session);
+    await internal.detachPeer!();
+    await expect(internal.preview!(viewport, 0, [])).rejects.toMatchObject({
+      name: 'Error', message: 'Worker preview requires retained hydration',
+    });
+    expect(opening).toHaveBeenCalledTimes(route === 'fallback' ? 2 : 1);
+    expect(session.failure).toBeUndefined();
+  } finally {
+    snapshot?.mockRestore();
+    opening.mockRestore();
+    warning.mockRestore();
+    edits?.dispose();
+    peer?.dispose();
     await session.dispose();
   }
 });
