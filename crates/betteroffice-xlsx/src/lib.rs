@@ -29,6 +29,8 @@ pub use types::{
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
     TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
+#[doc(hidden)]
+pub use workbook::PeerHydration;
 pub use workbook::batch::{
     CalculationRequest, CellGuard, DocumentVersion, EditApplication, EditCalculation, EditFailure,
     EditFailureCode, EditHistory, EditOperation, EditOutcome, EditPreview, EditReceipt,
@@ -45,8 +47,6 @@ pub use workbook::{
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS,
     UpdateSubscription, Workbook,
 };
-#[doc(hidden)]
-pub use workbook::PeerHydration;
 
 pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
