@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellAddress, CellInput, CellRange, CellRef, CellValue, Sheet,
-    SheetId, Workbook, WorkbookModel,
+    CalculationOptions, Cell, CellAddress, CellInput, CellRange, CellRef, CellValue,
+    ProposalEditInput, ProposalRequest, Sheet, SheetId, Workbook, WorkbookModel,
 };
 use serde_json::json;
 use xlsx_model::{DefinedName, ErrorValue};
@@ -436,6 +436,151 @@ fn clockless_collaborative_edit_cells_preserves_current_formula_and_spill_caches
     assert!(result.changed.is_empty());
     assert_eq!(collaborative_calculation_values(&workbook), before);
     assert_collaborative_clocked_catch_up(&mut workbook);
+}
+
+fn stage_clockless_cache_proposal(workbook: &mut Workbook) -> String {
+    workbook
+        .propose(
+            ProposalRequest {
+                agent_id: "clockless-agent".into(),
+                note: None,
+                edits: vec![ProposalEditInput {
+                    sheet: SheetId(0),
+                    cell: cell("A1"),
+                    input: "7".into(),
+                    number_format: None,
+                }],
+            },
+            CalculationOptions::default(),
+        )
+        .unwrap()
+        .id
+}
+
+#[test]
+fn clockless_snapshot_adoption_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut receiver = Workbook::open_collaborative(&bytes, 1).unwrap();
+    let mut sender = Workbook::open_collaborative(&bytes, 2).unwrap();
+    let before = receiver.sheet(SheetId(1)).unwrap().clone();
+    stage_clockless_cache_proposal(&mut receiver);
+    assert_eq!(receiver.proposals().len(), 1);
+    sender
+        .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
+        .unwrap();
+    let result = receiver
+        .apply_update_v1(
+            &sender.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(
+        result.changed,
+        vec![CellAddress {
+            sheet: SheetId(0),
+            cell: cell("A1"),
+        }]
+    );
+    assert!(receiver.proposals().is_empty());
+    assert_eq!(receiver.cell(SheetId(0), cell("A1")).unwrap().input, "2");
+    assert_eq!(receiver.sheet(SheetId(1)).unwrap(), &before);
+    assert_source_caches(&receiver);
+    assert_source_caches(&Workbook::open(&receiver.save().unwrap()).unwrap());
+}
+
+#[test]
+fn clockless_proposal_preview_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = workbook.sheet(SheetId(1)).unwrap().clone();
+    let id = stage_clockless_cache_proposal(&mut workbook);
+    let proposal = &workbook.proposals()[0];
+    assert_eq!(proposal.id, id);
+    assert_eq!(proposal.edits[0].old_text, "1");
+    assert_eq!(proposal.edits[0].new_text, "7");
+    assert_eq!(proposal.ghosts.len(), 1);
+    let ghost = &proposal.ghosts[0];
+    assert_eq!((ghost.sheet, ghost.row, ghost.col), (0, 0, 0));
+    assert_eq!(ghost.new_text, "7");
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "1");
+    assert_eq!(workbook.sheet(SheetId(1)).unwrap(), &before);
+    assert_source_caches(&workbook);
+    let saved = workbook.save().unwrap();
+    assert_eq!(saved, bytes);
+    assert_source_caches(&Workbook::open(&saved).unwrap());
+}
+
+#[test]
+fn clockless_proposal_validation_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    let before = workbook.sheet(SheetId(1)).unwrap().clone();
+    let id = stage_clockless_cache_proposal(&mut workbook);
+    assert_eq!(workbook.proposals()[0].ghosts.len(), 1);
+    workbook
+        .edit_cell(SheetId(0), cell("B1"), "9", CalculationOptions::default())
+        .unwrap();
+    let result = workbook
+        .accept_proposal(&id, false, CalculationOptions::default())
+        .unwrap();
+    assert!(result.mutation.applied);
+    assert!(result.mutation.changed.is_empty());
+    assert!(workbook.proposals().is_empty());
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "7");
+    assert_eq!(workbook.cell(SheetId(0), cell("B1")).unwrap().input, "9");
+    assert_eq!(workbook.sheet(SheetId(1)).unwrap(), &before);
+    assert_preserved_save(&workbook, &bytes);
+}
+
+#[test]
+fn clockless_proposal_acceptance_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut workbook = Workbook::open_collaborative(&bytes, 1).unwrap();
+    let before = workbook.sheet(SheetId(1)).unwrap().clone();
+    let id = stage_clockless_cache_proposal(&mut workbook);
+    let result = workbook
+        .accept_proposal(&id, true, CalculationOptions::default())
+        .unwrap();
+    assert!(result.mutation.applied);
+    assert!(result.mutation.changed.is_empty());
+    assert!(workbook.proposals().is_empty());
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "7");
+    assert_eq!(workbook.sheet(SheetId(1)).unwrap(), &before);
+    assert_preserved_save(&workbook, &bytes);
+}
+
+#[test]
+fn clockless_standalone_undo_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "7", CalculationOptions::default())
+        .unwrap();
+    let before = workbook.sheet(SheetId(1)).unwrap().clone();
+    let result = workbook.undo(CalculationOptions::default()).unwrap();
+    assert!(result.applied);
+    assert!(result.changed.is_empty());
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "1");
+    assert_eq!(workbook.sheet(SheetId(1)).unwrap(), &before);
+    assert_preserved_save(&workbook, &bytes);
+}
+
+#[test]
+fn clockless_standalone_redo_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "7", CalculationOptions::default())
+        .unwrap();
+    workbook.undo(CalculationOptions::default()).unwrap();
+    let before = workbook.sheet(SheetId(1)).unwrap().clone();
+    let result = workbook.redo(CalculationOptions::default()).unwrap();
+    assert!(result.applied);
+    assert!(result.changed.is_empty());
+    assert_eq!(workbook.cell(SheetId(0), cell("A1")).unwrap().input, "7");
+    assert_eq!(workbook.sheet(SheetId(1)).unwrap(), &before);
+    assert_preserved_save(&workbook, &bytes);
 }
 
 #[test]
