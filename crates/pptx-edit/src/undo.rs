@@ -8,6 +8,13 @@ use crate::{COMMENTS, EditError, EditResult, META, SHAPES, SLIDE_ORDER, SLIDES, 
 
 const CAPTURE_TIMEOUT_MS: u64 = 500;
 
+#[cfg(test)]
+type HistorySets = Vec<(yrs::IdSet, yrs::IdSet)>;
+#[cfg(test)]
+type ClientClockCounts = Vec<(yrs::ClientID, u64)>;
+#[cfg(test)]
+type HistoryCounts = Vec<(ClientClockCounts, ClientClockCounts)>;
+
 /// Policy for grouping tracked local transactions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum UndoCaptureMode {
@@ -123,13 +130,36 @@ impl DeckUndoManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn stack_diagnostics(
-        &self,
-    ) -> (Vec<(yrs::IdSet, yrs::IdSet)>, Vec<(yrs::IdSet, yrs::IdSet)>) {
+    pub(crate) fn stack_diagnostics(&self) -> (HistorySets, HistorySets) {
         let capture = |stack: &[yrs::undo::StackItem<()>]| {
             stack
                 .iter()
                 .map(|item| (item.deletions().clone(), item.insertions().clone()))
+                .collect()
+        };
+        (
+            capture(self.inner.undo_stack()),
+            capture(self.inner.redo_stack()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stack_clock_counts(&self) -> (HistoryCounts, HistoryCounts) {
+        let counts = |set: &yrs::IdSet| -> ClientClockCounts {
+            set.iter()
+                .map(|(client, ranges)| {
+                    let count = ranges
+                        .iter()
+                        .map(|range| u64::from(range.end - range.start))
+                        .sum();
+                    (*client, count)
+                })
+                .collect()
+        };
+        let capture = |stack: &[yrs::undo::StackItem<()>]| -> HistoryCounts {
+            stack
+                .iter()
+                .map(|item| (counts(item.deletions()), counts(item.insertions())))
                 .collect()
         };
         (

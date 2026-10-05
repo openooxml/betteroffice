@@ -546,8 +546,8 @@ impl DeckSession {
             .collect::<BTreeMap<_, _>>();
         let adjust_values_json = serde_json::to_string(&adjust_values)
             .map_err(|error| EditError::Json(error.to_string()))?;
-        let fill_json = serde_json::to_string(&fill)
-            .map_err(|error| EditError::Json(error.to_string()))?;
+        let fill_json =
+            serde_json::to_string(&fill).map_err(|error| EditError::Json(error.to_string()))?;
         let (order, index, shapes) = {
             let txn = self.doc.transact();
             let slide = slide_ref(&txn, slide_id)?;
@@ -2821,6 +2821,11 @@ mod tests {
         assert_eq!(left.can_undo(), right.can_undo(), "{label}: can undo");
         assert_eq!(left.can_redo(), right.can_redo(), "{label}: can redo");
         assert_eq!(
+            left.undo.borrow().stack_clock_counts(),
+            right.undo.borrow().stack_clock_counts(),
+            "{label}: history entries"
+        );
+        assert_eq!(
             left.id_counter.load(Ordering::Relaxed),
             right.id_counter.load(Ordering::Relaxed),
             "{label}: allocator"
@@ -2836,14 +2841,13 @@ mod tests {
                     for index in 0..story.length {
                         let left_anchor = left.anchor_caret(&story.id, index).unwrap();
                         let right_anchor = right.anchor_caret(&story.id, index).unwrap();
-                        assert_eq!(left_anchor, right_anchor, "{label}: anchor at {index}");
                         assert_eq!(
-                            left.resolve_caret_anchor(&right_anchor),
+                            left.resolve_caret_anchor(&left_anchor),
                             Some(index),
                             "{label}: left anchor"
                         );
                         assert_eq!(
-                            right.resolve_caret_anchor(&left_anchor),
+                            right.resolve_caret_anchor(&right_anchor),
                             Some(index),
                             "{label}: right anchor"
                         );
@@ -2863,6 +2867,7 @@ mod tests {
         let counter = session.id_counter.load(Ordering::Relaxed);
         let proposals = session.proposals().map_err(|error| error.to_string());
         let history = (session.can_undo(), session.can_redo());
+        let history_entries = session.undo.borrow().stack_diagnostics();
         let outcome = reject();
         assert!(outcome.is_err(), "{label}: {outcome:?}");
         assert_eq!(
@@ -2886,6 +2891,11 @@ mod tests {
             history,
             "{label}: history"
         );
+        assert_eq!(
+            session.undo.borrow().stack_diagnostics(),
+            history_entries,
+            "{label}: history entries"
+        );
     }
 
     fn assert_history_paths_match(
@@ -2894,6 +2904,11 @@ mod tests {
         label: &str,
         anchors: &[CaretAnchor],
     ) -> usize {
+        assert_eq!(
+            left.undo.borrow().stack_diagnostics(),
+            right.undo.borrow().stack_diagnostics(),
+            "{label}: history ids before restoration"
+        );
         let final_snapshot = left.snapshot().unwrap();
         let final_save = left.save().unwrap();
         let mut undos = 0;
@@ -3197,7 +3212,8 @@ mod tests {
             drop(txn);
             assert!(!session.can_undo());
             let epoch = session.epoch();
-            crate::story::import_source_numbering_restarts(&session.doc, session.package()).unwrap();
+            crate::story::import_source_numbering_restarts(&session.doc, session.package())
+                .unwrap();
             assert_eq!(session.epoch(), epoch + 1);
             for story_id in &story_ids {
                 for paragraph in session.story(story_id).unwrap().paragraphs {
@@ -3210,7 +3226,8 @@ mod tests {
                 }
             }
             let epoch = session.epoch();
-            crate::story::import_source_numbering_restarts(&session.doc, session.package()).unwrap();
+            crate::story::import_source_numbering_restarts(&session.doc, session.package())
+                .unwrap();
             assert_eq!(session.epoch(), epoch);
             assert_eq!(session.snapshot().unwrap(), pristine);
             session

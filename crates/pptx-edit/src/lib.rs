@@ -42,6 +42,8 @@ pub use batch::{
     TextGuard, ValidationOutcome, outcome_json, oversized_request,
 };
 pub use model::*;
+#[doc(hidden)]
+pub use peer::{PeerError, PeerFont};
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
