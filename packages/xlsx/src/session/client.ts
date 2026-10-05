@@ -34,6 +34,7 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 const wasmModules = new Map<string, WebAssembly.Module>();
 const PEER_SNAPSHOT_BUDGET = { records: 256, bytes: 16 * 1024 } as const;
+const PEER_SNAPSHOT_SLICE_MS = 8;
 
 /**
  * Options for opening a workbook in a dedicated worker.
@@ -124,14 +125,19 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
       builder = createWorkbookSnapshotBuilder(source.options);
       for (;;) {
         if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-        const chunk = await snapshot.pullPeerSnapshot();
-        if (chunk === undefined) break;
-        builder.push(new Uint8Array(chunk));
+        const chunks = await snapshot.pullPeerSnapshot();
+        if (chunks === undefined) break;
+        for (const chunk of chunks) builder.push(new Uint8Array(chunk));
       }
+      let ready = false;
       for (;;) {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-        if (builder.advance(PEER_SNAPSHOT_BUDGET.records, PEER_SNAPSHOT_BUDGET.bytes)) break;
+        const deadline = performance.now() + PEER_SNAPSHOT_SLICE_MS;
+        do {
+          if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+          ready = builder.advance(PEER_SNAPSHOT_BUDGET.records, PEER_SNAPSHOT_BUDGET.bytes);
+        } while (!ready && performance.now() < deadline);
+        if (ready) break;
       }
       peer = builder.finish();
       if (peer.version() !== pinned.version) throw new Error('Workbook snapshot peer version differs from worker');

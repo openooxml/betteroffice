@@ -42,7 +42,7 @@ export interface WorkbookReplayReply {
 
 export type WorkbookInternalSessionMethods = {
   beginPeerSnapshot(records: number, bytes: number): { version: string; sequence: number };
-  pullPeerSnapshot(): ArrayBuffer | undefined;
+  pullPeerSnapshot(): ArrayBuffer[] | undefined;
   endPeerSnapshot(discard: boolean): void;
   attachPeer(version: string, sequence: number): void;
   detachPeer(): void;

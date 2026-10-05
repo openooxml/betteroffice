@@ -50,7 +50,9 @@ export function createWorkbookSessionHost(
   let retainedHydration = false;
   let peerAttached = false;
   let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
-  let peerSnapshot: { version: string; sequence: number } | undefined;
+  let peerSnapshot: {
+    version: string; sequence: number; records: number; bytes: number; pending?: Uint8Array;
+  } | undefined;
   const committed: WorkbookReplayEnvelope[] = [];
   const encoder = new TextEncoder();
 
@@ -83,8 +85,8 @@ export function createWorkbookSessionHost(
       if (!retainedHydration || peerAttached) throw new Error('Worker peer snapshot requires pending retained hydration');
       try {
         workbookPeerSnapshot(opened).begin(records, bytes);
-        peerSnapshot = { version: opened.version(), sequence };
-        return peerSnapshot;
+        peerSnapshot = { version: opened.version(), sequence, records, bytes };
+        return { version: peerSnapshot.version, sequence };
       } catch (error) {
         try { workbookPeerSnapshot(opened).end(); } catch {}
         throw new Error(error instanceof Error ? error.message : String(error));
@@ -93,14 +95,25 @@ export function createWorkbookSessionHost(
     pullPeerSnapshot() {
       const opened = workbook();
       try {
-        checkPeerSnapshot(opened);
-        const chunk = workbookPeerSnapshot(opened).next();
-        if (chunk === undefined) return undefined;
-        const buffer = chunk.buffer;
-        if (!(buffer instanceof ArrayBuffer) || chunk.byteOffset !== 0 || chunk.byteLength !== buffer.byteLength) {
-          throw new Error('Worker peer snapshot chunk is not transferable');
+        const snapshot = checkPeerSnapshot(opened);
+        const buffers: ArrayBuffer[] = [];
+        let bytes = 0;
+        while (buffers.length < snapshot.records && bytes < snapshot.bytes) {
+          const chunk = snapshot.pending ?? workbookPeerSnapshot(opened).next();
+          snapshot.pending = undefined;
+          if (chunk === undefined) break;
+          const buffer = chunk.buffer;
+          if (!(buffer instanceof ArrayBuffer) || chunk.byteOffset !== 0 || chunk.byteLength !== buffer.byteLength) {
+            throw new Error('Worker peer snapshot chunk is not transferable');
+          }
+          if (buffers.length > 0 && bytes + chunk.byteLength > snapshot.bytes) {
+            snapshot.pending = chunk;
+            break;
+          }
+          buffers.push(buffer);
+          bytes += chunk.byteLength;
         }
-        return transferable(buffer, [buffer]);
+        return buffers.length === 0 ? undefined : transferable(buffers, buffers);
       } catch (error) {
         peerSnapshot = undefined;
         try { workbookPeerSnapshot(opened).end(); } catch {}
@@ -201,11 +214,12 @@ export function createWorkbookSessionHost(
     },
   };
 
-  function checkPeerSnapshot(opened: WorkbookHandle): void {
+  function checkPeerSnapshot(opened: WorkbookHandle) {
     if (!peerSnapshot) throw new Error('Worker peer snapshot is not active');
     if (peerSnapshot.version !== opened.version() || peerSnapshot.sequence !== sequence) {
       throw new Error('Workbook changed during peer snapshot');
     }
+    return peerSnapshot;
   }
 
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {

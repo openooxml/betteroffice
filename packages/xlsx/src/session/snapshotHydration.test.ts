@@ -10,7 +10,7 @@ import { createWorkbookEditPeer, type WorkbookEditPeer } from './editPeer';
 import { workbookSessionInternals } from './replay';
 import { createTestWorkbookSession } from './testHelpers';
 
-let bytes: Uint8Array;
+let bytes: Uint8Array<ArrayBuffer>;
 let wasm: Uint8Array<ArrayBuffer>;
 const calculation: WorkbookCalculationContext = { nowSerial: 46_000.5, randSeed: 123456789 };
 const editOptions = {
@@ -32,7 +32,7 @@ beforeAll(async () => {
   }).join('');
   zip.file('xl/worksheets/sheet1.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${rows}<row r="801"><c r="A801"><f>NOW()</f><v>0</v></c><c r="B801"><f>RAND()</f><v>0</v></c></row></sheetData></worksheet>`);
   zip.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>42</v></c></row></sheetData></worksheet>');
-  bytes = await zip.generateAsync({ type: 'uint8array' });
+  bytes = new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
 });
 
 function retainedSession(wrap?: (transport: SessionTransport) => SessionTransport) {
@@ -191,7 +191,7 @@ test.each(['explicit', 'worker-default'] as const)('successful snapshot releases
       expect(edits.editCell(0, 1, 0, '91').applied).toBe(true);
       await edits.flush();
       await equalPeer(peer, session);
-      expect(new Uint8Array(await edits.save())).toEqual(await session.save());
+      expect(new Uint8Array(await edits.save())).toEqual(new Uint8Array(await session.save()));
     } finally { setting.mockRestore(); }
   } finally {
     parsing.mockRestore();
@@ -245,7 +245,7 @@ test('real oversized-cell snapshot refusal discards the worker snapshot and repl
   const zip = await JSZip.loadAsync(bytes);
   const text = 'x'.repeat(20_000);
   zip.file('xl/worksheets/sheet2.xml', `<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>${text}</t></is></c></row></sheetData></worksheet>`);
-  const oversized = await zip.generateAsync({ type: 'uint8array' });
+  const oversized = new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
   const open = workbookWasm.openWorkbook;
   let worker: WorkbookHandle | undefined;
   const opening = spyOn(workbookWasm, 'openWorkbook').mockImplementation((...args) => {
@@ -272,7 +272,7 @@ test('real oversized-cell snapshot refusal discards the worker snapshot and repl
   try {
     expect(worker.cell(1, 0, 0).input).toBe(text);
     peer = await hydratePeer(session);
-    expect(warning).toHaveBeenCalledWith('xlsx worker editor: snapshot hydration fell back: snapshot logical chunk exceeds advance byte budget');
+    expect(warning).toHaveBeenCalledWith('xlsx worker editor: snapshot hydration fell back: Yrs snapshot record exceeds advance byte budget');
     expect(warning).toHaveBeenCalledTimes(1);
     expect(discarded).toEqual([true]);
     expect(() => workbookWasm.workbookPeerSnapshot(worker!).next()).toThrow('workbook peer snapshot is not active');
@@ -335,9 +335,10 @@ test('xlsx worker editor falls back to source hydration when the snapshot is ref
   }
 });
 
-test('snapshot hydration transfers multiple chunks and yields between fixed-budget advances', async () => {
+test('snapshot hydration transfers bounded chunk batches and yields between fixed-budget slices', async () => {
   const buffers: ArrayBuffer[] = [];
   const transfers: boolean[] = [];
+  const batches: number[][] = [];
   const begins: unknown[][] = [];
   const requests = new Map<number, string>();
   const session = await retainedSession((transport) => ({
@@ -351,9 +352,13 @@ test('snapshot hydration transfers multiple chunks and yields between fixed-budg
     }),
     post(message, transfer) {
       if (isHostMessage(message) && message.kind === 'reply' && message.ok &&
-        requests.get(message.id) === 'pullPeerSnapshot' && message.value instanceof ArrayBuffer) {
-        buffers.push(message.value);
-        transfers.push(transfer?.length === 1 && transfer[0] === message.value);
+        requests.get(message.id) === 'pullPeerSnapshot' && Array.isArray(message.value)) {
+        const chunks = message.value as ArrayBuffer[];
+        batches.push(chunks.map((chunk) => chunk.byteLength));
+        buffers.push(...chunks);
+        transfers.push(transfer?.length === chunks.length && chunks.every((chunk, index) =>
+          chunk instanceof ArrayBuffer && transfer?.[index] === chunk
+        ));
       }
       transport.post(message, transfer);
     },
@@ -361,15 +366,18 @@ test('snapshot hydration transfers multiple chunks and yields between fixed-budg
   const createBuilder = workbookWasm.createWorkbookSnapshotBuilder;
   const advances: number[][] = [];
   const turns: boolean[] = [];
+  let now = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
   let yielded = true;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const building = spyOn(workbookWasm, 'createWorkbookSnapshotBuilder').mockImplementation((options) => {
     const builder = createBuilder(options);
     return { ...builder, advance(records, bytes) {
       turns.push(yielded);
+      if (yielded) timer = setTimeout(() => { yielded = true; }, 0);
       yielded = false;
-      timer = setTimeout(() => { yielded = true; }, 0);
       advances.push([records, bytes]);
+      now += 4;
       return builder.advance(records, bytes);
     } };
   });
@@ -380,14 +388,21 @@ test('snapshot hydration transfers multiple chunks and yields between fixed-budg
     expect(warning).not.toHaveBeenCalled();
     expect(begins).toEqual([[256, 16 * 1024]]);
     expect(buffers.length).toBeGreaterThan(1);
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.some((batch) => batch.length > 1)).toBe(true);
+    expect(batches.every((batch) => batch.length <= 256 &&
+      batch.reduce((total, bytes) => total + bytes, 0) <= 16 * 1024
+    )).toBe(true);
     expect(transfers.every(Boolean)).toBe(true);
     expect(buffers.every((buffer) => buffer.byteLength === 0)).toBe(true);
     expect(advances.length).toBeGreaterThan(1);
     expect(advances.every(([records, bytes]) => records === 256 && bytes === 16 * 1024)).toBe(true);
-    expect(turns).toEqual(advances.map(() => true));
+    expect(turns.slice(0, 3)).toEqual([true, false, true]);
+    expect(turns).toEqual(advances.map((_, index) => index % 2 === 0));
     await equalPeer(peer, session);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+    clock.mockRestore();
     building.mockRestore();
     warning.mockRestore();
     peer?.dispose();
