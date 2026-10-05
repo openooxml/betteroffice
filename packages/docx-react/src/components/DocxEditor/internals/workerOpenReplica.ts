@@ -340,6 +340,14 @@ export function workerOpenSourceVersion(session: YrsSession, version: string | n
   return mapped;
 }
 
+export function workerOpenRequest<T extends { expectVersion: string }>(session: YrsSession, request: T): T {
+  const replica = replicas.get(session);
+  return replica && !replica.pending && replica.readyVersion !== undefined &&
+    request.expectVersion === replica.handoverVersion && session.version() === replica.readyVersion
+    ? { ...request, expectVersion: replica.readyVersion }
+    : request;
+}
+
 /** Layouts of the worker's `version` show the state the replica hydrates with. */
 export function adoptWorkerOpenHandoverVersion(session: YrsSession, version: string): void {
   const replica = replicas.get(session);

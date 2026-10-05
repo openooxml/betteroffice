@@ -685,9 +685,10 @@ export function useYrsCoreSession(
             };
             const deferEditorReplica = (): ReturnType<typeof deferWorkerOpenReplica> => {
               type StateRevision = NonNullable<ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>>;
+              type StateSnapshot = Awaited<ReturnType<WorkerOpenedDocument['encodeState']>>;
               type PrefetchedState = {
                 revision: StateRevision;
-                result: Promise<Uint8Array>;
+                result: Promise<StateSnapshot>;
               };
               let prefetchedState: PrefetchedState | null = null;
               const clearPrefetchedState = (): void => {
@@ -697,10 +698,10 @@ export function useYrsCoreSession(
                 const current = worker.stateRevision?.();
                 return current?.owner === revision.owner && current.sequence === revision.sequence;
               };
-              const encodeReplicaState = async (): Promise<Uint8Array> => {
+              const encodeReplicaState = async (): Promise<StateSnapshot> => {
                 const cached = prefetchedState;
                 clearPrefetchedState();
-                let update: Uint8Array;
+                let update: StateSnapshot;
                 if (cached && sameRevision(cached.revision)) {
                   update = await cached.result;
                   if (!sameRevision(cached.revision)) update = await worker.encodeState();
@@ -722,11 +723,14 @@ export function useYrsCoreSession(
                 async () => {
                   const handover = beginWorkerProposalHandover(next);
                   const handedOver = handover ? await handover : null;
-                  const update = handedOver ? handedOver.state : await encodeReplicaState();
+                  const update = handedOver ?? await encodeReplicaState();
                   return [
                     () => { next.openDocx(source, false); },
-                    () => next.loadState(update),
-                    () => handedOver?.complete(),
+                    () => next.loadState(update.state),
+                    () => {
+                      if (handedOver) handedOver.complete();
+                      else adoptWorkerOpenHandoverVersion(next, update.version);
+                    },
                   ];
                 },
                 () => {

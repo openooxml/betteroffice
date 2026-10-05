@@ -103,7 +103,7 @@ import { nearestPages } from './pageBuildOrder';
 import { scheduleIdlePageBuild, type PageBuildTask } from './pageBuildScheduler';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
-  encodeState(prefetch?: boolean): Promise<Uint8Array>;
+  encodeState(prefetch?: boolean): Promise<{ state: Uint8Array; version: string }>;
   stateRevision?(): { owner: ResidentEngineWorkerClient; sequence: number } | null;
   revisionCount(): Promise<number>;
   proposal: ResidentEngineWorkerClient['proposal'];
@@ -1777,14 +1777,14 @@ export function useRustDisplayList(
         return {
           ...opened,
           encodeState: (prefetch?: boolean) => {
-            if (!prefetch) return requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState());
+            if (!prefetch) return requestOpenedWorker(hostEngine, (owner) => owner.client.handOver());
             return (async () => {
               const previous = workerRef.current;
               let owner = previous;
               try {
                 const state = await requestOpenedWorker(hostEngine, (current) => {
                   owner = current;
-                  return current.client.encodeState();
+                  return current.client.handOver();
                 });
                 if (
                   owner && owner !== previous && isCurrentWorker(hostEngine, owner) &&
