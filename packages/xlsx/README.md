@@ -43,6 +43,31 @@ handle itself covers styling (`patchRangeStyle`, `setNumberFormat`), undo/redo,
 and PNG export (`renderPng` / `renderRangePng`; guard with
 `isPngExportAvailable`).
 
+`editWorkbookCells` applies raw cell inputs and captured range formats on
+multiple worksheets in one transaction. This includes one native undo step in
+collaborative sessions. Capture the format first, then submit the inputs and
+format targets together:
+
+```ts
+const format = workbook.captureFormat(0, "A1");
+workbook.editWorkbookCells(
+  [{ sheet: 0, row: 2, col: 0, input: "=A1*2" }],
+  [{ sheet: 1, range: "A1", format }],
+);
+```
+
+`moveRange(sheet, source, destination)` moves a same-sheet A1 range to a new
+top-left cell in one collaborative transaction. Direct references to moved
+cells follow them, and one Undo restores the whole move. The method refuses
+partial formula ranges and imported workbook features whose references or
+anchored content it cannot update safely, including defined names, validation,
+conditional formatting, drawings, and protection. Callers should show the
+returned error and keep the source workbook available when a move is refused.
+
+```ts
+workbook.moveRange(0, "A1:B2", "D5");
+```
+
 ## Print a range
 
 `workbook.printDisplayList(sheet, range, metrics, gridlines)` renders a range

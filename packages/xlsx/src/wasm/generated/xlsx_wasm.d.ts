@@ -66,6 +66,7 @@ export class XlsxDocument {
      * enter a batch of cell edits as one undo step; returns `SheetInfo` json.
      */
     editCellsJson(args: string): string;
+    editWorkbookCellsJson(args: string): string;
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
@@ -85,6 +86,7 @@ export class XlsxDocument {
      * slide a chart by a pixel delta as one undo step.
      */
     moveChartJson(args: string): string;
+    moveRangeJson(args: string): string;
     /**
      * open a workbook from raw `.xlsx` bytes.
      */
@@ -203,6 +205,7 @@ export interface InitOutput {
     readonly xlsxdocument_editCellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_editCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_editWorkbookCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly xlsxdocument_encodeStateVector: (a: number) => [number, number];
@@ -213,6 +216,7 @@ export interface InitOutput {
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_moveRangeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
