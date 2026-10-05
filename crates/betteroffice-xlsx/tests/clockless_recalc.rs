@@ -54,7 +54,10 @@ fn synthetic() -> Vec<u8> {
 
 fn assert_values(workbook: &Workbook, input: f64, today: f64) {
     assert!(workbook.model().defined_names.is_empty());
-    assert_eq!(workbook.model().value(SheetId(0), cell("A2")), number(input));
+    assert_eq!(
+        workbook.model().value(SheetId(0), cell("A2")),
+        number(input)
+    );
     for sheet in 0..3 {
         for (address, expected) in [("A1", today), ("B1", today + input), ("C1", input * 2.0)] {
             assert_eq!(
@@ -91,7 +94,8 @@ fn edit(workbook: &mut Workbook, input: &str, batch: bool) {
             }]
         });
         let result: serde_json::Value =
-            serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap()).unwrap();
+            serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap())
+                .unwrap();
         assert_eq!(result["ok"], true);
         assert_eq!(result["applied"], true);
     } else {
@@ -111,10 +115,20 @@ fn clockless_edits_and_history_keep_only_clock_caches() {
         edit(&mut workbook, "7", batch);
         assert_values(&workbook, 7.0, 45_000.0);
         save_without_errors(&workbook);
-        assert!(workbook.undo(CalculationOptions::default()).unwrap().applied);
+        assert!(
+            workbook
+                .undo(CalculationOptions::default())
+                .unwrap()
+                .applied
+        );
         assert_values(&workbook, 1.0, 45_000.0);
         save_without_errors(&workbook);
-        assert!(workbook.redo(CalculationOptions::default()).unwrap().applied);
+        assert!(
+            workbook
+                .redo(CalculationOptions::default())
+                .unwrap()
+                .applied
+        );
         assert_values(&workbook, 7.0, 45_000.0);
         save_without_errors(&workbook);
         workbook.recalculate_all(CalculationOptions {
