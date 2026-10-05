@@ -6577,9 +6577,7 @@ mod tests {
                                         }
                                     }
                                     let degenerate = if normalized {
-                                        if constant_x
-                                            && (expected_max - expected_min).is_finite()
-                                        {
+                                        if constant_x && (expected_max - expected_min).is_finite() {
                                             match (min, max) {
                                                 (Some(_), None) => {
                                                     expected_max = (expected_min
