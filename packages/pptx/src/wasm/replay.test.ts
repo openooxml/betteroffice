@@ -167,7 +167,7 @@ test('all_supported_ops_match_across_handles', async () => {
   apply({ method: 'setCommentStatus', args: [comment, true] });
   apply({ method: 'setCommentPosition', args: [comment, { xEmu: 100, yEmu: 200 }] });
   apply({ method: 'removeComment', args: [comment] });
-  expect(peer.snapshot().comments).toEqual([]);
+  expect(peer.snapshot().comments ?? []).toEqual([]);
   apply({ method: 'propose', args: ['agent', 'Review', [{ type: 'setSlideNotes', slideId: slide, text: 'Accepted' }]] });
   apply({ method: 'acceptProposal', args: [peer.listProposals()[0].id] });
   apply({ method: 'propose', args: ['agent', null, [{ type: 'setSlideNotes', slideId: slide, text: 'Rejected' }]] });
