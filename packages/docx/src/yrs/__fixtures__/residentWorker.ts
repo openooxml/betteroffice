@@ -37,6 +37,8 @@ const STUBS: Record<string, string> = {
 /**
  * Bundles the worker module, with canvas output stubbed, and returns a factory that starts one
  * in-process worker per call. Messages cross with structured-clone semantics, asynchronously.
+ * `terminate` stops the worker like a real one: no more messages either way, its timers and
+ * channels close and its sessions are freed.
  */
 export async function residentWorkerFactory(): Promise<(clientId?: number) => InProcessResidentWorker> {
   const result = await Bun.build({
@@ -64,25 +66,39 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
   const start = new Function(
     'self',
     'OffscreenCanvas',
+    'MessageChannel',
+    'setTimeout',
+    'clearTimeout',
     'testHarness',
     await result.outputs[0].text()
-  ) as (scope: unknown, canvas: unknown, harness: unknown) => void;
+  ) as (
+    scope: unknown,
+    canvas: unknown,
+    channel: unknown,
+    schedule: unknown,
+    unschedule: unknown,
+    harness: unknown
+  ) => void;
   return (clientId) => {
     let held: ResidentEngineWorkerResponse[] | null = null;
+    let terminated = false;
+    const channels: MessageChannel[] = [];
+    const timers = new Set<ReturnType<typeof setTimeout>>();
     const scope = {
       onmessage: null as ((event: {
         data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule;
       }) => void) | null,
       postMessage(reply: ResidentEngineWorkerResponse) {
+        if (terminated) return;
         if (held) held.push(reply);
         else deliver(reply);
       },
     };
     const deliver = (reply: ResidentEngineWorkerResponse) => {
       const data = structuredClone(reply);
-      queueMicrotask(() =>
-        worker.onmessage?.({ data } as MessageEvent<ResidentEngineWorkerResponse>)
-      );
+      queueMicrotask(() => {
+        if (!terminated) worker.onmessage?.({ data } as MessageEvent<ResidentEngineWorkerResponse>);
+      });
     };
     const worker: InProcessResidentWorker = {
       onmessage: null,
@@ -92,10 +108,25 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       sessions: [],
       postMessage(message) {
         worker.requests.push(message.type);
+        if (terminated) return;
         const data = structuredClone(message);
-        queueMicrotask(() => scope.onmessage?.({ data }));
+        queueMicrotask(() => {
+          if (!terminated) scope.onmessage?.({ data });
+        });
       },
-      terminate() {},
+      terminate() {
+        if (terminated) return;
+        terminated = true;
+        held = null;
+        scope.onmessage = null;
+        for (const timer of timers) clearTimeout(timer);
+        timers.clear();
+        for (const channel of channels.splice(0)) {
+          channel.port1.close();
+          channel.port2.close();
+        }
+        for (const session of worker.sessions) session.destroy();
+      },
       hold() {
         held ??= [];
       },
@@ -105,15 +136,39 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
         for (const reply of replies) deliver(reply);
       },
     };
-    start(scope, class {}, {
-      createSession: async (heapLimitBytes?: number) => {
-        const session = await createResidentEngineSession(heapLimitBytes, clientId);
-        worker.sessions.push(session);
-        return session;
+    start(
+      scope,
+      class {},
+      class extends MessageChannel {
+        constructor() {
+          super();
+          channels.push(this);
+        }
       },
-      preload: preloadEditWasm,
-      preloadFrom: preloadEditWasmFrom,
-    });
+      (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          if (!terminated) callback(...args);
+        }, delay);
+        if (terminated) clearTimeout(timer);
+        else timers.add(timer);
+        return timer;
+      },
+      (timer: ReturnType<typeof setTimeout>) => {
+        timers.delete(timer);
+        clearTimeout(timer);
+      },
+      {
+        createSession: async (heapLimitBytes?: number) => {
+          const session = await createResidentEngineSession(heapLimitBytes, clientId);
+          worker.sessions.push(session);
+          if (terminated) session.destroy();
+          return session;
+        },
+        preload: preloadEditWasm,
+        preloadFrom: preloadEditWasmFrom,
+      }
+    );
     return worker;
   };
 }
