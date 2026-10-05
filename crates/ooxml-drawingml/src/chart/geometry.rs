@@ -6416,7 +6416,10 @@ mod tests {
             assert_eq!(markers.len(), 2);
             for ((x, y), value) in markers.iter().zip([5.0, 10.0]) {
                 assert!((x - 270.0).abs() < 0.01, "{markers:?}");
-                assert!((y - (180.0 - 160.0 * (value / max))).abs() < 0.01, "{markers:?}");
+                assert!(
+                    (y - (180.0 - 160.0 * (value / max))).abs() < 0.01,
+                    "{markers:?}"
+                );
             }
             let labels = texts(&ops);
             assert!(labels.contains(&"40".to_owned()), "{labels:?}");
@@ -6815,7 +6818,8 @@ mod tests {
                                     assert!(ticks.len() >= 2, "{context:?}: {ticks:?}");
                                     if (scale.max - scale.min).is_finite() {
                                         assert_eq!(
-                                            ticks.iter()
+                                            ticks
+                                                .iter()
                                                 .copied()
                                                 .map(f64::to_bits)
                                                 .collect::<Vec<_>>(),
@@ -7061,12 +7065,7 @@ mod tests {
         let sizes = [2.0];
         for chart_type in ["scatter", "bubble"] {
             for (value, bounds, expected, fraction) in [
-                (
-                    f64::MIN,
-                    (Some(f64::MIN), None),
-                    (f64::MIN, f64::MIN),
-                    0.0,
-                ),
+                (f64::MIN, (Some(f64::MIN), None), (f64::MIN, f64::MIN), 0.0),
                 (f64::MAX, (None, Some(f64::MAX)), (0.0, 1.0), f64::MAX),
             ] {
                 for reversed in [false, true] {
@@ -7122,12 +7121,7 @@ mod tests {
         let sizes = [2.0];
         for chart_type in ["scatter", "bubble"] {
             for (value, bounds, expected, fraction) in [
-                (
-                    f64::MIN,
-                    (None, Some(f64::MIN)),
-                    (f64::MIN, f64::MIN),
-                    0.0,
-                ),
+                (f64::MIN, (None, Some(f64::MIN)), (f64::MIN, f64::MIN), 0.0),
                 (f64::MAX, (Some(f64::MAX), None), (0.0, 1.0), f64::MAX),
             ] {
                 for reversed in [false, true] {
