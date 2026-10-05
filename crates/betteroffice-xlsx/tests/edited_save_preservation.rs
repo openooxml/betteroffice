@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use betteroffice_xlsx::{CalculationOptions, CellRange, CellRef, SheetId, Workbook};
+use betteroffice_xlsx::{
+    CalculationOptions, CellRange, CellRef, CellState, CellValue, Op, SheetId, Workbook,
+};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -403,4 +405,99 @@ fn genuine_style_change_writes_the_new_index() {
             "{name}: {edited}"
         );
     }
+}
+
+fn outlined_package() -> Vec<u8> {
+    let mut parts = parts(&package(VARIANTS[0].1));
+    parts.insert(
+        "xl/worksheets/sheet1.xml".to_owned(),
+        worksheet(r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#).into_bytes(),
+    );
+    parts.insert(
+        "xl/worksheets/sheet2.xml".to_owned(),
+        worksheet(r#"<sheetData><row outlineLevel="1"><c r="A1"><v>1</v></c></row></sheetData>"#)
+            .into_bytes(),
+    );
+    ooxml_opc::rezip_parts(&parts.into_iter().collect::<Vec<_>>()).unwrap()
+}
+
+fn edit_and_insert(workbook: &mut Workbook, row: u32) {
+    workbook
+        .apply_ops(
+            vec![
+                Op::SetCell {
+                    sheet: SheetId(0),
+                    at: cell("A1"),
+                    cell: CellState {
+                        value: CellValue::Number { value: 7.0 },
+                        ..CellState::default()
+                    },
+                },
+                Op::InsertRows {
+                    sheet: SheetId(1),
+                    at: row,
+                    count: 1,
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn insert_below_authored_rows_keeps_unrelated_sheet_byte_identical() {
+    let source = outlined_package();
+    let before = parts(&source);
+    let mut workbook = Workbook::open(&source).unwrap();
+    let original_sheet = workbook.model().sheets[1].clone();
+    edit_and_insert(&mut workbook, 100);
+    assert_eq!(workbook.model().sheets[1], original_sheet);
+
+    let saved = workbook.save().unwrap();
+    let after = parts(&saved);
+    assert_eq!(
+        after["xl/worksheets/sheet2.xml"],
+        before["xl/worksheets/sheet2.xml"]
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
+    let (oracle, dispatches) = xlsx_parse::with_legacy_save_path(|| workbook.save().unwrap());
+    assert!(dispatches > 0);
+    assert_eq!(parts(&oracle), after);
+}
+
+#[test]
+fn insert_above_authored_row_moves_its_unmodeled_attributes() {
+    let source = outlined_package();
+    let before = parts(&source);
+    let mut workbook = Workbook::open(&source).unwrap();
+    edit_and_insert(&mut workbook, 0);
+
+    let saved = workbook.save().unwrap();
+    let after = parts(&saved);
+    assert_ne!(
+        after["xl/worksheets/sheet2.xml"],
+        before["xl/worksheets/sheet2.xml"]
+    );
+    let sheet = text(&after, "xl/worksheets/sheet2.xml");
+    assert!(
+        sheet.contains(r#"<row outlineLevel="1" r="2"><c r="A2"><v>1</v></c></row>"#),
+        "{sheet}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheets[0].cell(cell("A1")).unwrap().value,
+        CellValue::Number { value: 7.0 }
+    );
+    assert!(reopened.model().sheets[1].cell(cell("A1")).is_none());
+    assert_eq!(
+        reopened.model().sheets[1].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 1.0 }
+    );
+    let (oracle, dispatches) = xlsx_parse::with_legacy_save_path(|| workbook.save().unwrap());
+    assert!(dispatches > 0);
+    assert_eq!(parts(&oracle), after);
 }
