@@ -47,7 +47,6 @@ fn allowance(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> Snapsho
         ));
     }
     *meter = bytes;
-    #[cfg(test)]
     crate::snapshot::step::record(1, bytes);
     Ok(bytes)
 }
@@ -58,7 +57,6 @@ fn augment(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> SnapshotR
             "snapshot authority validation exceeds advance byte budget",
         ));
     }
-    #[cfg(test)]
     crate::snapshot::step::record(0, bytes.saturating_sub(*meter));
     *meter = bytes;
     Ok(())
@@ -544,6 +542,18 @@ impl SnapshotValidation {
             return Ok(false);
         }
         if self.phase == 6 {
+            if model
+                .styles
+                .snapshot_field_counts()
+                .into_iter()
+                .zip(base.styles.snapshot_field_counts())
+                .any(|(model, base)| model > base)
+            {
+                allowance(128, budget, &mut self.unit_bytes)?;
+                return Err(SnapshotError::new(
+                    "snapshot authority and model disagree: style tables extend beyond the authority base",
+                ));
+            }
             if let Some((id, _)) = model.styles.num_fmts.get(self.base_index) {
                 allowance(128, budget, &mut self.unit_bytes)?;
                 self.number_formats.entry(*id).or_insert(self.base_index);
@@ -1063,6 +1073,11 @@ impl SnapshotValidation {
                             if !matches!(value, Out::YMap(_)) {
                                 return Err(invalid());
                             }
+                            if !self.sheet_indices.contains_key(key.as_ref()) {
+                                return Err(SnapshotError::new(
+                                    "snapshot retained sheet map is outside the live sheet order",
+                                ));
+                            }
                         }
                         SnapshotParent::Root(name) if name.as_ref() == CELL_FORMATS => {
                             let Out::Any(Any::String(payload)) = value else {
@@ -1118,6 +1133,11 @@ impl SnapshotValidation {
                                                 .cell(at)
                                                 .and_then(|cell| cell.style)
                                                 .ok_or_else(invalid)?;
+                                            if style as usize >= base.styles.cell_xfs.len() {
+                                                return Err(SnapshotError::new(
+                                                    "snapshot authority and model disagree: cell style index exceeds the authority base",
+                                                ));
+                                            }
                                             if actual.len() > 64
                                                 || self.style_keys.get(&style).map(String::as_str)
                                                     != Some(actual)
@@ -1176,6 +1196,14 @@ impl SnapshotValidation {
                 });
                 if let Some((at, cell)) = first.chain(later).next() {
                     allowance(256, budget, &mut self.unit_bytes)?;
+                    if cell
+                        .style
+                        .is_some_and(|style| style as usize >= base.styles.cell_xfs.len())
+                    {
+                        return Err(SnapshotError::new(
+                            "snapshot authority and model disagree: cell style index exceeds the authority base",
+                        ));
+                    }
                     let contents = nested_map(&map, &txn, CONTENTS).map_err(SnapshotError::new)?;
                     let value = contents.get(&txn, &cell_key(at));
                     let actual = match &value {

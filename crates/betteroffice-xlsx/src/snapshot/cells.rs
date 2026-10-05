@@ -1,6 +1,6 @@
 use xlsx_model::{Cell, CellRange, CellRef, CellValue, ErrorValue, Workbook};
 
-use super::wire::{ChunkKind, Reader, Writer, frame};
+use super::wire::{ChunkKind, Reader, Writer, frame_records};
 use super::{SnapshotBudget, SnapshotError, SnapshotResult};
 
 #[derive(Clone, Copy, Default)]
@@ -44,6 +44,7 @@ impl CellCursor {
             let mut previous = base;
             let mut records = Writer::new();
             let mut count = 0;
+            let mut lengths = Vec::new();
             for (at, cell) in cells {
                 let mut record = Writer::new();
                 record.var_u32(at.row - previous.0);
@@ -58,17 +59,20 @@ impl CellCursor {
                 header.var_u32(base.0);
                 header.var_u32(base.1);
                 header.var_usize(count + 1);
-                let length = frame(ChunkKind::Cells, ordinal, &header.into_bytes()).len()
+                lengths.push(record.len() + if count == 0 { header.len() } else { 0 });
+                let length = frame_records(ChunkKind::Cells, ordinal, &[], &lengths).len()
+                    + header.len()
                     + records.len()
                     + record.len();
-                if count != 0 && length > budget.max_bytes() {
+                if count != 0 && length > budget.max_bytes().min(1024) {
+                    lengths.pop();
                     break;
                 }
                 records.raw(&record.into_bytes());
                 previous = (at.row, at.col);
                 self.after = Some(previous);
                 count += 1;
-                if count == budget.max_records() {
+                if count == budget.max_records().min(64) {
                     break;
                 }
             }
@@ -79,10 +83,11 @@ impl CellCursor {
                 payload.var_u32(base.1);
                 payload.var_usize(count);
                 payload.raw(&records.into_bytes());
-                return Ok(Some(frame(
+                return Ok(Some(frame_records(
                     ChunkKind::Cells,
                     ordinal,
                     &payload.into_bytes(),
+                    &lengths,
                 )));
             }
             self.sheet += 1;

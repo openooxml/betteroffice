@@ -7,7 +7,7 @@ use xlsx_parse::{SharedStringCells, SheetAxes};
 use crate::workbook::PreservedSheetState;
 
 use super::growth::Growth;
-use super::wire::{ChunkKind, Reader, Writer, frame, unframe};
+use super::wire::{ChunkKind, Reader, Writer, frame, frame_records, packed_record, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 
 const HEADER: u8 = 0;
@@ -44,6 +44,7 @@ impl PreservedSnapshotEncoder {
     ) -> SnapshotResult<Option<Vec<u8>>> {
         let mut payload = Writer::new();
         let mut count = 0;
+        let mut lengths = Vec::new();
         if !self.started {
             write_header(&mut payload, state)?;
             if frame(ChunkKind::Preserved, self.ordinal, &[]).len() + payload.len()
@@ -55,16 +56,23 @@ impl PreservedSnapshotEncoder {
             }
             self.started = true;
             count = 1;
+            lengths.push(payload.len());
         }
-        while count < budget.max_records() {
+        while count < budget.max_records().min(64) {
             let mut cursor = self.cursor;
             let mut record = Writer::new();
             if !cursor.write_next(&mut record, state)? {
                 self.cursor = cursor;
                 break;
             }
-            let length =
-                frame(ChunkKind::Preserved, self.ordinal, &[]).len() + payload.len() + record.len();
+            lengths.push(record.len());
+            let length = frame_records(ChunkKind::Preserved, self.ordinal, &[], &lengths).len()
+                + payload.len()
+                + record.len();
+            if length > budget.max_bytes().min(1024) && count != 0 {
+                lengths.pop();
+                break;
+            }
             if length > budget.max_bytes() {
                 if count != 0 {
                     break;
@@ -80,7 +88,12 @@ impl PreservedSnapshotEncoder {
         if payload.is_empty() {
             return Ok(None);
         }
-        let chunk = frame(ChunkKind::Preserved, self.ordinal, &payload.into_bytes());
+        let chunk = frame_records(
+            ChunkKind::Preserved,
+            self.ordinal,
+            &payload.into_bytes(),
+            &lengths,
+        );
         self.ordinal += 1;
         Ok(Some(chunk))
     }
@@ -268,7 +281,10 @@ impl PreservedSnapshotBuilder {
             ));
         }
         let result = self.advance_inner(chunk, budget);
-        self.failed |= result.is_err();
+        self.failed |= result
+            .as_ref()
+            .err()
+            .is_some_and(|failure| !budget.is_partial() || !failure.is_budget_refusal());
         result
     }
 
@@ -277,18 +293,30 @@ impl PreservedSnapshotBuilder {
         chunk: &[u8],
         budget: SnapshotBudget,
     ) -> SnapshotResult<SnapshotProgress> {
-        if chunk.len() > budget.max_bytes() {
+        let (kind, ordinal, payload) = unframe(chunk)?;
+        let packed = packed_record(chunk, self.offset)?;
+        let record = packed.unwrap_or(&payload[self.offset..]);
+        let framing = if self.offset == 0 {
+            chunk.len() - payload.len()
+        } else {
+            0
+        };
+        let extent = if packed.is_some() {
+            record.len() + framing
+        } else {
+            chunk.len()
+        };
+        if extent > budget.max_bytes() {
             return Err(SnapshotError::new(
                 "snapshot preservation exceeds advance byte budget",
             ));
         }
-        let (kind, ordinal, payload) = unframe(chunk)?;
         if kind != ChunkKind::Preserved || ordinal != self.ordinal || payload.is_empty() {
             return Err(SnapshotError::new(
                 "snapshot preservation chunk is missing or reordered",
             ));
         }
-        let mut r = Reader::new(&payload[self.offset..]);
+        let mut r = Reader::new(record);
         let tag = r.u8()?;
         if self.started {
             if self.runs.front().map(|&(expected, _)| expected) != Some(tag) || self.remaining == 0
@@ -330,11 +358,13 @@ impl PreservedSnapshotBuilder {
             }
             self.read_header(&mut r)?;
         }
-        let rest = r.rest();
-        self.offset = payload.len() - rest.len();
-        #[cfg(test)]
-        super::step::record(1, chunk.len());
-        if rest.is_empty() {
+        let consumed = record.len() - r.clone().rest().len();
+        if packed.is_some() {
+            r.finish()?;
+        }
+        self.offset += consumed;
+        super::step::record(1, consumed + framing);
+        if self.offset == payload.len() {
             self.offset = 0;
             self.ordinal += 1;
             Ok(SnapshotProgress::ready())
@@ -357,7 +387,6 @@ impl PreservedSnapshotBuilder {
             ));
         }
         let mut r = Reader::new(payload);
-        #[cfg(test)]
         crate::snapshot::step::record(0, chunk.len());
         let mut records = 0;
         while !r.is_empty() {
@@ -378,7 +407,6 @@ impl PreservedSnapshotBuilder {
                 self.read_record(tag, &mut r)?;
             }
             records += 1;
-            #[cfg(test)]
             crate::snapshot::step::record(1, 0);
         }
         r.finish()?;

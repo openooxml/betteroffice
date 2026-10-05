@@ -4,8 +4,11 @@ use std::cell::Cell;
 pub(crate) struct StepWork {
     pub(crate) records: usize,
     pub(crate) bytes: usize,
+    #[cfg(test)]
     pub(crate) initialized_bytes: usize,
+    #[cfg(test)]
     pub(crate) scanned_bytes: usize,
+    #[cfg(test)]
     pub(crate) allocated_bytes: usize,
 }
 
@@ -23,28 +26,34 @@ pub(crate) fn reset() {
     MIGRATED_ENTRIES.set(0);
 }
 
+#[cfg(test)]
 pub(crate) fn migrate(entries: usize) {
     MIGRATED_ENTRIES.set(MIGRATED_ENTRIES.get() + entries);
 }
 
+#[cfg(test)]
 pub(crate) fn migrated_entries() -> usize {
     MIGRATED_ENTRIES.get()
 }
 
+#[cfg(test)]
 pub(crate) fn drain(entries: usize) {
     DRAINED_ENTRIES.set(DRAINED_ENTRIES.get() + entries);
 }
 
+#[cfg(test)]
 pub(crate) fn drained_entries() -> usize {
     DRAINED_ENTRIES.get()
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub(crate) fn delete(clocks: usize) {
     DELETED_CLOCKS.set(DELETED_CLOCKS.get() + clocks);
 }
 
 #[doc(hidden)]
+#[cfg(test)]
 pub(crate) fn deleted_clocks() -> usize {
     DELETED_CLOCKS.get()
 }
@@ -58,21 +67,26 @@ pub(crate) fn record(records: usize, bytes: usize) {
 
 pub(crate) fn initialize(bytes: usize) {
     record(usize::from(bytes != 0), bytes);
-    let mut work = WORK.get();
-    work.initialized_bytes += bytes;
-    WORK.set(work);
+    #[cfg(test)]
+    {
+        let mut work = WORK.get();
+        work.initialized_bytes += bytes;
+        WORK.set(work);
+    }
 }
 
 pub(crate) fn current() -> StepWork {
     WORK.get()
 }
 
+#[cfg(test)]
 pub(crate) fn scan(bytes: usize) {
     let mut work = WORK.get();
     work.scanned_bytes += bytes;
     WORK.set(work);
 }
 
+#[cfg(test)]
 pub(crate) fn allocate(bytes: usize) {
     let mut work = WORK.get();
     work.allocated_bytes += bytes;

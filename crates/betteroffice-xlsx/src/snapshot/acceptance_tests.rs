@@ -373,6 +373,122 @@ fn assert_step_budget(budget: SnapshotBudget) -> crate::snapshot::step::StepWork
     work
 }
 
+#[test]
+fn snapshot_packed_cells_drain_within_step_budget() {
+    let cells = 2_048usize;
+    let mut sheet = crate::Sheet::new("Data");
+    for index in 0..cells {
+        sheet.set_cell(
+            CellRef::new((index / 20) as u32, (index % 20) as u32),
+            Cell {
+                value: CellValue::Number {
+                    value: index as f64,
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let worker = Workbook::from_parts(
+        WorkbookModel {
+            sheets: vec![sheet],
+            ..WorkbookModel::default()
+        },
+        None,
+        SheetId(0),
+        false,
+        None,
+    )
+    .unwrap();
+    let transport = SnapshotBudget::new(256, 16_384).unwrap();
+    let chunks = encode(&worker, transport);
+    let packed = decoded_snapshot(&chunks)
+        .into_iter()
+        .filter(|(kind, _, _)| *kind == ChunkKind::Cells)
+        .map(|(_, _, payload)| {
+            let mut reader = Reader::new(&payload);
+            reader.var_usize().unwrap();
+            reader.var_u32().unwrap();
+            reader.var_u32().unwrap();
+            reader.var_usize().unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(packed.iter().any(|count| *count > 1));
+    assert!(packed.iter().all(|count| *count <= 64));
+    assert_eq!(packed.iter().sum::<usize>(), cells);
+    for budget in [transport, SnapshotBudget::new(1, 1024).unwrap()] {
+        let mut builder = WorkbookSnapshotBuilder::new();
+        for chunk in &chunks {
+            builder.push(chunk).unwrap();
+            assert_step_budget(transport);
+        }
+        let limit = if budget == transport {
+            cells.div_ceil(64) + 64
+        } else {
+            200_000
+        };
+        let mut ready = false;
+        for _ in 0..limit {
+            let progress = builder.advance(budget).unwrap();
+            assert_step_budget(budget);
+            assert_eq!(progress.is_ready(), builder.ready.is_some());
+            ready = progress.is_ready();
+            if ready {
+                break;
+            }
+        }
+        assert!(ready, "snapshot exceeded {limit} advances at {budget:?}");
+        assert!(builder.advance(budget).unwrap().is_ready());
+        assert_eq!(assert_step_budget(budget).records, 0);
+        let (peer, _) = builder.finish().unwrap().into_parts();
+        assert_current_identity(&worker, &peer);
+        assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+    }
+}
+
+#[test]
+fn snapshot_partial_byte_allowance_defers_packed_records() {
+    let mut sheet = crate::Sheet::new("Data");
+    for row in 0..128 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: format!("{row:03}{}", "x".repeat(125)),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let transport = SnapshotBudget::new(256, 16_384).unwrap();
+    let budget = SnapshotBudget::new(256, 1024).unwrap();
+    let chunks = encode(&worker, transport);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in &chunks {
+        builder.push(chunk).unwrap();
+        assert_step_budget(transport);
+    }
+    let mut ready = false;
+    let mut drained = false;
+    for _ in 0..200_000 {
+        ready = builder.advance(budget).unwrap().is_ready();
+        let work = assert_step_budget(budget);
+        drained |= work.records > 1;
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    assert!(drained);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
 fn completed_builder_with_step_budget(
     chunks: &[Vec<u8>],
     budget: SnapshotBudget,
