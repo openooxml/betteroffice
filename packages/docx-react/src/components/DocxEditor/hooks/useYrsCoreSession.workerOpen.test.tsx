@@ -2747,6 +2747,48 @@ test('a failed worker-recovery main open keeps rendering pinned to the main engi
   }
 });
 
+test('a successful worker-recovery main open permits pending reads, navigation and mutations', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames(true);
+  const source = await longFixture(2);
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source },
+  });
+  try {
+    await frames.waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const editor = result.current.pagedEditorRef.current!;
+    const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+    const ensure = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    expect(api.getEditorRef()).toBeNull();
+    expectLoadingMutations(api, editor);
+    expect(request).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    const ready = awaitWorkerOpenReplica(session)!;
+    act(() => ensureWorkerOpenReplica(session));
+    await frames.untilCommitted(ready);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
+    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(api.findInDocument('paragraph')).toContainEqual({
+      paraId: '00000001', match: 'paragraph', before: 'First ', after: '',
+    });
+    expectReadyMutations(api, session, editor, result.current.searchReveals);
+    expect(result.current.mainOpens).toEqual([true]);
+    expect(request).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(workers).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
 test('opening the comments sidebar keeps a viewer document held in the worker', async () => {
   const { posted } = installWorker();
   const { result, unmount } = renderHook(useHarness, {

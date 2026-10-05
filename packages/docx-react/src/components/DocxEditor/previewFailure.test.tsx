@@ -528,6 +528,33 @@ test('a stale worker open failure keeps the replacement preview accepting input'
     });
     await act(async () => ref.current!.flushPendingInput());
     expect(session.paragraphs('body')[0]!.text).toBe(`${queuedText}${first.text}`);
+    expect(ref.current!.findInDocument('Page')).toContainEqual({
+      paraId: first.paraId, match: 'Page', before: queuedText, after: first.text.slice(4),
+    });
+    const readyEditor = ref.current!.getEditorRef()!;
+    const readyLayout = spyOn(readyEditor, 'getLayout').mockReturnValue({
+      pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
+    } as unknown as ReturnType<PagedEditorRef['getLayout']>);
+    const readyLocation = spyOn(readyEditor, 'displayPositionToYrsLoc').mockReturnValue({
+      story: 'body', paraId: first.paraId, offset: 0,
+    });
+    try {
+      expect(ref.current!.getPageContent(1)).toMatchObject({
+        pageNumber: 1,
+        text: `[${first.paraId}] ${queuedText}${first.text}`,
+        paragraphs: [{ paraId: first.paraId, text: `${queuedText}${first.text}` }],
+      });
+    } finally {
+      readyLocation.mockRestore();
+      readyLayout.mockRestore();
+    }
+    act(() => session.setSelection(
+      { story: 'body', paraId: first.paraId, offset: queuedText.length },
+      { story: 'body', paraId: first.paraId, offset: queuedText.length + 4 }
+    ));
+    expect(ref.current!.getSelectionInfo()).toMatchObject({
+      paraId: first.paraId, selectedText: 'Page', paragraphText: `${queuedText}${first.text}`,
+    });
     const target = { story: 'body', paraId: first.paraId, offset: 0 };
     act(() => session.setSelection({ ...target, offset: queuedText.length }));
     expect(ref.current!.scrollToParaId(first.paraId)).toBe(true);
