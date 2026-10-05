@@ -7879,6 +7879,12 @@ async function openingPluginFallback() {
       onWorkerOpen: (worker) => { if (worker) opened = worker; },
     },
   });
+  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
+    await act(async () => {
+      clock.advance(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+  }
   await flushPluginFallback(clock);
   expect(result.current.host).not.toBeNull();
   expect(opened).toBeDefined();
