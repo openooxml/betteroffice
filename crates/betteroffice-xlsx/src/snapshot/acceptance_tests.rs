@@ -1106,6 +1106,16 @@ fn snapshot_initial_save_identity() {
 #[test]
 fn snapshot_rebuilt_package_identity() {
     let bytes = source(false, false);
+    let mut parts = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let (_, data) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .unwrap();
+    *data = std::str::from_utf8(data)
+        .unwrap()
+        .replace("SUM(Items[Qty])+Input", "SUM(A5:A6)+Input")
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
     for budget in budgets() {
         let mut worker = worker(&bytes);
         let mut peer = hydrate(&worker, budget);
@@ -1130,7 +1140,7 @@ fn snapshot_rebuilt_package_identity() {
             workbook
                 .apply_ops(
                     vec![Op::InsertRows {
-                        sheet: SheetId(0),
+                        sheet: SheetId(1),
                         at: 0,
                         count: 1,
                     }],
