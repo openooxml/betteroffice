@@ -1019,7 +1019,13 @@ export function useYrsCoreSession(
       workerOpen?.pendingCompletion !== session &&
       (!handoffFrom || options?.shownEngine === session)
     ) {
-      if (registeredWorkerProposalAuthority(session)) {
+      const settled = workerOpenRef.current?.settledDisplayList?.(
+        null, null, 'window', controller.signal, () => {
+          if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
+        }
+      ) ?? Promise.resolve();
+      const authority = registeredWorkerProposalAuthority(session) !== null;
+      if (authority) {
         timer = setTimeout(startPeer, REPLICA_FRAME_WAIT_MS);
         if (typeof requestAnimationFrame === 'function') {
           frameId = requestAnimationFrame(() => {
@@ -1029,15 +1035,9 @@ export function useYrsCoreSession(
           clearTimeout(timer);
           timer = setTimeout(startPeer, 0);
         }
-        return cleanup;
       }
-      const settled = workerOpenRef.current?.settledDisplayList?.(
-        null, null, 'window', controller.signal, () => {
-          if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
-        }
-      ) ?? Promise.resolve();
       void settled.then(() => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || authority) return;
         if (typeof requestIdleCallback === 'function') {
           idleId = requestIdleCallback(startPeer, { timeout: 2000 });
         } else {
