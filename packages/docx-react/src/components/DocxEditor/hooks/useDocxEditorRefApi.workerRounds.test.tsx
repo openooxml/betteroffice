@@ -1,0 +1,312 @@
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { useRef } from 'react';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
+import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import { createYrsSession, type DocxProposalInput, type DocxProposalResult, type YrsSession } from '@betteroffice/docx/yrs';
+import { createStyleResolver } from '@betteroffice/docx/styles';
+import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
+import type { DocxEditorRef } from '../../DocxEditor';
+import type { PagedEditorRef } from '../PagedEditor';
+import { createCommentIdAllocator } from '../commentFactories';
+import { applyEditBatch } from '../editorBatches';
+import { registerWorkerProposalAuthority, handedOverRequest } from '../internals/workerProposalAuthority';
+import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
+import { useRustDisplayList } from './useDisplayList';
+import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { useRevisionPreview } from './useRevisionPreview';
+
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+const { act, cleanup, renderHook } = await import('@testing-library/react');
+const originalWorker = globalThis.Worker;
+const sessions: YrsSession[] = [];
+const workers: InProcessResidentWorker[] = [];
+let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
+let nextClientId = 98500;
+const LAYOUT = JSON.stringify({
+  bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+  measurement: { defaults: { fontFamily: 'Calibri', fontSize: 11 } }, renderEnv: {},
+});
+const SUGGEST = { author: 'Host', date: '2026-10-05T00:00:00Z' };
+
+beforeAll(async () => {
+  await preloadEditWasm(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
+  ))));
+  startWorker = await residentWorkerFactory();
+});
+afterEach(() => {
+  cleanup();
+  mock.restore();
+  for (const worker of workers.splice(0)) worker.terminate();
+  for (const session of sessions.splice(0)) session.destroy();
+  globalThis.Worker = originalWorker;
+});
+afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((yes) => { resolve = yes; });
+  return { promise, resolve };
+}
+
+function documentBytes() {
+  const parts = new Map<string, Uint8Array>();
+  parts.set('[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'));
+  parts.set('_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>'));
+  parts.set('word/document.xml', toBytes('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Alpha</w:t></w:r></w:p><w:sectPr/></w:body></w:document>'));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+function text(session: Pick<YrsSession, 'readParagraphs'>) {
+  const read = session.readParagraphs({ view: 'accepted' });
+  if (!read.ok) throw new Error(read.failure.message);
+  return read.paragraphs.map(({ text }) => text).join('\n');
+}
+
+function snapshot(result: DocxProposalResult) {
+  expect(result.ok).toBe(true);
+  if (!result.ok) throw new Error(result.failure.message);
+  return result.snapshot;
+}
+
+async function editor(holdHydration = false) {
+  globalThis.Worker = class {
+    constructor() { const worker = startWorker(nextClientId++); workers.push(worker); return worker; }
+  } as unknown as typeof Worker;
+  const bytes = documentBytes();
+  const peer = await createYrsSession({ clientId: nextClientId++ });
+  sessions.push(peer);
+  const loaded = deferred<void>();
+  const release = deferred<void>();
+  const events: string[] = [];
+  const refresh = mock(() => true);
+  const peerProjection = mock((_stories: readonly string[]) => {});
+  const renderer = renderHook(() => useRustDisplayList(
+    null, undefined, undefined, undefined, peer, undefined, undefined, undefined, true
+  ));
+  const opened = await renderer.result.current.openInWorker(peer, bytes);
+  if (!opened) throw new Error('No worker document');
+  const worker = workers.at(-1)!;
+  const { document } = peer.openDocx(bytes, false);
+  const replica = deferWorkerOpenReplica(peer, async () => {
+    const state = await opened.encodeVersionedState!();
+    events.push('snapshot');
+    return [
+      () => { peer.loadState(state.state); events.push('load'); loaded.resolve(); },
+    ];
+  }, () => { throw new Error('unexpected fallback'); }, () => {
+    events.push('ready');
+    peer.beginUndoCapture();
+    opened.replicaReady();
+  }, {
+    current: () => true, cancel: () => {},
+    serializeHydration: (load, complete) => authority.hydratePeer(async () => {
+      await load();
+      if (holdHydration) await release.promise;
+    }, () => { events.push('catchUp'); complete(); }),
+  });
+  await renderer.result.current.layoutInWorker(peer, LAYOUT);
+  const authority = registerWorkerProposalAuthority(peer, opened, {
+    editorPeer: true, current: () => true, laidOut: async () => {}, adopted: () => {},
+    relayout: () => {}, contentChanged: () => {}, projectionChanged: peerProjection,
+    peerUpdated: () => { if (!replica.pending) refresh(); },
+  });
+  await authority.initialize();
+  const editor = {
+    getYrsSession: () => peer, getDocument: () => document,
+    flushPendingInput: async () => {}, syncYrsInputState: refresh,
+    isWorkerViewer: () => false, getLayout: () => null,
+  } as unknown as PagedEditorRef;
+  const pagedEditorRef = { current: editor };
+  const hook = renderHook(() => {
+    const ref = useRef<DocxEditorRef>(null);
+    useDocxEditorRefApi({
+      experimentalWorkerOpen: true, ref, document, documentFromYrs: () => document,
+      historyStateRef: { current: document }, pagedEditorRef,
+      handleSave: async () => null, zoom: 1, setZoom: () => {},
+      scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
+      loadParsedDocument: () => {}, loadBuffer: async () => {}, comments: [],
+      setComments: () => {}, setShowCommentsSidebar: () => {},
+      contentChangeSubscribersRef: { current: new Set() }, selectionChangeSubscribersRef: { current: new Set() },
+      getCachedStyleResolver: createStyleResolver, commentIdAllocator: createCommentIdAllocator(),
+      commands: UNAVAILABLE_DOCX_COMMANDS, modeRef: { current: 'editing' },
+      allowHostProposalsRef: { current: true },
+      hostSearch: {
+        search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
+        searchNext: () => null, searchPrevious: () => null, searchGoTo: () => null, clearSearch: () => {},
+        getSearchState: () => null, onSearchChange: () => () => {},
+      },
+    });
+    return { api: ref, preview: useRevisionPreview(peer) };
+  });
+  const ready = requestWorkerOpenReplica(peer)!;
+  if (holdHydration) await loaded.promise;
+  else await act(async () => { await ready; });
+  const proposal = (id: string, content = 'Worker ', at: 'start' | 'end' = 'start'): DocxProposalInput => ({
+    id, paragraph: {
+      kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001',
+    }, suggest: SUGGEST, op: 'insertText', at, text: content,
+  });
+  const type = (content = 'Typed ') => {
+    peer.insertText({ story: 'body', paraId: '00000001', offset: 0 }, content);
+  };
+  return {
+    peer, worker, authority, replica, ready, release: () => release.resolve(), events, refresh, peerProjection,
+    api: hook.result.current.api.current!, hook, pagedEditorRef, proposal, type,
+    workerText: () => text(worker.sessions[0]!.proposalEngine),
+  };
+}
+
+test('ready editor ref rounds execute in the worker and integrate without whole-state decoding', async () => {
+  const h = await editor();
+  const propose = spyOn(h.peer, 'proposeChanges');
+  const encode = spyOn(h.peer, 'encodeState');
+  const load = spyOn(h.peer, 'loadState');
+  const host = spyOn(h.peer, 'applyHostUpdate');
+  const local = spyOn(h.peer, 'applyLocalUpdate');
+  const result = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('round')] }));
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(3);
+  expect(propose).not.toHaveBeenCalled();
+  expect(host).toHaveBeenCalledTimes(1);
+  expect(local).not.toHaveBeenCalled();
+  expect(encode).not.toHaveBeenCalled();
+  expect(load).not.toHaveBeenCalled();
+  expect(result.version).toBe(h.peer.version());
+  expect(text(h.peer)).toBe('Worker Alpha');
+  expect(text(h.peer)).toBe(h.workerText());
+  expect(h.refresh).toHaveBeenCalledTimes(1);
+  expect(h.peerProjection).toHaveBeenLastCalledWith(['body']);
+});
+
+test('integrating a round diff emits no applyUpdate echo', async () => {
+  const h = await editor();
+  const before = h.worker.requests.filter((type) => type === 'applyUpdate').length;
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('echo')] }));
+  await h.authority.residentOperation(async () => {});
+  expect(h.worker.requests.filter((type) => type === 'applyUpdate')).toHaveLength(before);
+  expect(text(h.peer)).toBe(h.workerText());
+});
+
+test('peer undo and redo retain worker proposal content while reverting only typing', async () => {
+  const h = await editor();
+  h.type();
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('undo')] }));
+  expect(text(h.peer)).toContain('Typed ');
+  expect(h.peer.undo()).toBe(true);
+  expect(text(h.peer)).toBe('Worker Alpha');
+  expect(h.peer.redo()).toBe(true);
+  expect(text(h.peer)).toContain('Typed ');
+  expect(text(h.peer)).toContain('Worker ');
+  expect((await h.api.getProposals()).proposals.map(({ id }) => id)).toEqual(['undo']);
+});
+
+test('typing before a queued round posts refuses its stale token', async () => {
+  const h = await editor();
+  const blocker = deferred<void>();
+  const started = deferred<void>();
+  const held = h.authority.residentOperation(async () => { started.resolve(); await blocker.promise; });
+  await started.promise;
+  const token = h.peer.version();
+  const pending = h.api.proposeChanges({ expectVersion: token, proposals: [h.proposal('stale')] });
+  h.type();
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  blocker.resolve();
+  await held;
+  expect(await pending).toMatchObject({ ok: false, version: h.peer.version(), failure: { code: 'stale-version' } });
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
+  expect((await h.api.getProposals()).proposals).toEqual([]);
+});
+
+test('typing after posting merges with a successful round and invalidates coverage', async () => {
+  const h = await editor();
+  h.worker.hold();
+  const posted = deferred<void>();
+  const send = h.worker.postMessage.bind(h.worker);
+  spyOn(h.worker, 'postMessage').mockImplementation((message, transfer) => {
+    send(message, transfer);
+    if ('type' in message && message.type === 'proposal') posted.resolve();
+  });
+  const pending = h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('merge')] });
+  await posted.promise;
+  h.type();
+  h.worker.release();
+  const result = snapshot(await pending);
+  expect(result.version).toBe(h.peer.version());
+  expect(text(h.peer)).toContain('Typed ');
+  expect(text(h.peer)).toContain('Worker ');
+  expect(h.authority.workerCoversPeer(h.peer.version())).toBe(false);
+  await h.authority.catchUp();
+  expect(text(h.peer)).toBe(h.workerText());
+});
+
+test('a hydration round stays in the worker and readiness follows the authority catch-up', async () => {
+  const h = await editor(true);
+  expect(h.replica.pending).toBe(true);
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  const peerPropose = spyOn(h.peer, 'proposeChanges');
+  const round = h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('during')] });
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
+  expect(h.events).toEqual(['snapshot', 'load']);
+  expect(h.replica.pending).toBe(true);
+  expect(h.authority.workerCoversPeer(h.peer.version())).toBe(false);
+  h.release();
+  await act(async () => { await h.ready; snapshot(await round); });
+  expect(peerPropose).not.toHaveBeenCalled();
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before + 2);
+  expect(h.events).toEqual(['snapshot', 'load', 'catchUp', 'ready']);
+  expect(text(h.peer)).toBe(h.workerText());
+  expect(h.authority.workerCoversPeer(h.peer.version())).toBe(true);
+  expect(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('after', 'After ')] }))
+    .toMatchObject({ ok: false, failure: { code: 'tracked-revision-conflict' } });
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('after', 'After ', 'end')] }));
+  expect(text(h.peer)).toContain('After ');
+  expect(text(h.peer)).toBe(h.workerText());
+});
+
+test('same proposal ids stay independent and both decisions enter the preview by revision id', async () => {
+  const h = await editor();
+  const local = snapshot(h.peer.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same', 'Local ')] }));
+  expect(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same')] }))
+    .toMatchObject({ ok: false, failure: { code: 'tracked-revision-conflict' } });
+  const remote = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same', 'Worker ', 'end')] }));
+  expect(h.peer.getProposals().proposals).toEqual(local.proposals);
+  expect((await h.api.getProposals()).proposals).toEqual(remote.proposals);
+  const localIds = local.proposals.flatMap(({ revisionIds }) => revisionIds);
+  const workerIds = remote.proposals.flatMap(({ revisionIds }) => revisionIds);
+  expect(localIds.length).toBeGreaterThan(0);
+  expect(workerIds.length).toBeGreaterThan(0);
+  expect(localIds.some((id) => workerIds.includes(id))).toBe(false);
+  await act(async () => {
+    snapshot(h.peer.setProposalStates({ expectVersion: h.peer.version(), expectPreviewVersion: local.previewVersion, changes: [{ id: 'same', state: 'rejected' }] }));
+    snapshot(await h.api.setProposalStates({ expectVersion: h.peer.version(), expectPreviewVersion: remote.previewVersion, changes: [{ id: 'same', state: 'accepted' }] }));
+  });
+  const preview = h.hook.result.current.preview.revisionPreview!;
+  expect(Object.keys(preview).sort()).toEqual([...localIds, ...workerIds].sort());
+  for (const id of localIds) expect(preview[id]).toBe('rejected');
+  for (const id of workerIds) expect(preview[id]).toBe('accepted');
+  expect(h.authority.revisionPreview()).toEqual(preview);
+  const settled = snapshot(await h.api.withdrawProposals({ expectVersion: h.peer.version(), ids: ['same'] }));
+  expect(settled.proposals).toEqual([]);
+  expect(h.peer.getProposals().proposals.map(({ id }) => id)).toEqual(['same']);
+});
+
+test('plugin peer batches map a worker token through every correspondence and reject it after an edit', async () => {
+  const h = await editor();
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('plugin')] }));
+  const token = h.authority.geometry()!.version;
+  const workerVersion = h.worker.sessions[0]!.proposalEngine.version();
+  expect(token).toBe(h.peer.version());
+  expect(handedOverRequest(h.peer, { expectVersion: workerVersion }).expectVersion).toBe(h.peer.version());
+  const step = { op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: '00000001' }, at: 'end', text: 'Plugin' } as const;
+  const applied = await applyEditBatch(h.pagedEditorRef, () => 'editing', { expectVersion: workerVersion, steps: [step] });
+  expect(applied).toMatchObject({ result: { ok: true, applied: true } });
+  expect(text(h.peer)).toContain('Plugin');
+  expect(handedOverRequest(h.peer, { expectVersion: workerVersion }).expectVersion).toBe(workerVersion);
+  const stale = await applyEditBatch(h.pagedEditorRef, () => 'editing', { expectVersion: workerVersion, steps: [step] });
+  expect(stale).toMatchObject({ result: { ok: false, failure: { code: 'stale-version' } } });
+});

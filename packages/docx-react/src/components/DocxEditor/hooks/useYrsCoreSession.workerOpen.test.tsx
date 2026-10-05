@@ -36,6 +36,7 @@ import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
 import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
+import type { ResolveDisplayListQueries } from './displayListQueryEpochGate';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
@@ -59,7 +60,7 @@ import { createCommentIdAllocator } from '../commentFactories';
 import { DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
-import { flushEditorInput } from '../editorBatches';
+import { applyEditBatch, flushEditorInput } from '../editorBatches';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
 import { createPluginClients } from '../../../plugins/createPluginClients';
 import type { DocxPlugin, DocxPluginContext, DocxPluginEvent, DocxPluginSnapshot } from '../../../plugins/types';
@@ -945,6 +946,7 @@ test('registered editor export reconciles worker repairs without echoing updates
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, { initialProps: { ...initialProps } });
   let applyLocal: ReturnType<typeof spyOn<YrsSession, 'applyLocalUpdate'>> | undefined;
+  let applyHost: ReturnType<typeof spyOn<YrsSession, 'applyHostUpdate'>> | undefined;
   let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
   try {
     await frames.waitFor(() => expect(result.current.host).not.toBeNull());
@@ -955,6 +957,7 @@ test('registered editor export reconciles worker repairs without echoing updates
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000, 'window'), 3000);
     const session = result.current.core.session!;
     applyLocal = spyOn(session, 'applyLocalUpdate');
+    applyHost = spyOn(session, 'applyHostUpdate');
     peerExport = spyOn(session, 'exportStructuredWithPagesFor');
     workers[0]!.sessions[0]!.applyRawOps('body', [{ op: 'insert', index: 0, text: 'Worker repair ' }]);
     const before = posted.filter(({ type }) => type === 'applyUpdate').length;
@@ -965,7 +968,8 @@ test('registered editor export reconciles worker repairs without echoing updates
     expect(exported.content.layout.documentVersion).toBe(session.version());
     expect(JSON.stringify(exported.content.structured)).toContain('Worker repair ');
     expect(session.paragraphs('body')[0]!.text).toStartWith('Worker repair ');
-    expect(applyLocal).toHaveBeenCalled();
+    expect(applyHost).toHaveBeenCalled();
+    expect(applyLocal).not.toHaveBeenCalled();
     expect(posted.filter(({ type }) => type === 'applyUpdate')).toHaveLength(before);
     expect(posted.slice(beforeExport).some(({ type }) => type === 'syncUpdate')).toBe(true);
     expect(posted.slice(beforeExport).some(({ type }) => type === 'sync')).toBe(true);
@@ -973,6 +977,7 @@ test('registered editor export reconciles worker repairs without echoing updates
   } finally {
     unmount();
     applyLocal?.mockRestore();
+    applyHost?.mockRestore();
     peerExport?.mockRestore();
     frames.restore();
     globalThis.Worker = originalWorker;
@@ -2676,7 +2681,8 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
     expect(openingApi.getEditorRef()?.getYrsSession()).toBe(session);
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
-    expect(mirror).toHaveBeenCalledWith(null);
+    expect(mirror).toHaveBeenCalledWith(null, false);
+    expect(session.getProposals().proposals).toEqual([]);
     expect(session.workerDocumentMirrored()).toBe(false);
     expect(terminate).not.toHaveBeenCalled();
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
@@ -2716,7 +2722,8 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
       result.current.pipeline.scheduleLayout('remote', true);
     });
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
-    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+    expect((await api.getProposals()).proposals[0]!.state).toBe('accepted');
+    expect(session.getProposals().proposals).toEqual([]);
     expect(posted.filter((request) => request.type === 'sync').length).toBeGreaterThan(syncs);
     const accepted = posted.filter((request) => request.type === 'sync').at(-1)!;
     if (accepted.type !== 'sync') throw new Error('Missing proposal sync');
@@ -2941,6 +2948,150 @@ test('main-thread layout fallback opens the pending replica before measuring it'
   expect(result.current.mainOpens).toEqual([true]);
   expect(result.current.core.replicaReady).toBe(true);
   expect(result.current.core.session?.hasStory('body')).toBe(true);
+  expect(result.current.errors).toEqual([]);
+});
+
+test('forced onHost relayout retires the source fallback and routes queued and later rounds to the peer', async () => {
+  const { posted, workers } = installWorker();
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const api = result.current.ref.current!;
+  const initial = await api.getProposals();
+  const authority = registeredWorkerProposalAuthority(session)!;
+  expect(authority.retirementReason()).toBeNull();
+  expect(result.current.core.replicaReady).toBe(false);
+  expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+  const peerPropose = spyOn(session, 'proposeChanges');
+  const peerLoad = spyOn(session, 'loadState');
+  const terminate = spyOn(workers[0]!, 'terminate');
+  let release!: () => void;
+  let started!: () => void;
+  const blocker = new Promise<void>((resolve) => { release = resolve; });
+  const blocking = new Promise<void>((resolve) => { started = resolve; });
+  const held = authority.residentOperation(async () => { started(); await blocker; });
+  await blocking;
+  const queuedParagraph = workers[0]!.sessions[0]!.paragraphIdentities().paragraphs.find((identity) =>
+    identity.session?.story === 'body')!.session!;
+  const queued = api.proposeChanges({ expectVersion: initial.version, proposals: [{
+    id: 'stale-after-fallback', paragraph: queuedParagraph,
+    suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+    op: 'insertText', at: 'start', text: 'Stale ',
+  }] });
+  const before = posted.filter((request) => request.type === 'proposal').length;
+  act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+  expect(result.current.core.replicaReady).toBe(true);
+  expect(authority.retirementReason()).toBe('source-fallback');
+  expect(authority.workerCoversPeer(session.version())).toBe(false);
+  expect(registeredWorkerProposalAuthority(session)).toBe(authority);
+  expect(workerProposalAuthority(session)).toBeNull();
+  expect(result.current.mainOpens).toEqual([true]);
+  expect(peerLoad).not.toHaveBeenCalled();
+  expect(terminate).toHaveBeenCalledTimes(1);
+  expect(warning.mock.calls.filter(([message]) =>
+    message === '[yrs] the source fallback retired worker proposal authority to the peer')).toHaveLength(1);
+  expect(session.version()).not.toBe(initial.version);
+  await act(async () => {
+    release();
+    await held;
+    expect(await queued).toMatchObject({ ok: false, version: session.version(), failure: { code: 'stale-version' } });
+  });
+  expect(peerPropose).toHaveBeenCalledTimes(1);
+  const paragraph = session.paragraphIdentities().paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+  await act(async () => {
+    expect(await api.proposeChanges({
+      expectVersion: session.version(), proposals: [{
+        id: 'peer-after-fallback', paragraph,
+        suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+        op: 'insertText', at: 'start', text: 'Peer ',
+      }],
+    })).toMatchObject({ ok: true, snapshot: { version: session.version() } });
+  });
+  expect(peerPropose).toHaveBeenCalledTimes(2);
+  expect(texts(session).body![0]).toBe('Peer First paragraph');
+  expect((await api.getProposals()).proposals.map(({ id }) => id)).toEqual(['peer-after-fallback']);
+  expect(authority.snapshot()).toEqual(session.getProposals());
+  const current = session.getProposals();
+  await act(async () => {
+    expect(await api.setProposalStates({ expectVersion: session.version(), expectPreviewVersion: current.previewVersion,
+      changes: [{ id: 'peer-after-fallback', state: 'accepted' }] })).toMatchObject({ ok: true });
+  });
+  expect(authority.revisionPreview()).toEqual(proposalRevisionPreview(session.getProposals()));
+  const step = { op: 'insertText', target: { kind: 'paragraph', story: paragraph.story, paraId: paragraph.paraId },
+    at: 'end', text: 'Plugin' } as const;
+  await act(async () => {
+    expect(await applyEditBatch(result.current.pagedEditorRef, () => 'editing', { expectVersion: initial.version, steps: [step] },
+      undefined, undefined, true)).toMatchObject({ result: { ok: false, failure: { code: 'stale-version' } } });
+    expect(await applyEditBatch(result.current.pagedEditorRef, () => 'editing', { expectVersion: session.version(), steps: [step] },
+      undefined, undefined, true)).toMatchObject({ result: { ok: true, applied: true } });
+    expect(await api.withdrawProposals({ expectVersion: session.version(), ids: ['peer-after-fallback'] })).toMatchObject({ ok: true });
+  });
+  expect((await api.getProposals()).proposals).toEqual([]);
+  expect(texts(session).body![0]).toContain('Plugin');
+  act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+  expect(authority.retire('source-fallback')).toBe(false);
+  authority.restart();
+  expect(authority.retirementReason()).toBe('source-fallback');
+  expect(authority.workerCoversPeer(session.version())).toBe(false);
+  expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(before);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(warning.mock.calls.filter(([message]) =>
+    message === '[yrs] the source fallback retired worker proposal authority to the peer')).toHaveLength(1);
+  expect(result.current.errors).toEqual([]);
+});
+
+test('onHost relayout during an in-flight worker round preserves authority and integrates its content into the peer', async () => {
+  const { posted, workers, received, reply } = installWorker({
+    holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
+  });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true, allowHostProposals: true, workerProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const api = result.current.ref.current!;
+  const identities = await api.getParagraphIdentities();
+  const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+  const initial = await api.getProposals();
+  const initialized = await received('proposal');
+  const authority = registeredWorkerProposalAuthority(session)!;
+  const peerPropose = spyOn(session, 'proposeChanges');
+  const hostUpdate = spyOn(session, 'applyHostUpdate');
+  const terminate = spyOn(workers[0]!, 'terminate');
+  const round = api.proposeChanges({ expectVersion: initial.version, proposals: [{
+    id: 'in-flight-onHost', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+    op: 'insertText', at: 'start', text: 'Worker ',
+  }] });
+  const request = await received('proposal', initialized.id);
+  expect(request).toMatchObject({ operation: { kind: 'propose' } });
+  expect(authority.holdsWorkerState()).toBe(true);
+  act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+  expect(authority.retirementReason()).toBeNull();
+  expect(result.current.core.replicaReady).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(terminate).not.toHaveBeenCalled();
+  await act(async () => {
+    const ready = requestWorkerOpenReplica(session)!;
+    reply(request);
+    expect(await round).toMatchObject({ ok: true });
+    await ready;
+  });
+  expect(peerPropose).not.toHaveBeenCalled();
+  expect(hostUpdate).toHaveBeenCalled();
+  expect(result.current.mainOpens).toEqual([false]);
+  expect(result.current.core.replicaReady).toBe(true);
+  expect(texts(session).body![0]).toBe('Worker First paragraph');
+  const workerRead = workers[0]!.sessions[0]!.proposalEngine.readParagraphs({ view: 'accepted' });
+  expect(workerRead.ok).toBe(true);
+  if (!workerRead.ok) throw new Error(workerRead.failure.message);
+  expect(workerRead.paragraphs.map(({ text }) => text)).toEqual(texts(session).body);
+  expect((await api.getProposals()).proposals.map(({ id }) => id)).toEqual(['in-flight-onHost']);
+  expect(authority.retirementReason()).toBeNull();
+  expect(terminate).not.toHaveBeenCalled();
   expect(result.current.errors).toEqual([]);
 });
 
@@ -4304,16 +4455,18 @@ test('worker proposals reach the registry before hydration and survive hand-over
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     expect(result.current.mainOpens).toEqual([false]);
     expect(session.workerDocumentMirrored()).toBe(false);
-    expect(session.getProposals().proposals).toEqual(mirrored.proposals);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect((await api().getProposals()).proposals).toEqual(mirrored.proposals);
     const workerCalls = posted.filter((request) => request.type === 'proposal').length;
     const decided = await api().setProposalStates({
       expectVersion: session.version(),
-      expectPreviewVersion: session.getProposals().previewVersion,
+      expectPreviewVersion: mirrored.previewVersion,
       changes: [{ id: 'worker-proposal', state: 'accepted' }],
     });
     expect(decided.ok).toBe(true);
-    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
-    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls);
+    expect((await api().getProposals()).proposals[0]!.state).toBe('accepted');
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls + 2);
   } finally {
     unmount();
     frames.restore();
@@ -4428,6 +4581,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
     const identities = await api().getParagraphIdentities();
     const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
     const initial = await api().getProposals();
+    const peerSnapshot = session.getProposals();
     const snapshot = await received('proposal');
     const authority = workerProposalAuthority(session)!;
     expect(authority.holdsWorkerState()).toBe(false);
@@ -4453,7 +4607,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
         await expect(proposed).rejects.toThrow('proposal failed');
       });
       expect(authority.holdsWorkerState()).toBe(false);
-      expect(session.getProposals()).toEqual(initial);
+      expect(session.getProposals()).toEqual(peerSnapshot);
       expect(terminate).not.toHaveBeenCalled();
       expect(result.current.core.replicaReady).toBe(false);
       const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
@@ -4474,6 +4628,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
       expect(workerProposalAuthority(session)).toBeNull();
       expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
       expect((await api().getProposals()).proposals).toEqual([]);
+      expect(registeredWorkerProposalAuthority(session)!.retirementReason()).toBe('source-fallback');
       expect(result.current.errors).toEqual([]);
     } finally {
       terminate.mockRestore();
@@ -4738,6 +4893,8 @@ test('a hand-over queued behind a recovery snapshot that fails still hydrates th
     expect(initialized).toBeInstanceOf(Error);
     expect((initialized as Error).message).toBe('snapshot failed');
     expect(answered).toMatchObject({ proposals: [] });
+    expect(posted.filter((request) => request.type === 'proposal' && request.operation.kind === 'snapshot').length)
+      .toBeGreaterThan(2);
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     const current = await api().getProposals();
     const target = await bodyParagraph();
@@ -4759,27 +4916,42 @@ test('a hand-over queued behind a recovery snapshot that fails still hydrates th
   }
 }, 15_000);
 
-test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
+test('editor ref rounds stay in the worker when the viewer proposal flag is disabled', async () => {
   const { posted, workers } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true, holdReplica: true },
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
+  act(() => result.current.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  act(() => result.current.presentFrame());
+  const initial = await result.current.ref.current!.getProposals();
+  const peerPropose = spyOn(session, 'proposeChanges');
   let settled = false;
-  const call = result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] });
+  const call = result.current.ref.current!.proposeChanges({ expectVersion: initial.version, proposals: [] });
   void call.then(() => { settled = true; });
-  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'proposal')).toBe(true);
   expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
   expect(result.current.mainOpens).toEqual([]);
   expect(settled).toBe(false);
+  await act(async () => { expect(await call).toMatchObject({ ok: true }); });
+  const proposals = posted.filter((request) => request.type === 'proposal');
+  expect(proposals.at(-1)?.operation.kind).toBe('propose');
+  expect(peerPropose).not.toHaveBeenCalled();
   act(() => { requestWorkerOpenReplica(session); });
   await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
-  expect(settled).toBe(false);
-  await act(async () => { workers[0].release(); await call; });
+  expect(result.current.core.replicaReady).toBe(false);
+  await act(async () => { workers[0].release(); await awaitWorkerOpenReplica(session); });
   expect(settled).toBe(true);
   expect(result.current.mainOpens).toEqual([false]);
-  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'proposal')).toBe(true);
+  await act(async () => {
+    expect(await result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] }))
+      .toMatchObject({ ok: true, snapshot: { version: session.version(), proposals: [] } });
+  });
+  expect(peerPropose).not.toHaveBeenCalled();
+  expect(posted.filter((request) => request.type === 'proposal').at(-1)?.operation.kind).toBe('propose');
 });
 
 test('the host proposal gate refuses before initializing the worker authority', async () => {
@@ -4843,6 +5015,8 @@ test('a failed empty hand-over releases the mirror before using the main replica
   await act(async () => { await requestWorkerOpenReplica(session); });
   expect(result.current.mainOpens).toEqual([true]);
   expect(session.workerDocumentMirrored()).toBe(false);
+  expect(result.current.core.replicaReady).toBe(true);
+  expect(registeredWorkerProposalAuthority(session)!.retirementReason()).toBe('source-fallback');
   expect(await result.current.ref.current!.setProposalStates({
     expectVersion: session.version(), expectPreviewVersion: session.getProposals().previewVersion,
     changes: [],
@@ -6257,6 +6431,74 @@ test('a queued drag extends from its resolved anchor after an earlier insertion'
   }
 });
 
+test('a ready drag queued behind navigation replays its final range once', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  const select = spyOn(opened.session, 'setSelection');
+  try {
+    await startNavigation();
+    const before = opened.session.selection();
+    fireEvent.mouseDown(opened.canvas, pointAt(6));
+    fireEvent.mouseMove(window, pointAt(10));
+    fireEvent.mouseUp(window, pointAt(10));
+    expect(opened.session.selection()).toEqual(before);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    const anchor = { story: 'body', paraId: opened.session.paragraphs('body')[0].paraId, offset: 5 };
+    const head = { ...anchor, offset: 9 };
+    const assertReplay = () => {
+      expect(opened.session.selection()).toEqual({ anchor, head });
+      expect(select.mock.calls.filter(([start, end]) => start.offset === 5 && end?.offset === 9)).toHaveLength(1);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
+test('a ready image click queued behind navigation selects the image instead of a drag', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  let armed = false;
+  const image = { pos: 6, rect: { x: 0, y: 0, width: 1, height: 1 } } as unknown as NonNullable<ReturnType<DisplayListQueries['imageAtPoint']>>;
+  const spies = [...new Set([opened.harness.renderer.queries!, opened.harness.renderer.inputQueries!])]
+    .map((queries) => spyOn(queries, 'imageAtPoint').mockImplementation(() => (armed ? image : null)));
+  try {
+    await startNavigation();
+    const before = opened.session.selection();
+    armed = true;
+    fireEvent.mouseDown(opened.canvas, pointAt(6));
+    armed = false;
+    fireEvent.mouseMove(window, pointAt(10));
+    fireEvent.mouseUp(window, pointAt(10));
+    expect(opened.session.selection()).toEqual(before);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    const anchor = { story: 'body', paraId: opened.session.paragraphs('body')[0].paraId, offset: 5 };
+    expect(opened.session.selection()).toEqual({ anchor, head: { ...anchor, offset: 6 } });
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    for (const spy of spies.reverse()) spy.mockRestore();
+    opened.close();
+  }
+});
+
 test('a composition started during opening commits exactly once after the switch', async () => {
   const opened = await openingEditor();
   const insert = spyOn(opened.preview, 'insertText');
@@ -7170,17 +7412,21 @@ test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yiel
     if (boundary === 2) await act(async () => tasks.run());
     act(() => {
       ensureWorkerOpenReplica(session);
-      expect(session.hasStory('body')).toBe(true);
-      expect(result.current.core.replicaReadyRef?.current).toBe(true);
-      expect(load).toHaveBeenCalledTimes(1);
+      expect(session.hasStory('body')).toBe(boundary === 2);
+      expect(result.current.core.replicaReadyRef?.current).toBe(false);
+      expect(load).toHaveBeenCalledTimes(boundary === 2 ? 1 : 0);
     });
-    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
-    expect(replicas).toEqual([session]);
+    expect(replicas).toEqual([]);
     await act(async () => {
       await tasks.run();
+      if (boundary === 1) await tasks.run();
       await pending;
     });
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
     expect(load).toHaveBeenCalledTimes(1);
     expect(result.current.mainOpens).toEqual([false]);
     expect(replicas).toEqual([session]);
@@ -8359,7 +8605,7 @@ function openingClipboard(write: (text: string) => Promise<void> = async () => {
   return { writeText, restore };
 }
 
-async function editorWithoutLayoutCompleteSignal(holdInput = false) {
+async function editorWithoutLayoutCompleteSignal(holdInput = false, resolveDisplayListQueries?: ResolveDisplayListQueries) {
   const worker = installWorker({ holdState: true });
   const frames = holdFrames(true);
   const visibility = stubDocumentVisibility('visible');
@@ -8378,7 +8624,7 @@ async function editorWithoutLayoutCompleteSignal(holdInput = false) {
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
         canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
-        inputQueries={harness.renderer.inputQueries} />
+        inputQueries={harness.renderer.inputQueries} resolveDisplayListQueries={resolveDisplayListQueries} />
     </>;
   }
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
@@ -8423,6 +8669,53 @@ function selectOpeningText(opened: Awaited<ReturnType<typeof editorWithoutLayout
   };
   fireEvent.mouseDown(opened.canvas, point(1));
   fireEvent.mouseUp(window, point(6));
+}
+
+async function readyEditorWithPendingNavigation() {
+  let releaseNavigation!: () => void;
+  const blocked = new Promise<null>((resolve) => { releaseNavigation = () => resolve(null); });
+  let started!: () => void;
+  const resolving = new Promise<void>((resolve) => { started = resolve; });
+  const resolveQueries = mock(() => {
+    started();
+    return blocked;
+  });
+  const opened = await editorWithoutLayoutCompleteSignal(false, resolveQueries);
+  try {
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    return {
+      opened, releaseNavigation,
+      pointAt(position: number) {
+        const caret = opened.harness.renderer.queries!.caretRect(position)!;
+        return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+      },
+      async startNavigation() {
+        await act(async () => {
+          fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowDown' });
+          await resolving;
+        });
+        expect(resolveQueries).toHaveBeenCalledTimes(1);
+        expect(opened.harness.core.replicaReady).toBe(true);
+        expect(opened.harness.renderer.inputQueries!.isReady()).toBe(true);
+        expect(opened.editor.current!.hasPendingInput()).toBe(true);
+      },
+    };
+  } catch (error) {
+    releaseNavigation();
+    opened.close();
+    throw error;
+  }
 }
 
 test.each([false, true])('a queued keystroke starts the peer before the layout signal and replays once with heldInput=%s', async (held) => {
@@ -8713,6 +9006,156 @@ test.each([false, true])('a queued cut writes the selected text before deletion 
     remove.mockRestore();
     opened.close();
     clipboard.restore();
+  }
+});
+
+test('a held copy writes the held selection made before it', async () => {
+  const opened = await editorWithoutLayoutCompleteSignal(true);
+  const clipboard = openingClipboard();
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true });
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    act(() => opened.releaseHeldInput());
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test('a ready copy queued behind navigation writes the new selection once and an idle copy stays synchronous', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  const clipboard = openingClipboard();
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    act(() => textarea.focus());
+    fireEvent.mouseDown(opened.canvas, pointAt(1));
+    fireEvent.mouseMove(window, pointAt(6));
+    fireEvent.mouseUp(window, pointAt(6));
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(opened.session.selection()?.anchor.offset).toBe(0);
+    expect(opened.session.selection()?.head.offset).toBe(5);
+    await startNavigation();
+    const point = { ...pointAt(9), detail: 2 };
+    fireEvent.mouseDown(opened.canvas, point);
+    fireEvent.mouseUp(window, point);
+    fireEvent.click(opened.canvas, point);
+    fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true });
+    expect(opened.session.selection()?.anchor.offset).toBe(0);
+    expect(opened.session.selection()?.head.offset).toBe(5);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    await waitFor(() => expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]));
+    expect(opened.session.selection()?.anchor.offset).toBe(6);
+    expect(opened.session.selection()?.head.offset).toBe(15);
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    act(() => {
+      expect(fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true })).toBe(true);
+      expect(textarea.value).toBe('paragraph');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(9);
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true])('a queued cut whose clipboard write fails keeps the selection with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const clipboard = openingClipboard(async () => {
+    throw new Error('denied');
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    await opened.sent('encodeState');
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(remove).not.toHaveBeenCalled();
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    remove.mockRestore();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true])('a cut without the Clipboard API queues no deletion with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  const restore = registerRestore(() => {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    act(() => opened.releaseHeldInput());
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(remove).not.toHaveBeenCalled();
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    remove.mockRestore();
+    opened.close();
+    restore();
   }
 });
 

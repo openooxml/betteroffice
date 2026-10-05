@@ -31,7 +31,7 @@ import { markPresented, stampWorkerFrameVersion } from '../internals/layoutProve
 import { navigateViewer, readViewerSelectionInfo, type ViewerNavigationTarget, type ViewerRefReadAccess } from '../internals/viewerRefReads';
 import * as workerOpenReplica from '../internals/workerOpenReplica';
 import { deferWorkerOpenReplica, holdWorkerOpenDocument, releaseWorkerOpenDocument, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
-import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { snapshotWorkerProposalPeer, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { exportWorkerOpenPages, registerWorkerOpenExport, VIEWER_LAYOUT_WAIT_MS } from '../internals/workerOpenExport';
 import { workerExportVersions } from '../internals/workerExportVersions';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
@@ -193,7 +193,7 @@ function workerFor(
     proposal,
     documentRead: documentRead as ResidentEngineWorkerClient['documentRead'],
     handOver: async () => ({ state: new Uint8Array(), version: 'worker-v', proposals: snapshot.mirror.proposals }),
-  }, { relayout: () => {}, current: () => true, laidOut, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
+  }, { relayout: () => {}, current: () => true, laidOut, adopted: () => {}, contentChanged: () => {} });
   return { authority, proposal, documentRead, snapshot };
 }
 
@@ -679,8 +679,7 @@ test('a saved viewer exports the worker layout after proposal hand-over', async 
   const host = apiFor(true, false, undefined, false, true, read as ResidentEngineWorkerClient['documentRead']);
   const worker = workerFor(host);
   await worker.authority.initialize();
-  const handover = await beginWorkerProposalHandover(host.session);
-  handover!.complete();
+  await snapshotWorkerProposalPeer(host.session);
   host.editor.getLayoutRequest.mockReturnValue(null);
   expect(await host.api.exportStructuredWithPages(PAGE_OPTIONS)).toEqual(PAGE_EXPORT);
   expect(read).toHaveBeenCalledWith({ kind: 'exportStructuredWithPages', options: PAGE_OPTIONS, currentRequest: PAGE_REQUEST });
@@ -697,8 +696,7 @@ test('a saved viewer exports the worker layout after proposal hand-over', async 
 test('editor paged export flushes and reads the resident worker after hand-over', async () => {
   const host = apiFor();
   const worker = editorWorkerFor(host);
-  const handover = await beginWorkerProposalHandover(host.session)!;
-  handover.complete();
+  await snapshotWorkerProposalPeer(host.session)!;
   const result = await host.api.exportStructuredWithPages(PAGE_OPTIONS);
   expect(result).toMatchObject({ ok: true, version: 'v', content: { layout: { documentVersion: 'v', layoutVersion: expect.stringMatching(/^v:\d+:7$/) } } });
   expect(host.session.exportStructuredWithPagesFor).not.toHaveBeenCalled();
@@ -1187,7 +1185,7 @@ test('worker twins read through PagedEditor and authority without requesting a r
     proposal: async () => snapshot,
     documentRead: (async (read: ResidentDocumentRead) => { reads.push(read); return { version: 'v', value: MATCHES }; }) as ResidentEngineWorkerClient['documentRead'],
     handOver: async () => ({ state: new Uint8Array(), version: 'v', proposals: snapshot.mirror.proposals }),
-  }, { relayout: () => {}, current: () => true, laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {} });
+  }, { relayout: () => {}, current: () => true, laidOut: async () => {}, adopted: () => {}, contentChanged: () => {} });
   expect(await host.api.findParagraphs('hello', { limit: 3 })).toEqual(MATCHES);
   expect(reads).toEqual([{ kind: 'findParagraphs', query: 'hello', limit: 3 }]);
   expect(await host.api.readSelectionInfo()).toEqual(INFO);

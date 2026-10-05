@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 import {
   proposalRevisionPreview,
-  type DocxProposalSnapshot,
   type YrsRenderEnv,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { workerProposalRoundAuthority } from '../internals/workerProposalAuthority';
 
 export interface RevisionPreviewState {
   previewVersion: number;
@@ -23,18 +23,23 @@ export function useRevisionPreview(session: YrsSession | null): RevisionPreviewS
   );
   useEffect(() => {
     if (!session) return;
-    const update = (snapshot: DocxProposalSnapshot): void => {
-      const revisionPreview = proposalRevisionPreview(snapshot);
+    const authority = workerProposalRoundAuthority(session);
+    const update = (): void => {
+      const snapshot = session.getProposals();
+      const previewVersion = authority?.initialized ? authority.previewVersion() : snapshot.previewVersion;
+      const revisionPreview = authority?.initialized ? authority.revisionPreview() : proposalRevisionPreview(snapshot);
       setState((previous) =>
         previous?.session === session &&
-        previous.preview.previewVersion === snapshot.previewVersion &&
+        previous.preview.previewVersion === previewVersion &&
         JSON.stringify(previous.preview.revisionPreview) === JSON.stringify(revisionPreview)
           ? previous
-          : { session, preview: { previewVersion: snapshot.previewVersion, revisionPreview } }
+          : { session, preview: { previewVersion, revisionPreview } }
       );
     };
-    update(session.getProposals());
-    return session.onProposalChange(update);
+    update();
+    const unsubscribe = session.onProposalChange(update);
+    const unsubscribeWorker = authority?.subscribe(update);
+    return () => { unsubscribe(); unsubscribeWorker?.(); };
   }, [session]);
   return state && state.session === session ? state.preview : NO_PREVIEW;
 }

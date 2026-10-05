@@ -50,6 +50,7 @@ import {
   handedOverRequest,
   registeredWorkerProposalAuthority,
   workerProposalAuthority,
+  workerProposalRoundAuthority,
   type WorkerProposalAuthority,
 } from '../internals/workerProposalAuthority';
 
@@ -315,7 +316,11 @@ function gateReplicaAccess(
           if (key === 'exportStructuredWithPages' && workerOpenExport(session)) {
             return Reflect.apply(call, api, args);
           }
-          if (WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)) {
+          if (
+            (key === 'proposeChanges' || key === 'setProposalStates' || key === 'withdrawProposals' || key === 'getProposals')
+              ? workerProposalRoundAuthority(session)
+              : WORKER_PROPOSAL_ACCESS.has(key) && workerProposalAuthority(session)
+          ) {
             return Reflect.apply(call, api, args);
           }
           if (access === 'sync') {
@@ -691,7 +696,11 @@ export function useDocxEditorRefApi({
         : workerProposalAuthority(session)
       : null;
   };
-  /** A proposal call on the worker's registry while it holds them, else on the main session. */
+  const roundAuthority = () => {
+    const session = pagedEditorRef.current?.getYrsSession();
+    return experimentalWorkerOpen && session ? workerProposalRoundAuthority(session) : null;
+  };
+  /** Executes a proposal round on the session's authority. */
   const routedProposalCall = <R extends { expectVersion: string }>(
     request: R,
     onWorker: (
@@ -710,7 +719,7 @@ export function useDocxEditorRefApi({
         experimentalWorkerOpen
       );
     };
-    const authority = proposalAuthority();
+    const authority = roundAuthority();
     if (!authority) return main(request);
     if (!hostProposalsAllowed()) {
       return Promise.resolve({
@@ -839,7 +848,7 @@ export function useDocxEditorRefApi({
       getProposals: () => {
         const main = async () =>
           (await mainSession()).session.getProposals();
-        return proposalAuthority()?.getProposals(main) ?? main();
+        return roundAuthority()?.getProposals(main) ?? main();
       },
 
       exportStructuredWithPages: (options) => {

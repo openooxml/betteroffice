@@ -57,6 +57,7 @@ interface QueuedGesture {
   head: CanvasPointHit;
   kind: 'caret' | 'range' | 'word' | 'paragraph';
   dragging: boolean;
+  rebind?: () => void;
 }
 
 export interface UsePagesPointerOptions {
@@ -437,16 +438,23 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   const focusInput = useCallback(() => yrsInputRef.current?.focus(), [yrsInputRef]);
   const prepareQueuedGestureRef = useRef<(gesture: QueuedGesture) => () => void>(() => () => {});
   prepareQueuedGestureRef.current = (gesture) => {
-    const position = (point: QueuedGesture['anchor']) => {
-      let hit = point.hit ?? gesture.queries.hitTestRegions(point.pageIndex, point.x, point.y);
-      const queries = inputQueriesRef.current;
-      if (!hit && queries && queries !== gesture.queries) {
+    const bodyHit = (point: QueuedGesture['anchor']) => {
+      let queries = gesture.queries;
+      let hit = point.hit ?? queries.hitTestRegions(point.pageIndex, point.x, point.y);
+      const current = inputQueriesRef.current;
+      if (!hit && current && current !== queries) {
+        queries = current;
         hit = queries.hitTestRegions(point.pageIndex, point.x, point.y);
       }
-      return hit?.region === 'body' ? hit.pos : null;
+      return hit?.region === 'body' ? { hit, queries } : null;
     };
-    const anchor = position(gesture.anchor);
-    const head = position(gesture.head);
+    const start = bodyHit(gesture.anchor);
+    const image = start?.queries.imageAtPoint(
+      gesture.anchor.pageIndex, gesture.anchor.x, gesture.anchor.y, 'body', start.hit.rId
+    ) ?? null;
+    if (image) gesture.dragging = false;
+    const anchor = image ? image.pos : start?.hit.pos ?? null;
+    const head = image ? image.pos + 1 : bodyHit(gesture.head)?.hit.pos ?? null;
     const anchorTarget = anchor == null ? null : resolveTarget(anchor);
     const headTarget = head == null ? null : resolveTarget(head);
     if (!anchorTarget || !headTarget) return () => {};
@@ -477,6 +485,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           setCaretPosition(null);
         }
       }
+      if (image) {
+        setSelectionRects([]);
+        setCaretPosition(null);
+      }
       yrsInputRef.current?.keepSelectionInPlace();
     };
   };
@@ -493,9 +505,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       kind: e.detail >= 3 ? 'paragraph' : e.detail === 2 ? 'word' : 'caret', dragging: true,
     };
     const scope = gestureScopeRef.current;
-    const apply = yrsSession && !replicaPending?.() && queries.isReady()
+    let apply = yrsSession && !replicaPending?.() && queries.isReady()
       ? prepareQueuedGestureRef.current(gesture)
       : null;
+    if (apply) gesture.rebind = () => {
+      if (inputQueriesRef.current === queries && queries.isReady()) apply = prepareQueuedGestureRef.current(gesture);
+    };
     const queued = yrsInputRef.current?.queueSelection?.(async () => {
       if (apply) return gestureScopeRef.current === scope ? apply : () => {};
       await queries.whenReady();
@@ -525,7 +540,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     const host = canvasHostRef?.current ?? pagesContainerRef.current;
     if (!gesture?.dragging || !host) return;
     const point = resolveCanvasPoint(host, gesture.queries, clientX, clientY, { clampToNearestPage: true });
-    if (point) gesture.head = point;
+    if (!point) return;
+    gesture.head = point;
+    gesture.rebind?.();
   }, [canvasHostRef, pagesContainerRef]);
 
   const beginTextDrag = useCallback(

@@ -384,7 +384,7 @@ export function createPluginClients(
       if (invocation.signal.aborted || invocation.lifetimeSignal.aborted) abort();
       try {
         const current = access.pagedEditorRef.current?.getYrsSession();
-        const authority = current ? workerProposalAuthority(current) : null;
+        const authority = current ? workerProposalAuthority(current, true) : null;
         const first = current && authority
           ? {
               session: current,

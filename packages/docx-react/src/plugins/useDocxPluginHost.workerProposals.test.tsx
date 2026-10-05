@@ -64,6 +64,9 @@ function fakeAuthority(session: YrsSession) {
   const authority = {
     initialized: true,
     geometry: () => mirror,
+    snapshot: () => session.getProposals(),
+    revisionPreview: () => proposalRevisionPreview(session.getProposals()),
+    previewVersion: () => session.getProposals().previewVersion,
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => {
@@ -100,7 +103,11 @@ test('worker geometry arriving after a frame re-notifies plugins and subscriptio
         ? secondWorker.authority
         : lookup(session)
   );
-  restores.push(() => routing.mockRestore());
+  const roundLookup = workerProposals.workerProposalRoundAuthority;
+  const rounds = spyOn(workerProposals, 'workerProposalRoundAuthority').mockImplementation((session) =>
+    session === first ? firstWorker.authority : session === second ? secondWorker.authority : roundLookup(session)
+  );
+  restores.push(() => { routing.mockRestore(); rounds.mockRestore(); });
   const pages = document.createElement('div');
   const canvas = document.createElement('canvas');
   canvas.dataset.pageIndex = '0';
