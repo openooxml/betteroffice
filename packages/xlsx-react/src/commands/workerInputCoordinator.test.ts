@@ -1,4 +1,11 @@
 import { describe, expect, test } from 'bun:test';
+import { isClientMessage, SessionFailure } from '../../../../shared/office-session';
+import { hydratePeer } from '../../../xlsx/src/session/client';
+import { createWorkbookEditPeer, type WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
+import { workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
+import type { WorkbookReplayOp } from '../../../xlsx/src/session/replay';
+import { createTestWorkbookSession, loadWorkbookSessionFixtures } from '../../../xlsx/src/session/testHelpers';
+import { openWorkbook, type WorkbookHandle } from '../../../xlsx/src/wasm/loader';
 import { XlsxCommandAdmissionError } from './createXlsxCommandStore';
 import type { InputDraft, InputSeal } from './inputCoordinator';
 import {
@@ -39,6 +46,8 @@ function harness() {
     writeError: null as Error | null,
     onSeal: null as (() => void) | null,
     onHydration: null as ((reason: string) => void | Promise<void>) | null,
+    onFlushEdits: null as (() => Promise<void>) | null,
+    onWrite: null as ((draft: InputDraft) => void) | null,
   };
   let coordinator!: WorkerInputCoordinator;
   const hooks = {
@@ -69,6 +78,7 @@ function harness() {
       }
       writes.push(draft);
       log.push(`write ${draft.value}`);
+      state.onWrite?.(draft);
       return true;
     },
     close: () => focus.push('grid'),
@@ -80,6 +90,7 @@ function harness() {
       hydration.push(reason);
       return state.onHydration?.(reason);
     },
+    flushEdits: () => state.onFlushEdits?.() ?? Promise.resolve(),
     onError: (error: unknown) => errors.push(error),
   };
   coordinator = createWorkerInputCoordinator(hooks);
@@ -691,6 +702,205 @@ describe('worker input coordinator', () => {
     await coordinator.recover();
     expect(log).toEqual(['paste', 'command']);
     expect(coordinator.unapplied).toEqual([]);
+  });
+
+  test('keeps newer commits behind refused clipboard input until FIFO recovery', async () => {
+    const { coordinator, draft, ready, log, writes } = harness();
+    ready();
+    let accept = false;
+    const paste = coordinator.clipboard(() => 'paste', (input) => {
+      if (!accept) return false;
+      log.push(`write ${input}`);
+      return true;
+    });
+    expect(await errorOf(paste)).toBe('input-failed');
+    const newer = draft('newer');
+    expect(await errorOf(coordinator.submitAsync(newer))).toBe('input-failed');
+    expect(writes).toEqual([]);
+    expect(log).toEqual([]);
+    expect(coordinator.unapplied.map((entry) => entry.kind)).toEqual(['clipboard', 'commit']);
+    accept = true;
+    await coordinator.recover();
+    expect(log).toEqual(['write paste', 'write newer']);
+    expect(writes).toEqual([newer]);
+    expect(coordinator.unapplied).toEqual([]);
+    expect(coordinator.pending).toBe(false);
+  });
+
+  test('rejects every flush while refused clipboard input remains unapplied', async () => {
+    const { coordinator, ready } = harness();
+    ready();
+    let accept = false;
+    expect(await errorOf(coordinator.clipboard(() => 'paste', () => accept))).toBe('input-failed');
+    for (let call = 0; call < 2; call += 1) {
+      expect(await errorOf(coordinator.flush())).toBe('input-failed');
+      expect(coordinator.pending).toBe(true);
+      expect(coordinator.unapplied[0]?.kind).toBe('clipboard');
+      expect(() => coordinator.runSync(() => {})).toThrow(WorkerInputNotReadyError);
+    }
+    accept = true;
+    await coordinator.recover();
+    await coordinator.flush();
+    expect(coordinator.unapplied).toEqual([]);
+    expect(coordinator.pending).toBe(false);
+  });
+
+  test('blocks draft corrections behind a clipboard entry whose sealed draft was refused', async () => {
+    const { coordinator, draft, ready, state, log, writes } = harness();
+    coordinator.setDraft(draft('sealed'));
+    state.refuse.add('sealed');
+    const paste = coordinator.clipboard(() => 'paste', (input) => { log.push(`write ${input}`); });
+    ready();
+    expect(await errorOf(paste)).toBe('input-failed');
+    const newer = draft('newer');
+    coordinator.setDraft(newer);
+    expect(await errorOf(coordinator.submitAsync(newer))).toBe('input-failed');
+    expect(writes).toEqual([]);
+    expect(log).toEqual(['refused sealed']);
+    expect(coordinator.unapplied.map((entry) => entry.kind)).toEqual(['clipboard', 'commit']);
+    state.refuse.clear();
+    await coordinator.recover();
+    expect(log).toEqual(['refused sealed', 'write sealed', 'write paste', 'write newer']);
+    expect(writes.map((entry) => entry.value)).toEqual(['sealed', 'newer']);
+    expect(coordinator.unapplied).toEqual([]);
+    expect(coordinator.pending).toBe(false);
+  });
+
+  test('flushes hydration-queued input through peer application and worker acknowledgement', async () => {
+    const { fixture, wasmBytes } = await loadWorkbookSessionFixtures();
+    const calculation = { nowSerial: 46_000.5, randSeed: 123456789 };
+    const acknowledgement = deferred<void>();
+    const entered = deferred<void>();
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'replay') {
+          entered.resolve();
+          void acknowledgement.promise.then(() => listener(message));
+        } else listener(message);
+      }),
+    }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+    const { coordinator, draft, ready, state, writes } = harness();
+    let peer: WorkbookHandle | undefined;
+    let edits: WorkbookEditPeer | undefined;
+    state.onHydration = async () => {
+      peer = await hydratePeer(session);
+      edits = createWorkbookEditPeer({ session, peer });
+      ready();
+    };
+    state.onWrite = (input) => {
+      if (!edits) throw new Error('Missing hydrated edit peer');
+      expect(edits.editCell(input.sheet, input.row, input.col, input.value).applied).toBe(true);
+    };
+    state.onFlushEdits = () => {
+      if (!edits) throw new Error('Missing hydrated edit peer');
+      return edits.flush();
+    };
+    try {
+      const original = await session.call.cellInputs(0, 'A1');
+      const input = draft('queued during hydration');
+      const commit = coordinator.submitAsync(input);
+      const flush = coordinator.flush();
+      let flushed = false;
+      void flush.then(() => { flushed = true; }).catch(() => {});
+      await Promise.race([
+        entered.promise,
+        flush.then(() => { throw new Error('Flush resolved before worker replay'); }),
+      ]);
+      await commit;
+      if (!peer || !edits) throw new Error('Missing hydrated edit peer');
+      expect(writes).toEqual([input]);
+      expect(peer.cell(0, 0, 0).input).toBe(input.value);
+      expect(await session.call.cellInputs(0, 'A1')).toEqual(original);
+      expect(edits.sentSequence).toBe(1);
+      expect(edits.acknowledgedSequence).toBe(0);
+      expect(flushed).toBe(false);
+      acknowledgement.resolve();
+      await flush;
+      expect(peer.cell(0, 0, 0).input).toBe(input.value);
+      expect((await session.call.cellInputs(0, 'A1')).cells[0]?.[0]?.input).toBe(input.value);
+      expect(edits.acknowledgedSequence).toBeGreaterThanOrEqual(1);
+      expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBeGreaterThanOrEqual(1);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(peer.save()).toEqual(await session.save());
+      expect(coordinator.unapplied).toEqual([]);
+      expect(coordinator.pending).toBe(false);
+    } finally {
+      acknowledgement.resolve();
+      edits?.dispose();
+      peer?.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('keeps input arriving inside recovery hydration in the peer and recovery save', async () => {
+    const { fixture, wasmBytes } = await loadWorkbookSessionFixtures();
+    const calculation = { nowSerial: 46_000.5, randSeed: 123456789 };
+    let crash: ((error: unknown) => void) | undefined;
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      onError(listener) { crash = listener; return transport.onError(listener); },
+    }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+    const peer = await hydratePeer(session);
+    const edits = createWorkbookEditPeer({ session, peer });
+    const { coordinator, draft, ready, state, log, writes } = harness();
+    ready();
+    try {
+      if (!crash) throw new Error('Missing worker crash callback');
+      const failed = new Promise<SessionFailure>((resolve) => { session.onFailure(resolve); });
+      crash(new SessionFailure('crash', 'Worker stopped'));
+      expect(await failed).toMatchObject({ code: 'crash', message: 'Worker stopped' });
+      expect(edits.state).toBe('failed');
+      const operations = workbookEditPeerOperations(edits);
+      const paste: WorkbookReplayOp = { method: 'editCell', args: [0, 0, 0, 'paste'] };
+      state.onWrite = (value) => {
+        expect(operations.applyRecoveryOp({
+          method: 'editCell', args: [value.sheet, value.row, value.col, value.value],
+        })).toMatchObject({ applied: true });
+      };
+      let accept = false;
+      const original = peer.cell(0, 0, 0).input;
+      expect(await errorOf(coordinator.clipboard(() => 'paste', (input) => {
+        if (!accept) return false;
+        expect(operations.applyRecoveryOp(paste)).toMatchObject({ applied: true });
+        log.push(`write ${input}`);
+        return true;
+      }))).toBe('input-failed');
+      const entered = deferred<void>();
+      const hydration = deferred<void>();
+      const incoming = draft('arrived during recovery');
+      state.onHydration = async (reason) => {
+        if (reason !== 'recovery') return;
+        expect(await errorOf(coordinator.submitAsync(incoming))).toBe('input-failed');
+        entered.resolve();
+        await hydration.promise;
+      };
+      accept = true;
+      const recovering = coordinator.recover();
+      await Promise.race([
+        entered.promise,
+        recovering.then(() => { throw new Error('Recovery finished before retaining incoming input'); }),
+      ]);
+      expect(peer.cell(0, 0, 0).input).toBe(original);
+      expect(writes).toEqual([]);
+      expect(coordinator.unapplied.map((entry) => entry.kind)).toEqual(['clipboard', 'commit']);
+      hydration.resolve();
+      await recovering;
+      expect(peer.cell(0, 0, 0).input).toBe('arrived during recovery');
+      const recoverySave = edits.recoverySave();
+      expect<Uint8Array>(new Uint8Array(recoverySave.bytes)).toEqual(peer.save());
+      const reopened = openWorkbook(new Uint8Array(recoverySave.bytes), { calculation });
+      try {
+        expect(reopened.cell(0, 0, 0).input).toBe('arrived during recovery');
+      } finally { reopened.dispose(); }
+      expect(log).toEqual(['write paste', 'write arrived during recovery']);
+      expect(coordinator.unapplied).toEqual([]);
+      expect(coordinator.pending).toBe(false);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
   });
 
   test('records synchronous operation application before a failure in the next microtask', async () => {

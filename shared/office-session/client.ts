@@ -18,7 +18,7 @@ export interface SessionClientOptions<M extends SessionMethods> {
   silenceMs?: number;
   now?(): number;
   timer?(callback: () => void, ms: number): () => void;
-  onWasmModule?(url: string, module: WebAssembly.Module): void;
+  onWasmModule?(url: string, module: WebAssembly.Module, hydration?: string): void;
 }
 
 export interface SessionClient<M extends SessionMethods, E extends SessionEvents> {
@@ -115,7 +115,7 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
     } else if (message.kind === 'wasm-module') {
-      try { options.onWasmModule?.(message.url, message.module); } catch {}
+      try { options.onWasmModule?.(message.url, message.module, message.hydration); } catch {}
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);

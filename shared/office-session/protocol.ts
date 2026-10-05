@@ -12,7 +12,7 @@ export interface ReplyError {
 }
 
 export type HostMessage =
-  | { protocol: 1; kind: 'wasm-module'; url: string; module: WebAssembly.Module }
+  | { protocol: 1; kind: 'wasm-module'; url: string; module: WebAssembly.Module; hydration?: string }
   | { protocol: 1; kind: 'reply'; id: number; ok: true; value: unknown }
   | { protocol: 1; kind: 'reply'; id: number; ok: false; error: ReplyError }
   | { protocol: 1; kind: 'event'; name: string; payload: unknown }
@@ -77,6 +77,7 @@ export function isHostMessage(value: unknown): value is HostMessage {
     case 'wasm-module':
       try {
         return typeof value.url === 'string' &&
+          (value.hydration === undefined || typeof value.hydration === 'string') &&
           Object.prototype.toString.call(value.module) === '[object WebAssembly.Module]';
       } catch { return false; }
     case 'reply':

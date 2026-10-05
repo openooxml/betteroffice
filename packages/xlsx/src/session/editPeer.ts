@@ -1,6 +1,9 @@
 import { SessionFailure } from '../../../../shared/office-session';
-import type { WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
+import {
+  adoptWorkbookPeerVersion, StaleProposalError, type WorkbookCalculationContext, type WorkbookHandle,
+} from '../wasm/loader';
 import type { WorkbookSession } from './client';
+import { workbookEditPeerInternals } from './editPeerInternals';
 import {
   applyWorkbookReplayOp,
   validateWorkbookReplayEnvelope,
@@ -26,10 +29,6 @@ export type WorkbookEditPeer = Pick<WorkbookHandle, WorkbookReplayMethod> & {
   readonly error: Error | undefined;
   readonly acknowledgedSequence: number;
   readonly sentSequence: number;
-  /** Keep the operation object for recovery. */
-  applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
-  /** Apply each retained operation at most once. */
-  applyRecoveryOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
   flush(): Promise<void>;
   save(): Promise<ArrayBuffer>;
   recoverySave(): { bytes: ArrayBuffer; recovery: true };
@@ -57,6 +56,9 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   const internal = workbookSessionInternals.get(session);
   if (!internal) throw new TypeError('Workbook session does not support edit replay');
   if (internal.editPeerAttached) throw new Error('Workbook session already has an attached edit peer');
+  if (internal.initialVersion !== undefined && peer.version() !== internal.initialVersion) {
+    adoptWorkbookPeerVersion(peer, internal.initialVersion);
+  }
   const replay = internal.replay;
   const now = options.now ?? Date.now;
   const seed = options.randomSeed ?? randomSeed;
@@ -156,9 +158,11 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     if (!recovery) pending.push(slot);
     applying.add(op);
     activeApplications += 1;
+    let envelope: typeof slot.envelope;
+    let snapshotFailure: unknown;
+    let proposals: string | undefined;
     try {
-      let envelope: typeof slot.envelope;
-      let snapshotFailure: unknown;
+      if (op.method === 'acceptProposal') proposals = JSON.stringify(peer.listProposals());
       try {
         envelope = structuredClone({ calculation, op });
       } catch (cause) { snapshotFailure = cause; }
@@ -176,6 +180,14 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
       }
       return result;
     } catch (cause) {
+      if (!recovery && cause instanceof StaleProposalError && proposals !== undefined &&
+        proposals !== JSON.stringify(peer.listProposals())) {
+        if (envelope) {
+          slot.envelope = {
+            ...envelope, staleProposal: structuredClone({ cells: cause.cells, targets: cause.targets }),
+          };
+        } else fail(snapshotFailure);
+      }
       if (!outcomes.has(op)) outcomes.set(op, { error: cause });
       throw cause;
     } finally {
@@ -220,17 +232,12 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     assertReady();
   }
 
-  return {
+  const edits: WorkbookEditPeer = {
     ...mutators,
     get state() { synchronizeFailure(); return error ? 'failed' : 'ready'; },
     get error() { synchronizeFailure(); return error; },
     get acknowledgedSequence() { return acknowledgedSequence; },
     get sentSequence() { return sentSequence; },
-    applyQueuedOp,
-    applyRecoveryOp(op) {
-      assertRecovery();
-      return apply(op, true);
-    },
     flush,
     async save() {
       await flush();
@@ -257,4 +264,12 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
       internal.editPeerAttached = false;
     },
   };
+  workbookEditPeerInternals.set(edits, {
+    applyQueuedOp,
+    applyRecoveryOp(op) {
+      assertRecovery();
+      return apply(op, true);
+    },
+  });
+  return edits;
 }

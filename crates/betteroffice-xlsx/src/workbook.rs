@@ -10,6 +10,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 
 use ooxml_drawingml::chart::ChartSpace;
+use serde::{Deserialize, Serialize};
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all_with_seed, recalc_after_with_seed};
 use xlsx_model::{
@@ -376,7 +377,102 @@ struct CachedChartSpace {
     space: Arc<ChartSpace>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PeerHydration {
+    cells: Vec<Vec<(CellRef, CellValue, Option<String>, Option<u32>)>>,
+    arrays: Vec<Vec<(CellRef, CellRange)>>,
+    last_calculation: CalculationResult,
+    recalculated_since_open: bool,
+    version_nonce: String,
+    committed_changes: u64,
+    client_id: Option<u64>,
+}
+
 impl Workbook {
+    pub fn peer_hydration_json(&self) -> Result<String> {
+        if self.edited_since_open {
+            return Err(Error::InvalidOperation(
+                "Peer hydration requires an unedited workbook".into(),
+            ));
+        }
+        serde_json::to_string(&PeerHydration {
+            cells: self
+                .model
+                .sheets
+                .iter()
+                .map(|sheet| {
+                    sheet
+                        .iter_cells()
+                        .map(|(at, cell)| {
+                            (at, cell.value.clone(), cell.formula.clone(), cell.style)
+                        })
+                        .collect()
+                })
+                .collect(),
+            arrays: self
+                .model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.array_formulas().collect())
+                .collect(),
+            last_calculation: self.last_calculation.clone(),
+            recalculated_since_open: self.recalculated_since_open,
+            version_nonce: self.version_nonce.clone(),
+            committed_changes: self.committed_changes,
+            client_id: self.is_collaborative().then(|| self.client_id()),
+        })
+        .map_err(|error| Error::InvalidRequest(error.to_string()))
+    }
+
+    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self> {
+        let hydration: PeerHydration = serde_json::from_str(hydration)
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        let mut workbook = Self::open_internal(bytes, false, hydration.client_id)?;
+        if hydration.cells.len() != workbook.model.sheets.len()
+            || hydration.arrays.len() != workbook.model.sheets.len()
+        {
+            return Err(Error::InvalidRequest(
+                "Peer hydration sheet count differs".into(),
+            ));
+        }
+        for ((sheet, cells), arrays) in workbook
+            .model
+            .sheets
+            .iter_mut()
+            .zip(hydration.cells)
+            .zip(hydration.arrays)
+        {
+            sheet.adopt_cells(
+                cells
+                    .into_iter()
+                    .map(|(at, value, formula, style)| {
+                        (
+                            (at.row, at.col),
+                            xlsx_model::Cell {
+                                value,
+                                formula,
+                                style,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+            let previous: Vec<_> = sheet.array_formulas().map(|(at, _)| at).collect();
+            for at in previous {
+                sheet.clear_array_formula(at);
+            }
+            for (at, range) in arrays {
+                sheet.set_array_formula(at, range);
+            }
+        }
+        validate_model(&workbook.model)?;
+        workbook.last_calculation = hydration.last_calculation;
+        workbook.recalculated_since_open = hydration.recalculated_since_open;
+        workbook.version_nonce = hydration.version_nonce;
+        workbook.committed_changes = hydration.committed_changes;
+        Ok(workbook)
+    }
+
     pub fn open(bytes: &[u8]) -> Result<Self> {
         Self::open_internal(bytes, true, None)
     }
@@ -586,6 +682,26 @@ impl Workbook {
     /// active sheet and proposals do not.
     pub fn version(&self) -> DocumentVersion {
         DocumentVersion::new(&self.version_nonce, self.committed_changes)
+    }
+
+    pub fn adopt_peer_version(&mut self, version: &str) -> Result<()> {
+        if self.edited_since_open {
+            return Err(Error::InvalidOperation(
+                "Peer version adoption requires an unedited workbook".into(),
+            ));
+        }
+        let (nonce, changes) = version
+            .rsplit_once('-')
+            .ok_or_else(|| Error::InvalidRequest("Invalid peer version".into()))?;
+        let changes = changes
+            .parse::<u64>()
+            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        if nonce.is_empty() {
+            return Err(Error::InvalidRequest("Invalid peer nonce".into()));
+        }
+        self.version_nonce = nonce.to_owned();
+        self.committed_changes = changes;
+        Ok(())
     }
 
     pub fn is_collaborative(&self) -> bool {

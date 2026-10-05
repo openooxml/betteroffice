@@ -578,6 +578,33 @@ export function openWorkbook(
   bytes: Uint8Array,
   options: OpenWorkbookOptions = {}
 ): WorkbookHandle {
+  return openWorkbookInternal(bytes, options);
+}
+
+const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
+const peerVersionAdopters = new WeakMap<WorkbookHandle, (version: string) => void>();
+
+export function workbookPeerHydration(handle: WorkbookHandle): string {
+  const read = peerHydrationReaders.get(handle);
+  if (!read) throw new TypeError('Workbook does not support peer hydration');
+  return read();
+}
+
+export function adoptWorkbookPeerVersion(handle: WorkbookHandle, version: string): void {
+  const adopt = peerVersionAdopters.get(handle);
+  if (!adopt) throw new TypeError('Workbook does not support peer version adoption');
+  adopt(version);
+}
+
+export function openWorkbookPeer(
+  bytes: Uint8Array, options: OpenWorkbookOptions, hydration: string
+): WorkbookHandle {
+  return openWorkbookInternal(bytes, options, hydration);
+}
+
+function openWorkbookInternal(
+  bytes: Uint8Array, options: OpenWorkbookOptions, hydration?: string
+): WorkbookHandle {
   if (options.calculation !== undefined) {
     validateCalculationContext(options.calculation);
     if (options.collaborative === true) {
@@ -588,7 +615,9 @@ export function openWorkbook(
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    if (options.calculation !== undefined) {
+    if (hydration !== undefined) {
+      doc = (XlsxDocument as PeerDocumentConstructor).openWithPeerHydrationJson(bytes, hydration);
+    } else if (options.calculation !== undefined) {
       doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
         bytes, JSON.stringify(options.calculation)
       );
@@ -605,7 +634,8 @@ export function openWorkbook(
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
   let nextListenerId = 0;
   let disposed = false;
-  let hasCalculationContext = options.calculation !== undefined;
+  let hasCalculationContext = options.calculation !== undefined ||
+    (hydration !== undefined && collaborativeClientId === undefined);
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -1017,8 +1047,19 @@ export function openWorkbook(
     },
   };
   displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
+  peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
+  peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
   return handle;
 }
+
+type PeerDocument = XlsxDocument & {
+  peerHydrationJson(): string;
+  adoptPeerVersion(version: string): void;
+};
+
+type PeerDocumentConstructor = typeof XlsxDocument & {
+  openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): PeerDocument;
+};
 
 type CalculationDocument = XlsxDocument & {
   setCalculationContextJson(context: string): void;

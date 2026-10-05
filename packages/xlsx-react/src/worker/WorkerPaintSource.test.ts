@@ -159,6 +159,7 @@ describe('WorkerPaintSource', () => {
     state.sentSequence = 2;
     const paint = peerPaint(state.request);
     const committed = source.commit(state.request, paint);
+    if (!committed) throw new Error('Missing peer paint');
     const committedSurface = surface();
 
     expect(paints).toEqual([committed]);
@@ -305,10 +306,11 @@ describe('WorkerPaintSource', () => {
     tick();
     const worker = frame(requests[0].request, 1);
     await respond(0, worker);
+    if (!worker.mergedRanges) throw new Error('Missing worker merged ranges');
     expect(source.painted).toEqual({
       source: 'worker', request: state.request, sequence: 1, displayList: worker.displayList,
       geometry: worker.displayList.grid, mergedRanges: worker.mergedRanges, version: worker.version,
-    });
+    } satisfies WorkerPaintResult);
     expect(source.painted?.displayList).toBe(worker.displayList);
     expect(source.painted?.geometry).toBe(worker.displayList.grid);
     expect(source.painted?.mergedRanges).toBe(worker.mergedRanges);

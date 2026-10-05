@@ -4,7 +4,7 @@ import type { SessionTransport } from '../../../../shared/office-session/transpo
 import { SessionFailure, type MethodHandlers } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, openWorkbook, workbookDisplayListJson,
+  initWasm, openWorkbook, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   type SheetInfo, type WorkbookHandle,
 } from '../wasm/loader';
 import {
@@ -21,7 +21,9 @@ import {
   type WorkbookInternalSessionMethods,
 } from './replay';
 
-type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
+type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
+  peerOpened: { version: string };
+};
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 
 function sheets(info: SheetInfo): WorkbookSheetSummary[] {
@@ -30,7 +32,10 @@ function sheets(info: SheetInfo): WorkbookSheetSummary[] {
 
 export function createWorkbookSessionHost(
   transport: SessionTransport,
-  options: { initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void> } = {}
+  options: {
+    initWasm?: (source?: ArrayBuffer | WebAssembly.Module) => Promise<void>;
+    wasmModule?(): WebAssembly.Module | undefined;
+  } = {}
 ): SessionHost<Events> {
   let handle: WorkbookHandle | undefined;
   let disposed = false;
@@ -73,9 +78,16 @@ export function createWorkbookSessionHost(
       try {
         const before = opened.version();
         opened.setCalculationContext(envelope.calculation);
-        const result = applyWorkbookReplayOp(opened, op.method === 'applyEdits' ? {
-          method: 'applyEdits', args: [{ ...op.args[0], expectVersion: before }],
-        } : op);
+        let result: ReturnType<typeof applyWorkbookReplayOp> = undefined;
+        try {
+          result = applyWorkbookReplayOp(opened, op);
+          if (envelope.staleProposal) throw new Error('Expected a stale proposal refresh');
+        } catch (error) {
+          if (!(error instanceof StaleProposalError) || !envelope.staleProposal ||
+            JSON.stringify({ cells: error.cells, targets: error.targets }) !== JSON.stringify(envelope.staleProposal)) {
+            throw error;
+          }
+        }
         if (workbookReplayRefused(result)) throw new Error(`Engine refused replay: ${JSON.stringify(result)}`);
         const changed = opened.version() !== before;
         sequence = envelope.sequence;
@@ -104,19 +116,28 @@ export function createWorkbookSessionHost(
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
       await (options.initWasm ?? initWasm)(wasm);
+      wasm ??= options.wasmModule?.();
       if (disposed) throw new Error('Workbook session is disposed');
-      if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
-        transport.post({ protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm });
-      }
+      const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
+        nowSerial: Date.now() / 86_400_000 + 25_569,
+        randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0],
+      } : undefined);
       const opened = openWorkbook(new Uint8Array(bytes), {
         collaborative: input.collaborative,
         clientId: input.clientId,
-        calculation: input.calculation,
+        calculation,
       });
       try {
+        if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
+          transport.post({
+            protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
+            hydration: workbookPeerHydration(opened),
+          });
+        }
         const info = opened.sheetInfo();
         const summaries = sheets(info);
         handle = opened;
+        host.emit('peerOpened', { version: opened.version() });
         return { format: 'xlsx', stage: 'ready', version, dirty,
           sheets: summaries, activeSheet: info.activeSheet };
       } catch (error) {

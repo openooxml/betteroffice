@@ -1,8 +1,14 @@
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { SessionFailure, type SessionTransport } from '../../../../shared/office-session';
+import JSZip from 'jszip';
+import { isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
+import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import * as workbookWasm from '../wasm/loader';
+import { XlsxDocument } from '../wasm/generated/xlsx_wasm.js';
 import { openWorkbook, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
-import { hydratePeer } from './client';
+import { createWorkbookSession, hydratePeer } from './client';
 import { createWorkbookEditPeer, WorkbookEditPeerFailedError } from './editPeer';
+import { workbookEditPeerOperations } from './editPeerInternals';
+import { createWorkbookSessionHost } from './host';
 import type { WorkbookReplayOp } from './replay';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
@@ -32,12 +38,109 @@ function crashableHost(): {
 }
 
 describe('workbook peer hydration', () => {
+  test('initializes hydration with the exact module received from the worker', async () => {
+    const pair = createInProcessPair();
+    let module: WebAssembly.Module | undefined;
+    const transport: SessionTransport = {
+      ...pair.client,
+      listen: (listener) => pair.client.listen((message) => {
+        if (isHostMessage(message) && message.kind === 'wasm-module') module = message.module;
+        listener(message);
+      }),
+    };
+    createWorkbookSessionHost(pair.host);
+    const session = await createWorkbookSession(fixture, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    }, transport);
+    const initializing = spyOn(workbookWasm, 'initWasm');
+    let peer: WorkbookHandle | undefined;
+    try {
+      if (!module) throw new Error('Missing worker module');
+      peer = await hydratePeer(session);
+      expect(initializing).toHaveBeenCalledTimes(1);
+      expect(initializing).toHaveBeenCalledWith(module);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(peer.save()).toEqual(await session.save());
+    } finally {
+      initializing.mockRestore();
+      peer?.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('adopts worker volatile values and version without recalculating during hydration', async () => {
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+    zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+    zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Volatile" sheetId="1" r:id="rId1"/></sheets></workbook>');
+    zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+    zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>TODAY()</f><v>0</v></c><c r="C1"><f>RAND()</f><v>0</v></c></row></sheetData></worksheet>');
+    const bytes = await zip.generateAsync({ type: 'uint8array' });
+    const session = await createTestWorkbookSession(bytes, undefined, {
+      wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    const read = { ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:C1' } }] } as const;
+    const opening = await session.call.readCells(read);
+    if (!opening.ok) throw new Error(opening.failure.message);
+    expect(opening.ranges[0]?.cells[0]?.map((cell) => cell.value.kind)).toEqual(['number', 'number', 'number']);
+    const saved = await session.save();
+    const clock = spyOn(Date, 'now').mockReturnValue(0);
+    const ordinaryOpen = spyOn(XlsxDocument, 'open');
+    const calculatedOpen = spyOn(XlsxDocument as typeof XlsxDocument & {
+      openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
+    }, 'openWithCalculationJson');
+    let peer: WorkbookHandle | undefined;
+    try {
+      peer = await hydratePeer(session);
+      expect(ordinaryOpen).not.toHaveBeenCalled();
+      expect(calculatedOpen).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+      ordinaryOpen.mockRestore();
+      calculatedOpen.mockRestore();
+    }
+    if (!peer) throw new Error('Missing hydrated workbook peer');
+    expect(peer.version()).toBe(await session.call.version());
+    const edits = createWorkbookEditPeer({
+      session, peer, now: () => (46_001.75 - 25_569) * 86_400_000, randomSeed: () => 42,
+    });
+    try {
+      expect(peer.readCells(read)).toEqual(opening);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(peer.save()).toEqual(saved);
+      const cells = peer.readCells(read);
+      if (!cells.ok) throw new Error(cells.failure.message);
+      const guarded = cells.ranges[0]?.cells[0]?.[2];
+      if (!guarded) throw new Error('Missing RAND cell');
+      expect(edits.applyEdits({
+        expectVersion: peer.version(),
+        steps: [{
+          op: 'setCellInputs', target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'C1' } },
+          expect: { cells: [[{ value: guarded.value }]] }, inputs: [['=RAND()+1']],
+        }],
+      })).toMatchObject({ ok: true, applied: true });
+      await edits.flush();
+      expect(peer.readCells(read)).toEqual(await session.call.readCells(read));
+      expect(peer.version()).toBe(await session.call.version());
+      expect(peer.save()).toEqual(await session.save());
+      expect(session.failure).toBeUndefined();
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('keeps hydration opt-in and normal sessions usable without retained state', async () => {
     const session = await createTestWorkbookSession(fixture, undefined, { calculation });
     const peer = openWorkbook(fixture, { calculation });
     try {
+      const version = await session.call.version();
       await expect(hydratePeer(session)).rejects.toThrow('does not retain peer hydration state');
-      expect(await session.call.version()).toBe(peer.version());
+      expect(await session.call.version()).toBe(version);
+      expect(await session.call.readCells({ ranges: [] })).toEqual({
+        ...peer.readCells({ ranges: [] }), version,
+      });
       expect(await session.save()).toEqual(peer.save());
       expect(session.state.stage).toBe('ready');
       expect(session.failure).toBeUndefined();
@@ -99,12 +202,12 @@ describe('workbook peer hydration', () => {
         expect(() => edits.editCell(0, 2, 1, 'blocked')).toThrow(WorkbookEditPeerFailedError);
         await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
         await expect(edits.save()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
-        expect(edits.applyRecoveryOp(input)).toMatchObject({ applied: true });
-        expect(edits.applyRecoveryOp(rows)).toMatchObject({ applied: true });
+        expect(workbookEditPeerOperations(edits).applyRecoveryOp(input)).toMatchObject({ applied: true });
+        expect(workbookEditPeerOperations(edits).applyRecoveryOp(rows)).toMatchObject({ applied: true });
         const version = peer.version();
         const expected = peer.save();
-        expect(edits.applyRecoveryOp(input)).toMatchObject({ applied: true });
-        expect(edits.applyRecoveryOp(rows)).toMatchObject({ applied: true });
+        expect(workbookEditPeerOperations(edits).applyRecoveryOp(input)).toMatchObject({ applied: true });
+        expect(workbookEditPeerOperations(edits).applyRecoveryOp(rows)).toMatchObject({ applied: true });
         expect(peer.version()).toBe(version);
         expect(peer.save()).toEqual(expected);
         expect(peer.cell(0, 3, 1).input).toBe('queued before hydration');
@@ -112,7 +215,7 @@ describe('workbook peer hydration', () => {
         expect(edits.acknowledgedSequence).toBe(0);
         const recovery = edits.recoverySave();
         expect(recovery.recovery).toBe(true);
-        expect(new Uint8Array(recovery.bytes)).toEqual(expected);
+        expect<Uint8Array>(new Uint8Array(recovery.bytes)).toEqual(expected);
         expect(errors).toEqual([session.failure!]);
         const reopened = openWorkbook(new Uint8Array(recovery.bytes), { calculation });
         try {
@@ -142,7 +245,7 @@ describe('workbook peer hydration', () => {
       const errors: Error[] = [];
       const edits = createWorkbookEditPeer({ session, peer, onError: (error) => { errors.push(error); } });
       try {
-        expect(new Uint8Array(edits.recoverySave().bytes)).toEqual(peer.save());
+        expect<Uint8Array>(new Uint8Array(edits.recoverySave().bytes)).toEqual(peer.save());
         expect(errors).toEqual([session.failure!]);
       } finally { edits.dispose(); }
     } finally {

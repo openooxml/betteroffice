@@ -13,6 +13,13 @@ pub struct Session {
     calculation_context: Option<CalculationOptions>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct PeerHydration {
+    workbook: String,
+    calculation_context: Option<CalculationOptions>,
+    rand_seed: Option<u32>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WorkbookCalculationContext {
@@ -285,6 +292,36 @@ struct AcceptResult {
 }
 
 impl Session {
+    pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), String> {
+        self.workbook
+            .adopt_peer_version(version)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn peer_hydration_json(&self) -> Result<String, String> {
+        serde_json::to_string(&PeerHydration {
+            workbook: self
+                .workbook
+                .peer_hydration_json()
+                .map_err(|error| error.to_string())?,
+            calculation_context: self.calculation_context,
+            rand_seed: self.workbook.rand_seed(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self, String> {
+        let hydration: PeerHydration = serde_json::from_str(hydration)
+            .map_err(|error| format!("bad peer hydration: {error}"))?;
+        let mut workbook = Workbook::open_with_peer_hydration_json(bytes, &hydration.workbook)
+            .map_err(|error| error.to_string())?;
+        workbook.set_rand_seed(hydration.rand_seed);
+        Ok(Self {
+            workbook,
+            calculation_context: hydration.calculation_context,
+        })
+    }
+
     pub fn open(bytes: &[u8], now_serial: Option<f64>) -> Result<Self, String> {
         Workbook::open_recalculated(bytes, calculation_options(now_serial))
             .map(|workbook| Self {

@@ -43,6 +43,7 @@ export interface WorkerInputCoordinatorHooks
   /** Resolves after the pending text has crossed a browser paint boundary. */
   preview(draft: InputDraft): Promise<void>;
   requestHydration(reason: string): void | Promise<void>;
+  flushEdits(): Promise<void>;
   onError?(error: unknown): void;
 }
 
@@ -122,6 +123,7 @@ interface Entry {
   state: 'queued' | 'running' | 'failed';
   applied: boolean;
   draftWrite: boolean;
+  error?: unknown;
   run(markApplied: () => void): unknown | Promise<unknown>;
   resolve(value: unknown): void;
   reject(error: unknown): void;
@@ -262,8 +264,24 @@ export function createWorkerInputCoordinator(
     active = lease;
     const draining = async () => {
       while (lease === cycle && !failure) {
-        const entry = entries.find((candidate) => candidate.state === 'queued');
+        let entry = entries[0];
         if (!entry) break;
+        if (entry.state === 'failed' && entry.draftWrite && entry.intent.kind !== 'clipboard' &&
+          entry.intent.draft && !written.has(entry.intent.draft)) {
+          const blockedDraft = entry.intent.draft;
+          const correction = entries[1];
+          if (correction?.state === 'queued' && correction.intent.kind === 'commit' &&
+            correction.intent.draft && sameCell(correction.intent.draft, blockedDraft)) {
+            entries = [correction, ...entries.filter((candidate) => candidate !== correction)];
+            entry = correction;
+          }
+        }
+        if (entry.state !== 'queued') {
+          for (const blocked of entries) {
+            if (blocked.state === 'queued') blocked.reject(entry.error ?? new XlsxCommandAdmissionError('input-failed'));
+          }
+          break;
+        }
         entry.state = 'running';
         try {
           check(entry.intent, lease);
@@ -285,7 +303,10 @@ export function createWorkerInputCoordinator(
           if (lease !== cycle) return;
           entry.reject(error);
           if (entry.applied) entries = entries.filter((candidate) => candidate !== entry);
-          else entry.state = 'failed';
+          else {
+            entry.state = 'failed';
+            entry.error = error;
+          }
           if (error instanceof XlsxCommandAdmissionError) {
             if (error.code === 'document-replaced') {
               reset();
@@ -298,13 +319,13 @@ export function createWorkerInputCoordinator(
           }
         }
       }
-      if (lease === cycle) inputFailed = false;
+      if (lease === cycle) inputFailed = entries.some((entry) => entry.state === 'failed');
     };
     const running = draining().finally(() => {
       if (active === lease) {
         active = null;
         work = null;
-        void pump();
+        if (entries[0]?.state === 'queued') void pump();
       }
     });
     work = running;
@@ -313,7 +334,7 @@ export function createWorkerInputCoordinator(
 
   const intent = <T>(
     kind: WorkerInputKind,
-    input: T | Promise<T>,
+    input: WorkerInputIntent<T>['input'],
     sealed: InputDraft | null,
     target = hooks.capture()
   ): WorkerInputIntent<T> =>
@@ -353,6 +374,13 @@ export function createWorkerInputCoordinator(
     const { entry, result } = record(saved, run);
     entry.draftWrite = draftWrite;
     if (failure) entry.reject(failure.error);
+    const blocked = entries[0];
+    if (blocked?.state === 'failed' && !(saved.kind === 'commit' && saved.draft &&
+      blocked.draftWrite && blocked.intent.kind !== 'clipboard' && blocked.intent.draft &&
+      !written.has(blocked.intent.draft) &&
+      sameCell(saved.draft, blocked.intent.draft))) {
+      entry.reject(blocked.error ?? new XlsxCommandAdmissionError('input-failed'));
+    }
     void pump();
     return result.promise;
   };
@@ -549,7 +577,10 @@ export function createWorkerInputCoordinator(
       );
     },
     runAfterPendingInput,
-    runSync(operation, options = {}) {
+    runSync<T, R>(
+      operation: (intent: WorkerInputIntent<T>, markApplied: () => void) => R,
+      options: WorkerInputOperationOptions<T> = {}
+    ) {
       current();
       assertReady();
       const seal = hooks.seal();
@@ -557,7 +588,7 @@ export function createWorkerInputCoordinator(
       if (seal.composition) throw new WorkerInputNotReadyError();
       hooks.sync();
       assertReady();
-      const saved = intent(
+      const saved = intent<T>(
         options.kind ?? 'host',
         structuredClone(options.input),
         null,
@@ -566,7 +597,7 @@ export function createWorkerInputCoordinator(
       syncRunning = true;
       const { entry, result } = record(saved, (currentEntry, lease, markApplied) => {
         check(currentEntry.intent, lease);
-        return operation(currentEntry.intent as typeof saved, markApplied);
+        return operation(saved, markApplied);
       });
       entry.state = 'running';
       try {
@@ -579,6 +610,7 @@ export function createWorkerInputCoordinator(
         return value;
       } catch (error) {
         entry.state = 'failed';
+        entry.error = error;
         entry.reject(error);
         if (entry.applied) entries = entries.filter((candidate) => candidate !== entry);
         if (error instanceof XlsxCommandAdmissionError) {
@@ -594,10 +626,18 @@ export function createWorkerInputCoordinator(
     },
     requestHydration,
     flush() {
-      const flushed = runAfterPendingInput(() => {}, { kind: 'host' });
+      const flushed = runAfterPendingInput(async (_, markApplied) => {
+        markApplied();
+        await hooks.flushEdits();
+      }, { kind: 'host' });
       void flushed.catch(() => {});
       return Promise.all([requestHydration('flush'), flushed]).then(async () => {
         await pump();
+        current();
+        if (failure) throw failure.error;
+        if (entries.some((entry) => !entry.applied)) {
+          throw new XlsxCommandAdmissionError('input-failed');
+        }
       });
     },
     fail,
@@ -617,7 +657,7 @@ export function createWorkerInputCoordinator(
         for (const entry of entries) entry.state = 'queued';
         do {
           await pump(true);
-        } while (entries.some((entry) => entry.state === 'queued') && !coordinatorError());
+        } while (entries[0]?.state === 'queued' && !coordinatorError());
         const error = coordinatorError();
         if (error) throw error.error;
         if (entries.length > 0) throw new XlsxCommandAdmissionError('input-failed');

@@ -5,7 +5,7 @@ import { createWorkerTransport, type SessionTransport } from '../../../../shared
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, openWorkbook, type OpenWorkbookOptions, type Viewport, type WorkbookHandle,
+  initWasm, openWorkbookPeer, type OpenWorkbookOptions, type Viewport, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -25,7 +25,9 @@ import {
   type WorkbookReplayEnvelope,
 } from './replay';
 
-type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] };
+type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
+  peerOpened: { version: string };
+};
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 const wasmModules = new Map<string, WebAssembly.Module>();
 const peerSources = new WeakMap<WorkbookSession, WorkbookPeerSource>();
@@ -34,6 +36,7 @@ interface WorkbookPeerSource {
   bytes: Uint8Array<ArrayBuffer>;
   options: OpenWorkbookOptions;
   module?: WebAssembly.Module;
+  hydration?: string;
   disposed: boolean;
   pending?: Promise<WorkbookHandle>;
 }
@@ -112,7 +115,8 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
   if (!source.module) throw new Error('Workbook peer hydration requires a worker-compiled module');
   await initWasm(source.module);
   if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-  return openWorkbook(source.bytes, source.options);
+  if (source.hydration === undefined) throw new Error('Workbook worker did not retain peer calculation state');
+  return openWorkbookPeer(source.bytes, source.options, source.hydration);
 }
 
 /** @internal */
@@ -172,9 +176,12 @@ export async function createWorkbookSession(
     }
     client = createSessionClient<Methods, Events>(transport, {
       methods: { ...WORKBOOK_SESSION_METHODS, ...WORKBOOK_INTERNAL_SESSION_METHODS },
-      onWasmModule: (url, module) => {
+      onWasmModule: (url, module, hydration) => {
         if (url !== wasmAssetUrl().href) return;
-        if (peerSource) peerSource.module = module;
+        if (peerSource) {
+          peerSource.module = module;
+          peerSource.hydration = hydration;
+        }
         if (options.wasm === undefined && !options.worker && !wasmModules.has(url)) {
           wasmModules.set(url, module);
         }
@@ -185,6 +192,8 @@ export async function createWorkbookSession(
     throw error;
   }
   let state: WorkbookSessionState;
+  let initialVersion: string | undefined;
+  client.on('peerOpened', (opened) => { initialVersion = opened.version; });
   client.on('changed', (change) => { state = { ...state, ...change }; });
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });
   const signal = options.signal;
@@ -254,7 +263,7 @@ export async function createWorkbookSession(
     }
     return reply;
   };
-  workbookSessionInternals.set(session, { replay, editPeerAttached: false });
+  workbookSessionInternals.set(session, { replay, initialVersion, editPeerAttached: false });
   if (peerSource) peerSources.set(session, peerSource);
   return session;
 }

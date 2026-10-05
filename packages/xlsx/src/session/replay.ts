@@ -1,5 +1,5 @@
 import type { MethodPolicies } from '../../../../shared/office-session';
-import type { WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
+import type { StaleProposalTarget, WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
 import type { WorkbookSession } from './client';
 
 export const WORKBOOK_REPLAY_MUTATORS = {
@@ -29,6 +29,7 @@ export interface WorkbookReplayEnvelope {
   sequence: number;
   calculation: WorkbookCalculationContext;
   op: WorkbookReplayOp;
+  staleProposal?: { cells: string[]; targets: StaleProposalTarget[] };
 }
 
 export interface WorkbookReplayReply {
@@ -50,6 +51,7 @@ export const WORKBOOK_INTERNAL_SESSION_POLICIES: MethodPolicies<WorkbookInternal
 
 export const workbookSessionInternals = new WeakMap<WorkbookSession, {
   replay(envelope: WorkbookReplayEnvelope): Promise<WorkbookReplayReply>;
+  initialVersion?: string;
   editPeerAttached: boolean;
 }>();
 
@@ -219,7 +221,14 @@ export function validateWorkbookReplayEnvelope(value: unknown): asserts value is
   if (!record(value) || !integer(value.sequence) || value.sequence === 0 ||
     !record(value.calculation) || !finite(value.calculation.nowSerial) ||
     !integer(value.calculation.randSeed) || value.calculation.randSeed > 0xffff_ffff ||
-    !validOp(value.op)) {
+    !validOp(value.op) || (value.staleProposal !== undefined && (
+      !record(value.staleProposal) || !strings(value.staleProposal.cells) ||
+      !Array.isArray(value.staleProposal.targets) ||
+      !Array.from(value.staleProposal.targets).every((target) => record(target) &&
+        integer(target.sheet) && integer(target.row) && integer(target.col) &&
+        typeof target.sheetId === 'string' && typeof target.a1 === 'string') ||
+      !record(value.op) || value.op.method !== 'acceptProposal'
+    ))) {
     const error = new TypeError('Malformed workbook replay envelope');
     error.name = 'WorkbookReplayValidationError';
     throw error;
