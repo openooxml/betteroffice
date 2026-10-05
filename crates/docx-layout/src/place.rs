@@ -1170,7 +1170,9 @@ fn place<F: PartialEq>(
             if let Some(converged) = convergence.and_then(|value| {
                 value.retained_match(
                     &checkpoint,
-                    paginator.pages[page_index].opening_fragment_geometry.as_deref(),
+                    paginator.pages[page_index]
+                        .opening_fragment_geometry
+                        .as_deref(),
                 )
             }) {
                 paginator.pages.truncate(page_index);
@@ -3057,7 +3059,10 @@ mod pagination_rule_tests {
         let mut full_input = value(20.0);
         let full = layout_document_checkpointed(&mut full_input).unwrap();
         assert_eq!(full.layout.pages.len(), 2);
-        assert_eq!(previous.layout.pages[0].margins, full.layout.pages[0].margins);
+        assert_eq!(
+            previous.layout.pages[0].margins,
+            full.layout.pages[0].margins
+        );
         assert_ne!(
             previous.layout.pages[1].opening_fragment_geometry,
             full.layout.pages[1].opening_fragment_geometry
@@ -3085,7 +3090,11 @@ mod pagination_rule_tests {
             .iter()
             .find(|checkpoint| checkpoint.block_index == 2 && checkpoint.page_index == 1)
             .unwrap();
-        assert!(!resumable(checkpoint, &full_input.measured, &full.layout.pages));
+        assert!(!resumable(
+            checkpoint,
+            &full_input.measured,
+            &full.layout.pages
+        ));
     }
 
     #[test]

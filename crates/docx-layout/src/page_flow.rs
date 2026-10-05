@@ -113,11 +113,7 @@ impl OpeningFragmentGeometry {
             size: page.size.clone(),
             margins: page.margins.clone(),
             active_margins: paginator.margins.clone(),
-            body_margins: page
-                .body_margins
-                .as_ref()
-                .unwrap_or(&page.margins)
-                .clone(),
+            body_margins: page.body_margins.as_ref().unwrap_or(&page.margins).clone(),
             body_anchor_margins: page
                 .body_anchor_margins
                 .as_ref()
