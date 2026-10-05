@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use betteroffice_xlsx::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, SnapshotBudget, UpdateEvent, UpdateOrigin,
-    UpdateSubscription, WorkbookSnapshotBuilder,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, SnapshotBudget, UpdateEvent,
+    UpdateOrigin, UpdateSubscription, WorkbookSnapshotBuilder,
 };
 use wasm_bindgen::prelude::*;
 
