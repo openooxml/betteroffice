@@ -78,6 +78,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     commentTextTarget: mock(() => ({ ok: true })),
     formatTextTarget: mock(() => ({ ok: true })),
     applyParagraphStyle: mock(() => {}),
+    splitParagraph: mock(() => ({ secondParaId: 'p2' })),
     insertPageBreak: mock(() => {}),
     mirrorWorkerDocument: (mirror: { version: string } | null) => { if (mirror) state.version = mirror.version; },
     getProposals: () => ({ version: 'v', previewVersion: 0, proposals: [] }),

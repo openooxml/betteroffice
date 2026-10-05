@@ -353,6 +353,28 @@ test('a batch chained from an early read edits the hydrated document', async () 
   expect(session.paragraphs('body')[0]!.text).toBe('Written after opening');
 });
 
+test('insertBreak preserves paragraph text and inserts a lowerable page break', async () => {
+  const { api, session, replica, release } = await pendingReplica('editing');
+  replica.start();
+  await act(async () => { release(); await replica.ready; });
+  const before = session.paragraphs('body');
+  const original = before[0]!;
+  expect(original.text.length).toBeGreaterThan(0);
+  const pageBreakCount = () => session.storySegments('body').filter(
+    (segment) => segment.kind === 'embed' && segment.embedKind === 'pageBreak'
+  ).length;
+  const previousPageBreaks = pageBreakCount();
+
+  act(() => expect(api.insertBreak({ paraId: original.paraId, type: 'page' })).toBe(true));
+
+  expect(() => session.yrsBlocksForStory('body')).not.toThrow();
+  const after = session.paragraphs('body');
+  expect(after).toHaveLength(before.length + 1);
+  expect(after[0]!.paraId).toBe(original.paraId);
+  expect(after.slice(0, 2).map((paragraph) => paragraph.text)).toEqual([original.text, '']);
+  expect(pageBreakCount()).toBe(previousPageBreaks + 1);
+});
+
 test('a synchronous write during an in-flight handoff is not overwritten by its reply', async () => {
   const { api, session, replica, release, opens } = await pendingReplica();
   replica.start();

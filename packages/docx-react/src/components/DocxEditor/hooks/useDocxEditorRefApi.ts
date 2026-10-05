@@ -1018,8 +1018,17 @@ export function useDocxEditorRefApi({
           paraId: located.paragraph.paraId,
           offset: span.end - span.start,
         };
-        if (options.type === 'page') session.insertPageBreak(at);
-        else if (options.type === 'sectionNextPage') {
+        if (options.type === 'page') {
+          const breakAt =
+            at.offset > 0
+              ? {
+                  story: at.story,
+                  paraId: session.splitParagraph(at).secondParaId,
+                  offset: 0,
+                }
+              : at;
+          session.insertPageBreak(breakAt);
+        } else if (options.type === 'sectionNextPage') {
           session.insertSectionBreak(at, 'nextPage');
         } else if (options.type === 'sectionContinuous') {
           session.insertSectionBreak(at, 'continuous');
