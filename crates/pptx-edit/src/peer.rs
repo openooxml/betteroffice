@@ -353,11 +353,30 @@ pub(crate) mod tests {
         serde_json::from_str(&json).unwrap()
     }
 
+    fn javascript_round_trip(value: &Value) -> Value {
+        match value {
+            Value::Number(number) => {
+                let float = number.as_f64().unwrap() + 0.0;
+                if float.fract() == 0.0 && float.abs() < 1e21 {
+                    serde_json::from_str(&format!("{float:.0}")).unwrap()
+                } else {
+                    json!(float)
+                }
+            }
+            Value::Array(items) => items.iter().map(javascript_round_trip).collect(),
+            Value::Object(object) => object
+                .iter()
+                .map(|(key, value)| (key.clone(), javascript_round_trip(value)))
+                .collect(),
+            other => other.clone(),
+        }
+    }
+
     pub(crate) fn apply_pair(worker: &DeckSession, peer: &DeckSession, op: &Value) -> Value {
         let result = replay(worker, op, None);
         assert_eq!(
             result,
-            replay(peer, op, Some(result["outcome"].clone())),
+            replay(peer, op, Some(javascript_round_trip(&result["outcome"]))),
             "operation {op}"
         );
         result
