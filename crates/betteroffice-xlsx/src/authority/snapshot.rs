@@ -649,6 +649,7 @@ impl AuthoritySnapshotEncoder {
         let WorkbookAuthority {
             doc,
             projection_valid: _,
+            snapshot_revision: _,
             base,
             history: _,
             next_sheet_id: _,
@@ -731,6 +732,7 @@ impl WorkbookAuthority {
         let Self {
             doc,
             projection_valid: _,
+            snapshot_revision: _,
             base: _,
             history: _,
             next_sheet_id,
