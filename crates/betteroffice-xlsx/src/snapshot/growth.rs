@@ -31,7 +31,7 @@ impl<S, T> Migration<S> for Move<S, T> {
             .len()
             .min(budget.max_records())
             .min(budget.max_bytes() / size_of::<T>().max(1));
-        if count == 0 && !self.records.is_empty() {
+        if count == 0 && !self.records.as_slice().is_empty() {
             return Err(SnapshotError::new(
                 "snapshot storage exceeds advance byte budget",
             ));
@@ -39,7 +39,7 @@ impl<S, T> Migration<S> for Move<S, T> {
         self.storage.extend(self.records.by_ref().take(count));
         #[cfg(test)]
         super::step::record(count, count * size_of::<T>());
-        if self.records.is_empty() {
+        if self.records.as_slice().is_empty() {
             *(self.target)(state)? = std::mem::take(&mut self.storage);
             Ok(true)
         } else {

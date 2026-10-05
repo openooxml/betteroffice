@@ -312,10 +312,11 @@ impl PreservedSnapshotBuilder {
             }
             self.read_header(&mut r)?;
         }
-        self.offset = payload.len() - r.rest().len();
+        let rest = r.rest();
+        self.offset = payload.len() - rest.len();
         #[cfg(test)]
         super::step::record(1, chunk.len());
-        if r.is_empty() {
+        if rest.is_empty() {
             self.offset = 0;
             self.ordinal += 1;
             Ok(SnapshotProgress::ready())
