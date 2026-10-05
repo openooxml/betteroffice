@@ -1,4 +1,4 @@
-import { expect, mock, test } from 'bun:test';
+import { afterEach, expect, mock, test } from 'bun:test';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import {
   adoptWorkerOpenHandoverVersion,
@@ -18,6 +18,36 @@ import {
 } from './workerOpenReplica';
 
 const fakeSession = () => ({ version: () => 'v1' }) as unknown as YrsSession;
+const globalRestores = new Set<() => void>();
+
+afterEach(() => {
+  for (const restore of [...globalRestores]) restore();
+});
+
+function holdTasks() {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
+  const tasks: Array<() => void> = [];
+  Object.defineProperty(globalThis, 'scheduler', {
+    configurable: true,
+    value: { yield: () => new Promise<void>((resolve) => tasks.push(resolve)) },
+  });
+  const restore = () => {
+    if (!globalRestores.delete(restore)) return;
+    if (descriptor) Object.defineProperty(globalThis, 'scheduler', descriptor);
+    else Reflect.deleteProperty(globalThis, 'scheduler');
+  };
+  globalRestores.add(restore);
+  return {
+    tasks,
+    async run() {
+      const task = tasks.shift();
+      if (!task) throw new Error('No pending task');
+      task();
+      await Promise.resolve();
+    },
+    restore,
+  };
+}
 
 test('awaiting a deferred editor replica leaves starting to its owner', async () => {
   const session = fakeSession();
@@ -170,4 +200,134 @@ test.each(['rejection', 'load', 'ensure'] as const)('a replica %s fallback defau
   expect(fallback).toHaveBeenCalledTimes(1);
   expect(fallback).toHaveBeenCalledWith('failure');
   expect(workerOpenReplicaPending(session)).toBe(false);
+});
+
+test('hydration opens, loads and publishes readiness in separate tasks', async () => {
+  const tasks = holdTasks();
+  try {
+    const session = fakeSession();
+    const openDocx = mock(() => {});
+    const loadState = mock(() => {});
+    const complete = mock(() => {});
+    const onReady = mock(() => {});
+    const replica = deferWorkerOpenReplica(session, async () => [openDocx, loadState, complete],
+      () => {}, onReady);
+    let ready = false;
+    void replica.ready.then(() => { ready = true; });
+    replica.start();
+    await Promise.resolve();
+    expect(openDocx).toHaveBeenCalledTimes(1);
+    expect(loadState).not.toHaveBeenCalled();
+    expect(replica.pending).toBe(true);
+    expect(ready).toBe(false);
+    expect(onReady).not.toHaveBeenCalled();
+    await tasks.run();
+    expect(loadState).toHaveBeenCalledTimes(1);
+    expect(complete).not.toHaveBeenCalled();
+    expect(replica.pending).toBe(true);
+    expect(ready).toBe(false);
+    expect(onReady).not.toHaveBeenCalled();
+    await tasks.run();
+    await replica.ready;
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(replica.pending).toBe(false);
+    expect(ready).toBe(true);
+  } finally {
+    tasks.restore();
+  }
+});
+
+test.each([1, 2])('synchronous ensure completes hydration at yield %s exactly once', async (boundary) => {
+  const tasks = holdTasks();
+  try {
+    const session = fakeSession();
+    const openDocx = mock(() => {});
+    const loadState = mock(() => {});
+    const complete = mock(() => {});
+    const fallback = mock(() => {});
+    const onReady = mock(() => {});
+    const replica = deferWorkerOpenReplica(session, async () => [openDocx, loadState, complete],
+      fallback, onReady);
+    replica.start();
+    await Promise.resolve();
+    if (boundary === 2) await tasks.run();
+    ensureWorkerOpenReplica(session);
+    expect(replica.pending).toBe(false);
+    expect(openDocx).toHaveBeenCalledTimes(1);
+    expect(loadState).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(fallback).not.toHaveBeenCalled();
+    await tasks.run();
+    await replica.ready;
+    ensureWorkerOpenReplica(session);
+    expect(openDocx).toHaveBeenCalledTimes(1);
+    expect(loadState).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(onReady).toHaveBeenCalledTimes(1);
+    expect(tasks.tasks).toHaveLength(0);
+  } finally {
+    tasks.restore();
+  }
+});
+
+test.each([1, 2])('a stale hydration at yield %s cancels without readiness or fallback', async (boundary) => {
+  const tasks = holdTasks();
+  try {
+    const session = fakeSession();
+    const openDocx = mock(() => {});
+    const loadState = mock(() => {});
+    const complete = mock(() => {});
+    const fallback = mock(() => {});
+    const onReady = mock(() => {});
+    const cancel = mock(() => {});
+    let current = true;
+    const replica = deferWorkerOpenReplica(session, async () => [openDocx, loadState, complete],
+      fallback, onReady, { current: () => current, cancel });
+    replica.start();
+    await Promise.resolve();
+    if (boundary === 2) await tasks.run();
+    current = false;
+    await tasks.run();
+    await expect(replica.ready).rejects.toThrow('The document changed');
+    expect(openDocx).toHaveBeenCalledTimes(1);
+    expect(loadState).toHaveBeenCalledTimes(boundary - 1);
+    expect(complete).not.toHaveBeenCalled();
+    expect(onReady).not.toHaveBeenCalled();
+    expect(fallback).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  } finally {
+    tasks.restore();
+  }
+});
+
+test.each([false, true])('loadState failure after a yield preserves fallback with failure=%s', async (fails) => {
+  const tasks = holdTasks();
+  try {
+    const session = fakeSession();
+    const loadError = new Error('Load failed');
+    const fallbackError = new Error('Fallback failed');
+    const openDocx = mock(() => {});
+    const loadState = mock(() => { throw loadError; });
+    const complete = mock(() => {});
+    const fallback = mock(() => { if (fails) throw fallbackError; });
+    const onReady = mock(() => {});
+    const replica = deferWorkerOpenReplica(session, async () => [openDocx, loadState, complete],
+      fallback, onReady);
+    replica.start();
+    await Promise.resolve();
+    expect(fallback).not.toHaveBeenCalled();
+    await tasks.run();
+    if (fails) await expect(replica.ready).rejects.toBe(fallbackError);
+    else await replica.ready;
+    expect(openDocx).toHaveBeenCalledTimes(1);
+    expect(loadState).toHaveBeenCalledTimes(1);
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(complete).not.toHaveBeenCalled();
+    expect(onReady).toHaveBeenCalledTimes(fails ? 0 : 1);
+    expect(replica.pending).toBe(false);
+  } finally {
+    tasks.restore();
+  }
 });

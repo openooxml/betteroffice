@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import type { ResidentDocumentRead, ResidentEngineWorkerClient } from '@betteroffice/docx/yrs';
+import type { ResidentDocumentRead, ResidentEngineWorkerClient, YrsSession } from '@betteroffice/docx/yrs';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
   residentWorkerFactory,
@@ -15,6 +15,7 @@ import {
   DocxAsyncOnlyError,
   DocxEditor,
   defineDocxPlugin,
+  type DocxEditorProps,
   type DocxEditorRef,
   type DocxPluginContext,
   type DocxPluginSelection,
@@ -23,6 +24,7 @@ import {
 import { pagedDocx } from './__fixtures__/pagedDocx';
 import * as scrollApi from './hooks/usePagedScrollApi';
 import * as viewerReads from './internals/viewerRefReads';
+import * as replicaHelpers from './internals/workerOpenReplica';
 import { markPresented, stampWorkerFrameVersion } from './internals/layoutProvenance';
 import type { YrsInputRef } from './YrsInput';
 
@@ -58,7 +60,10 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function navigationViewer() {
+async function navigationViewer(
+  props: Partial<DocxEditorProps> = {},
+  observeWorker?: (worker: InProcessResidentWorker) => void
+) {
   spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
     new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
   ));
@@ -66,17 +71,20 @@ async function navigationViewer() {
     constructor() {
       const worker = startWorker();
       workers.push(worker);
+      observeWorker?.(worker);
       return worker;
     }
   } as unknown as typeof Worker;
   const ref = createRef<DocxEditorRef>();
   let inputRef: { readonly current: YrsInputRef | null } | null = null;
   const input = { get current() { return inputRef?.current ?? null; } };
+  const session: { current: YrsSession | null } = { current: null };
   const scrolls: Array<ReturnType<typeof mock<(position: number, forParaIdScroll?: boolean) => void>>> = [];
   const useScroll = scrollApi.usePagedScrollApi;
   spyOn(scrollApi, 'usePagedScrollApi').mockImplementation((options) => {
     const api = useScroll(options);
     inputRef = options.yrsInputRef;
+    session.current = options.yrsSession;
     const scroll = mock((_position: number, _forParaIdScroll?: boolean) => {});
     scrolls.push(scroll);
     return { ...api, scrollToPositionImpl: scroll };
@@ -85,22 +93,91 @@ async function navigationViewer() {
     font.byteOffset, font.byteOffset + font.byteLength
   ) as ArrayBuffer) };
   const context: { current: DocxPluginContext<null> | null } = { current: null };
+  const loads: DocxPluginContext<null>[] = [];
   const plugin = defineDocxPlugin({
     id: 'test.viewer-navigation',
     createState: () => null,
     initialize: (next) => { context.current = next; },
-    onEvent: (next) => { context.current = next; },
+    onEvent(next, event) {
+      context.current = next;
+      if (event.type === 'load') loads.push(next);
+    },
   });
   const view = render(<DocxEditor
     ref={ref} documentBuffer={await pagedDocx(1, 2)} readOnly experimentalWorkerOpen
     previewFirstPage={false} measurementFontProvider={provider} plugins={[plugin]}
+    {...props}
   />);
   await waitFor(() => expect(() => ref.current!.getDocument()).toThrow(DocxAsyncOnlyError), { timeout: 20_000 });
   await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 });
   await waitFor(() => expect(context.current?.snapshot.layout).toBeTruthy(), { timeout: 20_000 });
   await waitFor(() => expect(input.current).not.toBeNull());
-  return { ref, input, scrolls, view, worker: workers[0]! };
+  return { ref, input, session, scrolls, view, loads, worker: workers[0]! };
 }
+
+test('a controlled closed worker viewer sidebar stays closed after positive revision queries without hydrating', async () => {
+  const revisionCounts: number[] = [];
+  const painted = mock(() => {});
+  const rendered = mock(() => {});
+  const { ref, view, worker, session, loads } = await navigationViewer({
+    documentBuffer: await pagedDocx(2, 2, { trackedInsertion: true }),
+    mode: 'viewing',
+    allowHostProposals: true,
+    previewFirstPage: true,
+    commentsSidebarOpen: false,
+    onFirstPagePainted: painted,
+    onRenderedDomContextReady: rendered,
+  }, (worker) => {
+    let onmessage: typeof worker.onmessage = null;
+    Object.defineProperty(worker, 'onmessage', {
+      get: () => (event: Parameters<NonNullable<typeof worker.onmessage>>[0]) => {
+        onmessage?.(event);
+        if (event.data.ok && event.data.revisionCount !== undefined) {
+          revisionCounts.push(event.data.revisionCount);
+        }
+      },
+      set: (listener: typeof worker.onmessage) => { onmessage = listener; },
+    });
+  });
+  await waitFor(() => expect(revisionCounts).toEqual([1]));
+  await waitFor(() => expect(loads).toHaveLength(1));
+  await waitFor(() => expect(painted).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(rendered).toHaveBeenCalled());
+  await act(async () => {});
+  expect(ref.current!.commands.getState('commentsSidebar').active).toBe(false);
+  expect(view.container.querySelector('aside.docx-unified-sidebar')).toBeNull();
+  expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();
+  expect(worker.requests).not.toContain('encodeState');
+  expect(replicaHelpers.workerOpenReplicaStarted(session.current!)).toBe(false);
+  expect(session.current!.storyIds()).toEqual([]);
+
+  act(() => ref.current!.scrollToPage(2));
+  const identities = await ref.current!.getParagraphIdentities();
+  const paragraph = identities.paragraphs.find(({ session }) => session?.story === 'body')!.session!;
+  const anchors = await ref.current!.resolveParagraphAnchors([paragraph]);
+  expect(anchors.results[0]!.status).toBe('found');
+  await act(async () => {
+    expect(await ref.current!.proposeChanges({
+      expectVersion: anchors.version,
+      proposals: [{
+        id: 'host-proposal', paragraph,
+        suggest: { author: 'Host', date: '2026-10-04T00:00:00Z' },
+        op: 'insertText', at: 'end', text: ' Proposed text.',
+      }],
+    })).toMatchObject({ ok: true });
+  });
+  await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 });
+  await act(async () => {});
+  expect(ref.current!.commands.getState('commentsSidebar').active).toBe(false);
+  expect(view.container.querySelector('aside.docx-unified-sidebar')).toBeNull();
+  expect(view.container.querySelector('.docx-tracked-change-card')).toBeNull();
+  expect(worker.requests.filter((type) => type === 'revisionCount')).toHaveLength(1);
+  expect(worker.requests).not.toContain('encodeState');
+  expect(replicaHelpers.workerOpenReplicaStarted(session.current!)).toBe(false);
+  expect(session.current!.storyIds()).toEqual([]);
+  expect(loads).toHaveLength(1);
+  expect(painted).toHaveBeenCalledTimes(1);
+}, 60_000);
 
 for (const gesture of ['keyboard', 'pointer']) {
   test(`pending viewer navigation yields to a newer ${gesture} selection`, async () => {

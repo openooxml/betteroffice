@@ -373,6 +373,199 @@ fn assert_step_budget(budget: SnapshotBudget) -> crate::snapshot::step::StepWork
     work
 }
 
+fn initial_string_workbook(count: usize) -> Workbook {
+    Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        shared_strings: (0..count)
+            .map(|index| char::from(b'a' + index as u8).to_string().repeat(2_048))
+            .collect(),
+        ..WorkbookModel::default()
+    })
+    .unwrap()
+}
+
+#[test]
+fn snapshot_pending_singleton_string_survives_a_larger_allowance() {
+    let worker = initial_string_workbook(2);
+    let small = SnapshotBudget::new(1, 1024).unwrap();
+    let large = SnapshotBudget::new(1, 4096).unwrap();
+    let chunks = encode(&worker, small);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in &chunks {
+        builder.push(chunk).unwrap();
+        assert_step_budget(small);
+    }
+    let mut pending = None;
+    for _ in 0..200_000 {
+        let progress = builder.advance(small).unwrap();
+        assert_step_budget(small);
+        assert!(!progress.is_ready());
+        pending = builder
+            .model
+            .as_ref()
+            .and_then(|model| model.pending_string_record());
+        if pending.is_some() {
+            let chunk = builder.queue.front().unwrap();
+            assert_eq!(chunk[0], crate::snapshot::wire::FORMAT_VERSION);
+            let (kind, ordinal, payload) = unframe(chunk).unwrap();
+            assert_eq!(kind, ChunkKind::Model);
+            assert_eq!(pending, Some((ordinal, 0)));
+            let mut reader = Reader::new(payload);
+            assert_eq!(reader.u8().unwrap(), 2);
+            assert_eq!(reader.str().unwrap(), worker.model().shared_strings[0]);
+            reader.finish().unwrap();
+            break;
+        }
+    }
+    let pending = pending.expect("first singleton string did not enter pending decoding");
+    let mut completed = false;
+    for _ in 0..16 {
+        assert!(!builder.advance(large).unwrap().is_ready());
+        assert_step_budget(large);
+        if builder.model.as_ref().unwrap().pending_string_record() != Some(pending) {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed);
+    assert!(
+        builder
+            .model
+            .as_ref()
+            .unwrap()
+            .pending_string_record()
+            .is_none()
+    );
+    let mut ready = false;
+    let mut second_pending = false;
+    for _ in 0..200_000 {
+        ready = builder.advance(small).unwrap().is_ready();
+        assert_step_budget(small);
+        second_pending |= builder
+            .model
+            .as_ref()
+            .and_then(|model| model.pending_string_record())
+            .is_some_and(|record| record != pending);
+        if ready {
+            break;
+        }
+    }
+    assert!(second_pending);
+    assert!(ready);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.authority.encode_state_as_update_v1(),
+        peer.authority.encode_state_as_update_v1()
+    );
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
+#[test]
+fn snapshot_singleton_strings_survive_alternating_allowances() {
+    let worker = initial_string_workbook(6);
+    let small = SnapshotBudget::new(1, 1024).unwrap();
+    let large = SnapshotBudget::new(1, 4096).unwrap();
+    let chunks = encode(&worker, small);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in &chunks {
+        builder.push(chunk).unwrap();
+        assert_step_budget(small);
+    }
+    let mut pending = std::collections::BTreeSet::new();
+    let mut ready = false;
+    // One record per advance and 2,048 > 1,024 guarantee pending decoding while copies and
+    // migrations use the small allowance; switch only once the string is pending.
+    for _ in 0..200_000 {
+        let budget = if builder
+            .model
+            .as_ref()
+            .and_then(|model| model.pending_string_record())
+            .is_some()
+        {
+            large
+        } else {
+            small
+        };
+        ready = builder.advance(budget).unwrap().is_ready();
+        assert_step_budget(budget);
+        if let Some(record) = builder
+            .model
+            .as_ref()
+            .and_then(|model| model.pending_string_record())
+        {
+            pending.insert(record);
+        }
+        if ready {
+            break;
+        }
+    }
+    assert!(
+        pending.len() >= 3,
+        "too few strings entered pending decoding: {pending:?}"
+    );
+    assert!(ready);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.authority.encode_state_as_update_v1(),
+        peer.authority.encode_state_as_update_v1()
+    );
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
+#[test]
+#[cfg(target_pointer_width = "64")]
+fn snapshot_empty_workbook_refuses_small_authority_scaffolding_and_retries() {
+    let worker = initial_string_workbook(0);
+    let small = SnapshotBudget::new(1, 512).unwrap();
+    let chunks = encode(&worker, small);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in &chunks {
+        builder.push(chunk).unwrap();
+        assert_step_budget(small);
+    }
+    let mut refused = false;
+    for _ in 0..256 {
+        let result = builder.advance(small);
+        assert_step_budget(small);
+        match result {
+            Ok(progress) => assert!(!progress.is_ready()),
+            Err(failure) => {
+                assert_eq!(
+                    failure.to_string(),
+                    "snapshot authority exceeds advance byte budget"
+                );
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "snapshot authority scaffolding remained pending");
+    assert_eq!(
+        builder.advance(small).unwrap_err().to_string(),
+        "snapshot authority exceeds advance byte budget"
+    );
+    assert_eq!(assert_step_budget(small).records, 0);
+    let larger = SnapshotBudget::new(1, 1024).unwrap();
+    let mut ready = false;
+    for _ in 0..200_000 {
+        ready = builder.advance(larger).unwrap().is_ready();
+        assert_step_budget(larger);
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.authority.encode_state_as_update_v1(),
+        peer.authority.encode_state_as_update_v1()
+    );
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
 #[test]
 fn snapshot_packed_cells_drain_within_step_budget() {
     let cells = 2_048usize;

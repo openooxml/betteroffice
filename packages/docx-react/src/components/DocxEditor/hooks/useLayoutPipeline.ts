@@ -30,6 +30,7 @@ import {
   ensureWorkerOpenReplica,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
+  workerOpenReplicaStarted,
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
@@ -234,10 +235,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // request without the revision preview or measurement, preview and measurement.
   const laidOutRef = useRef<{
     session: YrsSession;
+    layout: Layout;
     version: string | null;
     request: string;
     previewKey: string;
     measurement: ResidentMeasurementConfig;
+    zoom: number;
+    final: boolean;
   } | null>(null);
   const workerPrewarmRef = useRef<{ session: YrsSession; release: () => void } | null>(null);
   const releaseWorkerPrewarm = useCallback((owner: YrsSession | null) => {
@@ -248,7 +252,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   }, []);
   useEffect(() => () => releaseWorkerPrewarm(session), [releaseWorkerPrewarm, session]);
   // A deferred pass that had to run on this thread keeps that requirement.
-  const pendingOnHostRef = useRef(false);
+  const pendingOnHostRef = useRef<YrsSession | null>(null);
+  if (pendingOnHostRef.current !== session) pendingOnHostRef.current = null;
   // Whether every change the next pass lays out asked for a worker pass.
   const pendingInWorkerRef = useRef<boolean | null>(null);
   // The worker pass in flight. A pass that may run in the worker waits for it,
@@ -411,15 +416,27 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     (options?: { onHost?: boolean }) => {
       const workerRequired = session !== null &&
         (isViewerSession(session) ||
-          registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true);
-      const onHost = !workerRequired && (options?.onHost === true || pendingOnHostRef.current);
+          registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true ||
+          (workerOpenEnabledRef.current && options?.onHost !== true && workerOpenReplicaPending(session)));
+      const invalidateRetainedLayout = (): void => {
+        if (laidOutRef.current?.session === session) laidOutRef.current.final = false;
+      };
+      if (
+        session && workerOpenEnabledRef.current &&
+        workerOpenReplicaPending(session) &&
+        layoutInWorkerRef.current?.ownsDocument?.(session) !== true
+      ) invalidateRetainedLayout();
+      const onHost = !workerRequired &&
+        (options?.onHost === true || (session !== null && pendingOnHostRef.current === session));
       const inWorker = workerRequired || (!onHost && pendingInWorkerRef.current === true);
       const inFlight = workerPassRef.current;
       // A host batch waits for the worker pass in flight, and so does a pass no
       // change asked to run here, such as a preview change, unless the pass in
       // flight lays out the document as opened.
       const waits =
-        inWorker || (!onHost && pendingInWorkerRef.current === null && !inFlight?.opening);
+        inWorker || (!onHost &&
+          ((workerOpenEnabledRef.current && session !== null && workerOpenReplicaPending(session)) ||
+            (pendingInWorkerRef.current === null && !inFlight?.opening)));
       if (waits && session && inFlight?.session === session) {
         queuedBehindWorkerRef.current = true;
         markLayoutQueued(session, true);
@@ -442,21 +459,26 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           pendingLayoutOriginRef.current,
           layoutUpdateOrigin
         );
-        pendingOnHostRef.current = onHost;
+        pendingOnHostRef.current = onHost ? session : null;
         pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
 
+      const readSourceVersion = (): string | null => {
+        const version = readSessionVersion(session);
+        return workerOpenEnabledRef.current ? workerOpenSourceVersion(session, version) : version;
+      };
       const passRenderEnv = workerProposalRenderEnv(session, renderEnv);
       const run = (workerRequirements?: string | null): void => {
         let measurement: ResidentMeasurementConfig | null = null;
         try {
+          if (onHost && workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
           const request = buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv);
           if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
           const input = JSON.stringify(request);
           const pendingRequirements =
-            (isViewerSession(session) || workerOpenEnabledRef.current ||
+            !onHost && (isViewerSession(session) || workerOpenEnabledRef.current ||
               registeredWorkerProposalAuthority(session)?.holdsWorkerState()) &&
               workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input)
@@ -468,6 +490,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               },
               (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
+                invalidateRetainedLayout();
                 markLayoutQueued(session, false);
                 // A superseded preflight drops its pass; the pass that superseded it lays out.
                 if (!(error instanceof SupersededPreviewError)) {
@@ -489,6 +512,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           ) as ResidentFontRequirement[];
           measurement = residentMeasurementConfig(requirements);
         } catch (error) {
+          invalidateRetainedLayout();
           if (!isViewerSession(session)) console.error('[PagedEditor] Resident font preflight error:', error);
           markLayoutQueued(session, false);
           releaseWorkerPrewarm(session);
@@ -498,7 +522,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         }
         if (!measurement) {
           if (!onHost && workerPrewarmRef.current?.session !== session) {
-            const version = readSessionVersion(session);
+            const version = readSourceVersion();
             if (
               version !== null &&
               (openedVersionRef.current?.session !== session ||
@@ -520,12 +544,12 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             pendingLayoutOriginRef.current,
             layoutUpdateOrigin
           );
-          pendingOnHostRef.current = onHost;
+          pendingOnHostRef.current = onHost ? session : null;
           pendingInWorkerRef.current = mergeInWorker(pendingInWorkerRef.current, inWorker);
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
-        pendingOnHostRef.current = false;
+        pendingOnHostRef.current = null;
         // A queued pass deferred above still holds settles until it gets this far.
         if (!workerProposalAuthority(session)?.initialized) markLayoutQueued(session, false);
 
@@ -537,7 +561,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           measurement,
           ...(workerOpenEnabledRef.current ? { cachedPageTotals: true } : {}),
         };
-        const sourceVersion = readSessionVersion(session);
+        const sourceVersion = readSourceVersion();
         const previewKey = revisionPreviewKey(passRenderEnv.revisionPreview);
         const request = {
           ...buildResidentRegionLayoutRequest(document, pageGap, passRenderEnv),
@@ -548,12 +572,31 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           { ...request, measurement: undefined },
           (key, value: unknown) => (key === 'revisionPreview' ? undefined : value)
         );
+        const laidOut = laidOutRef.current;
+        if (
+          !isViewerSession(session) &&
+          registeredWorkerProposalAuthority(session)?.holdsWorkerState() !== true &&
+          workerOpenEnabledRef.current &&
+          workerOpenReplicaPending(session) && workerOpenReplicaStarted(session) &&
+          layoutInWorkerRef.current?.ownsDocument?.(session) === true &&
+          laidOut?.session === session && laidOut.final && laidOut.zoom === zoom &&
+          workerOpenSourceVersion(session, laidOut.version) === sourceVersion &&
+          laidOut.request === requestWithoutPreview &&
+          laidOut.previewKey === previewKey &&
+          JSON.stringify(laidOut.measurement) === JSON.stringify(measurement)
+        ) {
+          markSupersededLayout(laidOut.layout, false);
+          markLayoutQueued(session, false);
+          syncCoordinator.onLayoutComplete(currentEpoch);
+          return;
+        }
 
         // Step 4+: paint + scroll/events with the computed values.
         const applyComputation = (
           computation: LayoutComputation,
           origin: LayoutUpdateOrigin = layoutUpdateOrigin,
-          version = sourceVersion
+          version = sourceVersion,
+          final = true
         ) => {
           const { layout: newLayout } = computation;
           stampSourceVersion(
@@ -563,10 +606,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           stampRevisionPreviewKey(newLayout, previewKey);
           laidOutRef.current = {
             session,
+            layout: newLayout,
             version,
             request: requestWithoutPreview,
             previewKey,
             measurement: computeInputs.measurement,
+            zoom,
+            final,
           };
 
           const pagesEl = pagesContainerRef.current;
@@ -612,12 +658,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           }
         };
 
-        const layOutHere = (): void => {
+        const layOutHere = ({ recovery }: { recovery: boolean }): void => {
           if (isViewerSession(session)) {
             reportLayoutError(session, new Error('The document worker did not return a viewer layout'));
             return;
           }
-          if (registeredWorkerProposalAuthority(session)?.holdsWorkerState()) {
+          if (
+            registeredWorkerProposalAuthority(session)?.holdsWorkerState() ||
+            (!recovery && options?.onHost !== true && workerOpenEnabledRef.current &&
+              workerOpenReplicaPending(session))
+          ) {
             queueWorkerPass(session);
             if (!workerPassRef.current) requestPass();
             return;
@@ -625,7 +675,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           try {
             // An edit may have landed since the pass began.
             if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
-            const version = readSessionVersion(session);
+            const version = readSourceVersion();
             const computation = computeLayout(computeInputs);
             applyComputation(computation, layoutUpdateOrigin, version);
             const totalTime = performance.now() - pipelineStart;
@@ -653,7 +703,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         if (openedVersionRef.current?.session !== session) {
           openedVersionRef.current = { session, version: sourceVersion };
         }
-        const laidOut = laidOutRef.current;
         const previewOnly =
           laidOut?.session === session &&
           laidOut.version === sourceVersion &&
@@ -665,17 +714,19 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         if (
           isViewerSession(session) || registeredWorkerProposalAuthority(session)?.holdsWorkerState() ||
           (!onHost &&
-            sourceVersion !== null &&
-            (previewOnly ||
-              inWorker ||
-              sourceVersion ===
-                (workerOpenEnabledRef.current
-                  ? workerOpenSourceVersion(session, openedVersionRef.current.version)
-                  : openedVersionRef.current.version)))
+            ((workerOpenEnabledRef.current && workerOpenReplicaPending(session)) ||
+              (sourceVersion !== null &&
+                (previewOnly ||
+                  inWorker ||
+                  sourceVersion ===
+                    (workerOpenEnabledRef.current
+                      ? workerOpenSourceVersion(session, openedVersionRef.current.version)
+                      : openedVersionRef.current.version)))))
         ) {
           try {
             workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
           } catch (error) {
+            invalidateRetainedLayout();
             if (!isViewerSession(session) && workerProposalFailure(session) === error) {
               syncCoordinator.onLayoutComplete(currentEpoch);
               return;
@@ -691,7 +742,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         // The spare warmed while fonts loaded has been adopted by now, or is not needed.
         releaseWorkerPrewarm(session);
         if (!workerPass) {
-          layOutHere();
+          invalidateRetainedLayout();
+          layOutHere({ recovery: true });
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
@@ -700,34 +752,40 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           .then(
             (computation) => {
               if (pass !== passRef.current || sessionRef.current !== session) return;
+              if (!computation) invalidateRetainedLayout();
               // A change that landed meanwhile makes the worker's layout stale.
               // Only a queued worker pass follows it at once; until then it is
               // the newest layout there is, so it paints but settles no wait.
               // A queued pass supersedes it even at the same version, such as a
               // revision preview change, and lays out in its place when it failed.
               const stale =
-                readSessionVersion(session) !==
+                readSourceVersion() !==
                 (workerOpenEnabledRef.current
                   ? workerOpenSourceVersion(session, sourceVersion)
                   : sourceVersion);
+              if (!computation && workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
+                if (!queuedBehindWorkerRef.current) layOutHere({ recovery: true });
+                return;
+              }
               // A document only the worker holds lays out its newer state there, not here.
               if (stale && !queuedBehindWorkerRef.current && workerHeld(session)) {
                 queueWorkerPass(session);
               }
               const queued = queuedBehindWorkerRef.current;
               if (!computation || (stale && !queued)) {
-                if (!queued) layOutHere();
+                if (!queued) layOutHere({ recovery: !computation });
                 return;
               }
               if (stale || queued) markSupersededLayout(computation.layout);
-              applyComputation(computation);
+              applyComputation(computation, layoutUpdateOrigin, sourceVersion, !computation.complete);
               // The first pages paint now; the full layout replaces them.
               void computation.complete?.then(
                 (complete) => {
                   if (pass !== passRef.current || sessionRef.current !== session) return;
+                  if (!complete) invalidateRetainedLayout();
                   if (
                     complete &&
-                    readSessionVersion(session) ===
+                    readSourceVersion() ===
                       (workerOpenEnabledRef.current
                         ? workerOpenSourceVersion(session, sourceVersion)
                         : sourceVersion)
@@ -749,18 +807,20 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     workerOpenEnabledRef.current &&
                     layoutInWorkerRef.current?.ownsDocument?.(session) === true &&
                     (nullCompletionRetryRef.current?.session !== session ||
-                      nullCompletionRetryRef.current.version !== sourceVersion)
+                      workerOpenSourceVersion(session, nullCompletionRetryRef.current.version) !==
+                        sourceVersion)
                   ) {
                     nullCompletionRetryRef.current = { session, version: sourceVersion };
                     queueWorkerPass(session);
                     requestPass();
                   } else {
-                    layOutHere();
+                    layOutHere({ recovery: !complete });
                   }
                 },
                 (error: unknown) => {
-                  if (!isViewerSession(session) || pass !== passRef.current ||
-                    sessionRef.current !== session || error instanceof ResidentWorkerOutOfMemoryError) return;
+                  if (pass !== passRef.current || sessionRef.current !== session) return;
+                  invalidateRetainedLayout();
+                  if (!isViewerSession(session) || error instanceof ResidentWorkerOutOfMemoryError) return;
                   if (error instanceof SupersededPreviewError) {
                     if (session.isDisplayOnly?.()) return;
                     queueWorkerPass(session);
@@ -773,6 +833,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             },
             (error: unknown) => {
               if (pass !== passRef.current) return;
+              invalidateRetainedLayout();
               // The display reports a worker out of memory; nothing lays out here.
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
               if (!isViewerSession(session) && workerProposalFailure(session) === error) return;

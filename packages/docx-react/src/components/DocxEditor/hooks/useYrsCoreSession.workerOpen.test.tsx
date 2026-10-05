@@ -4,11 +4,13 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { PluginInvocation } from '../../../../../../shared/plugin-host/runtime';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import * as yrsFacade from '@betteroffice/docx/yrs';
 import * as docx from '@betteroffice/docx/docx';
 import type { Document } from '@betteroffice/docx/types/document';
+import { createStyleResolver } from '@betteroffice/docx/styles';
 import { createFontLoadScope } from '@betteroffice/docx/utils';
 import {
   createYrsSession,
@@ -31,8 +33,10 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
-import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
-import { useCanvasRenderer, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
+import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
+import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
+import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
+import type { ResolveDisplayListQueries } from './displayListQueryEpochGate';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
@@ -42,23 +46,31 @@ import { useHistory } from '../../../hooks/useHistory';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
-import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { useViewerSession } from '../internals/viewerSession';
+import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf, stampSourceVersion } from '../internals/layoutProvenance';
 import { workerOpenSave } from '../internals/workerOpenSave';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
-import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
+import { createDocxCommandController, DocxCommandAdmissionError, UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
+import { testBinding } from '../../../commands/testing';
 import { createCommentIdAllocator } from '../commentFactories';
-import { DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { flushEditorInput } from '../editorBatches';
+import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
+import { createPluginClients } from '../../../plugins/createPluginClients';
+import type { DocxPlugin, DocxPluginContext, DocxPluginEvent, DocxPluginSnapshot } from '../../../plugins/types';
+import * as pluginHosts from '../../../plugins/useDocxPluginHost';
+import * as pluginHostFactories from '../../../plugins/createDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render, renderHook, waitFor } = await import('@testing-library/react');
+const { DocxEditor } = await import('../../DocxEditor');
 const originalWorker = globalThis.Worker;
 const originalCreateYrsSession = yrsFacade.createYrsSession;
 const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
@@ -192,6 +204,7 @@ function installWorker(options: {
   const replies = new Map<number, () => void>();
   const received = new Set<ResidentEngineWorkerRequest>();
   const responses = new Map<ResidentEngineWorkerRequest, ResidentEngineWorkerResponse>();
+  const postWaiters = new Set<() => void>();
   const replyWaiters = new Set<() => void>();
   let proposalCrashed = false;
   let snapshotFailed = false;
@@ -204,7 +217,7 @@ function installWorker(options: {
         get: () => {
           const listener = onmessage;
           return (event: MessageEvent<ResidentEngineWorkerResponse>) => {
-            const request = posted.find((request) => request.id === event.data.id);
+            const request = requests.get(event.data.id);
             const data = event.data;
             const delivered = options.withoutDecisionFontRequirements && data.ok && data.proposal &&
               request?.type === 'proposal' && request.operation.kind === 'setStates'
@@ -230,6 +243,7 @@ function installWorker(options: {
         }
         posted.push(request);
         requests.set(request.id, request);
+        for (const waiter of postWaiters) waiter();
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdBootstrap && request.type === 'bootstrap') ||
@@ -282,6 +296,18 @@ function installWorker(options: {
   } as unknown as typeof Worker;
   return {
     workers, posted, hostModules, replies, responses,
+    sent(type: ResidentEngineWorkerRequest['type'], afterId = 0): Promise<ResidentEngineWorkerRequest> {
+      return new Promise((resolve) => {
+        const check = () => {
+          const request = posted.find((request) => request.type === type && request.id > afterId);
+          if (!request) return;
+          postWaiters.delete(check);
+          resolve(request);
+        };
+        postWaiters.add(check);
+        check();
+      });
+    },
     received(type: ResidentEngineWorkerRequest['type'], afterId = 0, timeout?: number): Promise<ResidentEngineWorkerRequest> {
       let check!: () => void;
       const promise = new Promise<ResidentEngineWorkerRequest>((resolve) => {
@@ -314,7 +340,9 @@ interface HarnessProps {
   previewFirstPage?: boolean;
   /** Opens the first-page preview in the worker, as DocxEditor does. */
   workerPreview?: boolean;
+  handleSave?: () => Promise<ArrayBuffer>;
   openInWorker?: OpenInWorker;
+  onWorkerOpen?: (worker: Awaited<ReturnType<OpenInWorker>>) => void;
   openPreviewInWorker?: OpenPreviewInWorker;
   source: Uint8Array;
   generation: number;
@@ -327,6 +355,7 @@ interface HarnessProps {
   allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
   measurementFont?: Uint8Array;
+  styleResolver?: boolean;
   onHostDocument?: (session: YrsSession) => void;
   onLoad?: (api: DocxEditorRef) => void;
   onPresented?: (session: unknown) => void;
@@ -334,6 +363,9 @@ interface HarnessProps {
   followCompletion?: boolean;
   /** Holds the replica as while the shown engine's completion is still to be asked of the worker. */
   holdReplica?: boolean;
+  layoutReady?: Promise<void>;
+  onLayoutWait?: () => void;
+  layoutCompleteSession?: YrsSession | null;
 }
 
 function useHarness(props: HarnessProps) {
@@ -353,6 +385,13 @@ function useHarness(props: HarnessProps) {
     viewerSessionRef
   );
   useEffect(() => renderer.resetSettled(), [generation]);
+  const settledDisplayList = useCallback<typeof renderer.settledDisplayList>(async (...args) => {
+    props.onLayoutWait?.();
+    const displayList = await renderer.settledDisplayList(...args);
+    await props.layoutReady;
+    if (args[3]?.aborted) throw new Error('The layout wait was cancelled');
+    return displayList;
+  }, [props.layoutReady, props.onLayoutWait, renderer.settledDisplayList]);
   const [host, setHost] = useState<YrsDocxHost | null>(null);
   const [, setCommentsSidebarOpen] = useState(false);
   const mainOpens = useRef<boolean[]>([]);
@@ -365,8 +404,13 @@ function useHarness(props: HarnessProps) {
   }, []);
   const loadChecks = useRef<number[]>([]);
   const openInWorker = useCallback<OpenInWorker>((session, source, digest, generation) => {
-    return (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
-  }, [props.openInWorker, renderer.openInWorker]);
+    const opening = (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
+    if (!props.onWorkerOpen) return opening;
+    return opening.then((worker) => {
+      props.onWorkerOpen?.(worker);
+      return worker;
+    });
+  }, [props.onWorkerOpen, props.openInWorker, renderer.openInWorker]);
   const core = useYrsCoreSession(
     true, host?.document ?? null, props.loader?.yrsSeedDocument ?? null,
     props.loader ? props.loader.yrsSeedBytes : props.source, generation, props.collaboration,
@@ -402,7 +446,10 @@ function useHarness(props: HarnessProps) {
         ...(props.workerPreview ? { openPreviewInWorker: props.openPreviewInWorker ?? renderer.openPreviewInWorker } : {}),
         workerProposals: props.workerProposals,
         refreshWorkerLayout: () => workerRelayout.current?.(),
+        settledDisplayList: props.layoutReady || props.onLayoutWait ? settledDisplayList : renderer.settledDisplayList,
         renderedFrame: renderer.status === 'ready' ? renderer.displayList : null,
+        layoutCompleteSession: props.holdReplica ? null : props.layoutCompleteSession === undefined
+          ? renderer.layoutCompleteSession : props.layoutCompleteSession,
         ...(props.holdReplica ? { pendingCompletion: renderer.presentedEngine } : {}),
         ...(props.followCompletion ? { pendingCompletion: renderer.pendingCompletion } : {}),
         viewer: props.viewer,
@@ -484,6 +531,15 @@ function useHarness(props: HarnessProps) {
       return yrsLocToProjectedDisplayPosition(session, () => projection, loc);
     },
     revealDisplayPosition: (position: number) => { searchReveals.current.push(position); return 'scrolled'; },
+    scrollToParaId: (paraId: string) => {
+      const session = coreRef.current.session!;
+      if (!session.paragraphs('body').some((paragraph) => paragraph.paraId === paraId)) return false;
+      const projection = createYrsPositionProjection(session, 'body');
+      const position = yrsLocToProjectedDisplayPosition(session, () => projection, { story: 'body', paraId, offset: 0 });
+      if (position === null) return false;
+      searchReveals.current.push(position);
+      return true;
+    },
     syncYrsInputState: () => true,
     refreshWorkerLayout: () => workerRelayout.current?.(),
   } as unknown as PagedEditorRef : null, [core.session]);
@@ -501,7 +557,7 @@ function useHarness(props: HarnessProps) {
     documentFromYrs: core.documentFromYrs,
     historyStateRef: { current: host?.document ?? null },
     pagedEditorRef,
-    handleSave: async () => new ArrayBuffer(0),
+    handleSave: props.handleSave ?? (async () => new ArrayBuffer(0)),
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -512,7 +568,7 @@ function useHarness(props: HarnessProps) {
     setShowCommentsSidebar: () => {},
     contentChangeSubscribersRef: { current: new Set() },
     selectionChangeSubscribersRef: { current: new Set() },
-    getCachedStyleResolver: (() => { throw new Error('unused'); }) as never,
+    getCachedStyleResolver: props.styleResolver ? createStyleResolver : (() => { throw new Error('unused'); }) as never,
     commentIdAllocator: createCommentIdAllocator(),
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'viewing' },
@@ -942,6 +998,7 @@ test('eager worker open preserves input and command order after first paint unti
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={harness.renderer.onLayoutComputed}
         canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
         commandBridgeRef={bridge} />
     </>;
@@ -1263,6 +1320,7 @@ test('eager worker-open hydration failure rejects flush, command and save during
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={harness.renderer.onLayoutComputed}
         canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
         commandBridgeRef={bridge} />
     </>;
@@ -1318,9 +1376,14 @@ function texts(session: YrsSession) {
   ]));
 }
 
-function holdFrames() {
+function holdFrames(holdPeerIdle = false) {
   const request = globalThis.requestAnimationFrame;
   const cancel = globalThis.cancelAnimationFrame;
+  const idle = holdPeerIdle ? holdIdle() : {
+    callbacks: new Map<number, { callback: IdleRequestCallback; options?: IdleRequestOptions }>(),
+    run: () => {},
+    restore: () => {},
+  };
   const frames = new Map<number, FrameRequestCallback>();
   let nextId = 0;
   globalThis.requestAnimationFrame = (callback) => {
@@ -1335,6 +1398,8 @@ function holdFrames() {
   };
   return {
     run,
+    runIdle: idle.run,
+    idleCallbacks: idle.callbacks,
     async waitFor(assertion: () => void, timeoutMs = 1000): Promise<void> {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
@@ -1373,9 +1438,14 @@ function holdFrames() {
       await act(async () => {});
       return promise;
     },
+    async settleAndIdle(promise: Promise<unknown>) {
+      await this.untilCommitted(promise);
+      await act(async () => idle.run());
+    },
     restore: registerRestore(() => {
       globalThis.requestAnimationFrame = request;
       globalThis.cancelAnimationFrame = cancel;
+      idle.restore();
     }),
   };
 }
@@ -1388,7 +1458,7 @@ function holdReplicaTimers() {
   let nextId = 0;
   globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
     const [callback, delay, ...args] = input;
-    if ((delay === 1000 || delay === 5000) && typeof callback === 'function') {
+    if ((delay === 1000 || delay === 5000 || delay === 10_000) && typeof callback === 'function') {
       const id = --nextId as unknown as ReturnType<typeof setTimeout>;
       pending.set(id, { at: now + delay, run: () => callback(...args) });
       return id;
@@ -1414,6 +1484,77 @@ function holdReplicaTimers() {
       globalThis.setTimeout = schedule;
     }),
   };
+}
+
+function expectLoadingMutations(api: DocxEditorRef, editor: PagedEditorRef, paraId = '00000001') {
+  const session = editor.getYrsSession()!;
+  const started = replicaHelpers.workerOpenReplicaStarted(session);
+  const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+  const requests = request.mock.calls.length;
+  const ensure = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+  const admissions = ensure.mock.calls.length;
+  const calls: Partial<Record<keyof DocxEditorRef, unknown[]>> = {
+    addComment: [{ paraId: '00000001', search: 'paragraph', text: 'Check', author: 'Ann' }],
+    proposeChange: [{ paraId: '00000001', search: 'paragraph', replaceWith: 'text', author: 'Host' }],
+    applyFormatting: [{ paraId: '00000001', search: 'paragraph', marks: { bold: true } }],
+    setParagraphStyle: [{ paraId: '00000001', styleId: 'Normal' }],
+    insertBreak: [{ paraId: '00000001', type: 'page' }],
+  };
+  for (const member of DOCX_REF_REPLICA_LOADING_MUTATIONS) {
+    const args = calls[member];
+    if (!args) throw new Error(`Missing loading mutation: ${member}`);
+    expect(() => Reflect.apply(api[member] as Function, api, args)).toThrow(DocxReplicaNotReadyError);
+  }
+  const navigate = spyOn(editor, 'scrollToParaId');
+  expect(api.getDocument()).toBeNull();
+  expect(api.getEditorRef()).toBeNull();
+  expect(api.findInDocument('paragraph')).toEqual([]);
+  expect(api.scrollToParaId(paraId)).toBe(false);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+  expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(started);
+  expect(request.mock.calls).toHaveLength(requests);
+  expect(ensure.mock.calls).toHaveLength(admissions);
+}
+
+function expectReadyMutations(api: DocxEditorRef, session: YrsSession, editor: PagedEditorRef, reveals: readonly number[], paraId = session.paragraphs('body')[0]!.paraId) {
+  expect(api.getDocument()).not.toBeNull();
+  expect(api.getEditorRef()).toBe(editor);
+  const first = session.paragraphs('body')[0]!;
+  expect(api.findInDocument(first.text)).toContainEqual(expect.objectContaining({ paraId: first.paraId, match: first.text }));
+  const revealed = reveals.length;
+  expect(api.scrollToParaId(paraId)).toBe(true);
+  const target = editor.yrsLocToDisplayPosition({ story: 'body', paraId, offset: 0 });
+  expect(target).not.toBeNull();
+  expect(reveals.slice(revealed)).toEqual([target!]);
+  expect(reveals).toContain(target!);
+  const last = session.paragraphs('body').at(-1)!;
+  const search = 'Replica contract';
+  let mutationParaId!: string;
+  act(() => {
+    const span = session.locateParagraph('body', last.paraId);
+    mutationParaId = session.splitParagraph({ story: 'body', paraId: last.paraId, offset: span.end - span.start }).secondParaId;
+    session.insertText({ story: 'body', paraId: mutationParaId, offset: 0 }, search);
+    session.setParagraphAttr(mutationParaId, 'pStyle', 'Heading1');
+  });
+  act(() => {
+    const comment = api.addComment({ paraId: mutationParaId, search, text: 'Check', author: 'Ann' });
+    expect(comment).toEqual(expect.any(Number));
+    expect(session.resolveComment(String(comment))).toContainEqual(expect.objectContaining({ story: 'body' }));
+    expect(api.applyFormatting({ paraId: mutationParaId, search, marks: { bold: true } })).toBe(true);
+    expect(session.storySegments('body')).toContainEqual(expect.objectContaining({
+      kind: 'text', text: search, attributes: expect.objectContaining({ bold: true }),
+    }));
+    expect(api.setParagraphStyle({ paraId: mutationParaId, styleId: 'Normal' })).toBe(true);
+    expect(session.paragraphs('body').find((entry) => entry.paraId === mutationParaId)!.properties.pStyle).toBe('Normal');
+    expect(api.proposeChange({ paraId: mutationParaId, search: '', replaceWith: 'Replica ready', author: 'Host' })).toBe(true);
+    expect(session.listRevisions()).toContainEqual(expect.objectContaining({
+      kind: 'insertion', author: 'Host', preview: 'Replica ready',
+    }));
+    const breaks = session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak').length;
+    expect(api.insertBreak({ paraId: mutationParaId, type: 'page' })).toBe(true);
+    expect(session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak')).toHaveLength(breaks + 1);
+  });
 }
 
 function trackMainLoads() {
@@ -1610,7 +1751,7 @@ test.each([false, true])('leaving viewer kind loads the editor replica once with
         frames.run();
         frames.run();
       } else {
-        timers.advance(5000);
+        timers.advance(10_000);
       }
     });
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
@@ -1749,6 +1890,8 @@ test('a painted main preview hands off to the worker before hydrating the full r
     await act(async () => { workers[0].release(); });
     await waitFor(() => expect(result.current.core.previewing).toBe(false));
     const full = result.current.core.session!;
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
     expect(full).not.toBe(preview);
     expect(full.isDisplayOnly()).toBe(false);
     expect(full.storyIds()).toEqual([]);
@@ -1785,7 +1928,8 @@ test('a painted main preview hands off to the worker before hydrating the full r
     expect(result.current.core.opening).toBe(false);
     expect(destroyed).toHaveBeenCalledTimes(1);
     act(() => frames.run());
-    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
     act(() => frames.run());
     await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
     expect(result.current.mainOpens).toEqual([]);
@@ -2488,11 +2632,9 @@ test('a worker lost during the handoff opens a full main replica', async () => {
   expect(posted.filter((request) => request.type === 'bootstrap')).toHaveLength(bootstraps);
 });
 
-test('getEditorRef during load opens the main replica and recovers worker rendering', async () => {
-  const { workers, posted, responses } = installWorker({ holdReply: () => false });
-  const frames = holdFrames();
-  const warning = spyOn(console, 'warn').mockImplementation(() => {});
-  let mainState: Uint8Array | null = null;
+test('eager hydration keeps worker rendering and proposal updates', async () => {
+  const { workers, posted } = installWorker({ holdReply: () => false });
+  const frames = holdFrames(true);
   let mirror: ReturnType<typeof spyOn<YrsSession, 'mirrorWorkerDocument'>> | undefined;
   let layoutHere: ReturnType<typeof spyOn<YrsSession, 'layoutDocumentWithRegionsRetainedJson'>> | undefined;
   let buildHere: ReturnType<typeof spyOn<YrsSession, 'buildDisplayListFrame'>> | undefined;
@@ -2500,41 +2642,50 @@ test('getEditorRef during load opens the main replica and recovers worker render
   let session!: YrsSession;
   const { result, unmount } = renderHook(useHarness, {
     initialProps: {
-      ...initialProps, workerProposals: true, allowHostProposals: true,
+      ...initialProps, workerProposals: true, allowHostProposals: true, styleResolver: true,
       onHostDocument: (next) => { session = next; },
-      onLoad: (api) => {
+      onLoad: () => {
         expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
         mirror = spyOn(session, 'mirrorWorkerDocument');
         layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
         buildHere = spyOn(session, 'buildDisplayListFrame');
         terminate = spyOn(workers[0]!, 'terminate');
-        expect(api.getEditorRef()?.getYrsSession()).toBe(session);
-        expect(api.getEditorRef()?.getYrsSession()).toBe(session);
-        mainState = session.encodeState();
       },
     },
   });
   try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const openingApi = result.current.ref.current!;
+    const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+    expect(openingApi.getEditorRef()).toBeNull();
+    expectLoadingMutations(openingApi, result.current.pagedEditorRef.current!);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(request).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
+    act(() => {
+      frames.run();
+      frames.run();
+    });
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
-    await waitFor(() => expect(mainState).not.toBeNull());
+    expectReadyMutations(openingApi, session, result.current.pagedEditorRef.current!, result.current.searchReveals);
+    act(() => result.current.pipeline.scheduleLayout('remote', true));
+    expect(openingApi.getEditorRef()?.getYrsSession()).toBe(session);
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
-    expect(result.current.mainOpens).toEqual([true]);
+    expect(result.current.mainOpens).toEqual([false]);
     expect(mirror).toHaveBeenCalledWith(null);
     expect(session.workerDocumentMirrored()).toBe(false);
-    expect(terminate).toHaveBeenCalledTimes(1);
+    expect(terminate).not.toHaveBeenCalled();
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
-    expect(workers).toHaveLength(2);
-    expect(workers[1]!.requests[0]).toBe('bootstrap');
+    expect(workers).toHaveLength(1);
     const bootstrap = posted.find((request) => request.type === 'bootstrap')!;
     expect(bootstrap.type).toBe('bootstrap');
     if (bootstrap.type !== 'bootstrap') throw new Error('Missing bootstrap');
-    expect(bootstrap.opened).toBeUndefined();
-    expect(bootstrap.snapshot.workerAuthoritative).toBeUndefined();
-    expect(bootstrap.snapshot.state).toEqual(mainState!);
-    const reply = responses.get(bootstrap)!;
-    expect(reply.ok).toBe(true);
-    if (!reply.ok || !reply.frame) throw new Error('Missing bootstrap frame');
-    expect(decodeFrameDelta(new Uint8Array(reply.frame)).full).toBe(true);
+    expect(bootstrap.opened).toBe(true);
     expect(result.current.renderer.workerSurfacesActive).toBe(true);
 
     const api = result.current.ref.current!;
@@ -2572,14 +2723,12 @@ test('getEditorRef during load opens the main replica and recovers worker render
     if (accepted.type !== 'sync') throw new Error('Missing proposal sync');
     expect(accepted.snapshot.workerAuthoritative).toBeUndefined();
     await waitFor(() => expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version()));
-    expect(workers[1]!.requests).toContain('sync');
+    expect(workers[0]!.requests).toContain('sync');
     expect(posted.filter((request) => request.type === 'open')).toHaveLength(1);
-    expect(result.current.mainOpens).toEqual([true]);
+    expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.renderer.workerSurfacesActive).toBe(true);
     expect(layoutHere).not.toHaveBeenCalled();
     expect(buildHere).not.toHaveBeenCalled();
-    expect(warning).toHaveBeenCalledTimes(1);
-    expect(warning.mock.calls[0]![0]).toContain('[DocxEditor] getEditorRef()');
     expect(result.current.errors).toEqual([]);
   } finally {
     unmount();
@@ -2587,81 +2736,12 @@ test('getEditorRef during load opens the main replica and recovers worker render
     layoutHere?.mockRestore();
     buildHere?.mockRestore();
     terminate?.mockRestore();
-    warning.mockRestore();
     frames.restore();
   }
 });
 
-test('sync recovery follows the shown epoch and ignores a destroyed worker\'s late layout', async () => {
-  let holdSync = false;
-  const { workers, posted, responses, reply } = installWorker({
-    holdState: true, holdReply: (request) => holdSync && request.type === 'sync',
-  });
-  const frames = holdFrames();
-  const warning = spyOn(console, 'warn').mockImplementation(() => {});
-  const { result, unmount } = renderHook(useHarness, {
-    initialProps,
-  });
-  try {
-    await waitFor(() => expect(result.current.host).not.toBeNull());
-    const session = result.current.core.session!;
-    act(() => result.current.pipeline.runLayoutPipeline());
-    await waitFor(() => expect(result.current.renderer.frame).not.toBeNull());
-    const shownEpoch = result.current.renderer.frame!.frameEpoch;
-    expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
-    const layoutHere = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
-    const buildHere = spyOn(session, 'buildDisplayListFrame');
-    const terminate = spyOn(workers[0]!, 'terminate');
-    try {
-      holdSync = true;
-      act(() => result.current.pipeline.scheduleLayout('remote', true));
-      act(() => frames.run());
-      await waitFor(() => expect(posted.some((request) => request.type === 'sync')).toBe(true));
-      const stale = posted.find((request) => request.type === 'sync')!;
-      await waitFor(() => expect(responses.has(stale)).toBe(true));
-      act(() => { void requestWorkerOpenReplica(session); });
-      await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
-      act(() => { result.current.ref.current!.getEditorRef(); });
-      expect(terminate).toHaveBeenCalledTimes(1);
-      holdSync = false;
-      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
-      expect(workers).toHaveLength(2);
-      const bootstrap = posted.filter((request) => request.type === 'bootstrap').at(-1)!;
-      if (bootstrap.type !== 'bootstrap') throw new Error('Missing recovery bootstrap');
-      expect(bootstrap.expectedFrameEpoch).toBeGreaterThanOrEqual(shownEpoch);
-      expect(bootstrap.opened).toBeUndefined();
-      expect(bootstrap.snapshot.workerAuthoritative).toBeUndefined();
-      const recovered = responses.get(bootstrap)!;
-      if (!recovered.ok || !recovered.frame) throw new Error('Missing recovery frame');
-      const delta = decodeFrameDelta(new Uint8Array(recovered.frame));
-      expect(delta.full).toBe(true);
-      expect(delta.frameEpoch).toBeGreaterThan(shownEpoch);
-      const frame = result.current.renderer.frame;
-      const layout = result.current.pipeline.layout;
-      await act(async () => { reply(stale); workers[0]!.release(); });
-      act(() => frames.run());
-      expect(result.current.renderer.frame).toBe(frame);
-      expect(result.current.pipeline.layout).toBe(layout);
-      expect(result.current.mainOpens).toEqual([true]);
-      expect(layoutHere).not.toHaveBeenCalled();
-      expect(buildHere).not.toHaveBeenCalled();
-      expect(warning).toHaveBeenCalledTimes(1);
-      expect(result.current.errors).toEqual([]);
-    } finally {
-      layoutHere.mockRestore();
-      buildHere.mockRestore();
-      terminate.mockRestore();
-    }
-  } finally {
-    unmount();
-    warning.mockRestore();
-    frames.restore();
-  }
-});
-
-test('a failed synchronous main open keeps rendering pinned to the main engine', async () => {
+test('a failed worker-recovery main open keeps rendering pinned to the main engine', async () => {
   const { workers, posted } = installWorker();
-  const warning = spyOn(console, 'warn').mockImplementation(() => {});
   const { result, unmount } = renderHook(useHarness, {
     initialProps,
   });
@@ -2669,11 +2749,20 @@ test('a failed synchronous main open keeps rendering pinned to the main engine',
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
     const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+    expect(api.getEditorRef()).toBeNull();
+    expectLoadingMutations(api, result.current.pagedEditorRef.current!);
+    expect(request).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
     const failure = new Error('Main open failed');
     open = spyOn(session, 'openDocx').mockImplementation(() => { throw failure; });
     const ready = awaitWorkerOpenReplica(session)!;
-    act(() => expect(() => result.current.ref.current!.getEditorRef()).toThrow(failure));
+    act(() => expect(() => ensureWorkerOpenReplica(session)).toThrow(failure));
     await expect(ready).rejects.toBe(failure);
+    expect(() => api.getEditorRef()).toThrow(failure);
     expect(() => result.current.renderer.layoutInWorker(session, '{}')).toThrow(failure);
     expect(workers).toHaveLength(1);
     expect(posted.some((request) => request.type === 'bootstrap')).toBe(false);
@@ -2681,7 +2770,48 @@ test('a failed synchronous main open keeps rendering pinned to the main engine',
   } finally {
     open?.mockRestore();
     unmount();
-    warning.mockRestore();
+  }
+});
+
+test('a successful worker-recovery main open permits pending reads, navigation and mutations', async () => {
+  const { workers, posted } = installWorker();
+  const frames = holdFrames(true);
+  const source = await longFixture(2);
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source },
+  });
+  try {
+    await frames.waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const api = result.current.ref.current!;
+    const editor = result.current.pagedEditorRef.current!;
+    const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+    const ensure = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+    expect(api.getEditorRef()).toBeNull();
+    expectLoadingMutations(api, editor);
+    expect(request).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    const ready = awaitWorkerOpenReplica(session)!;
+    act(() => ensureWorkerOpenReplica(session));
+    await frames.untilCommitted(ready);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
+    expect(ensure.mock.calls).toEqual([[session], [session]]);
+    expect(api.findInDocument('paragraph')).toContainEqual({
+      paraId: 'body:p0', match: 'paragraph', before: 'First ', after: '',
+    });
+    expectReadyMutations(api, session, editor, result.current.searchReveals);
+    expect(result.current.mainOpens).toEqual([true]);
+    expect(request).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(workers).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    frames.restore();
   }
 });
 
@@ -2745,6 +2875,8 @@ test('a first-layout font setup failure starts the replica for pending reads and
 
 test('a worker open without a frame or error starts the replica after the bounded wait', async () => {
   const { workers, posted } = installWorker({ holdState: true });
+  const peerFallback = holdPeerFallback();
+  const layoutFallback = holdLayoutFallback();
   const { result } = renderHook(useHarness, { initialProps });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   expect(await result.current.ref.current!.save()).toEqual(new ArrayBuffer(0));
@@ -2756,12 +2888,15 @@ test('a worker open without a frame or error starts the replica after the bounde
   const completed = { value: false };
   void calls.then(() => { completed.value = true; });
   expect(posted.map((request) => request.type)).toEqual(['open']);
+  act(() => peerFallback.advance(10_000));
   await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true), { timeout: 7000 });
   expect(result.current.renderer.frame).toBeNull();
   expect(result.current.errors).toEqual([]);
   expect(result.current.mainOpens).toEqual([]);
   expect(completed.value).toBe(false);
   await act(async () => { workers[0].release(); });
+  await waitFor(() => expect(layoutFallback.timers.size).toBe(2));
+  act(() => layoutFallback.advance(3000));
   await waitFor(() => expect(completed.value).toBe(true));
   const settled = await calls;
   expect(settled[0]).toMatchObject({ status: 'fulfilled', value: { ok: true } });
@@ -4192,7 +4327,7 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
   });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...workerProposalProps, viewer },
+    initialProps: { ...workerProposalProps, viewer, styleResolver: !viewer },
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -4219,6 +4354,14 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
       let proposal!: ResidentEngineWorkerRequest;
       await act(async () => { proposal = await received('proposal', snapshot.id); });
       expect(proposal).toMatchObject({ operation: { kind: 'propose' } });
+      if (!viewer) {
+        const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+        expect(api().getDocument()).toBeNull();
+        expectLoadingMutations(api(), result.current.pagedEditorRef.current!, paragraph.paraId);
+        expect(request).not.toHaveBeenCalled();
+        expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+        expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+      } else
       act(() => { expect(() => api().getDocument()).toThrow(viewer ? DocxAsyncOnlyError : DocxReplicaNotReadyError); });
       if (viewer) {
         expect(() => api().getPageContent(1)).toThrow(DocxAsyncOnlyError);
@@ -4237,8 +4380,14 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
       await act(async () => {
         reply(proposal);
         expect(await proposed).toMatchObject({ ok: true });
-        if (!viewer) await awaitWorkerOpenReplica(session);
+        if (!viewer) {
+          const ready = api().flushPendingInput();
+          await requestWorkerOpenReplica(session);
+          await ready;
+        }
       });
+      if (!viewer) expectReadyMutations(api(), session, result.current.pagedEditorRef.current!, result.current.searchReveals, paragraph.paraId);
+      if (!viewer) expect(api().getDocument()).not.toBeNull();
       expect(result.current.core.replicaReady).toBe(!viewer);
       expect(workerOpenDocumentHeld(session)).toBe(viewer);
       expect(result.current.mainOpens).toEqual(viewer ? [] : [false]);
@@ -4264,14 +4413,14 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
   }
 });
 
-test('a failed first proposal leaves an editor replica fallback available', async () => {
+test('a failed first proposal leaves the replica fallback available', async () => {
   const { workers, posted, received, reply } = installWorker({
     failProposal: true,
     holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
   });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...workerProposalProps, viewer: false },
+    initialProps: { ...workerProposalProps, viewer: false, styleResolver: true },
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -4308,7 +4457,17 @@ test('a failed first proposal leaves an editor replica fallback available', asyn
       expect(session.getProposals()).toEqual(initial);
       expect(terminate).not.toHaveBeenCalled();
       expect(result.current.core.replicaReady).toBe(false);
-      act(() => { expect(api().getDocument()).not.toBeNull(); });
+      const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+      expect(api().getDocument()).toBeNull();
+      expectLoadingMutations(api(), result.current.pagedEditorRef.current!, paragraph.paraId);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+      expect(request).not.toHaveBeenCalled();
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      act(() => { ensureWorkerOpenReplica(session); });
+      expectReadyMutations(api(), session, result.current.pagedEditorRef.current!, result.current.searchReveals, paragraph.paraId);
+      expect(result.current.core.documentFromYrs()).not.toBeNull();
+      expect(api().getDocument()).not.toBeNull();
       expect(result.current.mainOpens).toEqual([true]);
       expect(terminate).toHaveBeenCalledTimes(1);
       expect(result.current.core.replicaReady).toBe(true);
@@ -4689,4 +4848,4242 @@ test('a failed empty hand-over releases the mirror before using the main replica
     expectVersion: session.version(), expectPreviewVersion: session.getProposals().previewVersion,
     changes: [],
   })).toMatchObject({ ok: true });
+});
+
+async function openingEditor(workerPreview = true, viewer = false, options: {
+  delayQueries?: boolean;
+  source?: Uint8Array;
+  residentInput?: boolean;
+  publishLayout?: boolean;
+  holdFullLayout?: boolean;
+  holdReply?: (request: ResidentEngineWorkerRequest) => boolean;
+  onFirstPagePainted?: (input: { click(position: number): void; type(text: string): void }) => void;
+} = {}) {
+  const isFullOpen = (request: ResidentEngineWorkerRequest) =>
+    request.type === 'open' && request.previewBlocks === undefined;
+  let layoutHeld = false;
+  let fullOpenId = 0;
+  const holdReply = options.holdFullLayout
+    ? (request: ResidentEngineWorkerRequest) => options.holdReply?.(request) === true ||
+      (layoutHeld && (request.type === 'sync' || request.type === 'completeLayout'))
+    : options.holdReply;
+  const worker = installWorker(workerPreview
+    ? { holdReply: (request) => isFullOpen(request) || holdReply?.(request) === true, holdState: true }
+    : { holdOpen: true, holdState: true, holdReply });
+  const frames = holdFrames(true);
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  let releaseQueries = () => {};
+  const queryReady = new Promise<void>((resolve) => { releaseQueries = resolve; });
+  let queriesReleased = !options.delayQueries;
+  let previousInputQueries: DisplayListQueries | null = null;
+  const inputQueryFacades = new WeakMap<DisplayListQueries, DisplayListQueries>();
+  const inputQueries = (queries: DisplayListQueries | null | undefined) => {
+    if (!queries || !options.delayQueries) return queries;
+    let facade = inputQueryFacades.get(queries);
+    if (!facade) {
+      const loaded = spyOn(queryEngines, 'loadedRustDisplayListQueryEngine').mockReturnValue(null);
+      const loading = spyOn(queryEngines, 'loadRustDisplayListQueryEngine').mockImplementation(async () => {
+        await queryReady;
+        await queries.whenReady();
+        const engine: queryEngines.RustDisplayListQueryEngine = {
+          hitTestRegionsJson: (_list, pageIndex, x, y) => JSON.stringify(queries.hitTestRegions(pageIndex, x, y)),
+          rangeRectsJson: () => '[]',
+        };
+        return engine;
+      });
+      try {
+        facade = createDisplayListQueries(queries.displayList, undefined, previousInputQueries, harness.core.session);
+      } finally {
+        loaded.mockRestore();
+        loading.mockRestore();
+      }
+      previousInputQueries = facade;
+      inputQueryFacades.set(queries, facade);
+    }
+    return facade;
+  };
+  const props = { ...initialProps, source: options.source ?? (options.holdFullLayout ? await longFixture(1200) : longBytes),
+    previewFirstPage: true, workerPreview,
+    viewer, workerProposals: viewer, readOnly: viewer };
+  const selections: Array<ReturnType<YrsSession['cellSelection']>> = [];
+  function Editable({ source, generation, readOnly = viewer, viewer: viewerRequested = viewer }: Pick<HarnessProps, 'source' | 'generation' | 'readOnly' | 'viewer'>) {
+    const viewerSession = useViewerSession(props.experimentalWorkerOpen, viewerRequested, generation);
+    harness = useHarness({
+      ...props, source, generation, readOnly, viewer: viewerSession,
+      handleSave: async () => {
+        const current = editor.current;
+        const session = current?.getYrsSession();
+        if (session && replicaHelpers.workerOpenReplicaStarted(session)) {
+          await awaitWorkerOpenReplica(session);
+        }
+        await current?.flushPendingInput();
+        return new ArrayBuffer(0);
+      },
+    });
+    const layoutInWorker = useMemo<LayoutInWorker>(() => {
+      const layout = harness.renderer.layoutInWorker;
+      if (!options.holdFullLayout) return layout;
+      let pending: ReturnType<LayoutInWorker> = null;
+      return Object.assign((session: YrsSession, request: string) => {
+        if (!layoutHeld || session.isDisplayOnly() || !replicaHelpers.workerOpenReplicaPending(session)) {
+          return layout(session, request);
+        }
+        return pending ??= layout(session, request);
+      }, { prewarm: layout.prewarm, ownsDocument: layout.ownsDocument });
+    }, [harness.core.session, harness.renderer.layoutInWorker]);
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        readOnly={readOnly || harness.core.opening} holdInput={!readOnly && harness.core.opening} inputScope={generation}
+        viewerDocumentRead={viewerSession ? harness.renderer.readWorkerDocument : undefined}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={layoutInWorker}
+        onLayoutComputed={options.publishLayout || (options.holdFullLayout && !harness.core.previewing)
+          ? harness.renderer.onLayoutComputed : undefined}
+        applyResidentInput={options.residentInput ? harness.renderer.applyInput : undefined}
+        canvasHostRef={canvasHost} displayListQueries={queriesReleased ? harness.renderer.queries : null}
+        inputQueries={viewerSession ? undefined : inputQueries(harness.renderer.inputQueries)}
+        onYrsSelectionChange={() => selections.push(harness.core.session!.cellSelection())} />
+    </>;
+  }
+  const view = render(<Editable {...props} />);
+  const pointAt = (position: number) => {
+    const queries = harness.renderer.queries!;
+    const caret = queries.caretRect(position)!;
+    const size = queries.pageSize(0)!;
+    const canvas = canvasHost.current!.firstElementChild!;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
+      bottom: size.height, ...size }) as DOMRect;
+    return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+  };
+  const mouseDown = (position: number) => {
+    const point = pointAt(position);
+    const canvas = canvasHost.current!.firstElementChild!;
+    if (fireEvent.mouseDown(canvas, point)) (document.activeElement as HTMLElement | null)?.blur();
+  };
+  const mouseMove = (position: number) => fireEvent.mouseMove(canvasHost.current!.firstElementChild!, pointAt(position));
+  const mouseUp = (position: number) => fireEvent.mouseUp(window, pointAt(position));
+  const click = (position: number) => {
+    const point = pointAt(position);
+    const canvas = canvasHost.current!.firstElementChild!;
+    mouseDown(position);
+    fireEvent.mouseUp(window, point);
+    fireEvent.click(canvas, point);
+  };
+  const type = (text: string) => {
+    for (const key of text) {
+      const target = document.activeElement!;
+      fireEvent.keyDown(target, { key });
+      fireEvent.input(target, { target: { value: key } });
+    }
+  };
+  const waitForPreview = async (generation = 1) => {
+    await waitFor(() => {
+      expect(harness.core.previewing).toBe(true);
+      expect(harness.core.sessionGeneration).toBe(generation);
+    });
+    const preview = harness.core.session!;
+    act(() => harness.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(harness.renderer.presentedEngine).toBe(preview));
+    await waitFor(() => expect(harness.renderer.queries?.isReady()).toBe(true));
+    act(() => {
+      harness.presentFrame();
+      options.onFirstPagePainted?.({ click, type });
+    });
+    return preview;
+  };
+  try {
+    const preview = await waitForPreview();
+    await waitFor(() => expect(worker.posted.some(isFullOpen)).toBe(true));
+    const switchToFull = async () => {
+      act(() => frames.run());
+      act(() => frames.run());
+      await waitFor(() => expect(worker.posted.some(isFullOpen)).toBe(true));
+      const request = worker.posted.filter(isFullOpen).at(-1)!;
+      if (workerPreview) await waitFor(() => expect(worker.replies.has(request.id)).toBe(true));
+      fullOpenId = request.id;
+      layoutHeld = options.holdFullLayout === true;
+      await act(async () => {
+        if (workerPreview) worker.reply(request);
+        else worker.workers.at(-1)!.release();
+      });
+      await waitFor(() => expect(harness.core.previewing).toBe(false));
+      expect(harness.core.opening).toBe(true);
+      expect(harness.core.replicaReady).toBe(false);
+      return harness.core.session!;
+    };
+    const presentFull = async (full: YrsSession, startPeer = true) => {
+      if (options.holdFullLayout) {
+        await worker.received('completeLayout', fullOpenId);
+      } else {
+        act(() => harness.pipeline.runLayoutPipeline());
+      }
+      await waitFor(() => expect(harness.renderer.presentedEngine).toBe(full));
+      act(() => harness.presentFrame());
+      expect(harness.core.opening).toBe(false);
+      if (!startPeer) return;
+      await frames.settleAndIdle(harness.renderer.settledDisplayList(null, null, 'window'));
+      await waitFor(() => expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(true));
+    };
+    const loadPeer = async (full: YrsSession) => {
+      await act(async () => {
+        worker.workers.at(-1)!.release();
+        await awaitWorkerOpenReplica(full);
+        await editor.current!.flushPendingInput();
+      });
+    };
+    return {
+      ...worker, frames, editor, view, preview, click, type, switchToFull, presentFull, loadPeer,
+      mouseDown, mouseMove, mouseUp, pointAt, selections,
+      reply(request: ResidentEngineWorkerRequest) {
+        worker.reply(request);
+        if (!options.holdFullLayout || request.type !== 'completeLayout') return;
+        layoutHeld = false;
+        for (const pending of worker.posted) {
+          if (pending.type === 'sync' && pending.id > fullOpenId && worker.replies.has(pending.id)) {
+            worker.reply(pending);
+          }
+        }
+      },
+      releaseInputQueries() {
+        queriesReleased = true;
+        releaseQueries();
+      },
+      get harness() { return harness; },
+      get pendingQueries() { return previousInputQueries; },
+      setReadOnly(readOnly: boolean, viewerSession = viewer) {
+        view.rerender(<Editable {...props} readOnly={readOnly} viewer={viewerSession} />);
+      },
+      async replace() {
+        if (options.holdFullLayout) layoutHeld = false;
+        view.rerender(<Editable source={props.source.slice()} generation={2} />);
+        const replacement = await waitForPreview(2);
+        await waitFor(() => expect(worker.workers).toHaveLength(2));
+        return replacement;
+      },
+      close() {
+        view.unmount();
+        releaseQueries();
+        frames.restore();
+      },
+    };
+  } catch (error) {
+    view.unmount();
+    releaseQueries();
+    frames.restore();
+    throw error;
+  }
+}
+
+function pluginLoadGate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+function workerLoadRecorder(load?: () => Promise<void>) {
+  const events: DocxPluginEvent[] = [];
+  const contexts: DocxPluginContext<null>[] = [];
+  const plugin = defineDocxPlugin<null>({
+    id: 'test.worker-load',
+    createState: () => null,
+    onEvent(context, event) {
+      events.push(event);
+      if (event.type !== 'load') return;
+      contexts.push(context);
+      return load?.();
+    },
+    commands: [{
+      id: 'ready', label: 'Ready', mutatesDocument: false,
+      execute: () => ({ ok: true, status: 'executed' }),
+    }],
+  });
+  return {
+    plugin, contexts,
+    loads: () => events.filter((event) => event.type === 'load'),
+    changes: () => events.filter((event) => event.type === 'document-change'),
+  };
+}
+
+function openingPluginEditor(plugin: DocxPlugin, replay?: Promise<void>) {
+  const restores: Array<() => void> = [];
+  let view: ReturnType<typeof render> | undefined;
+  const close = () => {
+    try {
+      view?.unmount();
+    } finally {
+      for (const restore of [...restores].reverse()) restore();
+    }
+  };
+  try {
+    const previousWorker = globalThis.Worker;
+    const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+    restores.push(registerRestore(() => { globalThis.Worker = previousWorker; }));
+    restores.push(registerRestore(() => {
+      if (fonts) Object.defineProperty(document, 'fonts', fonts);
+      else Reflect.deleteProperty(document, 'fonts');
+    }));
+    const frames = holdFrames(true);
+    restores.push(frames.restore);
+    let editorRef: React.RefObject<PagedEditorRef | null> | undefined;
+    const bindPlugins = pluginHosts.useDocxPluginHost;
+    const captureEditor = spyOn(pluginHosts, 'useDocxPluginHost').mockImplementation((options) => {
+      editorRef = options.pagedEditorRef;
+      return bindPlugins(options);
+    });
+    restores.push(registerRestore(() => captureEditor.mockRestore()));
+    const peerReady = replicaHelpers.awaitWorkerOpenReplica;
+    if (replay) {
+      const wait = spyOn(replicaHelpers, 'awaitWorkerOpenReplica').mockImplementation((session) => {
+        const peer = peerReady(session);
+        return peer?.then(() => replay);
+      });
+      restores.push(registerRestore(() => wait.mockRestore()));
+    }
+    const fullOpen = (request: ResidentEngineWorkerRequest) =>
+      request.type === 'open' && request.previewBlocks === undefined;
+    const worker = installWorker({
+      holdReply: (request) => fullOpen(request) || request.type === 'encodeState',
+    });
+    if (!document.fonts) Object.defineProperty(document, 'fonts', {
+      value: {
+        addEventListener: () => {}, removeEventListener: () => {}, ready: Promise.resolve(),
+      },
+      configurable: true,
+    });
+    const ref = createRef<DocxEditorRef>();
+    const errors: unknown[] = [];
+    let painted = false;
+    const until = async (done: () => boolean) => {
+      await waitFor(() => {
+        act(() => { frames.run(); frames.runIdle(); });
+        if (errors.length) throw new AggregateError(errors, 'Worker-open editor failed');
+        expect(done()).toBe(true);
+      }, { timeout: 5_000 });
+    };
+    const settle = async <T,>(promise: Promise<T>): Promise<T> => {
+      let settled = false;
+      void promise.then(() => { settled = true; }, () => { settled = true; });
+      await until(() => settled);
+      return promise;
+    };
+    const editor = () => editorRef?.current ?? null;
+    const session = () => editor()?.getYrsSession() ?? null;
+    const ready = () => !!ref.current?.commands.getDescriptor('plugin:test.worker-load/ready');
+    const drain = async () => {
+      for (let turn = 0; turn < 4; turn += 1) {
+        await act(async () => {
+          frames.run();
+          frames.runIdle();
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        });
+      }
+    };
+    view = render(<DocxEditor ref={ref}
+      documentBuffer={longBytes.slice().buffer as ArrayBuffer}
+      mode="editing" experimentalWorkerOpen previewFirstPage plugins={[plugin]}
+      measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+      onFirstPagePainted={() => { painted = true; }} onError={(error) => errors.push(error)}
+      onPluginError={(failure) => errors.push(failure.error)} />);
+    return {
+      ...worker, ref, view, until, settle, ready, drain, editor, session, close,
+      async preview() {
+        await until(() => painted && session()?.isDisplayOnly() === true);
+        await until(() => worker.posted.some((request) => fullOpen(request) && worker.replies.has(request.id)));
+        return session()!;
+      },
+      type(key: string) {
+        const textarea = view!.getByTestId('yrs-input');
+        fireEvent.keyDown(textarea, { key });
+        fireEvent.input(textarea, { target: { value: key } });
+      },
+      async open() {
+        const request = worker.posted.find(fullOpen)!;
+        act(() => worker.reply(request));
+        await until(() => session() !== null && session()?.isDisplayOnly() === false);
+        await until(() => worker.posted.some((request) =>
+          request.type === 'encodeState' && worker.replies.has(request.id)));
+        return session()!;
+      },
+      async hydrate(full: YrsSession) {
+        const request = worker.posted.find((request) => request.type === 'encodeState')!;
+        act(() => worker.reply(request));
+        const peer = peerReady(full);
+        if (!peer) throw new Error('The editor peer was not scheduled');
+        await settle(peer);
+        await until(() => !replicaHelpers.workerOpenReplicaPending(full));
+      },
+    };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+async function boundedReplay<T>(promise: Promise<T>): Promise<T> {
+  let timer!: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Worker replay did not settle')), 5_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function openingReplayEditor() {
+  const previousWorker = globalThis.Worker;
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const restore = registerRestore(() => {
+    globalThis.Worker = previousWorker;
+    if (fonts) Object.defineProperty(document, 'fonts', fonts);
+    else Reflect.deleteProperty(document, 'fonts');
+  });
+  try {
+    const opened = await openingEditor(true, false, { residentInput: true, publishLayout: true });
+    return {
+      ...opened,
+      get harness() { return opened.harness; },
+      close() {
+        try {
+          opened.close();
+        } finally {
+          opened.frames.restore();
+          restore();
+        }
+      },
+    };
+  } catch (error) {
+    restore();
+    throw error;
+  }
+}
+
+async function settledReplayLayout(opened: Awaited<ReturnType<typeof openingReplayEditor>>, session: YrsSession) {
+  await waitFor(() => {
+    act(() => opened.frames.run());
+    expect(opened.harness.errors).toEqual([]);
+    expect(opened.harness.renderer.queries?.isReady()).toBe(true);
+    expect(sourceVersionOf(opened.harness.renderer.queries)).toBe(session.version());
+  }, { timeout: 5_000 });
+  for (let turn = 0; turn < 4; turn += 1) {
+    await act(async () => {
+      opened.frames.run();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+  }
+}
+
+function holdIdle() {
+  const request = globalThis.requestIdleCallback;
+  const cancel = globalThis.cancelIdleCallback;
+  const callbacks = new Map<number, { callback: IdleRequestCallback; options?: IdleRequestOptions }>();
+  let nextId = 0;
+  globalThis.requestIdleCallback = (callback, options) => {
+    callbacks.set(++nextId, { callback, options });
+    return nextId;
+  };
+  globalThis.cancelIdleCallback = (id) => { callbacks.delete(id); };
+  return {
+    callbacks,
+    run() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const { callback } of pending) callback({ didTimeout: false, timeRemaining: () => 50 });
+    },
+    restore: registerRestore(() => {
+      globalThis.requestIdleCallback = request;
+      globalThis.cancelIdleCallback = cancel;
+    }),
+  };
+}
+
+function holdHydrationTasks() {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
+  const tasks: Array<() => void> = [];
+  Object.defineProperty(globalThis, 'scheduler', {
+    configurable: true,
+    value: { yield: () => new Promise<void>((resolve) => tasks.push(resolve)) },
+  });
+  return {
+    tasks,
+    async run() {
+      const task = tasks.shift();
+      if (!task) throw new Error('No pending hydration task');
+      task();
+      await Promise.resolve();
+    },
+    restore: registerRestore(() => {
+      if (descriptor) Object.defineProperty(globalThis, 'scheduler', descriptor);
+      else Reflect.deleteProperty(globalThis, 'scheduler');
+    }),
+  };
+}
+
+function holdFontEditorReadiness(trace: string[]) {
+  const progress = replicaHelpers.notifyWorkerOpenLayoutProgress;
+  const hold = spyOn(replicaHelpers, 'notifyWorkerOpenLayoutProgress').mockImplementation((session, kind) => {
+    progress(session, !session.isDisplayOnly() && kind === 'complete' ? 'provisional' : kind);
+  });
+  const createHost = pluginHostFactories.createDocxPluginHost;
+  let readLayout: Parameters<typeof createHost>[0]['layout'] = () => ({
+    queries: null, complete: false, failed: false,
+  });
+  const capture = spyOn(pluginHostFactories, 'createDocxPluginHost').mockImplementation((access) => {
+    readLayout = access.layout;
+    const host = createHost(access);
+    const open = host.open;
+    host.open = (session) => {
+      trace.push('plugin-open');
+      open(session);
+    };
+    return host;
+  });
+  return {
+    complete: (session: YrsSession) => progress(session, 'complete'),
+    layout: () => readLayout(),
+    restore: registerRestore(() => {
+      capture.mockRestore();
+      hold.mockRestore();
+    }),
+  };
+}
+
+async function pendingFontEditor() {
+  const trace: string[] = [];
+  const readiness = holdFontEditorReadiness(trace);
+  const recorder = workerLoadRecorder();
+  const opened = openingPluginEditor(recorder.plugin);
+  const fallback = holdLayoutFallback();
+  let tasks: ReturnType<typeof holdHydrationTasks> | undefined;
+  let restoreRequirements = () => {};
+  const close = () => {
+    try {
+      opened.close();
+    } finally {
+      restoreRequirements();
+      tasks?.restore();
+      fallback.restore();
+      readiness.restore();
+    }
+  };
+  try {
+    await opened.preview();
+    const full = await opened.open();
+    await opened.drain();
+    const readRequirements = full.layoutFontRequirementsJson;
+    const requirements = spyOn(full, 'layoutFontRequirementsJson').mockImplementation((input) => {
+      trace.push('font-refresh');
+      return readRequirements(input);
+    });
+    restoreRequirements = registerRestore(() => requirements.mockRestore());
+    const initializedPosts = opened.posted.length;
+    tasks = holdHydrationTasks();
+    const state = opened.posted.find((request) => request.type === 'encodeState')!;
+    act(() => opened.reply(state));
+    await opened.until(() => tasks!.tasks.length === 1);
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaHydrating(full)).toBe(true);
+    return { ...opened, full, trace, readiness, requirements, initializedPosts, tasks, fallback, close };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+function holdPeerFallback(options: { allTimers?: boolean } = {}) {
+  const schedule = globalThis.setTimeout;
+  const unschedule = globalThis.clearTimeout;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  let now = 0;
+  let nextId = 0;
+  globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
+    const [callback, delay, ...args] = input;
+    if ((options.allTimers || delay === 10_000) && typeof callback === 'function') {
+      const id = --nextId;
+      timers.set(id, { at: now + (delay ?? 0), callback: () => callback(...args) });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    }
+    return schedule(callback, delay, ...args);
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id?: ReturnType<typeof setTimeout>) => {
+    if (!timers.delete(id as unknown as number)) unschedule(id);
+  }) as typeof clearTimeout;
+  return {
+    timers,
+    get now() { return now; },
+    advance(ms: number) {
+      if (!options.allTimers) {
+        now += ms;
+        for (const [id, timer] of [...timers]) {
+          if (timer.at > now) continue;
+          timers.delete(id);
+          timer.callback();
+        }
+        return;
+      }
+      const target = now + ms;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        const [id, timer] = next;
+        now = timer.at;
+        timers.delete(id);
+        timer.callback();
+      }
+      now = target;
+    },
+    restore: registerRestore(() => {
+      globalThis.setTimeout = schedule;
+      globalThis.clearTimeout = unschedule;
+    }),
+  };
+}
+
+function holdLayoutFallback() {
+  const schedule = globalThis.setTimeout;
+  const unschedule = globalThis.clearTimeout;
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  let now = 0;
+  let nextId = 0;
+  globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
+    const [callback, delay, ...args] = input;
+    if ((delay === 3000 || delay === 30_000) && typeof callback === 'function') {
+      const id = --nextId;
+      timers.set(id, { at: now + delay, callback: () => callback(...args) });
+      return id as unknown as ReturnType<typeof setTimeout>;
+    }
+    return schedule(callback, delay, ...args);
+  }) as typeof setTimeout;
+  globalThis.clearTimeout = ((id?: ReturnType<typeof setTimeout>) => {
+    if (!timers.delete(id as unknown as number)) unschedule(id);
+  }) as typeof clearTimeout;
+  return {
+    timers,
+    advance(ms: number) {
+      const target = now + ms;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        const [id, timer] = next;
+        now = timer.at;
+        timers.delete(id);
+        timer.callback();
+      }
+      now = target;
+    },
+    restore: registerRestore(() => {
+      globalThis.setTimeout = schedule;
+      globalThis.clearTimeout = unschedule;
+    }),
+  };
+}
+
+async function finishHeldHydration(
+  opened: Awaited<ReturnType<typeof openingEditor>>,
+  tasks: ReturnType<typeof holdHydrationTasks>
+) {
+  await waitFor(() => expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(true));
+  await act(async () => {
+    while (tasks.tasks.length) await tasks.run();
+  });
+  expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+  await act(async () => opened.workers.at(-1)!.release());
+  await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+  await act(async () => tasks.run());
+  await act(async () => tasks.run());
+  tasks.restore();
+}
+
+function stubDocumentVisibility(initial: 'visible' | 'hidden') {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'visibilityState');
+  let state = initial;
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+  return {
+    hide() {
+      state = 'hidden';
+      document.dispatchEvent(new Event('visibilitychange'));
+    },
+    restore: registerRestore(() => {
+      if (descriptor) Object.defineProperty(document, 'visibilityState', descriptor);
+      else Reflect.deleteProperty(document, 'visibilityState');
+    }),
+  };
+}
+
+function expectStatePrefetchAfterPageBuilds(posted: readonly ResidentEngineWorkerRequest[]): void {
+  const types = posted.map((request) => request.type);
+  expect(types.filter((type) => type === 'encodeState')).toHaveLength(1);
+  expect(types.indexOf('encodeState')).toBeGreaterThan(types.lastIndexOf('buildPages'));
+}
+
+async function openingViewer() {
+  const worker = installWorker({ holdReply: (request) => request.type === 'bootstrap' });
+  const frames = holdFrames(true);
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {}, ready: Promise.resolve() },
+    configurable: true,
+  });
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Viewer() {
+    harness = useHarness({ ...initialProps, source: longBytes, viewer: true, readOnly: true });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        readOnly viewerDocumentRead={harness.renderer.readWorkerDocument}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={harness.renderer.onLayoutComputed}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries} />
+    </>;
+  }
+  const view = render(<Viewer />);
+  const close = () => {
+    try {
+      view.unmount();
+    } finally {
+      frames.restore();
+      if (fonts) Object.defineProperty(document, 'fonts', fonts);
+      else Reflect.deleteProperty(document, 'fonts');
+    }
+  };
+  try {
+    await waitFor(() => expect(harness.host).not.toBeNull());
+    const session = harness.core.session!;
+    act(() => harness.pipeline.runLayoutPipeline());
+    const bootstrap = await worker.received('bootstrap');
+    return {
+      ...worker, frames, editor, view, session, close,
+      get harness() { return harness; },
+      click() {
+        const canvas = canvasHost.current!.firstElementChild!;
+        fireEvent.mouseDown(canvas, { clientX: 0, clientY: 0, button: 0 });
+        fireEvent.mouseUp(window, { clientX: 0, clientY: 0, button: 0 });
+      },
+      async present() {
+        act(() => worker.reply(bootstrap));
+        await waitFor(() => expect(harness.renderer.presentedEngine).toBe(session));
+        act(() => harness.presentFrame());
+        return session;
+      },
+    };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+test('worker-open plugins retry load once when a held key replays during async load', async () => {
+  const replay = pluginLoadGate();
+  const load = pluginLoadGate();
+  const recorder = workerLoadRecorder(() => load.promise);
+  const opened = openingPluginEditor(recorder.plugin, replay.promise);
+  try {
+    const preview = await opened.preview();
+    const previewVersion = preview.version();
+    opened.type('A');
+    expect(opened.editor()!.hasPendingInput()).toBe(true);
+    expect(preview.version()).toBe(previewVersion);
+    expect(recorder.loads()).toEqual([]);
+    const full = await opened.open();
+    expect(full.storyIds()).toEqual([]);
+    await opened.hydrate(full);
+    await opened.until(() => recorder.loads().length === 1);
+    const initial = recorder.loads()[0]!;
+    expect(initial.reason).toBe('loaded');
+    expect(initial.version).toBe(full.version());
+    expect(recorder.contexts[0]!.signal.aborted).toBe(false);
+    expect(opened.ready()).toBe(false);
+    act(() => replay.release());
+    await opened.settle(opened.editor()!.flushPendingInput());
+    const editedVersion = full.version();
+    expect(editedVersion).not.toBe(initial.version);
+    expect(full.paragraphs('body')[0]!.text).toBe('AFirst paragraph');
+    expect(recorder.contexts[0]!.signal.aborted).toBe(true);
+    expect(recorder.loads()).toHaveLength(1);
+    act(() => load.release());
+    await opened.until(opened.ready);
+    await opened.drain();
+    expect(recorder.loads()).toEqual([
+      initial,
+      { type: 'load', generation: initial.generation, reason: 'loaded', version: editedVersion },
+    ]);
+    expect(recorder.contexts.map((context) => context.snapshot.version))
+      .toEqual([initial.version, editedVersion]);
+    expect(recorder.changes()).toEqual([]);
+  } finally {
+    replay.release();
+    load.release();
+    opened.close();
+  }
+}, 30_000);
+
+test('worker-open typing after plugin load settles emits one document-change and no further load', async () => {
+  const recorder = workerLoadRecorder();
+  const opened = openingPluginEditor(recorder.plugin);
+  try {
+    await opened.preview();
+    const full = await opened.open();
+    await opened.hydrate(full);
+    await opened.until(opened.ready);
+    expect(recorder.loads()).toHaveLength(1);
+    expect(recorder.changes()).toEqual([]);
+    const initial = recorder.loads()[0]!;
+    opened.type('B');
+    await opened.settle(opened.editor()!.flushPendingInput());
+    await opened.until(() => recorder.changes().length === 1);
+    await opened.drain();
+    expect(full.paragraphs('body')[0]!.text).toBe('BFirst paragraph');
+    expect(full.version()).not.toBe(initial.version);
+    expect(recorder.loads()).toEqual([initial]);
+    expect(recorder.changes()).toEqual([
+      { type: 'document-change', generation: initial.generation, version: full.version() },
+    ]);
+  } finally {
+    opened.close();
+  }
+}, 30_000);
+
+test('an eager worker-open editor peer becoming ready delivers only the initial plugin load', async () => {
+  const recorder = workerLoadRecorder();
+  const opened = openingPluginEditor(recorder.plugin);
+  try {
+    await opened.preview();
+    const full = await opened.open();
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(full.storyIds()).toEqual([]);
+    await opened.hydrate(full);
+    await opened.until(opened.ready);
+    await opened.drain();
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(false);
+    expect(full.paragraphs('body')[0]!.text).toBe('First paragraph');
+    expect(recorder.loads()).toEqual([
+      { type: 'load', generation: recorder.loads()[0]!.generation, reason: 'loaded', version: full.version() },
+    ]);
+    expect(recorder.contexts).toHaveLength(1);
+    expect(recorder.changes()).toEqual([]);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+  } finally {
+    opened.close();
+  }
+}, 30_000);
+
+test.each(['held keys', 'held composition'] as const)(
+  'flush during opening waits for %s to land in the full session', async (kind) => {
+    const opened = await openingEditor(true, false, { publishLayout: true });
+    try {
+      const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+      opened.click(6);
+      if (kind === 'held keys') fireEvent.input(textarea, { target: { value: 'A' } });
+      else {
+        fireEvent.compositionStart(textarea);
+        textarea.value = '日本';
+      }
+      let done = false;
+      let seen: string[] = [];
+      const flush = opened.editor.current!.flushPendingInput().then(() => {
+        seen = opened.editor.current!.getYrsSession()!.paragraphs('body').map((paragraph) => paragraph.text);
+        done = true;
+      });
+      await act(async () => { await Promise.resolve(); });
+      expect(done).toBe(false);
+      const full = await opened.switchToFull();
+      expect(done).toBe(false);
+      if (kind === 'held keys') fireEvent.input(textarea, { target: { value: 'B' } });
+      await opened.presentFull(full);
+      if (kind === 'held composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+      await act(async () => { await Promise.resolve(); });
+      expect(done).toBe(false);
+      expect(full.storyIds()).toEqual([]);
+      await opened.loadPeer(full);
+      await act(async () => { await flush; });
+      expect(done).toBe(true);
+      expect(seen[0]).toBe(kind === 'held keys' ? 'FirstAB paragraph' : 'First日本 paragraph');
+      expect(full.selection()?.head.offset).toBe(7);
+      expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(opened.harness.mainOpens).toEqual([false]);
+    } finally {
+      opened.close();
+    }
+  }
+);
+
+test('flush during opening rejects when another document replaces held input', async () => {
+  const opened = await openingEditor(false);
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    fireEvent.input(textarea, { target: { value: 'discard' } });
+    const flush = opened.editor.current!.flushPendingInput().catch((error) => error);
+    await opened.replace();
+    expect(await flush).toEqual(new Error('The document changed while flushing input'));
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+  } finally {
+    opened.close();
+  }
+});
+
+test('flush with nothing held during opening keeps preview and replica readiness behavior', async () => {
+  const opened = await openingEditor();
+  try {
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    await act(async () => { await opened.editor.current!.flushPendingInput(); });
+    expect(opened.harness.core.previewing).toBe(true);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    const full = await opened.switchToFull();
+    let done = false;
+    const flush = opened.editor.current!.flushPendingInput().then(() => { done = true; });
+    await act(async () => { await Promise.resolve(); });
+    expect(done).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    await opened.presentFull(full);
+    expect(done).toBe(false);
+    await opened.loadPeer(full);
+    await act(async () => { await flush; });
+    expect(done).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+  } finally {
+    opened.close();
+  }
+});
+
+test('keys typed during opening land in order, none dropped', async () => {
+  const opened = await openingEditor();
+  const insert = spyOn(opened.preview, 'insertText');
+  const split = spyOn(opened.preview, 'splitParagraph');
+  const remove = spyOn(opened.preview, 'deleteRange');
+  const select = spyOn(opened.preview, 'setSelection');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    const version = opened.preview.version();
+    expect(opened.preview.storyIds()).toEqual([]);
+    expect(textarea.readOnly).toBe(false);
+    opened.click(6);
+    expect(document.activeElement).toBe(textarea);
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.input(textarea, { target: { value: 'BC' } });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    let clipboard = 'P\r\nQ';
+    fireEvent.paste(textarea, { clipboardData: { getData: () => clipboard } });
+    clipboard = 'invalidated';
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.preview.version()).toBe(version);
+    expect(insert).not.toHaveBeenCalled();
+    expect(split).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    try {
+      expect(full.storyIds()).toEqual([]);
+      await opened.presentFull(full);
+      fireEvent.input(textarea, { target: { value: 'R' } });
+      expect(load).not.toHaveBeenCalled();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body').slice(0, 3).map((paragraph) => paragraph.text))
+        .toEqual(['FirstA', 'BP', 'QR paragraph']);
+      expect(full.selection()?.head).toEqual({
+        story: 'body', paraId: full.paragraphs('body')[2].paraId, offset: 2,
+      });
+      act(() => opened.harness.presentFrame());
+      act(() => opened.frames.run());
+      act(() => opened.frames.run());
+      act(() => opened.frames.runIdle());
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body').slice(0, 3).map((paragraph) => paragraph.text))
+        .toEqual(['FirstA', 'BP', 'QR paragraph']);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(opened.harness.mainOpens).toEqual([false]);
+      expect(insert).not.toHaveBeenCalled();
+      expect(split).not.toHaveBeenCalled();
+      expect(remove).not.toHaveBeenCalled();
+      expect(select).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('');
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    insert.mockRestore();
+    split.mockRestore();
+    remove.mockRestore();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
+test('a key typed right after the first page paints is kept', async () => {
+  const opened = await openingEditor(true, false, {
+    delayQueries: true,
+    onFirstPagePainted: ({ click, type }) => {
+      click(6);
+      type('QZXJ');
+    },
+  });
+  const insertPreview = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.preview.storyIds()).toEqual([]);
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    try {
+      expect(opened.view.getByTestId('yrs-input')).toBe(textarea);
+      expect(document.activeElement).toBe(textarea);
+      await opened.presentFull(full);
+      expect(load).not.toHaveBeenCalled();
+      opened.releaseInputQueries();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJ paragraph');
+      expect(full.selection()?.head.offset).toBe(9);
+      act(() => opened.harness.presentFrame());
+      act(() => opened.frames.run());
+      act(() => opened.frames.run());
+      act(() => opened.frames.runIdle());
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJ paragraph');
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(insertPreview).not.toHaveBeenCalled();
+      expect(opened.harness.mainOpens).toEqual([false]);
+      expect(opened.harness.errors).toEqual([]);
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    insertPreview.mockRestore();
+    opened.close();
+  }
+});
+
+test('two bursts typed milliseconds apart around first paint both land, in order', async () => {
+  const opened = await openingEditor(true, false, {
+    delayQueries: true,
+    onFirstPagePainted: ({ click, type }) => {
+      click(6);
+      type('QZXJ');
+      click(6);
+      type('JWKV');
+    },
+  });
+  try {
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    try {
+      await opened.presentFull(full);
+      opened.releaseInputQueries();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJJWKV paragraph');
+      expect(full.selection()?.head.offset).toBe(13);
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body')[0].text).toBe('FirstQZXJJWKV paragraph');
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(opened.harness.errors).toEqual([]);
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    opened.close();
+  }
+});
+
+test('held text runs separated by a click replay with one worker layout request and match ready typing', async () => {
+  let replayedText!: string[];
+  let replayedOffset!: number;
+  const held = await openingReplayEditor();
+  try {
+    held.click(6);
+    held.type('AB');
+    held.click(2);
+    held.type('CD');
+    const full = await boundedReplay(held.switchToFull());
+    await boundedReplay(held.presentFull(full));
+    const start = held.posted.length;
+    await boundedReplay(held.loadPeer(full));
+    await settledReplayLayout(held, full);
+    const requests = held.posted.slice(start);
+    expect(requests.filter((request) =>
+      request.type === 'sync' || request.type === 'bootstrap' ||
+      request.type === 'applyInput' || request.type === 'applyDelete'
+    ).map((request) => request.type)).toEqual(['sync']);
+    expect(requests.filter((request) => request.type === 'applyUpdate')).toHaveLength(4);
+    expect(full.paragraphs('body')[0]!.text).toBe('FCDirstAB paragraph');
+    expect(held.editor.current!.hasPendingInput()).toBe(false);
+    replayedText = full.paragraphs('body').map((paragraph) => paragraph.text);
+    replayedOffset = full.selection()!.head.offset;
+    held.type('E');
+    await boundedReplay(held.editor.current!.flushPendingInput());
+    expect(held.posted.slice(start).filter((request) => request.type === 'applyInput'))
+      .toMatchObject([{ text: 'E' }]);
+  } finally {
+    held.close();
+  }
+  const ready = await openingReplayEditor();
+  try {
+    const full = await boundedReplay(ready.switchToFull());
+    await boundedReplay(ready.presentFull(full));
+    await boundedReplay(ready.loadPeer(full));
+    ready.click(6);
+    ready.type('AB');
+    await boundedReplay(ready.editor.current!.flushPendingInput());
+    await settledReplayLayout(ready, full);
+    ready.click(2);
+    ready.type('CD');
+    await boundedReplay(ready.editor.current!.flushPendingInput());
+    expect(full.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(replayedText);
+    expect(full.selection()!.head.offset).toBe(replayedOffset);
+    expect(ready.harness.errors).toEqual([]);
+  } finally {
+    ready.close();
+  }
+}, 30_000);
+
+test('clicks interleaved with held and hydrating input keep their original positions', async () => {
+  const opened = await openingEditor();
+  try {
+    opened.click(6);
+    opened.type('QZXJ');
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.click(2);
+    opened.type('JWKV');
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('FJWKVirstQZXJ paragraph');
+    expect(full.selection()?.head.offset).toBe(5);
+    expect(opened.harness.errors).toEqual([]);
+    expect(opened.harness.mainOpens).toEqual([false]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a click during hydration preserves A, ArrowLeft, B in order and places the final caret', async () => {
+  const opened = await openingEditor();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    opened.click(6);
+    opened.type('A');
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowLeft' });
+    opened.type('B');
+    opened.click(2);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('FirstBA paragraph');
+    const caret = { story: 'body', paraId: full.paragraphs('body')[0].paraId, offset: 1 };
+    expect(full.selection()).toEqual({ anchor: caret, head: caret });
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('table Tab during hydration follows held input and moves to the next cell', async () => {
+  const zip = await JSZip.loadAsync(longBytes);
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const cells = ['Left', 'Right'].map((text) =>
+    `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`
+  ).join('');
+  zip.file('word/document.xml', xml.replace(
+    '<w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>',
+    `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${cells}</w:tr></w:tbl>`
+  ));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const direct = await createYrsSession();
+  sessions.push(direct);
+  direct.openDocx(source, true);
+  const projection = createYrsPositionProjection(direct, 'body')!;
+  const left = 'body:t0:r0c0';
+  const right = 'body:t0:r0c1';
+  const position = projection.positionForLoc({ story: left, paraId: direct.paragraphs(left)[0]!.paraId, offset: 1 })!;
+  const opened = await openingEditor(true, false, { source });
+  try {
+    opened.click(position);
+    opened.type('A');
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    expect(opened.harness.core.opening).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(full.storyIds()).toEqual([]);
+    const textarea = opened.view.getByTestId('yrs-input');
+    expect(fireEvent.keyDown(textarea, { key: 'Tab' })).toBe(false);
+    opened.type('B');
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(full.storyIds()).toEqual([]);
+    await opened.loadPeer(full);
+    expect(full.paragraphs(left)[0]!.text).toBe('LAeft');
+    expect(full.paragraphs(right)[0]!.text).toBe('BRight');
+    expect(full.selection()?.head.story).toBe(right);
+    expect(full.selection()?.head.offset).toBe(1);
+    expect(full.cellSelection()?.head.column).toBe(1);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a ready click binds its position before an outstanding resident edit reply', async () => {
+  const zip = await JSZip.loadAsync(await longFixture(1));
+  const xml = await zip.file('word/document.xml')!.async('string');
+  zip.file('word/document.xml', xml.replace('First paragraph', 'abcdef'));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const opened = await openingEditor(true, false, {
+    source, residentInput: true,
+    holdReply: (request) => request.type === 'applyInput' && request.text === 'X',
+  });
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('abcdef');
+    opened.click(1);
+    opened.type('X');
+    const request = await opened.received('applyInput');
+    expect(request).toMatchObject({ text: 'X', selection: { head: { offset: 0 } } });
+    expect(opened.replies.has(request.id)).toBe(true);
+    expect(opened.responses.get(request)).toMatchObject({ ok: true, frame: expect.any(ArrayBuffer) });
+    expect(full.paragraphs('body')[0].text).toBe('abcdef');
+    expect(opened.harness.renderer.queries!.isReady()).toBe(true);
+    opened.click(4);
+    opened.type('Y');
+    expect(full.selection()?.head.offset).toBe(0);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      opened.reply(request);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(full.paragraphs('body')[0].text).toBe('XabcYdef');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a click awaiting replacement geometry keeps its paragraph after the canvas moves', async () => {
+  const opened = await openingEditor(true, false, { delayQueries: true });
+  try {
+    const queries = opened.pendingQueries!;
+    const point = opened.pointAt(6);
+    expect(queries.isReady()).toBe(false);
+    expect(queries.hitTestRegions(0, point.clientX, point.clientY)).toBeNull();
+    opened.click(6);
+    opened.type('Q');
+    const nextCaret = opened.harness.renderer.queries!.caretRect(18)!;
+    const size = queries.pageSize(0)!;
+    const top = point.clientY - nextCaret.y - nextCaret.height / 2;
+    const canvas = opened.view.container.querySelector('.canvas-page')!;
+    canvas.getBoundingClientRect = () => ({ left: 0, top, right: size.width,
+      bottom: top + size.height, ...size }) as DOMRect;
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    expect(opened.pendingQueries).not.toBe(queries);
+    expect(queries.isReady()).toBe(false);
+    opened.releaseInputQueries();
+    await queries.whenReady();
+    expect(queries.isReady()).toBe(true);
+    expect(queries.hitTestRegions(0, point.clientX, point.clientY)).toBeNull();
+    await opened.pendingQueries!.whenReady();
+    expect(opened.pendingQueries!.hitTestRegions(0, point.clientX, point.clientY - top)?.pos).toBeGreaterThan(16);
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+    expect(full.paragraphs('body')[1].text).toBe('Paragraph 1');
+    expect(full.selection()?.head.offset).toBe(6);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a queued drag across cells in one table publishes the cell selection', async () => {
+  const zip = await JSZip.loadAsync(longBytes);
+  const xml = await zip.file('word/document.xml')!.async('string');
+  const cells = ['Left', 'Right'].map((text) =>
+    `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`
+  ).join('');
+  zip.file('word/document.xml', xml.replace(
+    '<w:p><w:r><w:t>First paragraph</w:t></w:r></w:p>',
+    `<w:tbl><w:tblPr><w:tblW w:w="6000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid><w:tr>${cells}</w:tr></w:tbl>`
+  ));
+  const source = await zip.generateAsync({ type: 'uint8array' });
+  const direct = await createYrsSession();
+  sessions.push(direct);
+  direct.openDocx(source, true);
+  const projection = createYrsPositionProjection(direct, 'body')!;
+  const position = (story: string) => projection.positionForLoc({
+    story, paraId: direct.paragraphs(story)[0].paraId, offset: 1,
+  })!;
+  const anchorPosition = position('body:t0:r0c0');
+  const headPosition = position('body:t0:r0c1');
+  const anchorTarget = projection.targetAt(anchorPosition);
+  const headTarget = projection.targetAt(headPosition);
+  expect(anchorTarget.story).not.toBe(headTarget.story);
+  const range = { anchor: anchorTarget.cell!, head: headTarget.cell! };
+  const opened = await openingEditor(true, false, { source, delayQueries: true });
+  try {
+    opened.mouseDown(anchorPosition);
+    opened.mouseMove(headPosition);
+    opened.mouseUp(headPosition);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.releaseInputQueries();
+    await opened.loadPeer(full);
+    expect(full.cellSelection()).toEqual(range);
+    expect(full.selection()?.head.story).toBe(anchorTarget.story);
+    expect(opened.selections).toContainEqual(range);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test.each(['held keys', 'held composition'] as const)(
+  'becoming read-only during opening discards %s and rejects its flush', async (kind) => {
+    const opened = await openingEditor(true, false, { delayQueries: true });
+    try {
+      const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+      opened.click(6);
+      if (kind === 'held keys') opened.type('discard');
+      else {
+        fireEvent.compositionStart(textarea);
+        textarea.value = '日本';
+      }
+      const flush = opened.editor.current!.flushPendingInput().catch((error) => error);
+      expect(opened.editor.current!.hasPendingInput()).toBe(true);
+      opened.setReadOnly(true);
+      expect(opened.harness.core.session).toBe(opened.preview);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(await flush).toEqual(new Error('The document changed while flushing input'));
+      if (kind === 'held composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+      opened.setReadOnly(false);
+      const full = await opened.switchToFull();
+      await opened.presentFull(full);
+      opened.releaseInputQueries();
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+      opened.type('C');
+      await act(async () => { await opened.editor.current!.flushPendingInput(); });
+      expect(full.paragraphs('body')[0].text).toBe('CFirst paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(opened.harness.errors).toEqual([]);
+    } finally {
+      opened.close();
+    }
+  }
+);
+
+test('switching to viewing before eager hydration settles transferred input and its flush', async () => {
+  const opened = await openingEditor();
+  try {
+    opened.click(1);
+    opened.type('Q');
+    const full = await opened.switchToFull();
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
+    await opened.presentFull(full, false);
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    let flushed = false;
+    const flush = opened.editor.current!.flushPendingInput().then(() => { flushed = true; });
+    opened.setReadOnly(true, true);
+    expect(opened.editor.current!.isWorkerViewer()).toBe(false);
+    expect((opened.view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(flushed).toBe(false);
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
+    await waitFor(() => expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => {
+      opened.workers.at(-1)!.release();
+      await flush;
+    });
+    expect(flushed).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(full.paragraphs('body')[0].text).toBe('QFirst paragraph');
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a queued drag extends from its resolved anchor after an earlier insertion', async () => {
+  const opened = await openingEditor(true, false, { delayQueries: true });
+  try {
+    opened.click(1);
+    opened.type('Q');
+    opened.mouseDown(6);
+    opened.mouseMove(9);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.releaseInputQueries();
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')[0].text).toBe('QFirst paragraph');
+    expect(full.selection()?.anchor.offset).toBe(6);
+    expect(full.selection()?.head.offset).toBe(9);
+    opened.mouseMove(12);
+    act(() => opened.frames.run());
+    opened.mouseUp(12);
+    await act(async () => { await opened.editor.current!.flushPendingInput(); });
+    expect(full.selection()?.anchor.offset).toBe(6);
+    expect(full.selection()?.head.offset).toBe(11);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('a ready drag queued behind navigation replays its final range once', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  const select = spyOn(opened.session, 'setSelection');
+  try {
+    await startNavigation();
+    const before = opened.session.selection();
+    fireEvent.mouseDown(opened.canvas, pointAt(6));
+    fireEvent.mouseMove(window, pointAt(10));
+    fireEvent.mouseUp(window, pointAt(10));
+    expect(opened.session.selection()).toEqual(before);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    const anchor = { story: 'body', paraId: opened.session.paragraphs('body')[0].paraId, offset: 5 };
+    const head = { ...anchor, offset: 9 };
+    const assertReplay = () => {
+      expect(opened.session.selection()).toEqual({ anchor, head });
+      expect(select.mock.calls.filter(([start, end]) => start.offset === 5 && end?.offset === 9)).toHaveLength(1);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
+test('a ready image click queued behind navigation selects the image instead of a drag', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  let armed = false;
+  const image = { pos: 6, rect: { x: 0, y: 0, width: 1, height: 1 } } as unknown as NonNullable<ReturnType<DisplayListQueries['imageAtPoint']>>;
+  const spies = [...new Set([opened.harness.renderer.queries!, opened.harness.renderer.inputQueries!])]
+    .map((queries) => spyOn(queries, 'imageAtPoint').mockImplementation(() => (armed ? image : null)));
+  try {
+    await startNavigation();
+    const before = opened.session.selection();
+    armed = true;
+    fireEvent.mouseDown(opened.canvas, pointAt(6));
+    armed = false;
+    fireEvent.mouseMove(window, pointAt(10));
+    fireEvent.mouseUp(window, pointAt(10));
+    expect(opened.session.selection()).toEqual(before);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    const anchor = { story: 'body', paraId: opened.session.paragraphs('body')[0].paraId, offset: 5 };
+    expect(opened.session.selection()).toEqual({ anchor, head: { ...anchor, offset: 6 } });
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    for (const spy of spies.reverse()) spy.mockRestore();
+    opened.close();
+  }
+});
+
+test('a composition started during opening commits exactly once after the switch', async () => {
+  const opened = await openingEditor();
+  const insert = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    opened.click(6);
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    fireEvent.compositionStart(textarea);
+    fireEvent.compositionUpdate(textarea, { data: '日本' });
+    textarea.value = '日本';
+    const full = await opened.switchToFull();
+    expect(opened.view.getByTestId('yrs-input')).toBe(textarea);
+    expect(textarea.value).toBe('日本');
+    await opened.presentFull(full);
+    fireEvent.compositionEnd(textarea, { data: '日本' });
+    fireEvent(textarea, new InputEvent('textInput', { bubbles: true, data: '日本' }));
+    fireEvent.input(textarea);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.input(textarea);
+    const load = spyOn(full, 'loadState');
+    try {
+      await opened.loadPeer(full);
+      expect(full.paragraphs('body')[0].text).toBe('FirstA日本 paragraph');
+      expect(full.selection()?.head.offset).toBe(8);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(insert).not.toHaveBeenCalled();
+      expect(textarea.value).toBe('');
+    } finally {
+      load.mockRestore();
+    }
+  } finally {
+    insert.mockRestore();
+    opened.close();
+  }
+});
+
+test('input held during opening is discarded when another document replaces it', async () => {
+  const opened = await openingEditor(false, false, { delayQueries: true });
+  const insert = spyOn(opened.preview, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    opened.click(6);
+    fireEvent.input(textarea, { target: { value: 'discard' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.paste(textarea, { clipboardData: { getData: () => 'old paste' } });
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const replacement = await opened.replace();
+    expect(replacement).not.toBe(opened.preview);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.view.getByTestId('yrs-input')).toBe(textarea);
+    fireEvent.input(textarea, { target: { value: 'C' } });
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.releaseInputQueries();
+    await opened.loadPeer(full);
+    expect(full.paragraphs('body')).toHaveLength(205);
+    expect(full.paragraphs('body')[0].text).toBe('CFirst paragraph');
+    expect(full.selection()?.head.offset).toBe(1);
+    expect(insert).not.toHaveBeenCalled();
+    expect(opened.harness.errors).toEqual([]);
+    expect(opened.harness.mainOpens).toEqual([false]);
+  } finally {
+    insert.mockRestore();
+    opened.close();
+  }
+});
+
+test('viewer sessions stay read-only while opening', async () => {
+  const opened = await openingViewer();
+  const insert = spyOn(opened.session, 'insertText');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    const version = opened.session.version();
+    expect(textarea.readOnly).toBe(true);
+    opened.click();
+    fireEvent.input(textarea, { target: { value: 'ignored' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    fireEvent.paste(textarea, { clipboardData: { getData: () => 'ignored paste' } });
+    await act(async () => {});
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.session.version()).toBe(version);
+    expect(opened.session.storyIds()).toEqual([]);
+    const full = await opened.present();
+    act(() => opened.harness.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(opened.harness.renderer.presentedEngine).toBe(full));
+    act(() => opened.harness.presentFrame());
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
+    expect((opened.view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(full.storyIds()).toEqual([]);
+    expect(insert).not.toHaveBeenCalled();
+    expect(opened.harness.mainOpens).toEqual([]);
+  } finally {
+    insert.mockRestore();
+    opened.close();
+  }
+});
+
+test('a font announcement while the editor peer is pending replays once after the plugin host opens', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  const results: unknown[] = [];
+  try {
+    for (const held of [true, false]) {
+      const opened = await pendingFontEditor();
+      try {
+        if (held) act(() => {
+          fonts.dispatchEvent(new Event('loadingdone'));
+          fonts.dispatchEvent(new Event('loadingdone'));
+        });
+        await opened.drain();
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(opened.posted.slice(opened.initializedPosts).filter((request) => request.type === 'fontRequirements'))
+          .toHaveLength(0);
+        await act(async () => { await opened.tasks.run(); });
+        await act(async () => { await opened.tasks.run(); });
+        expect(opened.full.paragraphs('body')[0]!.text).toBe('First paragraph');
+        expect(replicaHelpers.workerOpenReplicaPending(opened.full)).toBe(true);
+        expect(replicaHelpers.workerOpenReplicaHydrating(opened.full)).toBe(false);
+        expect(opened.fallback.timers.size).toBe(2);
+        if (held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+        await opened.drain();
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(opened.posted.slice(opened.initializedPosts).filter((request) => request.type === 'fontRequirements'))
+          .toHaveLength(0);
+        const beforeLayout = opened.editor()!.getLayout();
+        const beforeQueries = opened.readiness.layout().queries;
+        const beforePosts = opened.posted.length;
+        act(() => opened.readiness.complete(opened.full));
+        await act(async () => { await Promise.resolve(); });
+        expect(opened.trace).toEqual(['plugin-open']);
+        if (!held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+        await act(async () => {
+          while (opened.tasks.tasks.length) await opened.tasks.run();
+        });
+        opened.tasks.restore();
+        await opened.until(() => opened.editor()!.getLayout() !== beforeLayout &&
+          opened.readiness.layout().queries !== beforeQueries && opened.readiness.layout().complete);
+        await opened.drain();
+        expect(opened.requirements).toHaveBeenCalledTimes(1);
+        expect(opened.trace).toEqual(['plugin-open', 'font-refresh']);
+        const posts = opened.posted.slice(beforePosts).map((request) => request.type).sort();
+        expect(posts.filter((type) => type === 'fontRequirements')).toHaveLength(0);
+        expect(posts.filter((type) => type === 'sync')).toHaveLength(1);
+        const layout = opened.editor()!.getLayout()!;
+        const queries = opened.readiness.layout().queries!;
+        expect(queries.isReady()).toBe(true);
+        expect(queries.pageCount()).toBe(layout.pages.length);
+        expect(sourceVersionOf(queries)).toBe(sourceVersionOf(layout));
+        expect(queries.caretRect(1)).not.toBeNull();
+        const canvases = [...opened.view.container.querySelectorAll<HTMLElement>('.canvas-page')];
+        expect(canvases.length).toBeGreaterThan(0);
+        results.push({
+          posts,
+          pages: layout.pages.map((page) => ({
+            size: page.size,
+            margins: page.margins,
+            fragments: page.fragments.map(({ kind, x, y, width, pmStart, pmEnd }) => ({
+              kind, x, y, width, pmStart, pmEnd,
+            })),
+          })),
+          sizes: Array.from({ length: queries.pageCount() }, (_, index) => queries.pageSize(index)),
+          caret: queries.caretRect(1),
+          canvases: canvases.map((canvas) => ({
+            page: canvas.getAttribute('data-page-index'),
+            width: canvas.style.width,
+            height: canvas.style.height,
+          })),
+        });
+      } finally {
+        opened.close();
+      }
+    }
+    expect(results[0]).toEqual(results[1]);
+  } finally {
+    if (descriptor) Object.defineProperty(document, 'fonts', descriptor);
+    else Reflect.deleteProperty(document, 'fonts');
+  }
+}, 30_000);
+
+test('a held font announcement is dropped when the document is replaced or the editor unmounts before readiness', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  const results: unknown[] = [];
+  try {
+    for (const [action, held] of [['replace', true], ['replace', false], ['unmount', true]] as const) {
+      const opened = await pendingFontEditor();
+      const oldWorker = spyOn(opened.workers[0]!, 'postMessage');
+      let restoreReplacementRequirements = () => {};
+      let restoreReplacementWorker = () => {};
+      try {
+        act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+        await act(async () => { await opened.tasks.run(); });
+        await act(async () => { await opened.tasks.run(); });
+        expect(replicaHelpers.workerOpenReplicaPending(opened.full)).toBe(true);
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(oldWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+        const beforeReplacementPosts = opened.posted.length;
+        if (action === 'unmount') opened.view.unmount();
+        else {
+          let replacement!: Promise<void>;
+          act(() => {
+            replacement = opened.ref.current!.loadDocumentBuffer(longBytes.slice().buffer as ArrayBuffer);
+          });
+          await opened.until(() => opened.session() !== null && opened.session() !== opened.full &&
+            opened.session()?.isDisplayOnly() === true);
+          const fullOpen = () => opened.posted.slice(beforeReplacementPosts).find((request) =>
+            request.type === 'open' && request.previewBlocks === undefined);
+          await opened.until(() => {
+            const request = fullOpen();
+            return !!request && opened.replies.has(request.id);
+          });
+          act(() => opened.reply(fullOpen()!));
+          await opened.settle(replacement);
+          await opened.until(() => opened.session() !== null && opened.session() !== opened.full &&
+            opened.session()?.isDisplayOnly() === false &&
+            replicaHelpers.workerOpenReplicaStarted(opened.session()!) &&
+            opened.posted.slice(beforeReplacementPosts).some((request) =>
+              request.type === 'encodeState' && opened.replies.has(request.id)));
+          await opened.drain();
+        }
+        await act(async () => {
+          opened.readiness.complete(opened.full);
+          opened.fallback.advance(30_000);
+          while (opened.tasks.tasks.length) await opened.tasks.run();
+        });
+        if (action === 'unmount') opened.tasks.restore();
+        await opened.drain();
+        expect(opened.requirements).not.toHaveBeenCalled();
+        expect(oldWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+        expect(opened.trace).toEqual([]);
+        if (action === 'replace') {
+          const replacement = opened.session()!;
+          const replacementWorker = spyOn(opened.workers.at(-1)!, 'postMessage');
+          restoreReplacementWorker = registerRestore(() => replacementWorker.mockRestore());
+          const readRequirements = replacement.layoutFontRequirementsJson;
+          const requirements = spyOn(replacement, 'layoutFontRequirementsJson').mockImplementation((input) => {
+            opened.trace.push('font-refresh:B');
+            return readRequirements(input);
+          });
+          restoreReplacementRequirements = registerRestore(() => requirements.mockRestore());
+          const state = opened.posted.slice(beforeReplacementPosts).find((request) => request.type === 'encodeState')!;
+          act(() => opened.reply(state));
+          await opened.until(() => opened.tasks.tasks.length === 1);
+          expect(replacement.isDisplayOnly()).toBe(false);
+          expect(replicaHelpers.workerOpenReplicaStarted(replacement)).toBe(true);
+          expect(replicaHelpers.workerOpenReplicaPending(replacement)).toBe(true);
+          expect(replicaHelpers.workerOpenReplicaHydrating(replacement)).toBe(true);
+          expect(requirements).not.toHaveBeenCalled();
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          if (held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+          await opened.drain();
+          expect(requirements).not.toHaveBeenCalled();
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          await act(async () => { await opened.tasks.run(); });
+          await act(async () => { await opened.tasks.run(); });
+          expect(replacement.paragraphs('body')[0]!.text).toBe('First paragraph');
+          expect(replicaHelpers.workerOpenReplicaPending(replacement)).toBe(true);
+          expect(replicaHelpers.workerOpenReplicaHydrating(replacement)).toBe(false);
+          expect(opened.fallback.timers.size).toBe(2);
+          await opened.drain();
+          expect(requirements).not.toHaveBeenCalled();
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          expect(opened.trace).toEqual([]);
+          const beforeLayout = opened.editor()!.getLayout();
+          const beforeQueries = opened.readiness.layout().queries;
+          const beforePosts = opened.posted.length;
+          act(() => opened.readiness.complete(replacement));
+          await act(async () => { await Promise.resolve(); });
+          expect(replicaHelpers.workerOpenReplicaPending(replacement)).toBe(false);
+          expect(opened.trace).toEqual(['plugin-open']);
+          if (!held) act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+          await act(async () => {
+            while (opened.tasks.tasks.length) await opened.tasks.run();
+          });
+          opened.tasks.restore();
+          await opened.until(() => opened.editor()!.getLayout() !== beforeLayout &&
+            opened.readiness.layout().queries !== beforeQueries && opened.readiness.layout().complete);
+          await opened.drain();
+          expect(opened.session()).toBe(replacement);
+          expect(opened.requirements).not.toHaveBeenCalled();
+          expect(oldWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          expect(requirements).toHaveBeenCalledTimes(1);
+          expect(replacementWorker.mock.calls.filter(([request]) => request.type === 'fontRequirements')).toHaveLength(0);
+          expect(opened.trace).toEqual(['plugin-open', 'font-refresh:B']);
+          const posts = opened.posted.slice(beforePosts).map((request) => request.type).sort();
+          expect(posts.filter((type) => type === 'fontRequirements')).toHaveLength(0);
+          expect(posts.filter((type) => type === 'sync')).toHaveLength(1);
+          const layout = opened.editor()!.getLayout()!;
+          const queries = opened.readiness.layout().queries!;
+          expect(queries.isReady()).toBe(true);
+          expect(queries.pageCount()).toBe(layout.pages.length);
+          expect(sourceVersionOf(queries)).toBe(sourceVersionOf(layout));
+          expect(queries.caretRect(1)).not.toBeNull();
+          const canvases = [...opened.view.container.querySelectorAll<HTMLElement>('.canvas-page')];
+          expect(canvases.length).toBeGreaterThan(0);
+          results.push({
+            posts,
+            pages: layout.pages.map((page) => ({
+              size: page.size,
+              margins: page.margins,
+              fragments: page.fragments.map(({ kind, x, y, width, pmStart, pmEnd }) => ({
+                kind, x, y, width, pmStart, pmEnd,
+              })),
+            })),
+            sizes: Array.from({ length: queries.pageCount() }, (_, index) => queries.pageSize(index)),
+            caret: queries.caretRect(1),
+            canvases: canvases.map((canvas) => ({
+              page: canvas.getAttribute('data-page-index'),
+              width: canvas.style.width,
+              height: canvas.style.height,
+            })),
+          });
+        }
+      } finally {
+        restoreReplacementRequirements();
+        restoreReplacementWorker();
+        oldWorker.mockRestore();
+        opened.close();
+      }
+    }
+    expect(results).toHaveLength(2);
+    expect(results[0]).toEqual(results[1]);
+  } finally {
+    if (descriptor) Object.defineProperty(document, 'fonts', descriptor);
+    else Reflect.deleteProperty(document, 'fonts');
+  }
+}, 30_000);
+
+test('font announcements in viewer sessions are not held', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const fonts = Object.assign(new EventTarget(), { ready: Promise.resolve() });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  let opened: Awaited<ReturnType<typeof openingViewer>> | undefined;
+  let restoreReplicaState = () => {};
+  let restoreRequirements = () => {};
+  try {
+    opened = await openingViewer();
+    const full = await opened.present();
+    await opened.frames.settleAndIdle(opened.harness.renderer.settledDisplayList(null, null, 'window'));
+    await act(async () => {});
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    const started = replicaHelpers.workerOpenReplicaStarted;
+    const pending = replicaHelpers.workerOpenReplicaPending;
+    const forcedStarted = spyOn(replicaHelpers, 'workerOpenReplicaStarted')
+      .mockImplementation((session) => session === full || started(session));
+    const forcedPending = spyOn(replicaHelpers, 'workerOpenReplicaPending')
+      .mockImplementation((session) => session === full || pending(session));
+    restoreReplicaState = registerRestore(() => {
+      forcedPending.mockRestore();
+      forcedStarted.mockRestore();
+    });
+    const beforePosts = opened.posted.length;
+    const beforeLayout = opened.editor.current!.getLayout();
+    const requirements = spyOn(full, 'layoutFontRequirementsJson');
+    restoreRequirements = registerRestore(() => requirements.mockRestore());
+    expect(workerOpenDocumentHeld(full)).toBe(true);
+    expect(opened.harness.core.experimentalWorkerOpen).toBe(true);
+    expect(opened.harness.core.previewing).toBe(false);
+    expect(opened.editor.current!.isWorkerViewer()).toBe(true);
+    expect(full.isDisplayOnly()).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(registeredWorkerProposalAuthority(full)?.holdsWorkerState() ?? false).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => { fonts.dispatchEvent(new Event('loadingdone')); });
+    await waitFor(() => expect(opened!.posted.slice(beforePosts)
+      .filter((request) => request.type === 'fontRequirements')).toHaveLength(1));
+    await waitFor(() => expect(opened!.editor.current!.getLayout()).not.toBe(beforeLayout));
+    expect(opened.posted.slice(beforePosts).filter((request) => request.type === 'sync')).toHaveLength(1);
+    expect(opened.posted.slice(beforePosts).filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(requirements).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaPending(full)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.mainOpens).toEqual([]);
+    expect(full.storyIds()).toEqual([]);
+  } finally {
+    try {
+      opened?.close();
+    } finally {
+      restoreRequirements();
+      restoreReplicaState();
+      if (descriptor) Object.defineProperty(document, 'fonts', descriptor);
+      else Reflect.deleteProperty(document, 'fonts');
+    }
+  }
+});
+
+test('held input and loading reads wait for the current worker layout after hydration', async () => {
+  const opened = await openingEditor(true, false, {
+    holdFullLayout: true,
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('A');
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowLeft' });
+    opened.type('B');
+    const pending = requestWorkerOpenReplica(full)!;
+    let ready = false;
+    void pending.then(() => { ready = true; });
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.replies.has(completion.id)).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(false);
+    expect(ready).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.harness.ref.current!.getDocument()).toBeNull();
+    expect(opened.harness.ref.current!.findInDocument('First')).toEqual([]);
+    expect(() => opened.harness.ref.current!.insertBreak({ paraId: '00000001', type: 'page' })).toThrow(DocxReplicaNotReadyError);
+    let saved = false;
+    const save = opened.harness.ref.current!.save().then(() => { saved = true; });
+    await act(async () => {});
+    expect(saved).toBe(false);
+    await act(async () => {
+      opened.reply(completion);
+      await pending;
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    await save;
+    expect(full.paragraphs('body')[0].text).toBe('FirstBA paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.ref.current!.getDocument()).not.toBeNull();
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('a completed worker layout commits readiness as soon as hydration finishes', async () => {
+  const opened = await openingEditor();
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    await finishHeldHydration(opened, tasks);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('a first worker pass that completes layout commits readiness and replays held input without a completion request', async () => {
+  const opened = await openingEditor();
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full);
+    opened.click(6);
+    opened.type('A');
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowLeft' });
+    opened.type('B');
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    await finishHeldHydration(opened, tasks);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    await waitFor(() => {
+      expect(full.paragraphs('body')[0].text).toBe('FirstBA paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    });
+    expect(opened.posted.some((request) => request.type === 'completeLayout')).toBe(false);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('a new provisional layout keeps held input pending after an earlier pass completes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('Q');
+    const pending = requestWorkerOpenReplica(full)!;
+    let ready = false;
+    void pending.then(() => { ready = true; });
+    act(() => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'provisional');
+    });
+    await finishHeldHydration(opened, tasks);
+    expect(ready).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(fallback.timers.size).toBe(2);
+    await act(async () => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      await pending;
+    });
+    expect(ready).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    await waitFor(() => {
+      expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    });
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('page progress after layout completion commits readiness as soon as hydration finishes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdReply: (request) => request.type === 'completeLayout',
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    const pending = requestWorkerOpenReplica(full)!;
+    let ready = false;
+    void pending.then(() => { ready = true; });
+    act(() => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'page');
+    });
+    expect(ready).toBe(false);
+    await finishHeldHydration(opened, tasks);
+    expect(ready).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('flushing held input commits a hydrated peer before worker layout completes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdFullLayout: true,
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('Q');
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(opened.replies.has(completion.id)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(full.paragraphs('body')[0].text).toBe('FirstQ paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('an editor readiness request commits a hydrated peer before worker layout completes', async () => {
+  const opened = await openingEditor(true, false, {
+    holdFullLayout: true,
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => replicaHelpers.requestWorkerOpenReplicaReadiness(full));
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.replies.has(completion.id)).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('layout progress keeps readiness pending past ten seconds until it stalls for three seconds', async () => {
+  const opened = await openingEditor(true, false, {
+    holdFullLayout: true,
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    for (let step = 0; step < 6; step += 1) {
+      act(() => {
+        fallback.advance(2000);
+        replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'page');
+      });
+      expect(opened.harness.core.replicaReady).toBe(false);
+    }
+    act(() => fallback.advance(2999));
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => fallback.advance(1));
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('readiness commits thirty seconds after hydration even with ongoing layout progress', async () => {
+  const opened = await openingEditor(true, false, {
+    holdFullLayout: true,
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    requestWorkerOpenReplica(full);
+    await finishHeldHydration(opened, tasks);
+    for (let step = 0; step < 14; step += 1) {
+      act(() => {
+        fallback.advance(2000);
+        replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'provisional');
+      });
+      expect(opened.harness.core.replicaReady).toBe(false);
+    }
+    act(() => fallback.advance(1999));
+    expect(opened.harness.core.replicaReady).toBe(false);
+    act(() => fallback.advance(1));
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(fallback.timers.size).toBe(0);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('replacing a document discards its hydrated peer waiting for layout completion', async () => {
+  const opened = await openingEditor(true, false, {
+    holdFullLayout: true,
+  });
+  const tasks = holdHydrationTasks();
+  const fallback = holdLayoutFallback();
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    opened.click(6);
+    opened.type('Q');
+    const pending = requestWorkerOpenReplica(full)!;
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(fallback.timers.size).toBe(2);
+    await opened.replace();
+    await expect(pending).rejects.toThrow('The document changed');
+    expect(fallback.timers.size).toBe(0);
+    await act(async () => {
+      opened.reply(completion);
+      replicaHelpers.notifyWorkerOpenLayoutProgress(full, 'complete');
+      fallback.advance(30_000);
+    });
+    const replacement = await opened.switchToFull();
+    expect(replacement).not.toBe(full);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.harness.core.replicaReadyRef?.current).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    fallback.restore();
+    tasks.restore();
+  }
+});
+
+test('worker hydration opens and loads in separate tasks before publishing readiness', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    let ready = false;
+    const pending = requestWorkerOpenReplica(session)!;
+    void pending.then(() => { ready = true; });
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(ready).toBe(false);
+    expect(replicas).toEqual([]);
+    await act(async () => tasks.run());
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    expect(ready).toBe(false);
+    expect(replicas).toEqual([]);
+    await act(async () => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(session, 'complete');
+      await tasks.run();
+      await pending;
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(ready).toBe(true);
+    expect(replicas).toEqual([session]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each(['replace', 'unmount'] as const)('a document %s between hydration tasks stops the stale peer', async (action) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const props = { ...initialProps,
+      collaboration: { onReplica: (session: unknown) => replicas.push(session as YrsSession | null) },
+    };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const errors = result.current.errors;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(result.current.mainOpens).toEqual([false]);
+    if (action === 'replace') {
+      rerender({ ...props, source: bytes.slice(), generation: 2 });
+      await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+      expect(result.current.core.session).not.toBe(session);
+    } else {
+      unmount();
+    }
+    await act(async () => tasks.run());
+    await expect(pending).rejects.toThrow('The document changed');
+    expect(load).not.toHaveBeenCalled();
+    expect(replicas).toEqual([]);
+    expect(errors).toEqual([]);
+    if (action === 'replace') {
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    }
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test('overlay projection builds in a task after replica readiness', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const restoreFonts = registerRestore(() => {
+    if (fonts) Object.defineProperty(document, 'fonts', fonts);
+    else Reflect.deleteProperty(document, 'fonts');
+  });
+  let restoreSegments = () => {};
+  try {
+    if (!document.fonts) Object.defineProperty(document, 'fonts', {
+      value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+    });
+    const { result } = renderHook(useHarness, { initialProps });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.queries?.isReady()).toBe(true));
+    const segments = spyOn(session, 'storySegments');
+    restoreSegments = registerRestore(() => segments.mockRestore());
+    const target = document.createElement('div');
+    const host = createRef<HTMLDivElement>();
+    const editor = () => <PagedEditor document={result.current.host!.document}
+      yrsCore={result.current.core} readOnly holdInput
+      canvasOverlayTarget={target} canvasHostRef={host}
+      displayListQueries={result.current.renderer.queries}
+      measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+      fontRequirementsInWorker={result.current.renderer.fontRequirementsInWorker}
+      layoutInWorker={result.current.renderer.layoutInWorker} />;
+    const view = render(editor());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    await act(async () => tasks.run());
+    expect(segments).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    view.rerender(editor());
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(segments).not.toHaveBeenCalled();
+    expect(tasks.tasks).toHaveLength(1);
+    await act(async () => tasks.run());
+    expect(segments).toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreSegments();
+      restoreFonts();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yield %s once', async (boundary) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    if (boundary === 2) await act(async () => tasks.run());
+    act(() => {
+      ensureWorkerOpenReplica(session);
+      expect(session.hasStory('body')).toBe(true);
+      expect(result.current.core.replicaReadyRef?.current).toBe(true);
+      expect(load).toHaveBeenCalledTimes(1);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each([false, true])('a loadState error after yielding preserves replica fallback with failure=%s', async (fails) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  let restoreOpen = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const loadError = new Error('State load failed');
+    const fallbackError = new Error('Replica fallback failed');
+    const load = spyOn(session, 'loadState').mockImplementation(() => { throw loadError; });
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const originalOpen = session.openDocx.bind(session);
+    const fallbackSeeds: boolean[] = [];
+    const open = spyOn(session, 'openDocx').mockImplementation((source, seed, options) => {
+      fallbackSeeds.push(seed);
+      if (fails && seed) throw fallbackError;
+      return originalOpen(source, seed, options);
+    });
+    restoreOpen = registerRestore(() => open.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    await act(async () => {
+      await tasks.run();
+      if (fails) await expect(pending).rejects.toBe(fallbackError);
+      else await pending;
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(fallbackSeeds).toEqual([false, true]);
+    expect(result.current.core.replicaReady).toBe(!fails);
+    expect(result.current.core.replicaReadyRef?.current).toBe(!fails);
+    expect(replicas).toEqual(fails ? [] : [session]);
+    expect(result.current.errors).toEqual(fails ? [fallbackError] : []);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreOpen();
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test('a hidden document starts the editor peer immediately without layout or idle', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const fallback = holdLayoutFallback();
+  const visibility = stubDocumentVisibility('hidden');
+  const { result, unmount } = renderHook(useHarness, { initialProps });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    expect(result.current.renderer.frame).toBeNull();
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
+    expect(result.current.mainOpens).toEqual([]);
+    act(() => frames.run());
+    act(() => frames.run());
+    act(() => frames.runIdle());
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(fallback.timers.size).toBe(2));
+    expect(result.current.core.replicaReady).toBe(false);
+    await act(async () => {
+      fallback.advance(3000);
+      await awaitWorkerOpenReplica(session);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    fallback.restore();
+    frames.restore();
+  }
+});
+
+test.each([false, true])('hiding a tab starts the editor peer immediately with settledLayout=%s', async (settledLayout) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const layoutReady = settledLayout ? undefined : new Promise<void>(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, layoutReady },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    act(() => visibility.hide());
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    act(() => frames.run());
+    act(() => frames.run());
+    act(() => frames.runIdle());
+    act(() => visibility.hide());
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test('a viewer skips peer scheduling and defers background page builds until idle', async () => {
+  const source = await longFixture(1200);
+  const options = { holdCompletion: true };
+  const { posted, workers } = installWorker(options);
+  const frames = holdFrames(true);
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const waitForUpdate = async (assertion: () => void) => {
+    const deadline = performance.now() + 5000;
+    for (;;) {
+      await act(async () => {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      });
+      try {
+        assertion();
+        return;
+      } catch (error) {
+        if (performance.now() >= deadline) throw error;
+      }
+    }
+  };
+  try {
+    const { result } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source, readOnly: true, viewer: true, onLayoutWait },
+    });
+    await waitForUpdate(() => expect(result.current.host).not.toBeNull());
+    await waitForUpdate(() => expect(result.current.renderer.frame).not.toBeNull());
+    expect(result.current.renderer.presentedEngine).toBe(result.current.core.session);
+    act(() => result.current.presentFrame());
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(fallback.timers.size).toBe(0);
+    await waitForUpdate(() => expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1));
+    await waitForUpdate(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    await waitForUpdate(() => expect(result.current.renderer.displayList!.pages.length).toBeGreaterThan(7));
+    await waitForUpdate(() => expect(frames.idleCallbacks.size).toBeGreaterThan(1));
+    expect(result.current.renderer.displayList!.pages.slice(5, 7).every((page) => page.unbuilt)).toBe(true);
+    expect(posted.filter((request) =>
+      request.type === 'buildPages' && request.background === true
+    )).toEqual([]);
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(fallback.timers.size).toBe(0);
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(false);
+    await act(async () => frames.runIdle());
+    await waitForUpdate(() => expect(posted.some((request) =>
+      request.type === 'buildPages' && request.background === true
+    )).toBe(true));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(posted.filter((request) => request.type === 'revisionCount')).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      visibility.restore();
+      fallback.restore();
+      frames.restore();
+    }
+  }
+}, 15_000);
+
+test('the editor state prefetch waits for a sliced background page-build reply', async () => {
+  const options = {
+    holdCompletion: true,
+    holdReply: (request: ResidentEngineWorkerRequest) =>
+      request.type === 'buildPages' || request.type === 'encodeState',
+  };
+  const { posted, workers, received, reply, replies } = installWorker(options);
+  const frames = holdFrames(true);
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  try {
+    const props = { ...initialProps, source: await longFixture(1200) };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    act(() => result.current.presentFrame());
+    const layout = result.current.renderer.settledDisplayList(null, null, 'document');
+    void layout.catch(() => {});
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    let batch = await received('buildPages');
+    while (batch.type === 'buildPages' && !batch.background) {
+      await act(async () => reply(batch));
+      batch = await received('buildPages', batch.id);
+    }
+    if (batch.type !== 'buildPages') throw new Error('expected a page build');
+    expect(batch.background).toBe(true);
+    expect(batch.pages.length).toBeGreaterThan(4);
+    expect(batch.pages).toEqual(expect.arrayContaining([5, 6]));
+    expect(replies.has(batch.id)).toBe(true);
+    const window = result.current.renderer.settledDisplayList(null, null, 'window');
+    void window.catch(() => {});
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    const postedBeforeReply = posted.length;
+    await act(async () => reply(batch));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    const prefetched = await received('encodeState');
+    expect(posted.indexOf(prefetched)).toBeGreaterThanOrEqual(postedBeforeReply);
+    expectStatePrefetchAfterPageBuilds(posted);
+    await frames.untilCommitted(layout);
+    await window;
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => {
+      reply(prefetched);
+      frames.runIdle();
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expectStatePrefetchAfterPageBuilds(posted);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    visibility.restore();
+    fallback.restore();
+    frames.restore();
+  }
+}, 15_000);
+
+test('the editor peer waits for window layout to settle and then starts on idle', async () => {
+  let holdMargin = true;
+  let marginId: number | null = null;
+  const options = {
+    holdCompletion: true,
+    holdReply: (request: ResidentEngineWorkerRequest) => {
+      if (!holdMargin || request.type !== 'buildPages' || !request.background) return false;
+      marginId ??= request.id;
+      return request.id === marginId;
+    },
+  };
+  const { posted, workers, received, reply } = installWorker(options);
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  try {
+    const props = { ...initialProps, source: await longFixture(1200) };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const full = result.current.core.session!;
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    act(() => result.current.presentFrame());
+    let settled = false;
+    const layout = result.current.renderer.settledDisplayList(null, null, 'window');
+    void layout.then(() => { settled = true; }, () => {});
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(settled).toBe(false);
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(posted.some((request) => request.type === 'buildPages')).toBe(true));
+    await waitFor(() => expect(marginId).not.toBeNull());
+    const margin = await received('buildPages', marginId! - 1);
+    expect(margin).toMatchObject({ type: 'buildPages', pages: [5, 6], background: true });
+    expect(settled).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    holdMargin = false;
+    await act(async () => reply(margin));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.findIndex((request) => request.type === 'encodeState')).toBeGreaterThan(posted.indexOf(margin));
+    await frames.untilCommitted(layout);
+    expect(settled).toBe(true);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(true);
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    visibility.restore();
+    frames.restore();
+  }
+}, 15_000);
+
+test.each(['resolved', 'in flight'] as const)(
+  'a host change after state prefetch is %s hydrates the current worker state',
+  async (stage) => {
+    const worker = installWorker({ holdReply: (request) => request.type === 'encodeState' });
+    const frames = holdFrames(true);
+    const visibility = stubDocumentVisibility('visible');
+    let resident!: NonNullable<Awaited<ReturnType<OpenInWorker>>>;
+    const openInWorker: OpenInWorker = async (...args) => {
+      const opened = await result.current.renderer.openInWorker(...args);
+      if (opened) resident = opened;
+      return opened;
+    };
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: await longFixture(1), openInWorker },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      const load = spyOn(session, 'loadState');
+      registerRestore(() => load.mockRestore());
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+      const prefetched = await worker.received('encodeState');
+      const before = worker.responses.get(prefetched)!;
+      if (!before.ok || !before.state) throw new Error('expected prefetched state');
+      expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(load).not.toHaveBeenCalled();
+      if (stage === 'resolved') await act(async () => worker.reply(prefetched));
+      const identities = await resident.documentRead({ kind: 'paragraphIdentities' });
+      const paragraph = identities.value.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+      await act(async () => {
+        const changed = await resident.proposal({
+          kind: 'propose',
+          request: {
+            expectVersion: identities.version,
+            proposals: [{
+              id: 'after-prefetch', paragraph,
+              suggest: { author: 'Host', date: '2026-10-04T00:00:00Z' },
+              op: 'insertText', at: 'start', text: 'Changed ',
+            }],
+          },
+        });
+        expect(changed.result).toMatchObject({ ok: true });
+      });
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      await act(async () => frames.runIdle());
+      await waitFor(() => expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(2));
+      const fresh = await worker.received('encodeState', prefetched.id);
+      const after = worker.responses.get(fresh)!;
+      if (!after.ok || !after.state) throw new Error('expected current worker state');
+      expect(after.version).not.toBe(before.version);
+      expect(load).not.toHaveBeenCalled();
+      await act(async () => {
+        if (stage === 'in flight') worker.reply(prefetched);
+        worker.reply(fresh);
+        await awaitWorkerOpenReplica(session);
+      });
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(load.mock.calls[0]![0]).toEqual(new Uint8Array(after.state));
+      expect(load.mock.calls[0]![0]).not.toEqual(new Uint8Array(before.state));
+      expect(session.paragraphs('body')[0].text).toBe('Changed First paragraph');
+      expect(result.current.mainOpens).toEqual([false]);
+      expect(result.current.core.replicaReady).toBe(true);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      visibility.restore();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('an already settled editor window prefetches state when its peer begins waiting', async () => {
+  const { posted, received, reply } = installWorker({ holdReply: (request) => request.type === 'encodeState' });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: await longFixture(1), onLayoutWait },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    const prefetched = await received('encodeState');
+    expect(onLayoutWait).toHaveBeenCalledTimes(1);
+    expect(posted.some((request) => request.type === 'buildPages')).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => reply(prefetched));
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test('a failed state prefetch takes the encode-failure fallback without encoding again', async () => {
+  const { workers, posted, received, reply, replies } = installWorker({
+    holdReply: (request) => request.type === 'encodeState',
+  });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: await longFixture(1) },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    const prefetched = await received('encodeState');
+    const lateState = replies.get(prefetched.id)!;
+    await act(async () => {
+      workers[0].onmessage?.({
+        data: { id: prefetched.id, ok: false, error: 'prefetch failed' },
+      } as MessageEvent);
+      reply(prefetched);
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.mainOpens).toEqual([true]));
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.errors).toEqual([]);
+    await act(async () => lateState());
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([true]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test.each([
+  ['replace', 'resolved'], ['replace', 'in flight'],
+  ['unmount', 'resolved'], ['unmount', 'in flight'],
+] as const)(
+  'a document %s discards a %s state prefetch before peer start',
+  async (action, stage) => {
+    let holdStateReply = true;
+    const { posted, received, reply, responses } = installWorker({
+      holdReply: (request) => holdStateReply && request.type === 'encodeState',
+    });
+    const frames = holdFrames(true);
+    const visibility = stubDocumentVisibility('visible');
+    const { result, rerender, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: await longFixture(1) },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const previous = result.current.core.session!;
+      const loadPrevious = spyOn(previous, 'loadState');
+      registerRestore(() => loadPrevious.mockRestore());
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(previous));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+      const prefetched = await received('encodeState');
+      const oldState = responses.get(prefetched)!;
+      if (!oldState.ok || !oldState.state) throw new Error('expected previous document state');
+      if (stage === 'resolved') await act(async () => reply(prefetched));
+      expect(replicaHelpers.workerOpenReplicaStarted(previous)).toBe(false);
+      const staleIdle = [...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000);
+      expect(staleIdle).toHaveLength(1);
+      holdStateReply = false;
+      if (action === 'replace') {
+        const source = await longFixture(2);
+        act(() => rerender({ ...initialProps, source, generation: 2 }));
+        await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+      } else unmount();
+      await act(async () => {
+        if (stage === 'in flight') reply(prefetched);
+        for (const { callback } of staleIdle) callback({ didTimeout: false, timeRemaining: () => 50 });
+        frames.runIdle();
+      });
+      expect(loadPrevious).not.toHaveBeenCalled();
+      expect(replicaHelpers.workerOpenReplicaPending(previous)).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+      if (action === 'replace') {
+        const replacement = result.current.core.session!;
+        const load = spyOn(replacement, 'loadState');
+        registerRestore(() => load.mockRestore());
+        act(() => result.current.pipeline.runLayoutPipeline());
+        await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(replacement));
+        act(() => result.current.presentFrame());
+        await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
+        await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+        expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(2);
+        expect(load).toHaveBeenCalledTimes(1);
+        expect(load.mock.calls[0]![0]).not.toEqual(new Uint8Array(oldState.state));
+        expect(texts(replacement).body).toEqual(['First paragraph', 'Tail paragraph']);
+        expect(loadPrevious).not.toHaveBeenCalled();
+        expect(result.current.mainOpens).toEqual([false]);
+      } else expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      if (action === 'replace') unmount();
+      visibility.restore();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+function observePluginFallback<T>(promise: Promise<T>, clock: ReturnType<typeof holdPeerFallback>) {
+  const outcome = {
+    settled: false,
+    value: undefined as T | undefined,
+    error: undefined as unknown,
+    at: undefined as number | undefined,
+  };
+  void promise.then(
+    (value) => { outcome.settled = true; outcome.value = value; outcome.at = clock.now; },
+    (error: unknown) => { outcome.settled = true; outcome.error = error; outcome.at = clock.now; }
+  );
+  return outcome;
+}
+
+async function flushPluginFallback(clock: ReturnType<typeof holdPeerFallback>) {
+  for (let turn = 0; turn < 12; turn += 1) {
+    await act(async () => {
+      clock.advance(0);
+      for (let microtask = 0; microtask < 12; microtask += 1) await Promise.resolve();
+    });
+  }
+}
+
+async function openingPluginFallback() {
+  const source = await longFixture(2);
+  const worker = installWorker({ holdState: true, holdCompletion: true });
+  const frames = holdFrames(true);
+  const clock = holdPeerFallback({ allTimers: true });
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const deferred = spyOn(replicaHelpers, 'deferWorkerOpenReplica');
+  let opened!: NonNullable<Awaited<ReturnType<OpenInWorker>>>;
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, source, layoutCompleteSession: null,
+      onWorkerOpen: (worker) => { if (worker) opened = worker; },
+    },
+  });
+  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
+    await act(async () => {
+      clock.advance(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+  }
+  await flushPluginFallback(clock);
+  expect(result.current.host).not.toBeNull();
+  expect(opened).toBeDefined();
+  const session = result.current.core.session!;
+  expect(session.storyIds()).toEqual([]);
+  expect(result.current.core.replicaReady).toBe(false);
+  const replicaIndex = deferred.mock.calls.findIndex(([owner]) => owner === session);
+  expect(replicaIndex).toBeGreaterThanOrEqual(0);
+  const replica = deferred.mock.results[replicaIndex]!.value as ReturnType<typeof replicaHelpers.deferWorkerOpenReplica>;
+  const snapshot = observePluginFallback(opened.documentRead({
+    kind: 'readParagraphs', request: { view: 'accepted' },
+  }), clock);
+  await flushPluginFallback(clock);
+  expect(snapshot.settled).toBe(true);
+  expect(snapshot.error).toBeUndefined();
+  if (!snapshot.value?.value.ok) throw new Error('The worker paragraph read did not succeed');
+  const version = snapshot.value.version;
+  const paragraphs = snapshot.value.value.paragraphs;
+  expect(paragraphs.map((paragraph) => paragraph.text)).toEqual(['First paragraph', 'Tail paragraph']);
+  const editor = result.current.pagedEditorRef.current!;
+  const focus = mock(() => {});
+  Object.assign(editor, { focus });
+  const flush = spyOn(editor, 'flushPendingInput').mockImplementation(async () => {
+    await replicaHelpers.awaitWorkerOpenReplica(session);
+  });
+  const start = spyOn(replica, 'start');
+  const ensure = spyOn(replica, 'ensure');
+  const requestReady = spyOn(replica, 'requestReady');
+  const requested = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+  const ensured = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+  const readinessRequested = spyOn(replicaHelpers, 'requestWorkerOpenReplicaReadiness');
+  const ready = spyOn(replicaHelpers, 'awaitWorkerOpenReplica');
+  const load = spyOn(session, 'loadState');
+  const apply = spyOn<YrsSession, 'applyEdits'>(session, 'applyEdits');
+  const selection = spyOn(session, 'setSelection');
+  const binding = testBinding();
+  binding.state.admission = async () => {
+    const flushed = await flushEditorInput(result.current.pagedEditorRef);
+    if (!flushed.ok) throw new DocxCommandAdmissionError(flushed.code);
+  };
+  const commands = createDocxCommandController();
+  commands.attach(binding.binding);
+  const controller = new AbortController();
+  const lifetime = new AbortController();
+  const invocation: PluginInvocation<DocxPluginSnapshot> = {
+    pluginId: 'acme.review',
+    activation: {},
+    snapshot: {} as DocxPluginSnapshot,
+    signal: controller.signal,
+    lifetimeSignal: lifetime.signal,
+    state: () => null,
+    setState: () => false,
+    onCleanup: () => {},
+    run: async () => {},
+    commit: (write) => write(),
+    refusal: () => controller.signal.aborted ? 'aborted' : null,
+  };
+  const queries = {
+    sourceState: () => ({ status: 'ready' }),
+    anchorRect: () => ({ pageIndex: 0, x: 0, y: 0, width: 1, height: 1 }),
+  } as unknown as DisplayListQueries;
+  stampSourceVersion(queries, version);
+  const clients = createPluginClients(invocation, {
+    pagedEditorRef: result.current.pagedEditorRef,
+    writeMode: () => 'editing',
+    viewer: () => false,
+    commands: () => commands,
+    layout: () => ({ queries, complete: false, failed: false }),
+    subscribeLayout: (listener) => session.onUpdate(listener),
+  }, () => ({ document: 'write', editBatches: true }), commands.store);
+  return {
+    worker, frames, clock, tasks, visibility, result, unmount, session, replica,
+    version, paragraphs, clients, focus, flush, start, ensure, requestReady,
+    requested, ensured, readinessRequested, ready, load, apply, selection, binding,
+  };
+}
+
+async function expectPluginOwnerFallback(
+  calls: (env: Awaited<ReturnType<typeof openingPluginFallback>>) => readonly Promise<unknown>[],
+  complete: (values: readonly unknown[], env: Awaited<ReturnType<typeof openingPluginFallback>>) => void | Promise<void>
+) {
+  const env = await openingPluginFallback();
+  const { clock, replica, result, session, worker } = env;
+  let outcomes: ReturnType<typeof observePluginFallback>[] = [];
+  try {
+    expect(clock.now).toBe(0);
+    expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.pagedEditorRef.current?.hasPendingInput()).toBe(false);
+    outcomes = calls(env).map((call) => observePluginFallback(call, clock));
+    await flushPluginFallback(clock);
+    expectUnstarted();
+    await act(async () => { clock.advance(9_999); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(9_999);
+    expectUnstarted();
+    await act(async () => { clock.advance(2); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(10_001);
+    expect(replica.started).toBe(true);
+    expect(env.start).toHaveBeenCalledTimes(1);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(env.requested.mock.calls).toEqual([[session]]);
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(env.load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    expectPassiveCall();
+    await act(async () => { worker.workers[0]!.release(); });
+    await flushPluginFallback(clock);
+    expect(env.tasks.tasks).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    await act(async () => { await env.tasks.run(); });
+    await flushPluginFallback(clock);
+    expect(env.load).toHaveBeenCalledTimes(1);
+    expect(env.tasks.tasks).toHaveLength(1);
+    await act(async () => { await env.tasks.run(); });
+    await flushPluginFallback(clock);
+    expect(replica.hydrated).toBe(true);
+    expect(replica.pending).toBe(true);
+    const hydratedVersion = replica.readyVersion;
+    expect(hydratedVersion).toBeDefined();
+    if (hydratedVersion === undefined || replica.loadedVersion === undefined) {
+      throw new Error('The replica did not record its hydrated versions');
+    }
+    expect(session.version()).toBe(hydratedVersion);
+    expect(hydratedVersion).toBe(replica.loadedVersion);
+    expect(hydratedVersion).not.toBe(env.version);
+    expect(clock.now).toBe(10_001);
+    expect(result.current.core.replicaReady).toBe(false);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    await act(async () => { clock.advance(2_999); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(13_000);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    await act(async () => { clock.advance(27_001); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(10_000 + 30_000 + 1);
+    for (const outcome of outcomes) {
+      expect(outcome.settled).toBe(true);
+      expect(outcome.error).toBeUndefined();
+      expect(outcome.at).toBeLessThanOrEqual(10_000 + 30_000 + 1);
+    }
+    expect(replica.pending).toBe(false);
+    expect(result.current.core.replicaReady).toBe(true);
+    const applied = env.apply.mock.results
+      .flatMap((call) => call.type === 'return' && call.value ? [call.value] : [])
+      .find((value) => value.ok && value.applied);
+    expect(session.version()).toBe(applied?.version ?? hydratedVersion);
+    expect(env.start).toHaveBeenCalledTimes(1);
+    expect(env.requested.mock.calls).toEqual([[session]]);
+    expect(env.load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.core.session).toBe(session);
+    expect<unknown[]>([null, session]).toContain(result.current.renderer.layoutCompleteSession);
+    expect(result.current.errors).toEqual([]);
+    expectPassiveCall();
+    await complete(outcomes.map((outcome) => outcome.value), env);
+  } finally {
+    env.unmount();
+    env.visibility.restore();
+    env.tasks.restore();
+    env.clock.restore();
+    env.frames.restore();
+  }
+
+  function expectPassiveCall() {
+    expect(env.ensure).not.toHaveBeenCalled();
+    expect(env.requestReady).not.toHaveBeenCalled();
+    expect(env.ensured).not.toHaveBeenCalled();
+    expect(env.readinessRequested).not.toHaveBeenCalled();
+    expect(env.ready.mock.calls).toEqual(outcomes.map(() => [session]));
+    expect(env.flush).toHaveBeenCalledTimes(outcomes.length);
+    expect(result.current.pagedEditorRef.current?.hasPendingInput()).toBe(false);
+  }
+
+  function expectUnstarted() {
+    expect(replica.pending).toBe(true);
+    expect(replica.started).toBe(false);
+    expect(env.start).not.toHaveBeenCalled();
+    expect(env.requested).not.toHaveBeenCalled();
+    expect(env.load).not.toHaveBeenCalled();
+    expect(env.apply).not.toHaveBeenCalled();
+    expect(env.selection).not.toHaveBeenCalled();
+    expect(env.focus).not.toHaveBeenCalled();
+    expect(env.binding.calls).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toEqual([]);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    expectPassiveCall();
+  }
+}
+
+test('reads and versions issued after worker open wait for the owner fallback and complete by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [
+    env.clients.read.version(),
+    env.clients.read.readParagraphs({ view: 'accepted' }),
+  ], (values, env) => {
+    expect(values[0]).toEqual({ ok: true, version: env.replica.readyVersion });
+    expect(values[1]).toEqual(env.session.readParagraphs({ view: 'accepted' }));
+    expect(values[1]).toMatchObject({ ok: true, version: env.replica.readyVersion, paragraphs: [
+      expect.objectContaining({ text: 'First paragraph' }),
+      expect.objectContaining({ text: 'Tail paragraph' }),
+    ] });
+  });
+});
+
+test('text search issued after worker open waits for the owner fallback and completes by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [env.clients.read.findText({
+    text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+  })], (values, env) => {
+    expect(values[0]).toEqual(env.session.findText({
+      text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    }));
+    expect(values[0]).toMatchObject({
+      ok: true, version: env.replica.readyVersion,
+      matches: [expect.objectContaining({ text: 'Tail' })],
+    });
+  });
+});
+
+test('navigation with focus issued after worker open waits for the owner fallback and completes by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [env.clients.navigation.scrollToParagraph(
+    { story: 'body', paraId: env.paragraphs[1]!.paraId },
+    { expectVersion: env.version, focus: true }
+  )], (values, env) => {
+    expect(values).toEqual([{ ok: true }]);
+    expect(env.session.selection()?.head).toMatchObject({
+      story: 'body', paraId: env.paragraphs[1]!.paraId, offset: 0,
+    });
+    expect(env.selection).toHaveBeenCalledTimes(1);
+    expect(env.focus).toHaveBeenCalledTimes(1);
+    expect(env.result.current.searchReveals).toHaveLength(1);
+  });
+});
+
+test('mutations and commands issued after worker open wait for the owner fallback and complete by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [
+    env.clients.edits!.applyEdits({
+      expectVersion: env.version,
+      steps: [{
+        op: 'replaceText', target: { kind: 'paragraph', story: 'body', paraId: env.paragraphs[0]!.paraId },
+        text: 'Owner-ready edit',
+      }],
+    }),
+    env.clients.commands.execute('reviewNext', null),
+  ], (values, env) => {
+    const readyVersion = env.replica.readyVersion;
+    if (readyVersion === undefined) throw new Error('The replica did not record its ready version');
+    expect(values[0]).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
+    expect(values[1]).toEqual({ ok: true, status: 'executed' });
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    expect(env.apply).toHaveBeenCalledTimes(1);
+    expect(env.binding.calls).toEqual([{ id: 'reviewNext', args: null, ordered: true }]);
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(readyVersion);
+  });
+});
+
+test('a pre-hydration worker version applies after unchanged owner hydration and becomes stale after an edit', async () => {
+  await expectPluginOwnerFallback(() => [], async (_values, env) => {
+    const readyVersion = env.replica.readyVersion;
+    if (readyVersion === undefined) throw new Error('The replica did not record its ready version');
+    const request = {
+      expectVersion: env.version,
+      steps: [{
+        op: 'replaceText' as const,
+        target: { kind: 'paragraph' as const, story: 'body', paraId: env.paragraphs[0]!.paraId },
+        text: 'Owner-ready edit',
+      }],
+    };
+    expect(env.replica.handoverVersion).toBe(env.version);
+    expect(env.session.version()).toBe(readyVersion);
+    const applied = await env.clients.edits!.applyEdits(request);
+    expect(applied).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(readyVersion);
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    const editedVersion = env.session.version();
+    expect(editedVersion).not.toBe(env.replica.readyVersion);
+    expect(await env.clients.edits!.applyEdits({
+      ...request, steps: [{ ...request.steps[0]!, text: 'Stale edit' }],
+    })).toMatchObject({ ok: false, version: editedVersion, failure: { code: 'stale-version' } });
+    expect(env.apply.mock.calls[1]![0].expectVersion).toBe(env.version);
+    expect(env.session.version()).toBe(editedVersion);
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    expect(await env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: env.paragraphs[1]!.paraId },
+      { expectVersion: env.version, focus: true }
+    )).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    expect(env.selection).not.toHaveBeenCalled();
+    expect(env.focus).not.toHaveBeenCalled();
+    expect(env.result.current.searchReveals).toEqual([]);
+  });
+});
+
+test.each([false, true])('the ten-second fallback starts the editor peer when layout never settles with ownFrame=%s', async (ownFrame) => {
+  const { posted, workers } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  const layoutReady = new Promise<void>(() => {});
+  try {
+    const { result } = renderHook(useHarness, {
+      initialProps: { ...initialProps, layoutReady },
+    });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    if (ownFrame) {
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    }
+    act(() => frames.runIdle());
+    act(() => fallback.advance(9999));
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    act(() => fallback.advance(1));
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(true);
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(fallback.timers.size).toBe(0);
+    act(() => frames.runIdle());
+    act(() => fallback.advance(10_000));
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => {
+      workers[0].release();
+      await awaitWorkerOpenReplica(session);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      visibility.restore();
+      fallback.restore();
+      frames.restore();
+    }
+  }
+});
+
+test.each(['layout', 'idle'] as const)('replacing a document cancels the pending peer start during %s', async (stage) => {
+  const { posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  let releaseLayout!: () => void;
+  const layoutReady = new Promise<void>((resolve) => { releaseLayout = resolve; });
+  try {
+    const { result, rerender } = renderHook(useHarness, {
+      initialProps: { ...initialProps, layoutReady: stage === 'layout' ? layoutReady : undefined },
+    });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const previous = result.current.core.session!;
+    const load = spyOn(previous, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(previous));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    expect(replicaHelpers.workerOpenReplicaStarted(previous)).toBe(false);
+    const idleCallbacks = [...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000);
+    expect(idleCallbacks).toHaveLength(stage === 'idle' ? 1 : 0);
+    const staleFallbacks = [...fallback.timers.values()];
+    expect(staleFallbacks).toHaveLength(1);
+    act(() => rerender({ ...initialProps, source: bytes.slice(), generation: 2, layoutReady: undefined }));
+    await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+    expect(result.current.core.session).not.toBe(previous);
+    expect([...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000)).toHaveLength(0);
+    await act(async () => {
+      releaseLayout();
+      for (const { callback } of idleCallbacks) callback({ didTimeout: false, timeRemaining: () => 50 });
+      for (const { callback } of staleFallbacks) callback();
+      frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaPending(previous)).toBe(false);
+    expect(load).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      visibility.restore();
+      fallback.restore();
+      frames.restore();
+    }
+  }
+});
+
+test('completion slices do not register an editor waiter or prefetch before the layout-complete signal', async () => {
+  const options = { holdCompletion: true };
+  const worker = installWorker(options);
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const props: HarnessProps = {
+    ...initialProps, source: await longFixture(1200), followCompletion: true,
+    layoutCompleteSession: null, onLayoutWait,
+  };
+  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    await worker.sent('completeLayout');
+    act(() => result.current.presentFrame());
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(result.current.renderer.pendingCompletion).toBeNull();
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    options.holdCompletion = false;
+    await act(async () => worker.workers[0].release());
+    await waitFor(() => expect(result.current.renderer.layoutCompleteSession).toBe(session));
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => rerender({ ...props, layoutCompleteSession: session }));
+    await frames.waitFor(() => expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(onLayoutWait).toHaveBeenCalledTimes(1);
+    expectStatePrefetchAfterPageBuilds(worker.posted);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    await frames.waitFor(() => expect([...frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+}, 15_000);
+
+test('a keystroke during completion slices starts the peer and replays once after readiness', async () => {
+  const opened = await openingEditor(true, false, { holdFullLayout: true });
+  const tasks = holdHydrationTasks();
+  let insert: ReturnType<typeof spyOn<YrsSession, 'insertText'>> | undefined;
+  try {
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    expect(opened.harness.renderer.layoutCompleteSession).toBeNull();
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    insert = spyOn(full, 'insertText');
+    opened.click(6);
+    opened.type('K');
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(insert).not.toHaveBeenCalled();
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await finishHeldHydration(opened, tasks);
+    expect(replicaHelpers.workerOpenReplicaHydrating(full)).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(insert).not.toHaveBeenCalled();
+    const completion = await opened.received('completeLayout');
+    await act(async () => {
+      opened.reply(completion);
+      await awaitWorkerOpenReplica(full);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(full.paragraphs('body')[0].text).toBe('FirstK paragraph');
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    insert?.mockRestore();
+    opened.close();
+    tasks.restore();
+  }
+});
+
+test.each(['ctrlKey', 'metaKey'] as const)('keyboard and menu select-all during completion slices wait for layout-complete with %s', async (modifier) => {
+  const opened = await openingEditor(true, false, { holdFullLayout: true });
+  const tasks = holdHydrationTasks();
+  try {
+    act(() => opened.editor.current!.selectAll());
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    expect(opened.harness.renderer.layoutCompleteSession).toBeNull();
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    act(() => opened.editor.current!.selectAll());
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    fireEvent.keyDown(textarea, { key: 'a', [modifier]: true });
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const completion = await opened.received('completeLayout');
+    await act(async () => opened.reply(completion));
+    await opened.frames.waitFor(() => expect(opened.harness.renderer.layoutCompleteSession).toBe(full));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await finishHeldHydration(opened, tasks);
+    await act(async () => {
+      await awaitWorkerOpenReplica(full);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const paragraphs = full.paragraphs('body');
+    expect(full.selection()).toEqual({
+      anchor: { story: 'body', paraId: paragraphs[0].paraId, offset: 0 },
+      head: { story: 'body', paraId: paragraphs.at(-1)!.paraId, offset: paragraphs.at(-1)!.text.length },
+    });
+    expect(document.activeElement).toBe(textarea);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    tasks.restore();
+  }
+});
+
+function openingClipboard(write: (text: string) => Promise<void> = async () => {}) {
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const item = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+  const writeText = mock(write);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: undefined });
+  const restore = registerRestore(() => {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+    if (item) Object.defineProperty(globalThis, 'ClipboardItem', item);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+  });
+  return { writeText, restore };
+}
+
+async function editorWithoutLayoutCompleteSignal(holdInput = false, resolveDisplayListQueries?: ResolveDisplayListQueries) {
+  const worker = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const source = await longFixture(1);
+  const editor = createRef<PagedEditorRef>();
+  const canvasHost = createRef<HTMLDivElement>();
+  let harness!: ReturnType<typeof useHarness>;
+  function Editable({ held, layoutCompleteSession = null }: { held: boolean; layoutCompleteSession?: YrsSession | null }) {
+    harness = useHarness({ ...initialProps, source, layoutCompleteSession, onLayoutWait });
+    return <>
+      <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
+      <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
+        readOnly={held} holdInput={held} inputScope={1}
+        measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
+        fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
+        layoutInWorker={harness.renderer.layoutInWorker}
+        canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
+        inputQueries={harness.renderer.inputQueries} resolveDisplayListQueries={resolveDisplayListQueries} />
+    </>;
+  }
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    value: { addEventListener: () => {}, removeEventListener: () => {} }, configurable: true,
+  });
+  const view = render(<Editable held={holdInput} />);
+  const close = () => {
+    view.unmount();
+    visibility.restore();
+    frames.restore();
+  };
+  try {
+    await waitFor(() => expect(harness.host).not.toBeNull());
+    const session = harness.core.session!;
+    act(() => harness.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(harness.renderer.presentedEngine).toBe(session));
+    await waitFor(() => expect(harness.renderer.queries?.isReady()).toBe(true));
+    act(() => harness.presentFrame());
+    const canvas = canvasHost.current!.firstElementChild!;
+    const size = harness.renderer.queries!.pageSize(0)!;
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: size.width,
+      bottom: size.height, ...size }) as DOMRect;
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    return {
+      ...worker, frames, view, session, editor, canvas, onLayoutWait, close,
+      get harness() { return harness; },
+      releaseHeldInput(layoutCompleteSession: YrsSession | null = null) {
+        view.rerender(<Editable held={false} layoutCompleteSession={layoutCompleteSession} />);
+      },
+    };
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+
+function selectOpeningText(opened: Awaited<ReturnType<typeof editorWithoutLayoutCompleteSignal>>) {
+  const point = (position: number) => {
+    const caret = opened.harness.renderer.queries!.caretRect(position)!;
+    return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+  };
+  fireEvent.mouseDown(opened.canvas, point(1));
+  fireEvent.mouseUp(window, point(6));
+}
+
+async function readyEditorWithPendingNavigation() {
+  let releaseNavigation!: () => void;
+  const blocked = new Promise<null>((resolve) => { releaseNavigation = () => resolve(null); });
+  let started!: () => void;
+  const resolving = new Promise<void>((resolve) => { started = resolve; });
+  const resolveQueries = mock(() => {
+    started();
+    return blocked;
+  });
+  const opened = await editorWithoutLayoutCompleteSignal(false, resolveQueries);
+  try {
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    return {
+      opened, releaseNavigation,
+      pointAt(position: number) {
+        const caret = opened.harness.renderer.queries!.caretRect(position)!;
+        return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+      },
+      async startNavigation() {
+        await act(async () => {
+          fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowDown' });
+          await resolving;
+        });
+        expect(resolveQueries).toHaveBeenCalledTimes(1);
+        expect(opened.harness.core.replicaReady).toBe(true);
+        expect(opened.harness.renderer.inputQueries!.isReady()).toBe(true);
+        expect(opened.editor.current!.hasPendingInput()).toBe(true);
+      },
+    };
+  } catch (error) {
+    releaseNavigation();
+    opened.close();
+    throw error;
+  }
+}
+
+test.each([false, true])('a queued keystroke starts the peer before the layout signal and replays once with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const insert = spyOn(opened.session, 'insertText');
+  const load = spyOn(opened.session, 'loadState');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    fireEvent.keyDown(textarea, { key: 'A' });
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(insert).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    await opened.sent('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(opened.session.paragraphs('body')[0].text).toBe('AFirst paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(insert).toHaveBeenCalledTimes(1);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    insert.mockRestore();
+    load.mockRestore();
+    opened.close();
+  }
+});
+
+test.each(['paste', 'cut', 'composition'] as const)('queued %s starts the peer immediately without a layout waiter', async (kind) => {
+  const opened = await editorWithoutLayoutCompleteSignal();
+  const insert = spyOn(opened.session, 'insertText');
+  const remove = spyOn(opened.session, 'deleteRange');
+  const clipboard = openingClipboard();
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    act(() => textarea.focus());
+    if (kind === 'cut') selectOpeningText(opened);
+    if (kind === 'paste') fireEvent.paste(textarea, { clipboardData: { getData: () => 'P' } });
+    else if (kind === 'cut') fireEvent.cut(textarea);
+    else fireEvent.compositionStart(textarea);
+    if (kind === 'composition') {
+      textarea.value = 'I';
+      fireEvent.compositionEnd(textarea, { data: 'I' });
+    }
+    expect(document.activeElement).toBe(textarea);
+    expect(insert).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    await opened.sent('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.mainOpens).toEqual([]);
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const assertReplay = () => {
+      expect(opened.harness.core.replicaReady).toBe(true);
+      expect(insert).toHaveBeenCalledTimes(kind === 'paste' || kind === 'composition' ? 1 : 0);
+      expect(remove).toHaveBeenCalledTimes(kind === 'cut' ? 1 : 0);
+      expect(opened.session.paragraphs('body')[0].text).toBe(
+        kind === 'paste' ? 'PFirst paragraph' : kind === 'composition' ? 'IFirst paragraph' :
+          ' paragraph'
+      );
+      if (kind === 'cut') {
+        expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+        expect(clipboard.writeText).toHaveBeenCalledWith('First');
+      }
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    insert.mockRestore();
+    remove.mockRestore();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true].flatMap((held) =>
+  ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].flatMap((key) =>
+    [false, true].map((shift) => [key, shift, held] as const)
+  )
+))('queued %s does not start the peer before layout-complete with Shift=%s and heldInput=%s', async (key, shift, held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const insert = spyOn(opened.session, 'insertText');
+  const remove = spyOn(opened.session, 'deleteRange');
+  const select = spyOn(opened.session, 'setSelection');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    fireEvent.keyDown(textarea, { key, shiftKey: shift });
+    expect(document.activeElement).toBe(textarea);
+    expect(insert).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(opened.harness.mainOpens).toEqual([]);
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const assertReplay = () => {
+      expect(opened.harness.core.replicaReady).toBe(true);
+      expect(insert).toHaveBeenCalledTimes(0);
+      expect(remove).toHaveBeenCalledTimes(0);
+      if (key === 'ArrowRight') {
+        expect(select.mock.calls.filter(([anchor, head]) => (head ?? anchor).offset === 1)).toHaveLength(1);
+        expect(opened.session.selection()?.head.offset).toBe(1);
+      }
+      expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    insert.mockRestore();
+    remove.mockRestore();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
+test.each([false, true])('ArrowRight and PageDown wait for a typed character to start the peer and queued input replays once in order with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const replay: string[] = [];
+  const setSelection = opened.session.setSelection.bind(opened.session);
+  const insertText = opened.session.insertText.bind(opened.session);
+  const select = spyOn(opened.session, 'setSelection').mockImplementation((anchor, head) => {
+    if ((head ?? anchor).offset === 1) replay.push('ArrowRight');
+    return setSelection(anchor, head);
+  });
+  const insert = spyOn(opened.session, 'insertText').mockImplementation((...args) => {
+    replay.push(args[1]);
+    return insertText(...args);
+  });
+  const load = spyOn(opened.session, 'loadState');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    for (const key of ['ArrowRight', 'PageDown']) {
+      fireEvent.keyDown(textarea, { key });
+      expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+      expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    }
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    fireEvent.keyDown(textarea, { key: 'A' });
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(replay).toEqual([]);
+    expect(insert).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(textarea);
+    await opened.sent('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.mainOpens).toEqual([]);
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const assertReplay = () => {
+      expect(opened.harness.core.replicaReady).toBe(true);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(select.mock.calls.filter(([anchor, head]) => (head ?? anchor).offset === 1)).toHaveLength(1);
+      expect(replay).toEqual(['ArrowRight', 'A']);
+      expect(opened.session.paragraphs('body')[0].text).toBe('FAirst paragraph');
+      expect(opened.session.selection()?.head.offset).toBe(2);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    select.mockRestore();
+    insert.mockRestore();
+    load.mockRestore();
+    opened.close();
+  }
+});
+
+test.each([false, true])('a queued cut writes the selected text before deletion and replays once with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  let releaseWrite!: () => void;
+  const writeReady = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let copied = '';
+  const clipboard = openingClipboard(async (text) => {
+    copied = text;
+    await writeReady;
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    await opened.sent('encodeState');
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(copied).toBe('First');
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => {
+      releaseWrite();
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(opened.session.paragraphs('body')[0].text).toBe(' paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseWrite();
+    remove.mockRestore();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test('a held copy writes the held selection made before it', async () => {
+  const opened = await editorWithoutLayoutCompleteSignal(true);
+  const clipboard = openingClipboard();
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true });
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    act(() => opened.releaseHeldInput());
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test('a ready copy queued behind navigation writes the new selection once and an idle copy stays synchronous', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  const clipboard = openingClipboard();
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    act(() => textarea.focus());
+    fireEvent.mouseDown(opened.canvas, pointAt(1));
+    fireEvent.mouseMove(window, pointAt(6));
+    fireEvent.mouseUp(window, pointAt(6));
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(opened.session.selection()?.anchor.offset).toBe(0);
+    expect(opened.session.selection()?.head.offset).toBe(5);
+    await startNavigation();
+    const point = { ...pointAt(9), detail: 2 };
+    fireEvent.mouseDown(opened.canvas, point);
+    fireEvent.mouseUp(window, point);
+    fireEvent.click(opened.canvas, point);
+    fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true });
+    expect(opened.session.selection()?.anchor.offset).toBe(0);
+    expect(opened.session.selection()?.head.offset).toBe(5);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    await waitFor(() => expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]));
+    expect(opened.session.selection()?.anchor.offset).toBe(6);
+    expect(opened.session.selection()?.head.offset).toBe(15);
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    act(() => {
+      expect(fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true })).toBe(true);
+      expect(textarea.value).toBe('paragraph');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(9);
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true])('a queued cut whose clipboard write fails keeps the selection with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const clipboard = openingClipboard(async () => {
+    throw new Error('denied');
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    await opened.sent('encodeState');
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(remove).not.toHaveBeenCalled();
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    remove.mockRestore();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true])('a cut without the Clipboard API queues no deletion with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  const restore = registerRestore(() => {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    act(() => opened.releaseHeldInput());
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(remove).not.toHaveBeenCalled();
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    remove.mockRestore();
+    opened.close();
+    restore();
+  }
+});
+
+test.each([false, true])('pointer moves, mouse selection, wheel and scroll do not start the opening peer with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  try {
+    const caret = opened.harness.renderer.queries!.caretRect(6)!;
+    const point = { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0 };
+    fireEvent.pointerMove(opened.canvas, point);
+    fireEvent.mouseDown(opened.canvas, point);
+    fireEvent.mouseMove(opened.canvas, point);
+    fireEvent.mouseUp(window, point);
+    fireEvent.click(opened.canvas, point);
+    fireEvent.wheel(opened.canvas, { deltaY: 100 });
+    fireEvent.scroll(opened.canvas);
+    fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'Shift' });
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(opened.harness.mainOpens).toEqual([]);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+  }
+});
+
+test('the ten-second fallback starts the peer when a presented frame has no layout-complete signal', async () => {
+  const fallback = holdPeerFallback();
+  const opened = await editorWithoutLayoutCompleteSignal();
+  try {
+    act(() => fallback.advance(9999));
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => fallback.advance(1));
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    await opened.sent('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(fallback.timers.size).toBe(0);
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.harness.mainOpens).toEqual([false]);
+  } finally {
+    opened.close();
+    fallback.restore();
+  }
+});
+
+test('a stale layout-complete signal cannot start the replacement session peer', async () => {
+  const worker = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const props: HarnessProps = { ...initialProps, source: await longFixture(1), layoutCompleteSession: null, onLayoutWait };
+  const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const previous = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.layoutCompleteSession).toBe(previous));
+    act(() => result.current.presentFrame());
+    const replacementProps = { ...props, source: await longFixture(2), generation: 2, layoutCompleteSession: previous };
+    act(() => rerender(replacementProps));
+    await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+    const replacement = result.current.core.session!;
+    expect(replacement).not.toBe(previous);
+    expect(result.current.renderer.layoutCompleteSession).not.toBe(previous);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.layoutCompleteSession).toBe(replacement));
+    act(() => result.current.presentFrame());
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(replicaHelpers.workerOpenReplicaStarted(replacement)).toBe(false);
+    expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    act(() => rerender({ ...replacementProps, layoutCompleteSession: replacement }));
+    await frames.waitFor(() => expect(onLayoutWait).toHaveBeenCalledTimes(1));
+    await worker.sent('encodeState');
+    await frames.waitFor(() => expect([...frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => frames.runIdle());
+    expect(replicaHelpers.workerOpenReplicaStarted(replacement)).toBe(true);
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
 });

@@ -22,18 +22,122 @@ pub(crate) trait Codec: Sized + Send + Sync + 'static {
     fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
         r.atomic::<Self>()
     }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>()
+    }
+
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let start = r.position;
+        let mut reader = Reader::new(&r.payload[start..]);
+        Self::read(&mut reader)?;
+        let bytes = r.payload.len() - start - reader.rest().len();
+        r.cost = r.cost.saturating_add(bytes);
+        r.position += bytes;
+        Ok(())
+    }
 }
 
 const DECODE_PENDING: &str = "authority base decoding is pending";
+const DECODE_RESERVATION: usize = 128;
+
+fn preparation_cost<T>() -> usize {
+    std::mem::size_of::<T>().saturating_add(96)
+}
+
+fn field_decode_cost<S, T: Codec>(_field: impl FnOnce(&S) -> &T) -> usize {
+    T::decode_cost()
+}
+
+fn map_entry_cost<K, V>() -> usize {
+    std::mem::size_of::<(K, V)>().saturating_add(64)
+}
 
 type DecodeKey = (usize, std::any::TypeId);
 type DecodeValue = Box<dyn std::any::Any + Send + Sync>;
 
 #[derive(Default)]
 pub(crate) struct BaseDecode {
+    record: Option<(u64, usize)>,
     ready: BTreeMap<DecodeKey, (usize, DecodeValue)>,
     pending: BTreeMap<DecodeKey, DecodeValue>,
     started: BTreeSet<DecodeKey>,
+}
+
+impl BaseDecode {
+    pub(crate) fn is_pending_for(&self, record: (u64, usize)) -> SnapshotResult<bool> {
+        if self.record.is_some_and(|saved| saved != record) {
+            return Err(SnapshotError::new(
+                "snapshot decoder belongs to another record",
+            ));
+        }
+        Ok(self.record.is_some())
+    }
+
+    fn bind(&mut self, record: (u64, usize)) -> SnapshotResult<()> {
+        self.is_pending_for(record)?;
+        self.record = Some(record);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_string_record(&self) -> Option<(u64, usize)> {
+        self.pending
+            .keys()
+            .any(|(_, ty)| *ty == std::any::TypeId::of::<String>())
+            .then_some(self.record)
+            .flatten()
+    }
+}
+
+pub(crate) struct DecodePreflight<'a> {
+    payload: &'a [u8],
+    position: usize,
+    cost: usize,
+    complete: bool,
+    state: &'a BaseDecode,
+}
+
+impl<'a> DecodePreflight<'a> {
+    fn new(payload: &'a [u8], position: usize, state: &'a BaseDecode) -> Self {
+        Self {
+            payload,
+            position,
+            cost: 0,
+            complete: true,
+            state,
+        }
+    }
+
+    fn value<T: Codec>(&mut self) -> SnapshotResult<()> {
+        if !self.complete {
+            return Ok(());
+        }
+        let key = (self.position, std::any::TypeId::of::<T>());
+        if let Some((end, _)) = self.state.ready.get(&key) {
+            self.position = *end;
+            return Ok(());
+        }
+        let mut child = Self::new(self.payload, self.position, self.state);
+        if !self.state.started.contains(&key) {
+            child.cost = preparation_cost::<T>();
+        }
+        T::preflight(&mut child)?;
+        self.cost = self.cost.max(child.cost);
+        self.position = child.position;
+        self.complete = child.complete;
+        Ok(())
+    }
+
+    fn field<S, T: Codec>(&mut self, _field: impl FnOnce(&S) -> &T) -> SnapshotResult<()> {
+        self.value::<T>()
+    }
+
+    fn tag(&mut self) -> SnapshotResult<u8> {
+        let tag = Reader::new(&self.payload[self.position..]).u8()?;
+        self.position += 1;
+        Ok(tag)
+    }
 }
 
 pub(crate) struct BoundedReader<'a> {
@@ -45,20 +149,37 @@ pub(crate) struct BoundedReader<'a> {
     state: &'a mut BaseDecode,
 }
 
-pub(crate) fn decode_record<T: Codec>(
-    state: &mut BaseDecode,
-    payload: &[u8],
+pub(crate) fn preflight_record<T: Codec>(
+    state: &BaseDecode,
+    record: (u64, usize),
     budget: SnapshotBudget,
-) -> SnapshotResult<Option<(T, usize)>> {
+) -> SnapshotResult<()> {
+    state.is_pending_for(record)?;
     if budget.max_bytes() < 256 {
         return Err(SnapshotError::new(
             "snapshot decoding byte budget is too small",
         ));
     }
+    if DECODE_RESERVATION.saturating_add(T::decode_cost()) > budget.max_bytes() {
+        return Err(SnapshotError::new(
+            "snapshot decoding exceeds advance byte budget",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_record<T: Codec>(
+    state: &mut BaseDecode,
+    record: (u64, usize),
+    payload: &[u8],
+    budget: SnapshotBudget,
+) -> SnapshotResult<Option<(T, usize)>> {
+    preflight_record::<T>(state, record, budget)?;
+    state.bind(record)?;
     let mut reader = BoundedReader {
         payload,
         position: 0,
-        remaining: budget.max_bytes() - 128,
+        remaining: budget.max_bytes() - DECODE_RESERVATION,
         elements: 0,
         max_elements: budget.max_records(),
         state,
@@ -66,7 +187,11 @@ pub(crate) fn decode_record<T: Codec>(
     let result = reader.value::<T>();
     crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
     match result {
-        Ok(value) => Ok(Some((value, reader.position))),
+        Ok(value) => {
+            let position = reader.position;
+            *reader.state = BaseDecode::default();
+            Ok(Some((value, position)))
+        }
         Err(failure) if failure.to_string() == DECODE_PENDING => Ok(None),
         Err(failure) => Err(failure),
     }
@@ -96,7 +221,7 @@ impl BoundedReader<'_> {
             return Ok(());
         }
         if !self.state.started.contains(&key) {
-            let cost = std::mem::size_of::<T>().saturating_add(96);
+            let cost = preparation_cost::<T>();
             if cost > self.remaining {
                 return Self::pending();
             }
@@ -216,6 +341,41 @@ impl Codec for u16 {
 }
 
 impl Codec for String {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let key = (r.position, std::any::TypeId::of::<Self>());
+        let (end, offset) = if let Some(value) = r.state.pending.get(&key) {
+            let (end, offset, _) =
+                value
+                    .downcast_ref::<(usize, usize, String)>()
+                    .ok_or_else(|| {
+                        SnapshotError::new("authority base string cursor has the wrong type")
+                    })?;
+            (*end, *offset)
+        } else {
+            let mut reader = Reader::new(&r.payload[r.position..]);
+            let length = reader.var_usize()?;
+            let offset = r.payload.len() - reader.rest().len();
+            let end = offset
+                .checked_add(length)
+                .filter(|end| *end <= r.payload.len())
+                .ok_or_else(|| SnapshotError::new("authority base string is truncated"))?;
+            r.cost = r.cost.saturating_add(offset - r.position);
+            (end, offset)
+        };
+        if offset < end {
+            let width = match r.payload[offset] {
+                0..=0x7f => 1,
+                0xc2..=0xdf => 2,
+                0xe0..=0xef => 3,
+                0xf0..=0xf4 => 4,
+                _ => return Err(SnapshotError::new("authority base string is invalid UTF-8")),
+            };
+            r.cost = r.cost.saturating_add(width * 3);
+        }
+        r.position = end;
+        Ok(())
+    }
+
     fn write(&self, w: &mut Writer) {
         w.str(self);
     }
@@ -230,6 +390,25 @@ impl Codec for String {
 }
 
 impl<T: Codec> Codec for Option<T> {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        match r.tag()? {
+            0 => r.cost = r.cost.saturating_add(1),
+            1 => {
+                let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+                child.value::<T>()?;
+                r.cost = r.cost.max(1usize.saturating_add(child.cost));
+                r.position = child.position;
+                r.complete = child.complete;
+            }
+            _ => return Err(SnapshotError::new("invalid snapshot option")),
+        }
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(1usize.saturating_add(T::decode_cost()))
+    }
+
     fn write(&self, w: &mut Writer) {
         w.option(self.as_ref(), |w, value| value.write(w));
     }
@@ -248,6 +427,41 @@ impl<T: Codec> Codec for Option<T> {
 }
 
 impl<T: Codec> Codec for Vec<T> {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let key = (r.position, std::any::TypeId::of::<Self>());
+        let remaining = if let Some(value) = r.state.pending.get(&key) {
+            let state = value.downcast_ref::<VectorDecode<T>>().ok_or_else(|| {
+                SnapshotError::new("authority base vector cursor has the wrong type")
+            })?;
+            r.position = state.offset;
+            state.count - state.values.len()
+        } else {
+            let mut reader = Reader::new(&r.payload[r.position..]);
+            let count = reader.var_usize()?;
+            let offset = r.payload.len() - reader.rest().len();
+            if count > r.payload.len() - offset {
+                return Err(SnapshotError::new("authority base vector is truncated"));
+            }
+            r.cost = r.cost.saturating_add(offset - r.position);
+            r.position = offset;
+            count
+        };
+        if remaining != 0 {
+            let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+            child.value::<T>()?;
+            r.cost = r
+                .cost
+                .max(std::mem::size_of::<T>().saturating_add(child.cost));
+            r.position = child.position;
+            r.complete = child.complete && remaining == 1;
+        }
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(std::mem::size_of::<T>().saturating_add(T::decode_cost()))
+    }
+
     fn write(&self, w: &mut Writer) {
         w.var_usize(self.len());
         for value in self {
@@ -312,6 +526,44 @@ struct VectorDecode<T> {
 }
 
 impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let key = (r.position, std::any::TypeId::of::<Self>());
+        let remaining = if let Some(value) = r.state.pending.get(&key) {
+            let state = value
+                .downcast_ref::<(Self, usize, usize)>()
+                .ok_or_else(|| {
+                    SnapshotError::new("authority base map cursor has the wrong type")
+                })?;
+            r.position = state.2;
+            state.1 - state.0.len()
+        } else {
+            let mut reader = Reader::new(&r.payload[r.position..]);
+            let count = reader.var_usize()?;
+            let offset = r.payload.len() - reader.rest().len();
+            if count > r.payload.len() - offset {
+                return Err(SnapshotError::new("authority base map is truncated"));
+            }
+            r.cost = r.cost.saturating_add(offset - r.position);
+            r.position = offset;
+            count
+        };
+        if remaining != 0 {
+            let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+            child.value::<(K, V)>()?;
+            r.cost = r
+                .cost
+                .max(map_entry_cost::<K, V>().saturating_add(child.cost));
+            r.position = child.position;
+            r.complete = child.complete && remaining == 1;
+        }
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>()
+            .max(map_entry_cost::<K, V>().saturating_add(<(K, V)>::decode_cost()))
+    }
+
     fn write(&self, w: &mut Writer) {
         w.var_usize(self.len());
         for (key, value) in self {
@@ -351,7 +603,7 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
         r.position = state.2;
         while state.0.len() < state.1 {
             let before = r.elements;
-            let cost = std::mem::size_of::<(K, V)>().saturating_add(64);
+            let cost = map_entry_cost::<K, V>();
             let entry = if before == r.max_elements || cost > r.remaining {
                 BoundedReader::pending()
             } else {
@@ -382,6 +634,17 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
 }
 
 impl<A: Codec, B: Codec> Codec for (A, B) {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        r.value::<A>()?;
+        r.value::<B>()
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>()
+            .max(A::decode_cost())
+            .max(B::decode_cost())
+    }
+
     fn write(&self, w: &mut Writer) {
         let (first, second) = self;
         first.write(w);
@@ -403,6 +666,15 @@ impl<A: Codec, B: Codec> Codec for (A, B) {
 macro_rules! struct_codec {
     ($ty:ident { $($field:ident),+ $(,)? }) => {
         impl Codec for $ty {
+            fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+                $(r.field(|value: &Self| &value.$field)?;)+
+                Ok(())
+            }
+
+            fn decode_cost() -> usize {
+                preparation_cost::<Self>()$(.max(field_decode_cost(|value: &Self| &value.$field)))+
+            }
+
             fn write(&self, w: &mut Writer) {
                 let $ty { $($field),+ } = self;
                 $($field.write(w);)+
@@ -555,6 +827,35 @@ struct_codec!(SheetChart {
 });
 
 impl Codec for Color {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let tag = r.tag()?;
+        let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+        match tag {
+            0 => child.value::<String>()?,
+            1 => child.value::<(u8, f64)>()?,
+            2 => child.value::<u8>()?,
+            3 => {
+                r.cost = r.cost.saturating_add(1);
+                return Ok(());
+            }
+            _ => return Err(SnapshotError::new("invalid snapshot color")),
+        }
+        r.cost = r.cost.max(1usize.saturating_add(child.cost));
+        r.position = child.position;
+        r.complete = child.complete;
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(
+            1usize.saturating_add(
+                String::decode_cost()
+                    .max(<(u8, f64)>::decode_cost())
+                    .max(u8::decode_cost()),
+            ),
+        )
+    }
+
     fn write(&self, w: &mut Writer) {
         match self {
             Self::Rgb(value) => {
@@ -601,6 +902,25 @@ impl Codec for Color {
 }
 
 impl Codec for Fill {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        match r.tag()? {
+            0 => r.cost = r.cost.saturating_add(1),
+            1 => {
+                let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+                child.value::<Color>()?;
+                r.cost = r.cost.max(1usize.saturating_add(child.cost));
+                r.position = child.position;
+                r.complete = child.complete;
+            }
+            _ => return Err(SnapshotError::new("invalid snapshot fill")),
+        }
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(1usize.saturating_add(Color::decode_cost()))
+    }
+
     fn write(&self, w: &mut Writer) {
         match self {
             Self::None => w.u8(0),
@@ -628,6 +948,17 @@ impl Codec for Fill {
 }
 
 impl Codec for Theme {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        for _ in 0..12 {
+            r.value::<String>()?;
+        }
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(String::decode_cost())
+    }
+
     fn write(&self, w: &mut Writer) {
         let Self { colors } = self;
         for color in colors {
@@ -657,6 +988,36 @@ impl Codec for Theme {
 }
 
 impl Codec for ChartAnchor {
+    fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
+        let tag = r.tag()?;
+        let mut child = DecodePreflight::new(r.payload, r.position, r.state);
+        match tag {
+            0 => {
+                child.value::<AnchorCell>()?;
+                child.value::<AnchorCell>()?;
+                child.value::<AnchorEditAs>()?;
+            }
+            1 => child.value::<(AnchorCell, AnchorExtent)>()?,
+            2 => child.value::<(AnchorPos, AnchorExtent)>()?,
+            _ => return Err(SnapshotError::new("invalid snapshot chart anchor")),
+        }
+        r.cost = r.cost.max(1usize.saturating_add(child.cost));
+        r.position = child.position;
+        r.complete = child.complete;
+        Ok(())
+    }
+
+    fn decode_cost() -> usize {
+        preparation_cost::<Self>().max(
+            1usize.saturating_add(
+                AnchorCell::decode_cost()
+                    .max(AnchorEditAs::decode_cost())
+                    .max(<(AnchorCell, AnchorExtent)>::decode_cost())
+                    .max(<(AnchorPos, AnchorExtent)>::decode_cost()),
+            ),
+        )
+    }
+
     fn write(&self, w: &mut Writer) {
         match self {
             Self::TwoCell { from, to, edit_as } => {
@@ -1126,6 +1487,66 @@ enum BaseRecord {
 }
 
 impl BaseRecord {
+    fn preflight_cost(section: usize, r: &mut DecodePreflight<'_>) -> SnapshotResult<usize> {
+        match section {
+            0 => {
+                r.value::<u64>()?;
+                r.value::<DateSystem>()?;
+                r.value::<String>()?;
+                r.value::<Theme>()?;
+                for _ in 0..BASE_SECTIONS {
+                    r.value::<usize>()?;
+                }
+                r.cost = r.cost.max(std::mem::size_of::<BaseManifest>());
+            }
+            1 => r.value::<DefinedName>()?,
+            2 => r.value::<(i64, Vec<String>)>()?,
+            3 => r.value::<Option<FreezePane>>()?,
+            4 => r.value::<SheetFormat>()?,
+            5 => r.value::<Vec<ColStyle>>()?,
+            6 => r.value::<Vec<Hyperlink>>()?,
+            7 => r.value::<Vec<SheetChart>>()?,
+            8 => r.value::<HiddenDimensions>()?,
+            9 | 15 => r.value::<String>()?,
+            10 => r.value::<Font>()?,
+            11 => r.value::<Fill>()?,
+            12 => r.value::<Border>()?,
+            13 => r.value::<Xf>()?,
+            14 => r.value::<(u16, String)>()?,
+            16 => r.value::<Table>()?,
+            _ => return Err(SnapshotError::new("invalid authority base section")),
+        }
+        Ok(r.cost)
+    }
+
+    #[cfg(test)]
+    fn decode_cost(section: usize) -> SnapshotResult<usize> {
+        Ok(match section {
+            0 => std::mem::size_of::<BaseManifest>()
+                .max(u64::decode_cost())
+                .max(DateSystem::decode_cost())
+                .max(String::decode_cost())
+                .max(Theme::decode_cost())
+                .max(usize::decode_cost()),
+            1 => DefinedName::decode_cost(),
+            2 => <(i64, Vec<String>)>::decode_cost(),
+            3 => <Option<FreezePane>>::decode_cost(),
+            4 => SheetFormat::decode_cost(),
+            5 => <Vec<ColStyle>>::decode_cost(),
+            6 => <Vec<Hyperlink>>::decode_cost(),
+            7 => <Vec<SheetChart>>::decode_cost(),
+            8 => HiddenDimensions::decode_cost(),
+            9 | 15 => String::decode_cost(),
+            10 => Font::decode_cost(),
+            11 => Fill::decode_cost(),
+            12 => Border::decode_cost(),
+            13 => Xf::decode_cost(),
+            14 => <(u16, String)>::decode_cost(),
+            16 => Table::decode_cost(),
+            _ => return Err(SnapshotError::new("invalid authority base section")),
+        })
+    }
+
     fn read(r: &mut BoundedReader<'_>, section: usize) -> SnapshotResult<Self> {
         Ok(match section {
             0 => {
@@ -1189,20 +1610,44 @@ struct BaseBuilder {
     cursor: BaseCursor,
     growth: Growth<WorkbookBase>,
     decode: BaseDecode,
+    ordinal: u64,
 }
 
 impl BaseBuilder {
-    fn push_bounded(&mut self, payload: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
-        if budget.max_bytes() < 256 {
+    fn preflight(&self, payload: &[u8], budget: SnapshotBudget) -> SnapshotResult<BaseCursor> {
+        self.decode.is_pending_for((self.ordinal, 0))?;
+        if budget.max_bytes() < DECODE_RESERVATION {
             return Err(SnapshotError::new(
                 "authority base decoding byte budget is too small",
             ));
         }
-        self.cursor.normalize(&self.counts);
+        let mut cursor = self.cursor.clone();
+        cursor.normalize(&self.counts);
+        let section = usize::from(Reader::new(payload).u8()?);
+        if section != cursor.section || section > BASE_SECTIONS {
+            return Err(SnapshotError::new("unexpected authority base record"));
+        }
+        let cost = DECODE_RESERVATION
+            .saturating_add(1)
+            .saturating_add(BaseRecord::preflight_cost(
+                section,
+                &mut DecodePreflight::new(payload, 1, &self.decode),
+            )?);
+        if cost > budget.max_bytes() {
+            return Err(SnapshotError::new(
+                "snapshot authority exceeds advance byte budget",
+            ));
+        }
+        Ok(cursor)
+    }
+
+    fn push_bounded(&mut self, payload: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
+        self.cursor = self.preflight(payload, budget)?;
+        self.decode.bind((self.ordinal, 0))?;
         let mut reader = BoundedReader {
             payload,
             position: 0,
-            remaining: budget.max_bytes() - 128,
+            remaining: budget.max_bytes() - DECODE_RESERVATION,
             elements: 0,
             max_elements: budget.max_records(),
             state: &mut self.decode,
@@ -1223,6 +1668,7 @@ impl BaseBuilder {
                 "authority base record has trailing bytes",
             ));
         }
+        *reader.state = BaseDecode::default();
         match record {
             BaseRecord::Manifest(manifest) => {
                 let BaseManifest {
@@ -1292,6 +1738,7 @@ impl BaseBuilder {
                 self.cursor.index += 1;
             }
         }
+        self.ordinal += 1;
         Ok(true)
     }
 
@@ -1604,6 +2051,11 @@ impl AuthorityHydrator {
             return Err(SnapshotError::new("authority snapshot hydration failed"));
         }
         if let Some(record) = self.pending_base.front() {
+            if let Err(error) = self.base.preflight(record, budget) {
+                self.failed = (!budget.is_partial() || !error.is_budget_refusal())
+                    && error.to_string() != "snapshot authority exceeds advance byte budget";
+                return Err(error);
+            }
             if !self.base.advance_capacity(record, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
@@ -1613,7 +2065,8 @@ impl AuthorityHydrator {
                     self.pending_base.pop_front();
                 }
                 Err(error) => {
-                    self.failed = !budget.is_partial() || !error.is_budget_refusal();
+                    self.failed = (!budget.is_partial() || !error.is_budget_refusal())
+                        && error.to_string() != "snapshot authority exceeds advance byte budget";
                     return Err(error);
                 }
             }
@@ -1778,6 +2231,292 @@ mod tests {
 
     fn source() -> WorkbookAuthority {
         WorkbookAuthority::from_model(&model()).unwrap()
+    }
+
+    #[test]
+    fn bounded_decoder_refuses_a_different_record_and_clears_completed_state() {
+        let text = "a".repeat(2_048);
+        let mut writer = Writer::new();
+        text.write(&mut writer);
+        let payload = writer.into_bytes();
+        let small = SnapshotBudget::new(1, 1024).unwrap();
+        let mut decode = BaseDecode::default();
+        crate::snapshot::step::reset();
+        assert!(
+            decode_record::<String>(&mut decode, (7, 0), &payload, small)
+                .unwrap()
+                .is_none()
+        );
+        let work = crate::snapshot::step::current();
+        assert!(work.records <= small.max_records());
+        assert!(work.bytes <= small.max_bytes());
+        assert_eq!(decode.pending_string_record(), Some((7, 0)));
+        for record in [(8, 0), (7, 1)] {
+            crate::snapshot::step::reset();
+            assert_eq!(
+                decode_record::<String>(&mut decode, record, &payload, small)
+                    .unwrap_err()
+                    .to_string(),
+                "snapshot decoder belongs to another record"
+            );
+            assert_eq!(crate::snapshot::step::current().records, 0);
+            assert_eq!(crate::snapshot::step::current().bytes, 0);
+            assert_eq!(decode.pending_string_record(), Some((7, 0)));
+        }
+        let larger = SnapshotBudget::new(1, 4096).unwrap();
+        let mut completed = None;
+        for _ in 0..16 {
+            crate::snapshot::step::reset();
+            completed = decode_record::<String>(&mut decode, (7, 0), &payload, larger).unwrap();
+            let work = crate::snapshot::step::current();
+            assert!(work.records <= larger.max_records());
+            assert!(work.bytes <= larger.max_bytes());
+            if completed.is_some() {
+                break;
+            }
+        }
+        assert_eq!(completed, Some((text, payload.len())));
+        assert!(decode.record.is_none());
+        assert!(decode.ready.is_empty());
+        assert!(decode.pending.is_empty());
+        assert!(decode.started.is_empty());
+    }
+
+    #[test]
+    fn authority_manifest_scaffolding_preflight_preserves_the_unit() {
+        for section in 0..=BASE_SECTIONS {
+            assert!(DECODE_RESERVATION + 1 + BaseRecord::decode_cost(section).unwrap() <= 1024);
+        }
+        let authority = source();
+        let mut writer = Writer::new();
+        writer.u8(0);
+        write_manifest(&authority.base, &mut writer);
+        let payload = writer.into_bytes();
+        let minimum = DECODE_RESERVATION + 1 + BaseRecord::decode_cost(0).unwrap();
+        let fresh = SnapshotBudget::new(1, minimum - 1).unwrap();
+        let partial = SnapshotBudget::new(256, 1024)
+            .unwrap()
+            .remaining(1, 1024 - (minimum - 1))
+            .unwrap();
+        let mut builder = BaseBuilder::default();
+        for budget in [fresh, partial] {
+            crate::snapshot::step::reset();
+            assert_eq!(
+                builder
+                    .push_bounded(&payload, budget)
+                    .unwrap_err()
+                    .to_string(),
+                "snapshot authority exceeds advance byte budget"
+            );
+            assert_eq!(crate::snapshot::step::current().records, 0);
+            assert_eq!(crate::snapshot::step::current().bytes, 0);
+            assert!(builder.base.is_none());
+            assert_eq!(builder.counts, [0; BASE_SECTIONS]);
+            assert_eq!(builder.cursor.section, 0);
+            assert_eq!(builder.cursor.index, 0);
+            assert_eq!(builder.ordinal, 0);
+            assert!(builder.decode.record.is_none());
+            assert!(builder.decode.ready.is_empty());
+            assert!(builder.decode.pending.is_empty());
+            assert!(builder.decode.started.is_empty());
+        }
+        let budget = SnapshotBudget::new(1, minimum).unwrap();
+        let mut completed = false;
+        for _ in 0..256 {
+            crate::snapshot::step::reset();
+            completed = builder.push_bounded(&payload, budget).unwrap();
+            let work = crate::snapshot::step::current();
+            assert!(work.records <= budget.max_records());
+            assert!(work.bytes <= budget.max_bytes());
+            if completed {
+                break;
+            }
+        }
+        assert!(completed);
+        assert!(builder.base.is_some());
+        assert_eq!(builder.ordinal, 1);
+        assert!(builder.decode.record.is_none());
+        assert!(builder.decode.ready.is_empty());
+        assert!(builder.decode.pending.is_empty());
+        assert!(builder.decode.started.is_empty());
+    }
+
+    fn builder_for_section(section: usize, count: usize) -> BaseBuilder {
+        let authority = source();
+        let mut writer = Writer::new();
+        writer.u8(0);
+        authority.base.bootstrap_client_id.write(&mut writer);
+        authority.base.date_system.write(&mut writer);
+        authority.base.fingerprint.write(&mut writer);
+        authority.base.styles.theme.write(&mut writer);
+        for index in 1..=BASE_SECTIONS {
+            writer.var_usize(if index == section { count } else { 0 });
+        }
+        let payload = writer.into_bytes();
+        let budget = SnapshotBudget::new(1, 1024).unwrap();
+        let mut builder = BaseBuilder::default();
+        let mut completed = false;
+        for _ in 0..256 {
+            crate::snapshot::step::reset();
+            completed = builder.push_bounded(&payload, budget).unwrap();
+            let work = crate::snapshot::step::current();
+            assert!(work.records <= budget.max_records());
+            assert!(work.bytes <= budget.max_bytes());
+            if completed {
+                break;
+            }
+        }
+        assert!(completed);
+        assert_eq!(builder.ordinal, 1);
+        builder
+    }
+
+    #[test]
+    fn authority_empty_vector_records_fit_their_actual_charge() {
+        let minimum = DECODE_RESERVATION + 1 + preparation_cost::<Vec<SheetChart>>() + 1;
+        for section in [5, 6, 7] {
+            let mut builder = builder_for_section(section, 1);
+            let payload = [section as u8, 0];
+            let fresh = SnapshotBudget::new(1, minimum - 1).unwrap();
+            let partial = SnapshotBudget::new(256, 1024)
+                .unwrap()
+                .remaining(1, 1024 - (minimum - 1))
+                .unwrap();
+            for budget in [fresh, partial] {
+                crate::snapshot::step::reset();
+                assert_eq!(
+                    builder
+                        .push_bounded(&payload, budget)
+                        .unwrap_err()
+                        .to_string(),
+                    "snapshot authority exceeds advance byte budget"
+                );
+                let work = crate::snapshot::step::current();
+                assert_eq!(work.records, 0);
+                assert_eq!(work.bytes, 0);
+                assert_eq!(builder.cursor.section, 1);
+                assert_eq!(builder.cursor.index, 0);
+                assert_eq!(builder.ordinal, 1);
+                assert!(builder.decode.record.is_none());
+                assert!(builder.decode.ready.is_empty());
+                assert!(builder.decode.pending.is_empty());
+                assert!(builder.decode.started.is_empty());
+                let base = builder.base.as_ref().unwrap();
+                assert!(base.col_styles.is_empty());
+                assert!(base.hyperlinks.is_empty());
+                assert!(base.charts.is_empty());
+            }
+            let budget = SnapshotBudget::new(1, minimum).unwrap();
+            crate::snapshot::step::reset();
+            assert!(builder.push_bounded(&payload, budget).unwrap());
+            let work = crate::snapshot::step::current();
+            assert_eq!(work.records, 1);
+            assert_eq!(work.bytes, minimum);
+            assert!(work.bytes <= budget.max_bytes());
+            assert_eq!(builder.ordinal, 2);
+            let base = builder.base.as_ref().unwrap();
+            match section {
+                5 => assert_eq!(base.col_styles, vec![Vec::new()]),
+                6 => assert_eq!(base.hyperlinks, vec![Vec::new()]),
+                7 => assert_eq!(base.charts, vec![Vec::new()]),
+                _ => unreachable!(),
+            }
+            assert!(builder.decode.record.is_none());
+            assert!(builder.decode.ready.is_empty());
+            assert!(builder.decode.pending.is_empty());
+            assert!(builder.decode.started.is_empty());
+        }
+    }
+
+    #[test]
+    fn authority_pending_vector_retries_with_its_remaining_charge() {
+        fn string_offset(decode: &BaseDecode) -> usize {
+            decode
+                .pending
+                .values()
+                .find_map(|value| {
+                    value
+                        .downcast_ref::<(usize, usize, String)>()
+                        .map(|state| state.1)
+                })
+                .unwrap()
+        }
+
+        let text = "a".repeat(2_048);
+        let mut builder = builder_for_section(2, 1);
+        let mut writer = Writer::new();
+        writer.u8(2);
+        (0i64, vec![text.clone()]).write(&mut writer);
+        let payload = writer.into_bytes();
+        let large = SnapshotBudget::new(1, 1024).unwrap();
+        crate::snapshot::step::reset();
+        assert!(!builder.push_bounded(&payload, large).unwrap());
+        let work = crate::snapshot::step::current();
+        assert!(work.records <= large.max_records());
+        assert!(work.bytes <= large.max_bytes());
+        assert_eq!(builder.decode.pending_string_record(), Some((1, 0)));
+        let offset = string_offset(&builder.decode);
+        let lengths = (
+            builder.decode.ready.len(),
+            builder.decode.pending.len(),
+            builder.decode.started.len(),
+        );
+        let minimum = DECODE_RESERVATION + 1 + std::mem::size_of::<String>() + 3;
+        let too_small = SnapshotBudget::new(1, minimum - 1).unwrap();
+        crate::snapshot::step::reset();
+        assert_eq!(
+            builder
+                .push_bounded(&payload, too_small)
+                .unwrap_err()
+                .to_string(),
+            "snapshot authority exceeds advance byte budget"
+        );
+        let work = crate::snapshot::step::current();
+        assert_eq!(work.records, 0);
+        assert_eq!(work.bytes, 0);
+        assert_eq!(builder.ordinal, 1);
+        assert_eq!(builder.cursor.section, 2);
+        assert_eq!(builder.cursor.index, 0);
+        assert!(builder.base.as_ref().unwrap().fingerprints.is_empty());
+        assert_eq!(builder.decode.pending_string_record(), Some((1, 0)));
+        assert_eq!(string_offset(&builder.decode), offset);
+        assert_eq!(
+            (
+                builder.decode.ready.len(),
+                builder.decode.pending.len(),
+                builder.decode.started.len(),
+            ),
+            lengths
+        );
+        let small = SnapshotBudget::new(1, minimum).unwrap();
+        crate::snapshot::step::reset();
+        assert!(!builder.push_bounded(&payload, small).unwrap());
+        let work = crate::snapshot::step::current();
+        assert_eq!(work.records, 1);
+        assert_eq!(work.bytes, minimum);
+        assert!(work.bytes <= small.max_bytes());
+        assert_eq!(string_offset(&builder.decode), offset + 1);
+        let mut completed = false;
+        for _ in 0..256 {
+            crate::snapshot::step::reset();
+            completed = builder.push_bounded(&payload, large).unwrap();
+            let work = crate::snapshot::step::current();
+            assert!(work.records <= large.max_records());
+            assert!(work.bytes <= large.max_bytes());
+            if completed {
+                break;
+            }
+        }
+        assert!(completed);
+        assert_eq!(
+            builder.base.as_ref().unwrap().fingerprints.get(&0),
+            Some(&vec![text])
+        );
+        assert_eq!(builder.ordinal, 2);
+        assert!(builder.decode.record.is_none());
+        assert!(builder.decode.ready.is_empty());
+        assert!(builder.decode.pending.is_empty());
+        assert!(builder.decode.started.is_empty());
     }
 
     fn header(

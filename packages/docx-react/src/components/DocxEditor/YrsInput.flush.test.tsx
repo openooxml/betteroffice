@@ -13,6 +13,7 @@ import {
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
+import type { DisplayListQuerySnapshot } from './hooks/displayListQueryEpochGate';
 import { performYrsHistoryAction } from './yrsCommands';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
@@ -21,6 +22,30 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
 const sessions: YrsSession[] = [];
+const globalRestores = new Set<() => void>();
+
+function registerRestore(restore: () => void): () => void {
+  const run = () => {
+    if (!globalRestores.delete(run)) return;
+    restore();
+  };
+  globalRestores.add(run);
+  return run;
+}
+
+async function bounded<T>(promise: Promise<T>): Promise<T> {
+  let timer!: ReturnType<typeof setTimeout>;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Input replay did not settle')), 2_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 beforeAll(() =>
   preloadEditWasm(
@@ -32,6 +57,7 @@ beforeAll(() =>
   )
 );
 afterEach(() => {
+  for (const restore of [...globalRestores].reverse()) restore();
   cleanup();
   for (const session of sessions.splice(0)) session.destroy();
 });
@@ -56,13 +82,14 @@ function inputFor(
   props: Partial<Pick<
     YrsInputProps,
     'isSuggesting' | 'author' | 'onPendingInputChange' | 'resolveDisplayListQueries' |
-    'replicaReadyRef' | 'inputEpoch' | 'onStateChange' | 'onDirectInput'
+    'replicaReadyRef' | 'inputEpoch' | 'onStateChange' | 'onDirectInput' |
+    'holdInput' | 'inputScope' | 'seedSelection' | 'resolveDisplayTarget'
   >> = {}
 ) {
-  const map = () =>
+  const map = (story = 'body') =>
     createYrsInputPositionMap(
-      'body',
-      session.paragraphs('body').map((p) => ({
+      story,
+      session.paragraphs(story).map((p) => ({
         paraId: p.paraId,
         length: p.text.length,
       }))
@@ -74,8 +101,8 @@ function inputFor(
       readOnly={false}
       session={session}
       inputPositionMap={map}
-      displayPositionToLoc={(position) => displayPositionToYrsLoc(map(), position)}
-      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(), loc)}
+      displayPositionToLoc={(position, story) => displayPositionToYrsLoc(map(story), position)}
+      locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
       onStateChange={() => {}}
       onDirectInput={() => {}}
       applyResidentInput={applyResidentInput}
@@ -131,6 +158,836 @@ async function pendingHydration() {
   return { session, input, replica, release, resident, changed, props, view, textarea,
     oldCalls, retire: () => { retired = true; } };
 }
+
+test('opening input holds both text paths, select-all, deletes and splits until replay', async () => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const resident = mock(async (_text: string) => null);
+  const view = render(inputFor(preview, input, resident, undefined, {
+    holdInput: true, inputScope: 1, seedSelection: false,
+  }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  const beforeInput = new InputEvent('textInput', {
+    bubbles: true, cancelable: true, inputType: 'insertText', data: 'A',
+  });
+  fireEvent(textarea, beforeInput);
+  expect(beforeInput.defaultPrevented).toBe(true);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  fireEvent.keyDown(textarea, { key: 'a', ctrlKey: true });
+  fireEvent.keyDown(textarea, { key: 'Delete' });
+  fireEvent.input(textarea, { target: { value: 'XY' } });
+  fireEvent.keyDown(textarea, { key: 'Home' });
+  fireEvent.keyDown(textarea, { key: 'Delete' });
+  fireEvent.keyDown(textarea, { key: 'Backspace' });
+  fireEvent.keyDown(textarea, { key: 'Enter' });
+  fireEvent.paste(textarea, { clipboardData: { getData: () => 'P\nQ' } });
+  await act(async () => {});
+  expect(text(preview)).toBe('Seed');
+  expect(resident).not.toHaveBeenCalled();
+  expect(input.current!.hasPendingInput()).toBe(true);
+  view.rerender(inputFor(full, input, resident, undefined, { holdInput: false, inputScope: 1 }));
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(full.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(['', 'P', 'QY']);
+  expect(full.selection()?.head.offset).toBe(1);
+  expect(text(preview)).toBe('Seed');
+  expect(input.current!.hasPendingInput()).toBe(false);
+  expect(resident.mock.calls).toEqual([['AB'], ['XY']]);
+});
+
+test('held navigation replays between text on the full session', async () => {
+  const preview = await seededSession();
+  const full = await createYrsSession();
+  sessions.push(full);
+  const { paraId } = full.createStory('body', 'abc');
+  full.setSelection({ story: 'body', paraId, offset: 3 });
+  const input = createRef<YrsInputRef>();
+  const resident = mock(async (_text: string) => null);
+  const view = render(inputFor(preview, input, resident, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input');
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(textarea, { key: 'ArrowLeft' })).toBe(false);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  expect(text(preview)).toBe('Seed');
+  view.rerender(inputFor(full, input, resident, undefined, { inputScope: 1 }));
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(text(full)).toBe('abcBA');
+  expect(full.selection()?.head.offset).toBe(4);
+  expect(input.current!.hasPendingInput()).toBe(false);
+  expect(resident.mock.calls).toEqual([['A'], ['B']]);
+});
+
+test.each([false, true])('held table Tab between text matches ready input with shift=%s', async (shift) => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const paraId = full.paragraphs('body')[0]!.paraId;
+  full.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
+  const cells = [0, 1].map((column) => `body:t0:r0c${column}`);
+  const story = cells[shift ? 1 : 0];
+  const loc = { story, paraId: full.paragraphs(story)[0]!.paraId, offset: 0 };
+  const ready = await createYrsSession();
+  sessions.push(ready);
+  ready.loadState(full.encodeState());
+  ready.setSelection(loc);
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(preview, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  act(() => {
+    expect(input.current!.queueSelection!(async () => () => full.setSelection(loc), false, () => true)).toBe(true);
+  });
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  expect(text(preview)).toBe('Seed');
+  expect(cells.map((cell) => full.paragraphs(cell)[0]!.text)).toEqual(['', '']);
+  view.rerender(inputFor(full, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  const replayed = cells.map((cell) => full.paragraphs(cell)[0]!.text);
+  expect(replayed).toEqual(shift ? ['B', 'A'] : ['A', 'B']);
+  expect(full.selection()?.head.story).toBe(cells[shift ? 0 : 1]);
+  expect(full.selection()?.head.offset).toBe(1);
+  expect(input.current!.hasPendingInput()).toBe(false);
+  view.unmount();
+  const loaded = render(inputFor(ready, input, undefined, undefined, props));
+  const loadedTextarea = loaded.getByTestId('yrs-input');
+  fireEvent.input(loadedTextarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(loadedTextarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+  fireEvent.input(loadedTextarea, { target: { value: 'B' } });
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(cells.map((cell) => ready.paragraphs(cell)[0]!.text)).toEqual(replayed);
+  expect(ready.paragraphs('body').map((paragraph) => paragraph.text))
+    .toEqual(full.paragraphs('body').map((paragraph) => paragraph.text));
+  expect(ready.selection()).toEqual(full.selection());
+  expect(ready.cellSelection()).toEqual(full.cellSelection());
+});
+
+test.each([false, true])('opening body Tab keeps native focus movement with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  expect(text(session)).toBe('Seed');
+  view.rerender(inputFor(session, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(text(session)).toBe('SeedAB');
+  expect(session.selection()?.head.offset).toBe(6);
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+});
+
+test.each([false, true])('held click in a table prevents Tab and replays cell navigation with shift=%s', async (shift) => {
+  const session = await seededSession();
+  session.insertTable({ ...session.selection()!.head, offset: 0 }, 1, 2);
+  const body = session.selection()!.head;
+  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  const story = stories[shift ? 1 : 0];
+  const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  act(() => {
+    input.current!.focus();
+    expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
+  });
+  expect(fireEvent.keyDown(textarea, { key: 'ArrowLeft' })).toBe(false);
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+  expect(session.selection()?.head).toEqual(body);
+  view.rerender(inputFor(session, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(session.selection()?.head.story).toBe(stories[shift ? 0 : 1]);
+  expect(session.selection()?.head.offset).toBe(0);
+  expect(session.cellSelection()?.head.column).toBe(shift ? 0 : 1);
+  expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['', '']);
+  expect(document.activeElement).toBe(textarea);
+});
+
+test.each([false, true])('held click outside a table keeps native Tab after navigation with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  session.setSelection({ story: stories[0], paraId: session.paragraphs(stories[0])[0]!.paraId, offset: 0 });
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const verticalMove = mock(() => ({ position: 1, goalX: 0 }));
+  const props = { inputScope: 1, replicaReadyRef,
+    resolveDisplayListQueries: async () => ({ queries: { verticalMove } as unknown as DisplayListQuerySnapshot['queries'], frameEpoch: 1 }),
+    resolveDisplayTarget: () => ({ story: stories[0], displayPosition: 1 }) };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  act(() => {
+    input.current!.focus();
+    expect(input.current!.queueSelection!(async () => () => session.setSelection(body), false, () => false)).toBe(true);
+  });
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  expect(fireEvent.keyDown(textarea, { key: 'ArrowUp' })).toBe(false);
+  expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(true);
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  view.rerender(inputFor(session, input, undefined, undefined, props));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(verticalMove).toHaveBeenCalledTimes(1);
+  expect(session.selection()?.head.story).toBe(stories[0]);
+  expect(session.selection()?.head.offset).toBe(1);
+  expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['B', '']);
+  expect(document.activeElement).toBe(textarea);
+});
+
+test.each([false, true])('held Tab replayed outside a table leaves document, selection and focus unchanged with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const story = 'body:t0:r0c0';
+  const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
+  const state = session.encodeState();
+  const version = session.version();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const verticalMove = mock(() => ({ position: 1, goalX: 0 }));
+  const props = { inputScope: 1, replicaReadyRef,
+    resolveDisplayListQueries: async () => ({ queries: { verticalMove } as unknown as DisplayListQuerySnapshot['queries'], frameEpoch: 1 }),
+    resolveDisplayTarget: () => ({ story: 'body', displayPosition: 1 }) };
+  const rectangles = spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(() =>
+    [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList
+  );
+  const restore = registerRestore(() => rectangles.mockRestore());
+  try {
+    const previous = render(<button data-testid="previous" />);
+    const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+    const next = render(<button data-testid="next" />);
+    const textarea = view.getByTestId('yrs-input');
+    act(() => {
+      input.current!.focus();
+      expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
+    });
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(fireEvent.keyDown(textarea, { key: 'ArrowDown' })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    const focused = shift ? next.getByTestId('next') : previous.getByTestId('previous');
+    act(() => { focused.focus(); });
+    view.rerender(inputFor(session, input, undefined, undefined, props));
+    await act(async () => { await bounded(input.current!.flushPendingInput()); });
+    expect(verticalMove).toHaveBeenCalledTimes(1);
+    const caret = { ...body, offset: 0 };
+    expect(session.selection()).toEqual({ anchor: caret, head: caret });
+    expect(session.cellSelection()).toBeNull();
+    expect(session.encodeState()).toEqual(state);
+    expect(session.version()).toBe(version);
+    expect(document.activeElement).toBe(focused);
+  } finally {
+    restore();
+  }
+});
+
+test.each([false, true])('held Tab outside a table at replay is a no-op and the next typed key lands in the editor with shift=%s', async (shift) => {
+  const session = await seededSession();
+  const body = session.selection()!.head;
+  session.insertTable({ ...body, offset: 0 }, 1, 2);
+  const stories = ['body:t0:r0c0', 'body:t0:r0c1'];
+  const story = stories[0];
+  const cell = { story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 };
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const verticalMove = mock(() => ({ position: 1, goalX: 0 }));
+  const props = { inputScope: 1, replicaReadyRef,
+    resolveDisplayListQueries: async () => ({ queries: { verticalMove } as unknown as DisplayListQuerySnapshot['queries'], frameEpoch: 1 }),
+    resolveDisplayTarget: () => ({ story: 'body', displayPosition: 1 }) };
+  const rectangles = spyOn(HTMLElement.prototype, 'getClientRects').mockImplementation(() =>
+    [new DOMRect(0, 0, 10, 10)] as unknown as DOMRectList
+  );
+  const restore = registerRestore(() => rectangles.mockRestore());
+  try {
+    const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+    const textarea = view.getByTestId('yrs-input');
+    act(() => {
+      input.current!.focus();
+      expect(input.current!.queueSelection!(async () => () => session.setSelection(cell), false, () => true)).toBe(true);
+    });
+    expect(document.activeElement).toBe(textarea);
+    expect(fireEvent.keyDown(textarea, { key: 'ArrowDown' })).toBe(false);
+    expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: shift })).toBe(false);
+    fireEvent.input(textarea, { target: { value: 'X' } });
+    expect(document.activeElement).toBe(textarea);
+    view.rerender(inputFor(session, input, undefined, undefined, props));
+    await act(async () => { await bounded(input.current!.flushPendingInput()); });
+    expect(verticalMove).toHaveBeenCalledTimes(1);
+    expect(stories.map((story) => session.paragraphs(story)[0]!.text)).toEqual(['', '']);
+    expect(session.paragraphs('body').find((paragraph) => paragraph.paraId === body.paraId)?.text).toBe('XSeed');
+    const caret = { ...body, offset: 1 };
+    expect(session.selection()).toEqual({ anchor: caret, head: caret });
+    expect(session.cellSelection()).toBeNull();
+    expect(document.activeElement).toBe(textarea);
+  } finally {
+    restore();
+  }
+});
+
+test('held no-op first-cell Shift+Tab keeps two undo steps across an 800 ms edit gap', async () => {
+  const source = await seededSession();
+  const paraId = source.paragraphs('body')[0]!.paraId;
+  source.insertTable({ story: 'body', paraId, offset: 0 }, 1, 2);
+  const story = 'body:t0:r0c0';
+  const state = source.encodeState();
+  let now = 1_000;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now);
+  const undoClock = spyOn(Date, 'now').mockImplementation(() => now);
+  const restore = registerRestore(() => {
+    undoClock.mockRestore();
+    clock.mockRestore();
+  });
+  try {
+    for (const held of [false, true]) {
+      now = 1_000;
+      const session = await createYrsSession();
+      sessions.push(session);
+      session.loadState(state);
+      session.setSelection({ story, paraId: session.paragraphs(story)[0]!.paraId, offset: 0 });
+      const input = createRef<YrsInputRef>();
+      const props = { inputScope: 1, replicaReadyRef: { current: true } };
+      const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: held }));
+      const textarea = view.getByTestId('yrs-input');
+      fireEvent.input(textarea, { target: { value: 'A' } });
+      if (!held) await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      now += 400;
+      expect(fireEvent.keyDown(textarea, { key: 'Tab', shiftKey: true })).toBe(false);
+      if (!held) await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      now += 400;
+      fireEvent.input(textarea, { target: { value: 'B' } });
+      if (held) view.rerender(inputFor(session, input, undefined, undefined, props));
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(session.paragraphs(story)[0]!.text).toBe('AB');
+      expect(session.selection()?.head.story).toBe(story);
+      expect(session.undo()).toBe(true);
+      expect(session.paragraphs(story)[0]!.text).toBe('A');
+      expect(session.undo()).toBe(true);
+      expect(session.paragraphs(story)[0]!.text).toBe('');
+      expect(session.canUndo()).toBe(false);
+      view.unmount();
+    }
+  } finally {
+    restore();
+  }
+});
+
+test('held selection deletion follows select-all on the full session', async () => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  act(() => {
+    input.current!.selectAll();
+    input.current!.deleteSelection();
+  });
+  expect(text(preview)).toBe('Seed');
+  view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 1 }));
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(text(full)).toBe('');
+  expect(full.selection()?.head.offset).toBe(0);
+  expect(text(preview)).toBe('Seed');
+});
+
+test.each([100, 499, 500, 501, 650])(
+  'worker opening replay groups undo by a %i ms held-input gap', async (gap) => {
+    const session = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const resident = mock(async (_text: string) => null);
+    const replicaReadyRef = { current: true };
+    let now = 1_000;
+    const clock = spyOn(performance, 'now').mockImplementation(() => now);
+    const restore = registerRestore(() => clock.mockRestore());
+    try {
+      const view = render(inputFor(session, input, resident, undefined, {
+        holdInput: true, inputScope: 1, replicaReadyRef,
+      }));
+      const textarea = view.getByTestId('yrs-input');
+      fireEvent.input(textarea, { target: { value: 'A' } });
+      now += gap;
+      fireEvent.input(textarea, { target: { value: 'B' } });
+      now += 10_000;
+      view.rerender(inputFor(session, input, resident, undefined, { inputScope: 1, replicaReadyRef }));
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(text(session)).toBe('SeedAB');
+      expect(resident).not.toHaveBeenCalled();
+      expect(session.undoCaptureMode()).toBe('auto');
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe(gap < 500 ? 'Seed' : 'SeedA');
+      if (gap >= 500) {
+        expect(session.undo()).toBe(true);
+        expect(text(session)).toBe('Seed');
+      }
+      expect(session.canUndo()).toBe(false);
+    } finally {
+      restore();
+    }
+  }
+);
+
+test.each([100, 600])(
+  'live input groups with the last worker replay edit after %i ms', async (gap) => {
+    const session = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const resident = mock(async (_text: string) => null);
+    const replicaReadyRef = { current: true };
+    let now = 1_000;
+    let undoNow = 10_000;
+    const clock = spyOn(performance, 'now').mockImplementation(() => now);
+    const undoClock = spyOn(Date, 'now').mockImplementation(() => undoNow);
+    const restore = registerRestore(() => {
+      undoClock.mockRestore();
+      clock.mockRestore();
+    });
+    const props = { inputScope: 1, replicaReadyRef };
+    try {
+      const view = render(inputFor(session, input, resident, undefined, { ...props, holdInput: true }));
+      const textarea = view.getByTestId('yrs-input');
+      fireEvent.input(textarea, { target: { value: 'A' } });
+      now += 650;
+      fireEvent.input(textarea, { target: { value: 'B' } });
+      now += 10_000;
+      view.rerender(inputFor(session, input, resident, undefined, props));
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(text(session)).toBe('SeedAB');
+      expect(resident).not.toHaveBeenCalled();
+      expect(session.undoCaptureMode()).toBe('auto');
+      undoNow += gap;
+      fireEvent.input(textarea, { target: { value: 'C' } });
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(text(session)).toBe('SeedABC');
+      expect(resident.mock.calls).toEqual([['C']]);
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe(gap < 500 ? 'SeedA' : 'SeedAB');
+      if (gap >= 500) {
+        expect(session.undo()).toBe(true);
+        expect(text(session)).toBe('SeedA');
+      }
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe('Seed');
+      expect(session.canUndo()).toBe(false);
+    } finally {
+      restore();
+    }
+  }
+);
+
+test('a rejected held click preserves every worker replay edit and reports its failure', async () => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const failure = new Error('selection preparation failed');
+  const reportError = spyOn(console, 'error').mockImplementation(() => {});
+  const restore = registerRestore(() => reportError.mockRestore());
+  const props = { inputScope: 1, replicaReadyRef };
+  try {
+    const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+    const textarea = view.getByTestId('yrs-input');
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    act(() => {
+      expect(input.current!.queueSelection!(async () => { throw failure; })).toBe(true);
+    });
+    fireEvent.input(textarea, { target: { value: 'B' } });
+    view.rerender(inputFor(session, input, undefined, undefined, props));
+    await act(async () => {
+      await expect(bounded(input.current!.flushPendingInput())).rejects.toBe(failure);
+    });
+    expect(text(session)).toBe('SeedAB');
+    expect(reportError).toHaveBeenCalledTimes(1);
+    expect(reportError).toHaveBeenCalledWith('[YrsInput] queued input operation failed', failure);
+    expect(input.current!.hasPendingInput()).toBe(false);
+  } finally {
+    restore();
+  }
+});
+
+test.each(['navigation', 'click'] as const)(
+  'a held %s separates undo without splitting the worker replay refresh', async (kind) => {
+    const session = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const replicaReadyRef = { current: true };
+    const changed = mock((_selection: unknown, _docChanged: boolean) => {});
+    const clock = spyOn(performance, 'now').mockReturnValue(1_000);
+    const restore = registerRestore(() => clock.mockRestore());
+    const props = { inputScope: 1, replicaReadyRef, onStateChange: changed };
+    try {
+      const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+      const textarea = view.getByTestId('yrs-input');
+      fireEvent.input(textarea, { target: { value: 'A' } });
+      if (kind === 'navigation') fireEvent.keyDown(textarea, { key: 'ArrowLeft' });
+      else act(() => {
+        expect(input.current!.queueSelection!(async () => () => {
+          const head = session.selection()!.head;
+          session.setSelection({ ...head, offset: 4 });
+        })).toBe(true);
+      });
+      fireEvent.input(textarea, { target: { value: 'B' } });
+      view.rerender(inputFor(session, input, undefined, undefined, props));
+      await act(async () => { await bounded(input.current!.flushPendingInput()); });
+      expect(text(session)).toBe('SeedBA');
+      expect(changed.mock.calls.filter(([, docChanged]) => docChanged)).toHaveLength(1);
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe('SeedA');
+      expect(session.undo()).toBe(true);
+      expect(text(session)).toBe('Seed');
+    } finally {
+      restore();
+    }
+  }
+);
+
+test('worker replay preserves story-switch and explicit undo boundaries in manual capture', async () => {
+  const session = await seededSession();
+  const otherStory = 'body:other';
+  const other = session.createStory(otherStory, 'Other');
+  session.setUndoCaptureMode('manual');
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const props = { inputScope: 1, replicaReadyRef };
+  const view = render(inputFor(session, input, undefined, undefined, { ...props, holdInput: true }));
+  const textarea = view.getByTestId('yrs-input');
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  act(() => {
+    input.current!.queueSelection!(async () => () => session.addUndoBoundary());
+  });
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  act(() => {
+    input.current!.queueSelection!(async () => () => {
+      session.setSelection({ story: otherStory, paraId: other.paraId, offset: 5 });
+    });
+  });
+  fireEvent.input(textarea, { target: { value: 'C' } });
+  const map = (story = 'body') => createYrsInputPositionMap(story,
+    session.paragraphs(story).map((paragraph) => ({ paraId: paragraph.paraId, length: paragraph.text.length })));
+  view.rerender(cloneElement(inputFor(session, input, undefined, undefined, props), {
+    inputPositionMap: map,
+    locToDisplayPosition: (loc: Parameters<typeof yrsLocToDisplayPosition>[1]) =>
+      yrsLocToDisplayPosition(map(loc.story), loc),
+  }));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  expect(text(session)).toBe('SeedAB');
+  expect(session.paragraphs(otherStory)[0]!.text).toBe('OtherC');
+  expect(session.undoCaptureMode()).toBe('manual');
+  expect(session.undo()).toBe(true);
+  expect(session.paragraphs(otherStory)[0]!.text).toBe('Other');
+  expect(text(session)).toBe('SeedAB');
+  expect(session.undo()).toBe(true);
+  expect(text(session)).toBe('SeedA');
+  expect(session.undo()).toBe(true);
+  expect(text(session)).toBe('Seed');
+});
+
+test('held text, horizontal navigation and composition match ready input in order', async () => {
+  const held = await seededSession();
+  const ready = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const reference = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const resident = mock(async (_text: string) => null);
+  const view = render(inputFor(held, input, resident, undefined, {
+    holdInput: true, inputScope: 1, replicaReadyRef,
+  }));
+  const heldTextarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  const enter = (textarea: HTMLTextAreaElement) => fireEvent.input(textarea, { target: { value: 'A' } });
+  enter(heldTextarea);
+  fireEvent.keyDown(heldTextarea, { key: 'ArrowLeft' });
+  fireEvent.input(heldTextarea, { target: { value: 'B' } });
+  fireEvent.compositionStart(heldTextarea);
+  fireEvent.compositionUpdate(heldTextarea, { data: '日' });
+  heldTextarea.value = '日本';
+  fireEvent.compositionEnd(heldTextarea, { data: '日本' });
+  await act(async () => { await Promise.resolve(); });
+  fireEvent.input(heldTextarea, { target: { value: 'C' } });
+  view.rerender(inputFor(held, input, resident, undefined, { inputScope: 1, replicaReadyRef }));
+  await act(async () => { await bounded(input.current!.flushPendingInput()); });
+  view.unmount();
+  const liveView = render(inputFor(ready, reference));
+  const textarea = liveView.getByTestId('yrs-input') as HTMLTextAreaElement;
+  enter(textarea);
+  await act(async () => { await bounded(reference.current!.flushPendingInput()); });
+  fireEvent.keyDown(textarea, { key: 'ArrowLeft' });
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  await act(async () => { await bounded(reference.current!.flushPendingInput()); });
+  fireEvent.compositionStart(textarea);
+  fireEvent.compositionUpdate(textarea, { data: '日' });
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  await act(async () => { await bounded(reference.current!.flushPendingInput()); });
+  fireEvent.input(textarea, { target: { value: 'C' } });
+  await act(async () => { await bounded(reference.current!.flushPendingInput()); });
+  expect(text(held)).toBe('SeedB日本CA');
+  expect(text(held)).toBe(text(ready));
+  expect(held.selection()?.head.offset).toBe(ready.selection()?.head.offset);
+  expect(resident).not.toHaveBeenCalled();
+  expect(held.undo()).toBe(true);
+  expect(text(held)).toBe('SeedB日本A');
+  expect(held.undo()).toBe(true);
+  expect(text(held)).toBe('SeedBA');
+});
+
+test('an asynchronous navigation interrupt preserves every held edit and later live input', async () => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: true };
+  const resident = mock(async (_text: string) => null);
+  const remove = mock(async (_direction: 'backward' | 'forward') => null);
+  let release!: () => void;
+  const queryReady = new Promise<null>((resolve) => { release = () => resolve(null); });
+  const resolveQueries = mock(() => queryReady);
+  const props = { inputScope: 1, replicaReadyRef, resolveDisplayListQueries: resolveQueries };
+  const view = render(inputFor(session, input, resident, remove, { ...props, holdInput: true }));
+  try {
+    const textarea = view.getByTestId('yrs-input');
+    fireEvent.input(textarea, { target: { value: 'AB' } });
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' });
+    fireEvent.input(textarea, { target: { value: 'CD' } });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.input(textarea, { target: { value: 'EF' } });
+    fireEvent.keyDown(textarea, { key: 'Home' });
+    fireEvent.keyDown(textarea, { key: 'Delete' });
+    fireEvent.keyDown(textarea, { key: 'End' });
+    fireEvent.input(textarea, { target: { value: 'G' } });
+    view.rerender(inputFor(session, input, resident, remove, props));
+    await act(async () => { await Promise.resolve(); });
+    expect(text(session)).toBe('SeedAB');
+    expect(input.current!.hasPendingInput()).toBe(true);
+    fireEvent.input(textarea, { target: { value: 'H' } });
+    release();
+    await act(async () => { await bounded(input.current!.flushPendingInput()); });
+    expect(session.paragraphs('body').map((paragraph) => paragraph.text)).toEqual(['SeedABC', 'FGH']);
+    expect(input.current!.hasPendingInput()).toBe(false);
+    expect(resolveQueries).toHaveBeenCalledTimes(1);
+    expect(resident.mock.calls).toEqual([['H']]);
+    expect(remove).not.toHaveBeenCalled();
+    expect(session.undoCaptureMode()).toBe('auto');
+  } finally {
+    release();
+  }
+});
+
+test('a held-input flush waits for replay and the full-session operation queue', async () => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const replicaReadyRef = { current: false };
+  let release!: () => void;
+  const replica = deferWorkerOpenReplica(full,
+    () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+    () => {}, () => { replicaReadyRef.current = true; });
+  replica.start();
+  const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input');
+  fireEvent.input(textarea, { target: { value: 'A' } });
+  expect(input.current!.hasHeldInput!()).toBe(true);
+  let done = false;
+  const flush = input.current!.flushPendingInput().then(() => { done = true; });
+  await act(async () => { await Promise.resolve(); });
+  expect(done).toBe(false);
+  view.rerender(inputFor(full, input, undefined, undefined, {
+    holdInput: true, inputScope: 1, replicaReadyRef,
+  }));
+  fireEvent.input(textarea, { target: { value: 'B' } });
+  await act(async () => { await Promise.resolve(); });
+  expect(done).toBe(false);
+  view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 1, replicaReadyRef }));
+  await act(async () => { await Promise.resolve(); });
+  expect(input.current!.hasHeldInput!()).toBe(false);
+  expect(done).toBe(false);
+  expect(text(preview)).toBe('Seed');
+  expect(text(full)).toBe('Seed');
+  await act(async () => { release(); await flush; });
+  expect(done).toBe(true);
+  expect(text(full)).toBe('SeedAB');
+  expect(full.selection()?.head.offset).toBe(6);
+  expect(text(preview)).toBe('Seed');
+});
+
+test.each([
+  ['held keys', 'scope change'],
+  ['held keys', 'unmount'],
+  ['active composition', 'scope change'],
+  ['active composition', 'unmount'],
+  ['pending composition', 'scope change'],
+  ['pending composition', 'unmount'],
+] as const)('a flush of %s rejects on %s before opening completes', async (kind, lifecycle) => {
+  const preview = await seededSession();
+  const replacement = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  if (kind === 'held keys') fireEvent.input(textarea, { target: { value: 'discard' } });
+  else {
+    fireEvent.compositionStart(textarea);
+    textarea.value = '日本';
+    if (kind === 'pending composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+  }
+  const flush = input.current!.flushPendingInput().catch((error) => error);
+  if (lifecycle === 'unmount') view.unmount();
+  else view.rerender(inputFor(replacement, input, undefined, undefined, { holdInput: true, inputScope: 2 }));
+  await act(async () => {
+    expect(await flush).toEqual(new Error('The document changed while flushing input'));
+  });
+  expect(text(preview)).toBe('Seed');
+  expect(text(replacement)).toBe('Seed');
+});
+
+test.each(['scope change', 'unmount'] as const)(
+  'a held-input flush rejects on %s while the replayed queue waits for the peer', async (lifecycle) => {
+    const preview = await seededSession();
+    const full = await seededSession();
+    const replacement = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const replicaReadyRef = { current: false };
+    let release!: () => void;
+    const replica = deferWorkerOpenReplica(full,
+      () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+      () => {}, () => { replicaReadyRef.current = true; });
+    replica.start();
+    const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+    fireEvent.input(view.getByTestId('yrs-input'), { target: { value: 'discard' } });
+    const flush = input.current!.flushPendingInput().catch((error) => error);
+    view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 1, replicaReadyRef }));
+    await act(async () => { await Promise.resolve(); });
+    expect(input.current!.hasHeldInput!()).toBe(false);
+    expect(input.current!.hasPendingInput()).toBe(true);
+    if (lifecycle === 'unmount') view.unmount();
+    else view.rerender(inputFor(replacement, input, undefined, undefined, { inputScope: 2 }));
+    expect(await flush).toEqual(new Error('The document changed while flushing input'));
+    replica.cancel();
+    await act(async () => { release(); await replica.ready.catch(() => {}); });
+    expect(text(preview)).toBe('Seed');
+    expect(text(full)).toBe('Seed');
+    expect(text(replacement)).toBe('Seed');
+  }
+);
+
+test.each(['held commit', 'pending commit', 'active composition'] as const)(
+  'opening composition survives the same-scope session switch with %s', async (stage) => {
+    const preview = await seededSession();
+    const full = await seededSession();
+    const input = createRef<YrsInputRef>();
+    const replicaReadyRef = { current: false };
+    let release!: () => void;
+    const replica = deferWorkerOpenReplica(full,
+      () => new Promise<() => void>((resolve) => { release = () => resolve(() => {}); }),
+      () => {}, () => { replicaReadyRef.current = true; });
+    replica.start();
+    const view = render(inputFor(preview, input, undefined, undefined, {
+      holdInput: true, inputScope: 1, seedSelection: false,
+    }));
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    fireEvent.compositionStart(textarea);
+    textarea.value = '日本';
+    expect(input.current!.hasHeldInput!()).toBe(true);
+    let done = false;
+    const flush = input.current!.flushPendingInput().then(() => { done = true; });
+    if (stage !== 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+    if (stage === 'held commit') await act(async () => { await Promise.resolve(); });
+    view.rerender(inputFor(full, input, undefined, undefined, {
+      holdInput: true, inputScope: 1, seedSelection: false, replicaReadyRef,
+    }));
+    expect(view.getByTestId('yrs-input')).toBe(textarea);
+    view.rerender(inputFor(full, input, undefined, undefined, {
+      holdInput: false, inputScope: 1, replicaReadyRef,
+    }));
+    if (stage === 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+    fireEvent(textarea, new InputEvent('textInput', { bubbles: true, data: '日本' }));
+    fireEvent.input(textarea);
+    await act(async () => { await Promise.resolve(); });
+    fireEvent.input(textarea);
+    expect(done).toBe(false);
+    expect(text(full)).toBe('Seed');
+    expect(text(preview)).toBe('Seed');
+    await act(async () => { release(); await flush; });
+    expect(done).toBe(true);
+    expect(text(full)).toBe('Seed日本');
+    expect(full.selection()?.head.offset).toBe(6);
+    expect(textarea.value).toBe('');
+    expect(input.current!.hasPendingInput()).toBe(false);
+  }
+);
+
+test.each(['scope change', 'unmount'] as const)('opening input is discarded on %s', async (lifecycle) => {
+  const session = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const view = render(inputFor(session, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.input(textarea, { target: { value: 'discard' } });
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  fireEvent.compositionEnd(textarea, { data: '日本' });
+  if (lifecycle === 'unmount') {
+    view.unmount();
+    render(inputFor(session, input, undefined, undefined, { inputScope: 1 }));
+  } else {
+    view.rerender(inputFor(session, input, undefined, undefined, { inputScope: 2 }));
+  }
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(text(session)).toBe('Seed');
+  expect(input.current!.hasPendingInput()).toBe(false);
+});
+
+test.each([
+  ['active composition', 'key'],
+  ['active composition', 'composition'],
+  ['pending commit', 'key'],
+  ['pending commit', 'composition'],
+] as const)('discarded %s ignores delayed trailing events until a fresh %s', async (stage, boundary) => {
+  const preview = await seededSession();
+  const full = await seededSession();
+  const input = createRef<YrsInputRef>();
+  const view = render(inputFor(preview, input, undefined, undefined, { holdInput: true, inputScope: 1 }));
+  const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+  fireEvent.compositionStart(textarea);
+  textarea.value = '日本';
+  if (stage === 'pending commit') fireEvent.compositionEnd(textarea, { data: '日本' });
+  view.rerender(inputFor(full, input, undefined, undefined, { inputScope: 2 }));
+  fireEvent.compositionUpdate(textarea, { data: '日本' });
+  fireEvent.input(textarea, { target: { value: '日本' }, isComposing: true });
+  if (stage === 'active composition') fireEvent.compositionEnd(textarea, { data: '日本' });
+  fireEvent.input(textarea, { target: { value: '日本' } });
+  for (const delay of ['microtask', 'macrotask'] as const) {
+    await act(async () => {
+      if (delay === 'microtask') await Promise.resolve();
+      else await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    fireEvent.keyDown(textarea, { key: 'a', isComposing: true });
+    fireEvent.keyDown(textarea, { key: 'Process' });
+    fireEvent.keyDown(textarea, { key: 'Unidentified', keyCode: 229 });
+    textarea.value = '日本';
+    const beforeInput = new InputEvent('textInput', {
+      bubbles: true, cancelable: true, inputType: 'insertText', data: '日本',
+    });
+    fireEvent(textarea, beforeInput);
+    expect(beforeInput.defaultPrevented).toBe(true);
+    expect(textarea.value).toBe('');
+    fireEvent.input(textarea, { data: '日本', target: { value: '日本' } });
+    expect(textarea.value).toBe('');
+    await act(async () => { await input.current!.flushPendingInput(); });
+    expect(text(preview)).toBe('Seed');
+    expect(text(full)).toBe('Seed');
+  }
+  if (boundary === 'key') {
+    fireEvent.keyDown(textarea, { key: 'C' });
+    fireEvent.input(textarea, { target: { value: 'C' } });
+  } else {
+    fireEvent.compositionStart(textarea);
+    textarea.value = 'C';
+    fireEvent.compositionEnd(textarea, { data: 'C' });
+  }
+  await act(async () => { await input.current!.flushPendingInput(); });
+  expect(text(full)).toBe('SeedC');
+});
 
 test('pending hydration preserves mixed input and event-time paste in sealed FIFO batches', async () => {
   const { session, input, release, resident, view, textarea, props } = await pendingHydration();
