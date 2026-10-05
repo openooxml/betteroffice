@@ -2,4 +2,4 @@
 "@betteroffice/docx": patch
 ---
 
-Typing plain text in long documents does less work per keystroke.
+Plain-text edits refresh only the affected preview record instead of rebuilding every record.
