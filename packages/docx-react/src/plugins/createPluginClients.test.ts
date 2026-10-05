@@ -13,8 +13,14 @@ import {
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { PluginInvocation } from '../../../../shared/plugin-host/runtime';
-import { UNAVAILABLE_DOCX_COMMANDS } from '../commands/createDocxCommandStore';
+import {
+  createDocxCommandController,
+  DocxCommandAdmissionError,
+  UNAVAILABLE_DOCX_COMMANDS,
+} from '../commands/createDocxCommandStore';
+import { testBinding } from '../commands/testing';
 import * as editorBatches from '../components/DocxEditor/editorBatches';
+import { DocxWorkerError } from '../components/DocxEditor/internals/docxWorkerError';
 import type { EditorMode } from '../components/DocxEditor/internals/editing-modes';
 import { stampRevisionPreviewKey, stampSourceVersion } from '../components/DocxEditor/internals/layoutProvenance';
 import * as workerOpenReplica from '../components/DocxEditor/internals/workerOpenReplica';
@@ -313,6 +319,55 @@ async function expectPluginPending(result: Promise<unknown>, pending: ReturnType
   expect(pending.requestReady).not.toHaveBeenCalled();
 }
 
+async function expectPluginPeerFailure(
+  env: Awaited<ReturnType<typeof setup>>,
+  worker: ReturnType<typeof routeWorker>,
+  calls: () => readonly Promise<unknown>[]
+) {
+  const clock = navigationClock();
+  for (const openFails of [true, false]) {
+    const pending = pendingPluginReplica(env);
+    const readinessCalls = worker.ready.mock.calls.length;
+    const results = calls();
+    const outcomes = results.map((result) => {
+      const outcome = { settled: false, value: undefined as unknown };
+      void result.then(
+        (value) => { outcome.settled = true; outcome.value = value; },
+        (error: unknown) => { outcome.settled = true; outcome.value = error; }
+      );
+      return outcome;
+    });
+    for (const result of results) await expectPluginPending(result, pending);
+    expect(worker.ready).toHaveBeenCalledTimes(readinessCalls + results.length);
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    clock.advance(29_999);
+    for (const result of results) await expectPluginPending(result, pending);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    if (openFails) {
+      workerOpenReplica.failWorkerOpenReplica(
+        env.session,
+        new DocxWorkerError('open', new Error('The editor peer could not open'))
+      );
+    }
+    clock.advance(2);
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+    expect(pending.start).not.toHaveBeenCalled();
+    expect(pending.ensure).not.toHaveBeenCalled();
+    expect(pending.requestReady).not.toHaveBeenCalled();
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(worker.ready).toHaveBeenCalledTimes(readinessCalls + results.length);
+    for (const outcome of outcomes) {
+      expect(outcome.settled).toBe(true);
+      expect(outcome.value).toMatchObject({ ok: false, failure: { code: 'input-failed' } });
+    }
+  }
+}
+
 describe('plugin edit client', () => {
   test('applies with the expected version and refuses one that flushed typing made stale', async () => {
     let session!: YrsSession;
@@ -397,6 +452,92 @@ describe('plugin edit client', () => {
 });
 
 describe('plugin read and navigation clients', () => {
+  test('reads and versions waiting for the editor peer refuse with input-failed on open failure or timeout, without starting the peer', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    worker.routing.mockReturnValue(null);
+    const flush = spyOn(env.editor, 'flushPendingInput').mockImplementation(async () => {
+      await workerOpenReplica.awaitWorkerOpenReplica(env.session);
+    });
+    restoreWorkers.push(() => flush.mockRestore());
+    await expectPluginPeerFailure(env, worker, () => [
+      env.clients.read.version(),
+      env.clients.read.readParagraphs({ view: 'accepted' }),
+      env.clients.read.validateEdits(replace(env.session.version(), '00000001', 'Beta')),
+    ]);
+  });
+
+  test('text search waiting for the editor peer refuses with input-failed on open failure or timeout, without starting the peer', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    await expectPluginPeerFailure(env, worker, () => [
+      env.clients.read.findText({
+        text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+      }),
+    ]);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(env.events).toEqual([]);
+  });
+
+  test('navigation with focus waiting for the editor peer refuses with input-failed on open failure or timeout, without starting the peer', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    await expectPluginPeerFailure(env, worker, () => [
+      env.clients.navigation.scrollToParagraph(
+        { story: 'body', paraId: '00000002' },
+        { expectVersion: env.session.version(), focus: true }
+      ),
+    ]);
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(env.events).toEqual([]);
+  });
+
+  test('mutations and commands waiting for the editor peer refuse with input-failed on open failure or timeout, without starting the peer', async () => {
+    const env = await setup();
+    const worker = routeWorker(env);
+    worker.routing.mockReturnValue(null);
+    const flush = spyOn(env.editor, 'flushPendingInput').mockImplementation(async () => {
+      await workerOpenReplica.awaitWorkerOpenReplica(env.session);
+    });
+    restoreWorkers.push(() => flush.mockRestore());
+    const binding = testBinding();
+    binding.state.admission = async () => {
+      const flushed = await editorBatches.flushEditorInput(env.pagedEditorRef);
+      if (!flushed.ok) throw new DocxCommandAdmissionError(flushed.code);
+    };
+    const controller = createDocxCommandController();
+    controller.attach(binding.binding);
+    const invocation: PluginInvocation<DocxPluginSnapshot> = {
+      pluginId: 'acme.review',
+      activation: {},
+      snapshot: {} as DocxPluginSnapshot,
+      signal: env.controller.signal,
+      lifetimeSignal: env.lifetimeController.signal,
+      state: () => null,
+      setState: () => false,
+      onCleanup: () => {},
+      run: async () => {},
+      commit: (write) => write(),
+      refusal: () => env.state.ended ?? (env.controller.signal.aborted ? 'aborted' : null),
+    };
+    const clients = createPluginClients(
+      invocation, env.access, () => env.state.grant, controller.store
+    );
+    const version = env.session.version();
+    const apply = spyOn(env.session, 'applyEdits');
+    restoreWorkers.push(() => apply.mockRestore());
+    try {
+      await expectPluginPeerFailure(env, worker, () => [
+        clients.edits!.applyEdits(replace(version, '00000001', 'Beta')),
+        clients.commands.execute('reviewNext', null),
+      ]);
+    } finally {
+      expect(apply).not.toHaveBeenCalled();
+      expect(binding.calls).toEqual([]);
+      expect(env.session.version()).toBe(version);
+    }
+  });
+
   test('worker navigation waits for the current preview at the same document version', async () => {
     const env = await setup();
     const worker = routeWorker(env);
