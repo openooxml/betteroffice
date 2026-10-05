@@ -1011,7 +1011,11 @@ export function useYrsCoreSession(
     visibilityDocument?.addEventListener('visibilitychange', onVisibilityChange);
     if (visibilityDocument?.visibilityState === 'hidden') {
       startPeer();
-    } else if (hasOwnWorkerFrame && (!handoffFrom || options?.shownEngine === session)) {
+    } else if (
+      hasOwnWorkerFrame && retiringRef.current === null &&
+      workerOpen?.pendingCompletion !== session &&
+      (!handoffFrom || options?.shownEngine === session)
+    ) {
       const settled = workerOpenRef.current?.settledDisplayList?.(
         null, null, 'window', controller.signal, () => {
           if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
@@ -1033,6 +1037,7 @@ export function useYrsCoreSession(
     hasOwnWorkerFrame,
     openReplicaGate,
     replicaRequestVersion,
+    workerOpen?.pendingCompletion,
     workerOpen?.viewer,
     previewing,
     handoffFrom,
@@ -1062,7 +1067,10 @@ export function useYrsCoreSession(
       if (owner && workerOpenDocumentHeld(owner as YrsSession)) return false;
       if (owner === sessionRef.current && owner &&
         workerProposalFailure(owner as YrsSession) === error) return false;
-      if (session === undefined || session === sessionRef.current) startReplicaRef.current?.();
+      if (session === undefined || session === sessionRef.current) {
+        pendingReplicaRef.current?.requestReady();
+        startReplicaRef.current?.();
+      }
       return false;
     },
     []

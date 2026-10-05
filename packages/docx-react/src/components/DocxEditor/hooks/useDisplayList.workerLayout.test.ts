@@ -645,49 +645,6 @@ test.each([true, false])('viewer layout recovery (%s) keeps main construction em
   }
 });
 
-test('sync recovery rejects a cached layout frame from the old owner of the same engine', async () => {
-  const { native, layoutJson, frame, engine } = setup();
-  const { result, rerender, unmount } = renderHook(
-    ({ layout, source }) => useRustDisplayList(
-      layout, undefined, undefined, undefined, source, undefined, undefined, undefined, true
-    ),
-    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
-  );
-  try {
-    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
-    const old = FakeWorker.last!;
-    old.reply({ id: old.requestAt(0).id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
-    const opened = await opening;
-    const first = result.current.layoutInWorker(engine, REQUEST);
-    old.reply({
-      id: old.requestAt(1).id, ok: true, frame: frame.slice().buffer,
-      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
-    });
-    const cached = await first!;
-    act(() => {
-      const recover = opened!.fallback({ syncAccess: 'getEditorRef' });
-      expect(recover && recover()).toBe(true);
-    });
-    expect(old.terminated).toBe(true);
-    const next = result.current.layoutInWorker(engine, REQUEST);
-    const current = FakeWorker.last!;
-    expect(current).not.toBe(old);
-    expect(current.posted[0]).toMatchObject({ type: 'bootstrap' });
-    expect(current.posted[0]).not.toHaveProperty('opened');
-    current.reply({
-      id: current.requestAt(0).id, ok: true, frame: frame.slice().buffer,
-      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 2, layoutJson,
-    });
-    await next;
-    await act(async () => { rerender({ layout: cached!.layout, source: engine }); });
-    await waitFor(() => expect(current.posted.at(-1)).toMatchObject({ type: 'buildFrame' }));
-    expect(result.current.frame).toBeNull();
-  } finally {
-    unmount();
-    native.free();
-  }
-});
-
 test('a retained worker query facade forwards within a document load but never to the next document', async () => {
   const requestB = JSON.stringify({
     ...JSON.parse(REQUEST),

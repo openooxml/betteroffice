@@ -33,11 +33,11 @@ import { exportWorkerOpenPages, registerWorkerOpenExport, VIEWER_LAYOUT_WAIT_MS 
 import { workerExportVersions } from '../internals/workerExportVersions';
 import { usePagedEditorRefApi } from './usePagedEditorRefApi';
 import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
-import { DocxAsyncOnlyError, DocxReplicaNotReadyError, routeViewerRefAccess, useDocxEditorRefApi } from './useDocxEditorRefApi';
+import { DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotReadyError, routeViewerRefAccess, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { cleanup, renderHook } = await import('@testing-library/react');
+const { act, cleanup, renderHook } = await import('@testing-library/react');
 beforeEach(resetDeprecatedViewerMembersForTests);
 afterEach(() => { cleanup(); mock.restore(); });
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
@@ -218,6 +218,21 @@ function editorWorkerFor(host: ReturnType<typeof apiFor>) {
     },
   });
   return { ...resident, catchUp, read, result, owner, fail: (error: Error) => { failure = error; } };
+}
+
+function expectLoadingMutations(api: DocxEditorRef) {
+  const calls: Partial<Record<keyof DocxEditorRef, unknown[]>> = {
+    addComment: [{ paraId: '00000001', search: 'paragraph', text: 'Check', author: 'Ann' }],
+    proposeChange: [{ paraId: '00000001', search: 'paragraph', replaceWith: 'text', author: 'Host' }],
+    applyFormatting: [{ paraId: '00000001', search: 'paragraph', marks: { bold: true } }],
+    setParagraphStyle: [{ paraId: '00000001', styleId: 'Normal' }],
+    insertBreak: [{ paraId: '00000001', type: 'page' }],
+  };
+  for (const member of DOCX_REF_REPLICA_LOADING_MUTATIONS) {
+    const args = calls[member];
+    if (!args) throw new Error(`Missing loading mutation: ${member}`);
+    expect(() => Reflect.apply(api[member] as Function, api, args)).toThrow(DocxReplicaNotReadyError);
+  }
 }
 
 function expectNoReplica(host: ReturnType<typeof apiFor>) {
@@ -848,7 +863,7 @@ for (const [member, args, use] of [
   ['getPageContent', [1], 'exportStructuredWithPages'],
   ['findInDocument', ['hello'], 'findParagraphs'],
 ] as const) {
-  test(`${member} refuses worker viewers without requesting a replica and evaluates the session at call time`, () => {
+  test(`${member} refuses worker viewers without requesting a replica and evaluates the session at call time`, async () => {
     const warning = spyOn(console, 'warn').mockImplementation(() => {});
     const host = apiFor(true, true);
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -865,9 +880,32 @@ for (const [member, args, use] of [
     expect(host.fallback).not.toHaveBeenCalled();
     expect(host.request).not.toHaveBeenCalled();
     host.state.viewer = false;
-    releaseWorkerOpenDocument(host.session);
-    Reflect.apply(host.api[member], host.api, args);
-    expect(host.fallback).toHaveBeenCalledTimes(1);
+    const replica = releaseWorkerOpenDocument(host.session)!;
+    const request = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
+    host.editor.getLayout = () => ({
+      pages: [{ fragments: [{ kind: 'paragraph', pmStart: 0 }] }],
+    }) as unknown as Layout;
+    host.pagedEditorRef.current!.displayPositionToYrsLoc = () => ({ story: 'body', paraId: 'p', offset: 0 });
+    expect(Reflect.apply(host.api[member], host.api, args)).toEqual(member === 'findInDocument' ? [] : null);
+    expectLoadingMutations(host.api);
+    expect(host.replica!.started).toBe(false);
+    expect(host.request).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+    expect(host.hydrate).not.toHaveBeenCalled();
+    expect(host.fallback).not.toHaveBeenCalled();
+    expect(host.editor.flushPendingInput).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledTimes(1);
+    replica.start();
+    await act(async () => { await replica.ready; });
+    expect(Reflect.apply(host.api[member], host.api, args)).toEqual(
+      member === 'getDocument' ? host.editor.getDocument() : member === 'findInDocument' ? MATCHES : {
+        pageNumber: 1, text: '[p] hello', paragraphs: [{ paraId: 'p', text: 'hello' }],
+      }
+    );
+    expect(host.hydrate).toHaveBeenCalledTimes(1);
+    expect(host.request).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+    expect(host.fallback).not.toHaveBeenCalled();
     expect(warning).toHaveBeenCalledTimes(1);
   });
 }

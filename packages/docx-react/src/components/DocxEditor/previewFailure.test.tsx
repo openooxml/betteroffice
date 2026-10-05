@@ -359,7 +359,7 @@ test.each([false, true])('a terminal worker open reports one typed error and an 
   }
 });
 
-test('a stale worker open failure keeps the replacement preview read-only', async () => {
+test('a stale worker open failure keeps the replacement preview accepting input', async () => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -407,14 +407,14 @@ test('a stale worker open failure keeps the replacement preview read-only', asyn
     expect(openInWorker.mock.calls[1][0] as unknown).toBe(fullSession);
     expect(preview).not.toBe(fullSession);
     expect(preview.isDisplayOnly()).toBe(true);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
     expect(ref.current!.getDocument()).toBeNull();
 
     await act(async () => {
       releaseA();
       await new Promise((done) => setTimeout(done, 200));
     });
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
     expect(ref.current!.getDocument()).toBeNull();
     expect(errors).toEqual([]);
     expect(renderer!.layoutEngine).toBe(preview);
@@ -822,7 +822,7 @@ test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only whil
   } as unknown as typeof Worker;
   const ref = createRef<Editor>();
   const errors: Error[] = [];
-  const view = render(<DocxEditor ref={ref} previewFirstPage experimentalWorkerOpen
+  const view = render(<DocxEditor ref={ref} experimentalWorkerOpen
     readOnly={mode === 'readOnly'} mode={mode === 'viewing' ? 'viewing' : 'editing'}
     documentBuffer={documentBuffer()} onError={(error) => errors.push(error)} />);
   try {

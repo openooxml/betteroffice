@@ -598,31 +598,37 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('worker navigation with focus waits for the replica and checks replacement', async () => {
+  test('worker navigation with focus waits without starting the replica and checks replacement', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     const target = { story: 'body', paraId: '00000002' };
     const version = env.session.version();
-    let release!: () => void;
-    let requested!: () => void;
-    const ready = new Promise<void>((resolve) => (release = resolve));
-    const waiting = new Promise<void>((resolve) => (requested = resolve));
-    worker.replica.mockImplementation(() => {
-      requested();
-      return ready;
+    const pending = pendingPluginReplica(env);
+    let observed!: () => void;
+    const waiting = new Promise<void>((resolve) => (observed = resolve));
+    worker.ready.mockImplementation(() => {
+      observed();
+      return pending.replica.ready;
     });
     const scroll = env.clients.navigation.scrollToParagraph(target, {
       expectVersion: version,
       focus: true,
     });
     await waiting;
-    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.replica.started).toBe(false);
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
     expect(env.events).toEqual([]);
-    release();
+    pending.replica.start();
+    pending.release();
     expect(await scroll).toEqual({ ok: true });
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(env.session.selection()?.head).toMatchObject({ ...target, offset: 0 });
-    worker.replica.mockImplementation(async () => {
+    expect(pending.hydrate).toHaveBeenCalledTimes(1);
+    expect(pending.fallback).not.toHaveBeenCalled();
+    worker.ready.mockImplementation(async () => {
       env.pagedEditorRef.current = null;
     });
     expect(
@@ -636,6 +642,7 @@ describe('plugin read and navigation clients', () => {
     });
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
   });
 
   test('viewer navigation with focus selects in the viewer input without the replica', async () => {
@@ -756,7 +763,7 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('editor worker reads skip flushing while text searches retain replica admission', async () => {
+  test('worker reads and versions skip flushing, while text searches wait without starting the replica', async () => {
     const env = await setup();
     const worker = routeWorker(env);
     expect(await env.clients.read.version()).toEqual({ ok: true, version: env.session.version() });
@@ -765,14 +772,25 @@ describe('plugin read and navigation clients', () => {
     expect(worker.read).toHaveBeenCalledTimes(1);
     expect(worker.flush).not.toHaveBeenCalled();
     expect(worker.replica).not.toHaveBeenCalled();
-    expect(
-      await env.clients.read.findText({
-        text: 'Tail',
-        within: { kind: 'story', story: 'body' },
-        view: 'accepted',
-      })
-    ).toMatchObject({ ok: true });
-    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    const pending = pendingPluginReplica(env);
+    const found = env.clients.read.findText({
+      text: 'Tail',
+      within: { kind: 'story', story: 'body' },
+      view: 'accepted',
+    });
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    await Promise.resolve();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(worker.flush).not.toHaveBeenCalled();
+    expect(pending.replica.started).toBe(false);
+    expect(pending.hydrate).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
+    pending.replica.start();
+    pending.release();
+    expect(await found).toMatchObject({ ok: true });
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.hydrate).toHaveBeenCalledTimes(1);
+    expect(pending.fallback).not.toHaveBeenCalled();
     expect(worker.flush).toHaveBeenCalledTimes(1);
     expect(env.events).toEqual(['flush']);
   });
@@ -881,23 +899,27 @@ describe('plugin read and navigation clients', () => {
     expect(worker.replica).not.toHaveBeenCalled();
   });
 
-  test('text searches wait for hydration and return a refusal if the document is replaced', async () => {
+  test('text searches wait without starting hydration and refuse if the document is replaced', async () => {
     const env = await setup();
     const worker = routeWorker(env);
-    let release!: () => void;
-    const waiting = new Promise<void>((resolve) => (release = resolve));
-    worker.replica.mockImplementation(() => waiting);
+    const pending = pendingPluginReplica(env);
     const found = env.clients.read.findText({
       text: 'Tail',
       within: { kind: 'story', story: 'body' },
       view: 'accepted',
     });
-    expect(worker.replica).toHaveBeenCalledWith(env.session);
+    expect(worker.ready).toHaveBeenCalledWith(env.session);
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.replica.started).toBe(false);
+    expect(pending.hydrate).not.toHaveBeenCalled();
     expect(worker.flush).not.toHaveBeenCalled();
     env.pagedEditorRef.current = null;
-    release();
+    pending.replica.start();
+    pending.release();
     expect(await found).toMatchObject({ ok: false, failure: { code: 'document-replaced' } });
     expect(worker.flush).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(pending.fallback).not.toHaveBeenCalled();
   });
 
   test.each(['search', 'focus navigation'] as const)(
