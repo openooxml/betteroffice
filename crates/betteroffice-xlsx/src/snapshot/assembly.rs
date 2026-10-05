@@ -886,12 +886,18 @@ struct StreamAdmission {
 }
 
 impl StreamAdmission {
-    fn push(&mut self, mut payload: &[u8], budget: SnapshotBudget) -> SnapshotResult<()> {
+    fn push(
+        &mut self,
+        mut payload: &[u8],
+        budget: SnapshotBudget,
+        facts: bool,
+    ) -> SnapshotResult<()> {
         let max_bytes = budget.max_bytes();
         self.records = 0;
-        self.bytes = 0;
-        if self.remaining != 0 && self.length > max_bytes.min(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES)
-        {
+        self.bytes = if facts { 0 } else { payload.len() };
+        let record_limit =
+            if facts { max_bytes } else { usize::MAX }.min(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES);
+        if self.remaining != 0 && self.length > record_limit {
             return Err(error("snapshot record exceeds advance byte budget"));
         }
         while !payload.is_empty() {
@@ -901,7 +907,9 @@ impl StreamAdmission {
                 payload = &payload[count..];
                 if self.remaining == 0 {
                     self.records += 1;
-                    self.bytes = self.bytes.saturating_add(self.length);
+                    if facts {
+                        self.bytes = self.bytes.saturating_add(self.length);
+                    }
                     if self.records > budget.max_records() || self.bytes > max_bytes {
                         return Err(error(
                             "snapshot stream exceeds advance record or byte budget",
@@ -922,7 +930,7 @@ impl StreamAdmission {
                     if length == 0 {
                         return Err(error("snapshot record is empty"));
                     }
-                    if length > max_bytes.min(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES) {
+                    if length > record_limit {
                         return Err(error("snapshot record exceeds advance byte budget"));
                     }
                     self.remaining = length;
@@ -1399,7 +1407,7 @@ impl WorkbookSnapshotBuilder {
         }
         if let Some(chunk) = self.queue.front()
             && chunk.len() > budget.max_bytes()
-            && unframe(chunk)?.0 != ChunkKind::Yrs
+            && !matches!(unframe(chunk)?.0, ChunkKind::Yrs | ChunkKind::Model)
         {
             return Err(error("snapshot logical chunk exceeds advance byte budget"));
         }
@@ -1429,7 +1437,7 @@ impl WorkbookSnapshotBuilder {
             };
             if let Some(admission) = admission {
                 let mut next = *admission;
-                next.push(payload, budget)?;
+                next.push(payload, budget, kind == ChunkKind::Facts)?;
                 if kind == ChunkKind::Facts && next.records > 1 {
                     self.failed = true;
                     return Err(error("snapshot facts chunk completes multiple records"));
@@ -1463,7 +1471,7 @@ impl WorkbookSnapshotBuilder {
                 _ => None,
             };
             if let Some(admission) = admission {
-                admission.push(payload, budget)?;
+                admission.push(payload, budget, kind == ChunkKind::Facts)?;
             }
         }
         let result = self.advance_inner(budget);
@@ -1583,9 +1591,8 @@ impl WorkbookSnapshotBuilder {
                         .as_mut()
                         .ok_or_else(|| error("snapshot header is missing"))?;
                     authority.push_base(payload)?;
-                    authority.advance_bounded(budget)?;
                     #[cfg(test)]
-                    crate::snapshot::step::bytes_at_least(payload.len());
+                    crate::snapshot::step::record(1, payload.len());
                 }
                 ChunkKind::Yrs => return Err(error("unexpected queued Yrs chunk")),
                 ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved => {

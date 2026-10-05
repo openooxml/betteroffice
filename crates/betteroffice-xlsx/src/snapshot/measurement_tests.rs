@@ -34,7 +34,29 @@ fn frames_for_parts(
     budget: SnapshotBudget,
 ) -> (Vec<Vec<u8>>, Vec<u8>) {
     let merged = yrs::merge_updates_v1(parts.iter()).unwrap();
-    let vector = yrs::encode_state_vector_from_update_v1(&merged).unwrap();
+    let doc = non_gc_doc(u64::from(u32::MAX));
+    for part in &parts {
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(part).unwrap())
+            .unwrap();
+    }
+    let txn = doc.transact();
+    assert!(txn.store().pending_update().is_none());
+    assert!(txn.store().pending_ds().is_none());
+    let state = txn.state_vector();
+    assert_eq!(state, Update::decode_v1(&merged).unwrap().state_vector());
+    let mut entries = state
+        .iter()
+        .map(|(client, clock)| (client.get(), *clock))
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    let mut writer = Writer::new();
+    writer.var_usize(entries.len());
+    for (client, clock) in entries {
+        writer.var_u64(client);
+        writer.var_u32(clock);
+    }
+    let vector = writer.into_bytes();
     let chunks = replace_yrs(worker, parts, vector.clone(), budget);
     (chunks, vector)
 }

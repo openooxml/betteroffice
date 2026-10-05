@@ -52,7 +52,7 @@ impl ModelValidation {
         loop {
             if self.phase == 0 {
                 if let Some(name) = model.defined_names.get(self.index) {
-                    let bytes = admit(name.name.len().saturating_add(name.formula.len()), budget)?;
+                    let bytes = admit(128, budget)?;
                     if name
                         .local_sheet
                         .is_some_and(|sheet| sheet.0 as usize >= model.sheets.len())
@@ -177,16 +177,7 @@ impl ModelValidation {
                 }
                 5 => {
                     if let Some(link) = sheet.hyperlinks.get(self.index) {
-                        let bytes = [
-                            &link.external_target,
-                            &link.location,
-                            &link.tooltip,
-                            &link.display,
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .fold(64usize, |bytes, value| bytes.saturating_add(value.len()));
-                        let bytes = admit(bytes, budget)?;
+                        let bytes = admit(128, budget)?;
                         check(validate_hyperlinks(std::slice::from_ref(link)))?;
                         self.index += 1;
                         return Ok((false, 1, bytes));

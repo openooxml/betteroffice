@@ -454,7 +454,9 @@ impl UpdateCursor {
         if !allow_oversized {
             scanner.limit = scanner.pos.saturating_add(max_bytes).min(update.len());
             scanner.refuse_text = refuse_text;
-            scanner.allocation_left = max_bytes;
+            if refuse_text {
+                scanner.allocation_left = max_bytes;
+            }
             scanner.measured = refuse_text;
         }
         if next.phase == 0 {
@@ -634,11 +636,8 @@ impl CausalState {
         let mut records = 0;
         let mut bytes = 0;
         while records < max_records {
-            let cost = if let Some((_, (_, parent, key))) = self.locations.first_key_value() {
-                96 + match parent {
-                    SnapshotParent::Root(name) => name.len(),
-                    _ => 0,
-                } + key.as_ref().map_or(0, |key| key.len())
+            let cost = if !self.locations.is_empty() {
+                96
             } else if !self.kinds.is_empty() {
                 std::mem::size_of::<((u64, u32), (u32, u8))>()
             } else if !self.clocks.is_empty() {

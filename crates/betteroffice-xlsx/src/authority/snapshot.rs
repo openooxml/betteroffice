@@ -15,9 +15,172 @@ use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotR
 
 use super::*;
 
-pub(super) trait Codec: Sized {
+pub(crate) trait Codec: Sized + Send + Sync + 'static {
     fn write(&self, w: &mut Writer);
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self>;
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        r.atomic::<Self>()
+    }
+}
+
+const DECODE_PENDING: &str = "authority base decoding is pending";
+
+type DecodeKey = (usize, std::any::TypeId);
+type DecodeValue = Box<dyn std::any::Any + Send + Sync>;
+
+#[derive(Default)]
+pub(crate) struct BaseDecode {
+    ready: BTreeMap<DecodeKey, (usize, DecodeValue)>,
+    pending: BTreeMap<DecodeKey, DecodeValue>,
+    started: BTreeSet<DecodeKey>,
+}
+
+pub(crate) struct BoundedReader<'a> {
+    payload: &'a [u8],
+    position: usize,
+    remaining: usize,
+    elements: usize,
+    max_elements: usize,
+    state: &'a mut BaseDecode,
+}
+
+pub(crate) fn decode_record<T: Codec>(
+    state: &mut BaseDecode,
+    payload: &[u8],
+    budget: SnapshotBudget,
+) -> SnapshotResult<Option<(T, usize)>> {
+    if budget.max_bytes() < 256 {
+        return Err(SnapshotError::new(
+            "snapshot decoding byte budget is too small",
+        ));
+    }
+    let mut reader = BoundedReader {
+        payload,
+        position: 0,
+        remaining: budget.max_bytes() - 128,
+        elements: 0,
+        max_elements: budget.max_records(),
+        state,
+    };
+    let result = reader.value::<T>();
+    #[cfg(test)]
+    crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
+    match result {
+        Ok(value) => Ok(Some((value, reader.position))),
+        Err(failure) if failure.to_string() == DECODE_PENDING => Ok(None),
+        Err(failure) => Err(failure),
+    }
+}
+
+impl BoundedReader<'_> {
+    fn pending<T>() -> SnapshotResult<T> {
+        Err(SnapshotError::new(DECODE_PENDING))
+    }
+
+    fn atomic<T: Codec>(&mut self) -> SnapshotResult<T> {
+        let mut reader = Reader::new(&self.payload[self.position..]);
+        let value = T::read(&mut reader)?;
+        let bytes = self.payload.len() - self.position - reader.rest().len();
+        if bytes > self.remaining {
+            return Self::pending();
+        }
+        self.remaining -= bytes;
+        self.position += bytes;
+        Ok(value)
+    }
+
+    fn prepare<T: Codec>(&mut self) -> SnapshotResult<()> {
+        let key = (self.position, std::any::TypeId::of::<T>());
+        if let Some((end, _)) = self.state.ready.get(&key) {
+            self.position = *end;
+            return Ok(());
+        }
+        if !self.state.started.contains(&key) {
+            let cost = std::mem::size_of::<T>().saturating_add(96);
+            if cost > self.remaining {
+                return Self::pending();
+            }
+            self.remaining -= cost;
+            self.state.started.insert(key);
+            #[cfg(test)]
+            crate::snapshot::step::allocate(cost);
+        }
+        let value = T::read_bounded(self)?;
+        self.state.started.remove(&key);
+        self.state
+            .ready
+            .insert(key, (self.position, Box::new(value)));
+        Ok(())
+    }
+
+    fn field<S, T: Codec>(&mut self, _field: impl FnOnce(&S) -> &T) -> SnapshotResult<()> {
+        self.prepare::<T>()
+    }
+
+    fn take<T: Codec>(&mut self) -> SnapshotResult<T> {
+        let key = (self.position, std::any::TypeId::of::<T>());
+        let (end, value) = self
+            .state
+            .ready
+            .remove(&key)
+            .ok_or_else(|| SnapshotError::new("authority base decoded field is missing"))?;
+        self.position = end;
+        value
+            .downcast::<T>()
+            .map(|value| *value)
+            .map_err(|_| SnapshotError::new("authority base decoded field has the wrong type"))
+    }
+
+    fn value<T: Codec>(&mut self) -> SnapshotResult<T> {
+        let start = self.position;
+        self.prepare::<T>()?;
+        self.position = start;
+        self.take::<T>()
+    }
+
+    fn string(&mut self) -> SnapshotResult<String> {
+        let key = (self.position, std::any::TypeId::of::<String>());
+        let (end, mut offset, mut value) = if let Some(value) = self.state.pending.remove(&key) {
+            *value.downcast::<(usize, usize, String)>().map_err(|_| {
+                SnapshotError::new("authority base string cursor has the wrong type")
+            })?
+        } else {
+            let length = self.atomic::<usize>()?;
+            let end = self
+                .position
+                .checked_add(length)
+                .filter(|end| *end <= self.payload.len())
+                .ok_or_else(|| SnapshotError::new("authority base string is truncated"))?;
+            (end, self.position, String::with_capacity(length))
+        };
+        let limit = end.min(offset.saturating_add(self.remaining / 3));
+        let chunk = &self.payload[offset..limit];
+        let text = match std::str::from_utf8(chunk) {
+            Ok(text) => text,
+            Err(failure) if failure.error_len().is_none() && limit < end => {
+                std::str::from_utf8(&chunk[..failure.valid_up_to()])
+                    .map_err(|_| SnapshotError::new("authority base string is invalid UTF-8"))?
+            }
+            Err(_) => return Err(SnapshotError::new("authority base string is invalid UTF-8")),
+        };
+        value.push_str(text);
+        offset += text.len();
+        self.remaining -= text.len() * 3;
+        #[cfg(test)]
+        {
+            crate::snapshot::step::allocate(text.len());
+            crate::snapshot::step::scan(text.len() * 2);
+        }
+        if offset != end {
+            self.state
+                .pending
+                .insert(key, Box::new((end, offset, value)));
+            return Self::pending();
+        }
+        self.position = end;
+        Ok(value)
+    }
 }
 
 macro_rules! primitive_codec {
@@ -61,6 +224,10 @@ impl Codec for String {
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         Ok(r.str()?.to_owned())
     }
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        r.string()
+    }
 }
 
 impl<T: Codec> Codec for Option<T> {
@@ -70,6 +237,14 @@ impl<T: Codec> Codec for Option<T> {
 
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         r.option(T::read)
+    }
+
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        match r.atomic::<u8>()? {
+            0 => Ok(None),
+            1 => r.value::<T>().map(Some),
+            _ => Err(SnapshotError::new("invalid snapshot option")),
+        }
     }
 }
 
@@ -89,6 +264,52 @@ impl<T: Codec> Codec for Vec<T> {
         }
         Ok(values)
     }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        let key = (r.position, std::any::TypeId::of::<Self>());
+        let mut state = if let Some(state) = r.state.pending.remove(&key) {
+            *state.downcast::<VectorDecode<T>>().map_err(|_| {
+                SnapshotError::new("authority base vector cursor has the wrong type")
+            })?
+        } else {
+            let count = r.atomic::<usize>()?;
+            if count > r.payload.len() - r.position {
+                return Err(SnapshotError::new("authority base vector is truncated"));
+            }
+            VectorDecode {
+                values: Vec::new(),
+                count,
+                offset: r.position,
+            }
+        };
+        r.position = state.offset;
+        while state.values.len() < state.count {
+            let before = r.elements;
+            let value = if before == r.max_elements || std::mem::size_of::<T>() > r.remaining {
+                BoundedReader::pending()
+            } else {
+                r.remaining -= std::mem::size_of::<T>();
+                r.value::<T>()
+            };
+            match value {
+                Ok(value) => {
+                    state.values.push(value);
+                    state.offset = r.position;
+                    r.elements = r.elements.max(before + 1);
+                }
+                Err(failure) => {
+                    r.state.pending.insert(key, Box::new(state));
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(state.values)
+    }
+}
+
+struct VectorDecode<T> {
+    values: Vec<T>,
+    count: usize,
+    offset: usize,
 }
 
 impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
@@ -115,6 +336,50 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
         }
         Ok(values)
     }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        let key = (r.position, std::any::TypeId::of::<Self>());
+        let mut state = if let Some(state) = r.state.pending.remove(&key) {
+            *state
+                .downcast::<(Self, usize, usize)>()
+                .map_err(|_| SnapshotError::new("authority base map cursor has the wrong type"))?
+        } else {
+            let count = r.atomic::<usize>()?;
+            if count > r.payload.len() - r.position {
+                return Err(SnapshotError::new("authority base map is truncated"));
+            }
+            (Self::new(), count, r.position)
+        };
+        r.position = state.2;
+        while state.0.len() < state.1 {
+            let before = r.elements;
+            let cost = std::mem::size_of::<(K, V)>().saturating_add(64);
+            let entry = if before == r.max_elements || cost > r.remaining {
+                BoundedReader::pending()
+            } else {
+                r.remaining -= cost;
+                r.value::<(K, V)>()
+            };
+            match entry {
+                Ok((key, value)) => {
+                    if state
+                        .0
+                        .last_key_value()
+                        .is_some_and(|(last, _)| last >= &key)
+                    {
+                        return Err(SnapshotError::new("snapshot map keys are not increasing"));
+                    }
+                    state.0.insert(key, value);
+                    state.2 = r.position;
+                    r.elements = r.elements.max(before + 1);
+                }
+                Err(failure) => {
+                    r.state.pending.insert(key, Box::new(state));
+                    return Err(failure);
+                }
+            }
+        }
+        Ok(state.0)
+    }
 }
 
 impl<A: Codec, B: Codec> Codec for (A, B) {
@@ -126,6 +391,13 @@ impl<A: Codec, B: Codec> Codec for (A, B) {
 
     fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
         Ok((A::read(r)?, B::read(r)?))
+    }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        let start = r.position;
+        r.prepare::<A>()?;
+        r.prepare::<B>()?;
+        r.position = start;
+        Ok((r.take::<A>()?, r.take::<B>()?))
     }
 }
 
@@ -139,6 +411,13 @@ macro_rules! struct_codec {
 
             fn read(r: &mut Reader<'_>) -> SnapshotResult<Self> {
                 Ok(Self { $($field: Codec::read(r)?),+ })
+            }
+
+            fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+                let start = r.position;
+                $(r.field(|value: &Self| &value.$field)?;)+
+                r.position = start;
+                Ok(Self { $($field: r.take()?),+ })
             }
         }
     };
@@ -308,6 +587,18 @@ impl Codec for Color {
             _ => return Err(SnapshotError::new("invalid snapshot color")),
         })
     }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        Ok(match r.atomic::<u8>()? {
+            0 => Self::Rgb(r.value()?),
+            1 => {
+                let (idx, tint) = r.value()?;
+                Self::Theme { idx, tint }
+            }
+            2 => Self::Indexed(r.value()?),
+            3 => Self::Auto,
+            _ => return Err(SnapshotError::new("invalid snapshot color")),
+        })
+    }
 }
 
 impl Codec for Fill {
@@ -328,6 +619,13 @@ impl Codec for Fill {
             _ => Err(SnapshotError::new("invalid snapshot fill")),
         }
     }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        match r.atomic::<u8>()? {
+            0 => Ok(Self::None),
+            1 => r.value().map(Self::Solid),
+            _ => Err(SnapshotError::new("invalid snapshot fill")),
+        }
+    }
 }
 
 impl Codec for Theme {
@@ -342,6 +640,18 @@ impl Codec for Theme {
         let mut colors = std::array::from_fn(|_| String::new());
         for color in &mut colors {
             *color = Codec::read(r)?;
+        }
+        Ok(Self { colors })
+    }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        let start = r.position;
+        for _ in 0..12 {
+            r.prepare::<String>()?;
+        }
+        r.position = start;
+        let mut colors = std::array::from_fn(|_| String::new());
+        for color in &mut colors {
+            *color = r.take()?;
         }
         Ok(Self { colors })
     }
@@ -384,6 +694,31 @@ impl Codec for ChartAnchor {
                 pos: Codec::read(r)?,
                 extent: Codec::read(r)?,
             },
+            _ => return Err(SnapshotError::new("invalid snapshot chart anchor")),
+        })
+    }
+    fn read_bounded(r: &mut BoundedReader<'_>) -> SnapshotResult<Self> {
+        Ok(match r.atomic::<u8>()? {
+            0 => {
+                let start = r.position;
+                r.prepare::<AnchorCell>()?;
+                r.prepare::<AnchorCell>()?;
+                r.prepare::<AnchorEditAs>()?;
+                r.position = start;
+                Self::TwoCell {
+                    from: r.take()?,
+                    to: r.take()?,
+                    edit_as: r.take()?,
+                }
+            }
+            1 => {
+                let (from, extent) = r.value()?;
+                Self::OneCell { from, extent }
+            }
+            2 => {
+                let (pos, extent) = r.value()?;
+                Self::Absolute { pos, extent }
+            }
             _ => return Err(SnapshotError::new("invalid snapshot chart anchor")),
         })
     }
@@ -755,15 +1090,206 @@ impl WorkbookAuthority {
     }
 }
 
+struct BaseManifest {
+    client: u64,
+    date: DateSystem,
+    fingerprint: String,
+    theme: Theme,
+    counts: [usize; BASE_SECTIONS],
+}
+
+enum BaseRecord {
+    Manifest(Box<BaseManifest>),
+    DefinedName(DefinedName),
+    Fingerprints((i64, Vec<String>)),
+    FreezePane(Option<FreezePane>),
+    Format(SheetFormat),
+    Columns(Vec<ColStyle>),
+    Hyperlinks(Vec<Hyperlink>),
+    Charts(Vec<SheetChart>),
+    Hidden(HiddenDimensions),
+    String(String),
+    Font(Font),
+    Fill(Fill),
+    Border(Border),
+    Xf(Xf),
+    NumberFormat((u16, String)),
+    Color(String),
+    Table(Table),
+}
+
+impl BaseRecord {
+    fn read(r: &mut BoundedReader<'_>, section: usize) -> SnapshotResult<Self> {
+        Ok(match section {
+            0 => {
+                let start = r.position;
+                r.prepare::<u64>()?;
+                r.prepare::<DateSystem>()?;
+                r.prepare::<String>()?;
+                r.prepare::<Theme>()?;
+                for _ in 0..BASE_SECTIONS {
+                    r.prepare::<usize>()?;
+                }
+                let cost = std::mem::size_of::<BaseManifest>();
+                if cost > r.remaining {
+                    return BoundedReader::pending();
+                }
+                r.remaining -= cost;
+                #[cfg(test)]
+                crate::snapshot::step::allocate(cost);
+                r.position = start;
+                let client = r.take()?;
+                let date = r.take()?;
+                let fingerprint = r.take()?;
+                let theme = r.take()?;
+                let mut counts = [0; BASE_SECTIONS];
+                for count in &mut counts {
+                    *count = r.take()?;
+                }
+                Self::Manifest(Box::new(BaseManifest {
+                    client,
+                    date,
+                    fingerprint,
+                    theme,
+                    counts,
+                }))
+            }
+            1 => Self::DefinedName(r.value()?),
+            2 => Self::Fingerprints(r.value()?),
+            3 => Self::FreezePane(r.value()?),
+            4 => Self::Format(r.value()?),
+            5 => Self::Columns(r.value()?),
+            6 => Self::Hyperlinks(r.value()?),
+            7 => Self::Charts(r.value()?),
+            8 => Self::Hidden(r.value()?),
+            9 => Self::String(r.value()?),
+            10 => Self::Font(r.value()?),
+            11 => Self::Fill(r.value()?),
+            12 => Self::Border(r.value()?),
+            13 => Self::Xf(r.value()?),
+            14 => Self::NumberFormat(r.value()?),
+            15 => Self::Color(r.value()?),
+            16 => Self::Table(r.value()?),
+            _ => return Err(SnapshotError::new("invalid authority base section")),
+        })
+    }
+}
+
 #[derive(Default)]
 struct BaseBuilder {
     base: Option<WorkbookBase>,
     counts: [usize; BASE_SECTIONS],
     cursor: BaseCursor,
     growth: Growth<WorkbookBase>,
+    decode: BaseDecode,
 }
 
 impl BaseBuilder {
+    fn push_bounded(&mut self, payload: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
+        if budget.max_bytes() < 256 {
+            return Err(SnapshotError::new(
+                "authority base decoding byte budget is too small",
+            ));
+        }
+        self.cursor.normalize(&self.counts);
+        let mut reader = BoundedReader {
+            payload,
+            position: 0,
+            remaining: budget.max_bytes() - 128,
+            elements: 0,
+            max_elements: budget.max_records(),
+            state: &mut self.decode,
+        };
+        let section = usize::from(reader.atomic::<u8>()?);
+        if section != self.cursor.section || section > BASE_SECTIONS {
+            return Err(SnapshotError::new("unexpected authority base record"));
+        }
+        let record = BaseRecord::read(&mut reader, section);
+        #[cfg(test)]
+        crate::snapshot::step::record(1, budget.max_bytes() - reader.remaining);
+        let record = match record {
+            Ok(record) => record,
+            Err(failure) if failure.to_string() == DECODE_PENDING => return Ok(false),
+            Err(failure) => return Err(failure),
+        };
+        if reader.position != payload.len() {
+            return Err(SnapshotError::new(
+                "authority base record has trailing bytes",
+            ));
+        }
+        match record {
+            BaseRecord::Manifest(manifest) => {
+                let BaseManifest {
+                    client,
+                    date,
+                    fingerprint,
+                    theme,
+                    counts,
+                } = *manifest;
+                self.counts = counts;
+                let mut styles = Stylesheet::default();
+                styles.theme = theme;
+                self.base = Some(WorkbookBase {
+                    bootstrap_client_id: client,
+                    date_system: date,
+                    defined_names: Vec::new(),
+                    fingerprint,
+                    fingerprints: BTreeMap::new(),
+                    freeze_panes: Vec::new(),
+                    formats: Vec::new(),
+                    col_styles: Vec::new(),
+                    hyperlinks: Vec::new(),
+                    charts: Vec::new(),
+                    hidden_dimensions: Vec::new(),
+                    shared_strings: Vec::new(),
+                    styles,
+                    tables: Vec::new(),
+                });
+                self.cursor.section = 1;
+            }
+            record => {
+                let base = self
+                    .base
+                    .as_mut()
+                    .ok_or_else(|| SnapshotError::new("authority base manifest is missing"))?;
+                match record {
+                    BaseRecord::DefinedName(value) => base.defined_names.push(value),
+                    BaseRecord::FreezePane(value) => base.freeze_panes.push(value),
+                    BaseRecord::Format(value) => base.formats.push(value),
+                    BaseRecord::Columns(value) => base.col_styles.push(value),
+                    BaseRecord::Hyperlinks(value) => base.hyperlinks.push(value),
+                    BaseRecord::Charts(value) => base.charts.push(value),
+                    BaseRecord::Hidden(value) => base.hidden_dimensions.push(value),
+                    BaseRecord::String(value) => base.shared_strings.push(value),
+                    BaseRecord::Font(value) => base.styles.fonts.push(value),
+                    BaseRecord::Fill(value) => base.styles.fills.push(value),
+                    BaseRecord::Border(value) => base.styles.borders.push(value),
+                    BaseRecord::Xf(value) => base.styles.cell_xfs.push(value),
+                    BaseRecord::NumberFormat(value) => base.styles.num_fmts.push(value),
+                    BaseRecord::Color(value) => base.styles.indexed_colors.push(value),
+                    BaseRecord::Table(value) => base.tables.push(value),
+                    BaseRecord::Fingerprints((key, value)) => {
+                        if self
+                            .cursor
+                            .fingerprint_key
+                            .is_some_and(|previous| previous >= key)
+                        {
+                            return Err(SnapshotError::new(
+                                "snapshot fingerprints are not increasing",
+                            ));
+                        }
+                        base.fingerprints.insert(key, value);
+                        self.cursor.fingerprint_key = Some(key);
+                    }
+                    BaseRecord::Manifest(_) => unreachable!(),
+                }
+                self.cursor.index += 1;
+            }
+        }
+        Ok(true)
+    }
+
+    #[cfg(test)]
     fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         let mut r = Reader::new(payload);
         self.cursor.normalize(&self.counts);
@@ -1075,15 +1601,15 @@ impl AuthorityHydrator {
             if !self.base.advance_capacity(record, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
-            let record = self
-                .pending_base
-                .pop_front()
-                .ok_or_else(|| SnapshotError::new("authority base record is missing"))?;
-            #[cfg(test)]
-            crate::snapshot::step::record(1, record.len());
-            if let Err(error) = self.base.push(&record) {
-                self.failed = true;
-                return Err(error);
+            match self.base.push_bounded(record, budget) {
+                Ok(false) => return Ok(SnapshotProgress::pending()),
+                Ok(true) => {
+                    self.pending_base.pop_front();
+                }
+                Err(error) => {
+                    self.failed = true;
+                    return Err(error);
+                }
             }
         }
         if self.pending_base.is_empty() {

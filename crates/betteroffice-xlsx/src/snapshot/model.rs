@@ -424,6 +424,7 @@ pub(crate) struct ModelSnapshotBuilder {
     array_key: Option<(u32, u32)>,
     growth: Growth<Workbook>,
     offset: usize,
+    decode: crate::authority::snapshot::BaseDecode,
 }
 
 impl ModelSnapshotBuilder {
@@ -444,6 +445,7 @@ impl ModelSnapshotBuilder {
             array_key: None,
             growth: Growth::default(),
             offset: 0,
+            decode: crate::authority::snapshot::BaseDecode::default(),
         }
     }
 
@@ -470,11 +472,6 @@ impl ModelSnapshotBuilder {
         chunk: &[u8],
         budget: SnapshotBudget,
     ) -> SnapshotResult<SnapshotProgress> {
-        if chunk.len() > budget.max_bytes() {
-            return Err(SnapshotError::new(
-                "snapshot model exceeds advance byte budget",
-            ));
-        }
         let (kind, ordinal, payload) = unframe(chunk)?;
         if ordinal != self.ordinal || payload.is_empty() {
             return Err(SnapshotError::new(
@@ -501,6 +498,18 @@ impl ModelSnapshotBuilder {
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
+            if chunk.len() > budget.max_bytes() {
+                let Some(consumed) = self.read_large_record(tag, r.rest(), budget)? else {
+                    return Ok(SnapshotProgress::pending());
+                };
+                self.offset += 1 + consumed;
+                if self.offset == payload.len() {
+                    self.offset = 0;
+                    self.ordinal += 1;
+                    return Ok(SnapshotProgress::ready());
+                }
+                return Ok(SnapshotProgress::pending());
+            }
             self.read_record(tag, &mut r)?;
         } else {
             if tag != HEADER {
@@ -519,6 +528,179 @@ impl ModelSnapshotBuilder {
         } else {
             Ok(SnapshotProgress::pending())
         }
+    }
+
+    fn read_large_record(
+        &mut self,
+        tag: u8,
+        payload: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<Option<usize>> {
+        use crate::authority::snapshot::decode_record;
+        macro_rules! decoded {
+            ($ty:ty) => {
+                match decode_record::<$ty>(&mut self.decode, payload, budget)? {
+                    Some(value) => value,
+                    None => return Ok(None),
+                }
+            };
+        }
+        let consumed = match tag {
+            NAME => {
+                let (value, end) = decoded!(DefinedName);
+                self.model.defined_names.push(value);
+                end
+            }
+            STRING => {
+                let (value, end) = decoded!(String);
+                self.model.shared_strings.push(value);
+                end
+            }
+            FONT => {
+                let (value, end) = decoded!(Font);
+                self.model.styles.fonts.push(value);
+                end
+            }
+            FILL => {
+                let (value, end) = decoded!(Fill);
+                self.model.styles.fills.push(value);
+                end
+            }
+            BORDER => {
+                let (value, end) = decoded!(Border);
+                self.model.styles.borders.push(value);
+                end
+            }
+            XF => {
+                let (value, end) = decoded!(Xf);
+                self.model.styles.cell_xfs.push(value);
+                end
+            }
+            NUM_FMT => {
+                let (value, end) = decoded!((u16, String));
+                self.model.styles.num_fmts.push(value);
+                end
+            }
+            THEME => {
+                let (value, end) = decoded!(String);
+                self.model.styles.theme.colors[self.theme_index] = value;
+                self.theme_index += 1;
+                end
+            }
+            INDEXED => {
+                let (value, end) = decoded!(String);
+                self.model.styles.indexed_colors.push(value);
+                end
+            }
+            TABLE_COLUMN => {
+                let (value, end) = decoded!(String);
+                self.model
+                    .tables
+                    .last_mut()
+                    .ok_or_else(|| SnapshotError::new("snapshot table column has no table"))?
+                    .columns
+                    .push(value);
+                end
+            }
+            HYPERLINK => {
+                let (value, end) = decoded!(Hyperlink);
+                self.model
+                    .sheets
+                    .last_mut()
+                    .ok_or_else(|| SnapshotError::new("snapshot sheet metadata has no sheet"))?
+                    .hyperlinks
+                    .push(value);
+                end
+            }
+            CHART_REF => {
+                let (value, end) = decoded!(ChartRef);
+                self.model
+                    .sheets
+                    .last_mut()
+                    .and_then(|sheet| sheet.charts.last_mut())
+                    .ok_or_else(|| SnapshotError::new("snapshot chart reference has no chart"))?
+                    .refs
+                    .push(value);
+                end
+            }
+            TABLE => {
+                let ((name, (sheet, (range, (header_rows, (totals_rows, columns))))), end) =
+                    decoded!((
+                        String,
+                        (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
+                    ));
+                self.model.tables.push(Table {
+                    name,
+                    sheet,
+                    range,
+                    header_rows,
+                    totals_rows,
+                    columns: Vec::new(),
+                });
+                if columns != 0 {
+                    self.runs.push_front((TABLE_COLUMN, columns));
+                }
+                end
+            }
+            CHART => {
+                let ((part, (drawing, (anchor_index, (anchor, refs)))), end) =
+                    decoded!((String, (String, (usize, (ChartAnchor, usize)))));
+                self.model
+                    .sheets
+                    .last_mut()
+                    .ok_or_else(|| SnapshotError::new("snapshot sheet metadata has no sheet"))?
+                    .charts
+                    .push(SheetChart {
+                        part,
+                        drawing,
+                        anchor_index,
+                        anchor,
+                        refs: Vec::new(),
+                    });
+                if refs != 0 {
+                    self.runs.push_front((CHART_REF, refs));
+                }
+                end
+            }
+            _ => {
+                return Err(SnapshotError::new(
+                    "snapshot model exceeds advance byte budget",
+                ));
+            }
+        };
+        let index = if matches!(tag, TABLE | CHART) {
+            usize::from(self.runs.front().is_some_and(|&(next, _)| next != tag))
+        } else {
+            0
+        };
+        let (_, remaining) = self
+            .runs
+            .get_mut(index)
+            .ok_or_else(|| SnapshotError::new("extra snapshot metadata record"))?;
+        *remaining -= 1;
+        if *remaining == 0 {
+            self.runs.remove(index);
+        }
+        self.remaining_records -= 1;
+        self.validate_counts()?;
+        if self.remaining_records == 0 {
+            self.validate_metadata_complete()?;
+        } else if self.runs.is_empty() {
+            return Err(SnapshotError::new(
+                "snapshot model has excess metadata count",
+            ));
+        }
+        Ok(Some(consumed))
+    }
+
+    fn validate_metadata_complete(&self) -> SnapshotResult<()> {
+        if !self.runs.is_empty()
+            || self.model.sheets.len() != self.expected_sheets
+            || self.declared_cells != self.remaining_cells
+        {
+            return Err(SnapshotError::new("snapshot model counts do not match"));
+        }
+        Ok(())
     }
 
     fn advance_capacity(&mut self, tag: u8, budget: SnapshotBudget) -> SnapshotResult<bool> {

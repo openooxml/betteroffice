@@ -1,4 +1,3 @@
-use std::io::{self, Write};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use crate::snapshot::yrs_split::{SnapshotKeys, SnapshotParent};
@@ -24,7 +23,10 @@ pub(crate) struct SnapshotValidation {
     base_child: usize,
     metadata_child: usize,
     metadata_ref: usize,
-    metadata_bytes: usize,
+    json: JsonPosition,
+    record_offset: usize,
+    format_digest: Sha256,
+    format_key: Option<String>,
     style_index: u32,
     style_keys: BTreeMap<u32, String>,
     format_keys: BTreeSet<String>,
@@ -60,38 +62,268 @@ fn augment(bytes: usize, budget: SnapshotBudget, meter: &mut usize) -> SnapshotR
     Ok(())
 }
 
-struct JsonComparison<'a> {
-    bytes: &'a [u8],
+#[derive(Default)]
+struct JsonPosition {
+    token: usize,
     offset: usize,
+    bytes: usize,
+}
+
+struct JsonWindow<'a> {
+    position: &'a mut JsonPosition,
+    token: usize,
+    bytes: Vec<u8>,
     limit: usize,
 }
 
-impl Write for JsonComparison<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let end = self.offset.saturating_add(bytes.len());
-        if end > self.limit || self.bytes.get(self.offset..end) != Some(bytes) {
-            return Err(io::Error::other("snapshot metadata differs"));
+#[derive(Debug)]
+enum JsonStop {
+    Pending,
+    Invalid,
+}
+
+type JsonResult = Result<(), JsonStop>;
+
+impl JsonWindow<'_> {
+    fn raw(&mut self, value: &[u8]) -> JsonResult {
+        let token = self.token;
+        self.token += 1;
+        if token < self.position.token {
+            return Ok(());
         }
-        self.offset = end;
-        Ok(bytes.len())
+        let start = self.position.offset;
+        let count = (value.len() - start).min(self.limit - self.bytes.len());
+        self.bytes.extend_from_slice(&value[start..start + count]);
+        self.position.bytes += count;
+        if start + count != value.len() {
+            self.position.offset += count;
+            return Err(JsonStop::Pending);
+        }
+        self.position.token += 1;
+        self.position.offset = 0;
+        Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
+    fn string(&mut self, value: &str) -> JsonResult {
+        let token = self.token;
+        self.token += 1;
+        if token < self.position.token {
+            return Ok(());
+        }
+        while self.position.offset < value.len() + 2 {
+            let at = self.position.offset;
+            let mut escape = [0u8; 6];
+            let bytes: &[u8] = if at == 0 || at == value.len() + 1 {
+                b"\""
+            } else {
+                let byte = value.as_bytes()[at - 1];
+                match byte {
+                    b'"' => b"\\\"",
+                    b'\\' => b"\\\\",
+                    b'\n' => b"\\n",
+                    b'\r' => b"\\r",
+                    b'\t' => b"\\t",
+                    8 => b"\\b",
+                    12 => b"\\f",
+                    0..=31 => {
+                        escape[..4].copy_from_slice(b"\\u00");
+                        escape[4] = b"0123456789abcdef"[(byte >> 4) as usize];
+                        escape[5] = b"0123456789abcdef"[(byte & 15) as usize];
+                        &escape
+                    }
+                    _ => {
+                        escape[0] = byte;
+                        &escape[..1]
+                    }
+                }
+            };
+            if bytes.len() > self.limit - self.bytes.len() {
+                return Err(JsonStop::Pending);
+            }
+            self.bytes.extend_from_slice(bytes);
+            self.position.bytes += bytes.len();
+            self.position.offset += 1;
+        }
+        self.position.token += 1;
+        self.position.offset = 0;
         Ok(())
+    }
+
+    fn small(&mut self, value: &impl serde::Serialize) -> JsonResult {
+        if self.token < self.position.token {
+            self.token += 1;
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(value).map_err(|_| JsonStop::Invalid)?;
+        self.raw(&bytes)
+    }
+
+    fn optional_string(&mut self, value: Option<&str>) -> JsonResult {
+        match value {
+            Some(value) => self.string(value),
+            None => self.raw(b"null"),
+        }
+    }
+
+    fn color(&mut self, value: &xlsx_model::styles::Color) -> JsonResult {
+        if let xlsx_model::styles::Color::Rgb(value) = value {
+            self.raw(b"{\"Rgb\":")?;
+            self.string(value)?;
+            self.raw(b"}")
+        } else {
+            self.small(value)
+        }
+    }
+
+    fn optional_color(&mut self, value: Option<&xlsx_model::styles::Color>) -> JsonResult {
+        match value {
+            Some(value) => self.color(value),
+            None => self.raw(b"null"),
+        }
+    }
+
+    fn format(
+        &mut self,
+        model: &WorkbookModel,
+        xf: Option<&xlsx_model::styles::Xf>,
+        formats: &BTreeMap<u16, usize>,
+    ) -> JsonResult {
+        let default = CellFormat::default();
+        let font = xf
+            .and_then(|xf| xf.font)
+            .and_then(|index| model.styles.fonts.get(index as usize))
+            .unwrap_or(&default.font);
+        let fill = xf
+            .and_then(|xf| xf.fill)
+            .and_then(|index| model.styles.fills.get(index as usize))
+            .unwrap_or(&default.fill);
+        let border = xf
+            .and_then(|xf| xf.border)
+            .and_then(|index| model.styles.borders.get(index as usize))
+            .unwrap_or(&default.border);
+        self.raw(b"{\"font\":{\"name\":")?;
+        self.optional_string(font.name.as_deref())?;
+        self.raw(b",\"size_pt\":")?;
+        self.small(&font.size_pt)?;
+        for (key, value) in [
+            (b",\"bold\":".as_slice(), font.bold),
+            (b",\"italic\":".as_slice(), font.italic),
+            (b",\"underline\":".as_slice(), font.underline),
+            (b",\"strike\":".as_slice(), font.strike),
+        ] {
+            self.raw(key)?;
+            self.small(&value)?;
+        }
+        self.raw(b",\"color\":")?;
+        self.optional_color(font.color.as_ref())?;
+        self.raw(b"},\"fill\":")?;
+        match fill {
+            xlsx_model::styles::Fill::None => self.raw(b"\"None\"")?,
+            xlsx_model::styles::Fill::Solid(color) => {
+                self.raw(b"{\"Solid\":")?;
+                self.color(color)?;
+                self.raw(b"}")?;
+            }
+        }
+        self.raw(b",\"border\":{")?;
+        for (key, edge) in [
+            (b"\"left\":".as_slice(), &border.left),
+            (b",\"right\":".as_slice(), &border.right),
+            (b",\"top\":".as_slice(), &border.top),
+            (b",\"bottom\":".as_slice(), &border.bottom),
+        ] {
+            self.raw(key)?;
+            if let Some(edge) = edge {
+                self.raw(b"{\"style\":")?;
+                self.small(&edge.style)?;
+                self.raw(b",\"color\":")?;
+                self.optional_color(edge.color.as_ref())?;
+                self.raw(b"}")?;
+            } else {
+                self.raw(b"null")?;
+            }
+        }
+        self.raw(b"},\"numberFormat\":")?;
+        let id = xf.and_then(|xf| xf.num_fmt_id).unwrap_or(0);
+        if let Some(&index) = formats.get(&id).filter(|_| id >= 164) {
+            self.raw(b"{\"kind\":\"custom\",\"pattern\":")?;
+            self.string(&model.styles.num_fmts[index].1)?;
+            self.raw(b"}")?;
+        } else {
+            self.raw(b"{\"kind\":\"builtin\",\"id\":")?;
+            self.small(&id)?;
+            self.raw(b"}")?;
+        }
+        self.raw(b",\"alignment\":")?;
+        self.small(
+            xf.and_then(|xf| xf.alignment.as_ref())
+                .unwrap_or(&default.alignment),
+        )?;
+        self.raw(b"}")
+    }
+
+    fn hyperlink(&mut self, link: &Hyperlink) -> JsonResult {
+        self.raw(b"{\"range\":")?;
+        self.small(&link.range)?;
+        for (key, value) in [
+            (
+                b",\"external_target\":".as_slice(),
+                link.external_target.as_deref(),
+            ),
+            (b",\"location\":".as_slice(), link.location.as_deref()),
+            (b",\"tooltip\":".as_slice(), link.tooltip.as_deref()),
+            (b",\"display\":".as_slice(), link.display.as_deref()),
+        ] {
+            self.raw(key)?;
+            self.optional_string(value)?;
+        }
+        self.raw(b"}")
+    }
+
+    fn chart_header(&mut self, chart: &SheetChart) -> JsonResult {
+        self.raw(b"{\"part\":")?;
+        self.string(&chart.part)?;
+        self.raw(b",\"drawing\":")?;
+        self.string(&chart.drawing)?;
+        self.raw(b",\"anchorIndex\":")?;
+        self.small(&chart.anchor_index)?;
+        self.raw(b",\"anchor\":")?;
+        self.small(&chart.anchor)?;
+        self.raw(b",\"refs\":[")
+    }
+
+    fn chart_ref(&mut self, reference: &ChartRef) -> JsonResult {
+        self.raw(b"{\"kind\":")?;
+        self.small(&reference.kind)?;
+        self.raw(b",\"formula\":")?;
+        self.string(&reference.formula)?;
+        self.raw(b"}")
     }
 }
 
-fn same_json(value: &impl serde::Serialize, actual: &str, limit: usize) -> SnapshotResult<()> {
-    let mut writer = JsonComparison {
-        bytes: actual.as_bytes(),
-        offset: 0,
+fn json_window(
+    position: &mut JsonPosition,
+    budget: SnapshotBudget,
+    meter: &mut usize,
+    write: impl FnOnce(&mut JsonWindow<'_>) -> JsonResult,
+) -> SnapshotResult<(bool, Vec<u8>)> {
+    allowance(640, budget, meter)?;
+    let limit = ((budget.max_bytes() - 512) / 4).min(4096);
+    let mut window = JsonWindow {
+        position,
+        token: 0,
+        bytes: Vec::with_capacity(limit),
         limit,
     };
-    serde_json::to_writer(&mut writer, value).map_err(|_| invalid())?;
-    if writer.offset != actual.len() {
-        return Err(invalid());
-    }
-    Ok(())
+    let done = match write(&mut window) {
+        Ok(()) => true,
+        Err(JsonStop::Pending) => false,
+        Err(JsonStop::Invalid) => return Err(invalid()),
+    };
+    augment(640.max(512 + window.bytes.len() * 4), budget, meter)?;
+    #[cfg(test)]
+    crate::snapshot::step::allocate(512 + limit);
+    Ok((done, window.bytes))
 }
 
 fn parent(map: &MapRef) -> SnapshotParent {
@@ -115,22 +347,93 @@ fn string(value: &Any) -> SnapshotResult<&str> {
     }
 }
 
-fn content_matches(value: Option<&Any>, cell: Option<&Cell>) -> SnapshotResult<bool> {
+fn compare_text(
+    left: &str,
+    right: &str,
+    budget: SnapshotBudget,
+    meter: &mut usize,
+    offset: &mut usize,
+) -> SnapshotResult<Option<bool>> {
+    if left.len() != right.len() {
+        *offset = 0;
+        return Ok(Some(false));
+    }
+    let length = (budget.max_bytes().saturating_sub(*meter) / 2).min(4096);
+    if length == 0 && *offset < left.len() {
+        return Err(SnapshotError::new(
+            "snapshot authority validation exceeds advance byte budget",
+        ));
+    }
+    let end = left.len().min(offset.saturating_add(length));
+    augment(*meter + (end - *offset) * 2, budget, meter)?;
+    if left.as_bytes()[*offset..end] != right.as_bytes()[*offset..end] {
+        *offset = 0;
+        return Ok(Some(false));
+    }
+    *offset = end;
+    if end == left.len() {
+        *offset = 0;
+        Ok(Some(true))
+    } else {
+        Ok(None)
+    }
+}
+
+fn content_matches(
+    value: Option<&Any>,
+    cell: Option<&Cell>,
+    budget: SnapshotBudget,
+    meter: &mut usize,
+    offset: &mut usize,
+) -> SnapshotResult<Option<bool>> {
     let Some(value) = value else {
-        return Ok(cell
-            .is_none_or(|cell| cell.formula.is_none() && matches!(cell.value, CellValue::Empty)));
+        return Ok(Some(cell.is_none_or(|cell| {
+            cell.formula.is_none() && matches!(cell.value, CellValue::Empty)
+        })));
     };
     let values = any_values(value, "cell content").map_err(SnapshotError::new)?;
     let kind = values.first().ok_or_else(invalid)?;
-    if any_i64(kind, "cell content kind").map_err(SnapshotError::new)? == 1 {
-        if values.len() != 3 {
-            return Err(invalid());
+    let kind = any_i64(kind, "cell content kind").map_err(SnapshotError::new)?;
+    let payload = match kind {
+        0 if values.len() == 2 => &values[1],
+        1 if values.len() == 3 => &values[2],
+        _ => return Err(invalid()),
+    };
+    let authored = any_values(payload, "cell value").map_err(SnapshotError::new)?;
+    let text = if authored.len() == 2
+        && any_i64(&authored[0], "cell value kind").map_err(SnapshotError::new)? == 2
+    {
+        Some(string(&authored[1])?)
+    } else {
+        None
+    };
+    if kind == 1 {
+        if text.is_none() {
+            value_from_any(payload).map_err(SnapshotError::new)?;
         }
-        value_from_any(&values[2]).map_err(SnapshotError::new)?;
-        return Ok(cell.and_then(|cell| cell.formula.as_deref()) == Some(string(&values[1])?));
+        let formula = string(&values[1])?;
+        return match cell.and_then(|cell| cell.formula.as_deref()) {
+            Some(other) => compare_text(formula, other, budget, meter, offset),
+            None => Ok(Some(false)),
+        };
     }
-    let authored = content_from_any(value).map_err(SnapshotError::new)?;
-    Ok(authored_content_equal(Some(&authored), cell))
+    if let Some(text) = text {
+        return match cell {
+            Some(Cell {
+                value: CellValue::Text { value },
+                formula: None,
+                ..
+            }) => compare_text(text, value, budget, meter, offset),
+            _ => Ok(Some(false)),
+        };
+    }
+    let value = value_from_any(payload).map_err(SnapshotError::new)?;
+    if matches!(value, CellValue::Empty) {
+        return Err(invalid());
+    }
+    Ok(Some(cell.is_some_and(|cell| {
+        cell.formula.is_none() && cell.value == value
+    })))
 }
 
 impl SnapshotValidation {
@@ -202,12 +505,18 @@ impl SnapshotValidation {
                 .get(&self.version)
                 .and_then(|values| values.get(self.metadata_child))
                 .ok_or_else(invalid)?;
-            allowance(
-                fingerprint.len().max(candidate.len()).saturating_add(128),
+            allowance(128, budget, &mut self.unit_bytes)?;
+            let Some(matches) = compare_text(
+                fingerprint,
+                candidate,
                 budget,
                 &mut self.unit_bytes,
-            )?;
-            if fingerprint == candidate {
+                &mut self.record_offset,
+            )?
+            else {
+                return Ok(false);
+            };
+            if matches {
                 self.phase = 6;
                 self.metadata_child = 0;
             } else {
@@ -227,27 +536,43 @@ impl SnapshotValidation {
         }
         if self.phase == 7 {
             let index = self.style_index;
-            let format = if index == 0 {
-                allowance(2048, budget, &mut self.unit_bytes)?;
-                CellFormat::default()
+            let xf = if index == 0 {
+                None
             } else if let Some(xf) = model.styles.cell_xfs.get((index - 1) as usize) {
-                snapshot_format(
-                    model,
-                    xf,
-                    &self.number_formats,
-                    budget,
-                    &mut self.unit_bytes,
-                )?
+                Some(xf)
             } else {
-                self.phase = 1;
                 allowance(64, budget, &mut self.unit_bytes)?;
+                self.phase = 1;
                 return Ok(false);
             };
-            let (key, payload) = cell_format_entry(&format).map_err(SnapshotError::new)?;
-            if index == 0 && formats.get(&txn, &key) != Some(Out::Any(Any::from(payload.as_str())))
-            {
-                return Err(invalid());
+            let start = self.json.bytes;
+            let (done, bytes) =
+                json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
+                    window.format(model, xf, &self.number_formats)
+                })?;
+            if let Some(key) = &self.format_key {
+                let payload = atomic(&formats, &txn, key)?;
+                let payload = string(&payload)?;
+                if payload.len() > MAX_CELL_FORMAT_BYTES
+                    || payload.as_bytes().get(start..self.json.bytes) != Some(bytes.as_slice())
+                    || (done && payload.len() != self.json.bytes)
+                {
+                    return Err(invalid());
+                }
+            } else {
+                self.format_digest.update(&bytes);
             }
+            if !done {
+                return Ok(false);
+            }
+            self.json = JsonPosition::default();
+            let Some(key) = self.format_key.take() else {
+                self.format_key = Some(format!(
+                    "{:x}",
+                    std::mem::take(&mut self.format_digest).finalize()
+                ));
+                return Ok(false);
+            };
             self.format_keys.insert(key.clone());
             if index != 0 {
                 self.style_keys.insert(index - 1, key);
@@ -280,6 +605,9 @@ impl SnapshotValidation {
                     )?;
                     let authored_name = atomic(&map, &txn, NAME)?;
                     let authored_name = string(&authored_name)?;
+                    if authored_name.len() != sheet.name.len() {
+                        return Err(invalid());
+                    }
                     augment(
                         sheet
                             .name
@@ -345,36 +673,48 @@ impl SnapshotValidation {
                             }
                             HYPERLINKS => {
                                 let json = string(&value)?;
-                                if let Some(link) = sheet.hyperlinks.get(self.metadata_child) {
-                                    let bytes = [
-                                        &link.external_target,
-                                        &link.location,
-                                        &link.tooltip,
-                                        &link.display,
-                                    ]
-                                    .into_iter()
-                                    .flatten()
-                                    .fold(
-                                        256usize,
-                                        |bytes, value| {
-                                            bytes.saturating_add(value.len().saturating_mul(6))
-                                        },
-                                    );
-                                    allowance(bytes, budget, &mut self.unit_bytes)?;
-                                    self.metadata_bytes = self.metadata_bytes.saturating_add(bytes);
+                                let start = self.json.bytes;
+                                let link = sheet.hyperlinks.get(self.metadata_child);
+                                let (done, bytes) = json_window(
+                                    &mut self.json,
+                                    budget,
+                                    &mut self.unit_bytes,
+                                    |window| {
+                                        if let Some(link) = link {
+                                            window.raw(if self.metadata_child == 0 {
+                                                b"["
+                                            } else {
+                                                b","
+                                            })?;
+                                            window.hyperlink(link)
+                                        } else {
+                                            window.raw(if self.metadata_child == 0 {
+                                                b"[]"
+                                            } else {
+                                                b"]"
+                                            })
+                                        }
+                                    },
+                                )?;
+                                if json.as_bytes().get(start..self.json.bytes)
+                                    != Some(bytes.as_slice())
+                                {
+                                    return Err(invalid());
+                                }
+                                if !done {
+                                    return Ok(false);
+                                }
+                                self.json.token = 0;
+                                self.json.offset = 0;
+                                if link.is_some() {
                                     self.metadata_child += 1;
                                     return Ok(false);
                                 }
-                                allowance(
-                                    json.len()
-                                        .saturating_add(64)
-                                        .max(self.metadata_bytes.saturating_add(64)),
-                                    budget,
-                                    &mut self.unit_bytes,
-                                )?;
-                                same_json(&sheet.hyperlinks, json, budget.max_bytes())?;
+                                if json.len() != self.json.bytes {
+                                    return Err(invalid());
+                                }
                                 self.metadata_child = 0;
-                                self.metadata_bytes = 0;
+                                self.json = JsonPosition::default();
                             }
                             _ => return Err(invalid()),
                         }
@@ -388,43 +728,58 @@ impl SnapshotValidation {
                             return Err(invalid());
                         };
                         let json = string(&value)?;
-                        if let Some(chart) = sheet.charts.get(self.metadata_child) {
-                            if self.metadata_ref == 0 {
-                                let bytes = chart
-                                    .part
-                                    .len()
-                                    .saturating_add(chart.drawing.len())
-                                    .saturating_mul(6)
-                                    .saturating_add(512);
-                                allowance(bytes, budget, &mut self.unit_bytes)?;
-                                self.metadata_bytes = self.metadata_bytes.saturating_add(bytes);
-                                self.metadata_ref = 1;
-                            } else if let Some(reference) = chart.refs.get(self.metadata_ref - 1) {
-                                let bytes = reference
-                                    .formula
-                                    .len()
-                                    .saturating_mul(6)
-                                    .saturating_add(128);
-                                allowance(bytes, budget, &mut self.unit_bytes)?;
-                                self.metadata_bytes = self.metadata_bytes.saturating_add(bytes);
+                        let start = self.json.bytes;
+                        let chart = sheet.charts.get(self.metadata_child);
+                        let (done, bytes) =
+                            json_window(&mut self.json, budget, &mut self.unit_bytes, |window| {
+                                if let Some(chart) = chart {
+                                    if self.metadata_ref == 0 {
+                                        window.raw(if self.metadata_child == 0 {
+                                            b"["
+                                        } else {
+                                            b","
+                                        })?;
+                                        window.chart_header(chart)
+                                    } else if let Some(reference) =
+                                        chart.refs.get(self.metadata_ref - 1)
+                                    {
+                                        if self.metadata_ref > 1 {
+                                            window.raw(b",")?;
+                                        }
+                                        window.chart_ref(reference)
+                                    } else {
+                                        window.raw(b"]}")
+                                    }
+                                } else {
+                                    window.raw(if self.metadata_child == 0 {
+                                        b"[]"
+                                    } else {
+                                        b"]"
+                                    })
+                                }
+                            })?;
+                        if json.as_bytes().get(start..self.json.bytes) != Some(bytes.as_slice()) {
+                            return Err(invalid());
+                        }
+                        if !done {
+                            return Ok(false);
+                        }
+                        self.json.token = 0;
+                        self.json.offset = 0;
+                        if let Some(chart) = chart {
+                            if self.metadata_ref <= chart.refs.len() {
                                 self.metadata_ref += 1;
                             } else {
-                                allowance(64, budget, &mut self.unit_bytes)?;
                                 self.metadata_child += 1;
                                 self.metadata_ref = 0;
                             }
                             return Ok(false);
                         }
-                        allowance(
-                            json.len()
-                                .saturating_add(64)
-                                .max(self.metadata_bytes.saturating_add(64)),
-                            budget,
-                            &mut self.unit_bytes,
-                        )?;
-                        same_json(&sheet.charts, json, budget.max_bytes())?;
+                        if json.len() != self.json.bytes {
+                            return Err(invalid());
+                        }
                         self.metadata_child = 0;
-                        self.metadata_bytes = 0;
+                        self.json = JsonPosition::default();
                     } else {
                         let charts = base
                             .charts
@@ -436,41 +791,40 @@ impl SnapshotValidation {
                         }
                         if let Some(chart) = charts.get(self.metadata_child) {
                             let other = &sheet.charts[self.metadata_child];
-                            if self.metadata_ref == 0 {
-                                allowance(
-                                    chart
-                                        .part
-                                        .len()
-                                        .max(other.part.len())
-                                        .saturating_add(
-                                            chart.drawing.len().max(other.drawing.len()),
-                                        )
-                                        .saturating_add(256),
+                            if self.metadata_ref < 2 {
+                                let (left, right) = if self.metadata_ref == 0 {
+                                    (&chart.part, &other.part)
+                                } else {
+                                    (&chart.drawing, &other.drawing)
+                                };
+                                if !equal_record(
+                                    left,
+                                    right,
+                                    0,
                                     budget,
                                     &mut self.unit_bytes,
-                                )?;
-                                if chart.part != other.part
-                                    || chart.drawing != other.drawing
-                                    || chart.anchor_index != other.anchor_index
+                                    &mut self.record_offset,
+                                )? {
+                                    return Ok(false);
+                                }
+                                if chart.anchor_index != other.anchor_index
                                     || chart.anchor != other.anchor
                                     || chart.refs.len() != other.refs.len()
                                 {
                                     return Err(invalid());
                                 }
-                                self.metadata_ref = 1;
-                            } else if let Some(reference) = chart.refs.get(self.metadata_ref - 1) {
-                                let other = &other.refs[self.metadata_ref - 1];
-                                allowance(
-                                    reference
-                                        .formula
-                                        .len()
-                                        .max(other.formula.len())
-                                        .saturating_add(64),
+                                self.metadata_ref += 1;
+                            } else if let Some(reference) = chart.refs.get(self.metadata_ref - 2) {
+                                let other = &other.refs[self.metadata_ref - 2];
+                                if !equal_record(
+                                    reference,
+                                    other,
+                                    0,
                                     budget,
                                     &mut self.unit_bytes,
-                                )?;
-                                if reference != other {
-                                    return Err(invalid());
+                                    &mut self.record_offset,
+                                )? {
+                                    return Ok(false);
                                 }
                                 self.metadata_ref += 1;
                             } else {
@@ -524,13 +878,16 @@ impl SnapshotValidation {
                                 .flatten()
                                 .fold(128usize, |bytes, value| bytes.saturating_add(value.len()))
                             };
-                            equal_record(
+                            if !equal_record(
                                 link,
                                 other,
                                 size(link).max(size(other)),
                                 budget,
                                 &mut self.unit_bytes,
-                            )?;
+                                &mut self.record_offset,
+                            )? {
+                                return Ok(false);
+                            }
                             self.metadata_child += 1;
                             return Ok(false);
                         }
@@ -609,6 +966,21 @@ impl SnapshotValidation {
         }
         if self.phase == 2 {
             if let Some((owner, key)) = keys.first() {
+                let known = match owner {
+                    SnapshotParent::Root(name) => {
+                        matches!(name.as_ref(), META | SHEETS | CELL_FORMATS)
+                    }
+                    SnapshotParent::Nested(_, _) => self.maps.contains_key(owner),
+                };
+                if !known {
+                    allowance(96, budget, &mut self.unit_bytes)?;
+                    keys.pop_first();
+                    return Ok(false);
+                }
+                if key.len() > 64 {
+                    allowance(96, budget, &mut self.unit_bytes)?;
+                    return Err(invalid());
+                }
                 let owner_bytes = match owner {
                     SnapshotParent::Root(name) => name.len(),
                     _ => 0,
@@ -653,21 +1025,6 @@ impl SnapshotValidation {
                             {
                                 return Err(invalid());
                             }
-                            augment(
-                                key.len()
-                                    .saturating_add(owner_bytes)
-                                    .saturating_add(payload.len().saturating_mul(8))
-                                    .saturating_add(1024),
-                                budget,
-                                &mut self.unit_bytes,
-                            )?;
-                            let format: CellFormat =
-                                serde_json::from_str(&payload).map_err(|_| invalid())?;
-                            let (expected, canonical) =
-                                cell_format_entry(&format).map_err(SnapshotError::new)?;
-                            if key.as_ref() != expected || payload.as_ref() != canonical {
-                                return Err(invalid());
-                            }
                         }
                         _ => {
                             if let Some(&(sheet_index, field)) = self.maps.get(owner) {
@@ -687,16 +1044,17 @@ impl SnapshotValidation {
                                             return Err(invalid());
                                         };
                                         if field == CONTENTS {
-                                            let bytes = content_bytes(&value)?;
-                                            augment(
-                                                bytes
-                                                    .saturating_add(key.len())
-                                                    .saturating_add(owner_bytes)
-                                                    .saturating_add(96),
+                                            let Some(matches) = content_matches(
+                                                Some(&value),
+                                                sheet.cell(at),
                                                 budget,
                                                 &mut self.unit_bytes,
-                                            )?;
-                                            if !content_matches(Some(&value), sheet.cell(at))? {
+                                                &mut self.record_offset,
+                                            )?
+                                            else {
+                                                return Ok(false);
+                                            };
+                                            if !matches {
                                                 self.sheet = sheet_index;
                                                 let values = any_values(&value, "cell content")
                                                     .map_err(SnapshotError::new)?;
@@ -769,12 +1127,7 @@ impl SnapshotValidation {
                     end: CellRef::new(u32::MAX, u32::MAX),
                 });
                 if let Some((at, cell)) = first.chain(later).next() {
-                    let bytes = cell.formula.as_ref().map_or(0, String::len)
-                        + match &cell.value {
-                            CellValue::Text { value } => value.len(),
-                            _ => 0,
-                        };
-                    allowance(bytes.saturating_add(256), budget, &mut self.unit_bytes)?;
+                    allowance(256, budget, &mut self.unit_bytes)?;
                     let contents = nested_map(&map, &txn, CONTENTS).map_err(SnapshotError::new)?;
                     let value = contents.get(&txn, &cell_key(at));
                     let actual = match &value {
@@ -782,17 +1135,18 @@ impl SnapshotValidation {
                         None => None,
                         _ => return Err(invalid()),
                     };
-                    if let Some(actual) = actual {
-                        augment(
-                            content_bytes(actual)?
-                                .saturating_add(bytes)
-                                .saturating_add(256),
-                            budget,
-                            &mut self.unit_bytes,
-                        )?;
-                    }
+                    let Some(matches) = content_matches(
+                        actual,
+                        Some(cell),
+                        budget,
+                        &mut self.unit_bytes,
+                        &mut self.record_offset,
+                    )?
+                    else {
+                        return Ok(false);
+                    };
                     self.after = Some((at.row, at.col));
-                    if !content_matches(actual, Some(cell))? {
+                    if !matches {
                         self.pending_cell = Some((at, false));
                     }
                     let styles = nested_map(&map, &txn, STYLES).map_err(SnapshotError::new)?;
@@ -909,105 +1263,39 @@ impl SnapshotValidation {
     }
 }
 
-fn snapshot_format(
-    model: &WorkbookModel,
-    xf: &xlsx_model::styles::Xf,
-    formats: &BTreeMap<u16, usize>,
-    budget: SnapshotBudget,
-    meter: &mut usize,
-) -> SnapshotResult<CellFormat> {
-    let default = CellFormat::default();
-    let font = xf
-        .font
-        .and_then(|index| model.styles.fonts.get(index as usize))
-        .unwrap_or(&default.font);
-    let fill = xf
-        .fill
-        .and_then(|index| model.styles.fills.get(index as usize))
-        .unwrap_or(&default.fill);
-    let border = xf
-        .border
-        .and_then(|index| model.styles.borders.get(index as usize))
-        .unwrap_or(&default.border);
-    let id = xf.num_fmt_id.unwrap_or(0);
-    let pattern = if id >= 164 {
-        formats
-            .get(&id)
-            .map(|&index| model.styles.num_fmts[index].1.as_str())
-    } else {
-        None
-    };
-    let bytes = font
-        .name
-        .as_ref()
-        .map_or(0, String::len)
-        .saturating_add(font.color.as_ref().map_or(0, color_bytes))
-        .saturating_add(match fill {
-            xlsx_model::styles::Fill::Solid(color) => color_bytes(color),
-            _ => 0,
-        })
-        .saturating_add(
-            [&border.left, &border.right, &border.top, &border.bottom]
-                .into_iter()
-                .flatten()
-                .map(|edge| edge.color.as_ref().map_or(0, color_bytes))
-                .sum::<usize>(),
-        )
-        .saturating_add(pattern.map_or(0, str::len));
-    allowance(bytes.saturating_mul(8).saturating_add(2048), budget, meter)?;
-    Ok(CellFormat {
-        font: font.clone(),
-        fill: fill.clone(),
-        border: border.clone(),
-        alignment: xf.alignment.clone().unwrap_or_default(),
-        number_format: match pattern {
-            Some(pattern) => xlsx_model::NumberFormat::Custom {
-                pattern: pattern.to_owned(),
-            },
-            None => xlsx_model::NumberFormat::Builtin { id },
-        },
-    })
-}
-
-fn content_bytes(value: &Any) -> SnapshotResult<usize> {
-    let values = any_values(value, "cell content").map_err(SnapshotError::new)?;
-    if values.len() > 3 {
-        return Err(invalid());
-    }
-    let mut bytes = 128usize;
-    for value in values {
-        match value {
-            Any::String(value) => bytes = bytes.saturating_add(value.len()),
-            Any::Array(values) if values.len() <= 2 => {
-                for value in values.iter() {
-                    if let Any::String(value) = value {
-                        bytes = bytes.saturating_add(value.len());
-                    }
-                }
-            }
-            Any::Array(_) | Any::Map(_) => return Err(invalid()),
-            _ => {}
-        }
-    }
-    Ok(bytes)
-}
-
 fn equal_record<T: super::snapshot::Codec>(
     left: &T,
     right: &T,
-    bytes: usize,
+    _bytes: usize,
     budget: SnapshotBudget,
     meter: &mut usize,
-) -> SnapshotResult<()> {
-    allowance(bytes.saturating_mul(2).saturating_add(64), budget, meter)?;
-    let mut left_bytes = crate::snapshot::wire::Writer::new();
-    let mut right_bytes = crate::snapshot::wire::Writer::new();
+    offset: &mut usize,
+) -> SnapshotResult<bool> {
+    allowance(128, budget, meter)?;
+    let length = ((budget.max_bytes() - 64) / 2).min(4096);
+    let mut left_bytes = crate::snapshot::wire::Writer::window(*offset, length);
+    let mut right_bytes = crate::snapshot::wire::Writer::window(*offset, length);
     left.write(&mut left_bytes);
     right.write(&mut right_bytes);
-    if left_bytes.into_bytes() != right_bytes.into_bytes() {
+    let total = left_bytes.len();
+    if total != right_bytes.len() {
         return Err(invalid());
     }
-    Ok(())
+    let left_bytes = left_bytes.into_bytes();
+    let right_bytes = right_bytes.into_bytes();
+    augment(128.max(64 + left_bytes.len() * 2), budget, meter)?;
+    #[cfg(test)]
+    crate::snapshot::step::allocate(length * 2);
+    if left_bytes != right_bytes {
+        return Err(invalid());
+    }
+    *offset += left_bytes.len();
+    if *offset == total {
+        *offset = 0;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 fn color_bytes(color: &xlsx_model::styles::Color) -> usize {
@@ -1046,7 +1334,16 @@ impl SnapshotValidation {
                         .saturating_add(left.formula.len())
                         .max(right.name.len().saturating_add(right.formula.len()))
                         .saturating_add(64);
-                    equal_record(left, right, bytes, budget, &mut self.unit_bytes)?;
+                    if !equal_record(
+                        left,
+                        right,
+                        bytes,
+                        budget,
+                        &mut self.unit_bytes,
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1054,13 +1351,15 @@ impl SnapshotValidation {
             2 => {
                 if let Some(left) = base.shared_strings.get(index) {
                     let right = &model.shared_strings[index];
-                    allowance(
-                        left.len().max(right.len()).saturating_add(64),
+                    if !equal_record(
+                        left,
+                        right,
+                        0,
                         budget,
                         &mut self.unit_bytes,
-                    )?;
-                    if left != right {
-                        return Err(invalid());
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
                     }
                     self.base_index += 1;
                     return Ok(false);
@@ -1070,13 +1369,17 @@ impl SnapshotValidation {
                 if let Some(left) = base.tables.get(index) {
                     let right = &model.tables[index];
                     if self.base_child == 0 {
-                        allowance(
-                            left.name.len().max(right.name.len()).saturating_add(128),
+                        if !equal_record(
+                            &left.name,
+                            &right.name,
+                            0,
                             budget,
                             &mut self.unit_bytes,
-                        )?;
-                        if left.name != right.name
-                            || left.sheet != right.sheet
+                            &mut self.record_offset,
+                        )? {
+                            return Ok(false);
+                        }
+                        if left.sheet != right.sheet
                             || left.range != right.range
                             || left.header_rows != right.header_rows
                             || left.totals_rows != right.totals_rows
@@ -1087,13 +1390,15 @@ impl SnapshotValidation {
                         self.base_child = 1;
                     } else if let Some(column) = left.columns.get(self.base_child - 1) {
                         let other = &right.columns[self.base_child - 1];
-                        allowance(
-                            column.len().max(other.len()).saturating_add(64),
+                        if !equal_record(
+                            column,
+                            other,
+                            0,
                             budget,
                             &mut self.unit_bytes,
-                        )?;
-                        if column != other {
-                            return Err(invalid());
+                            &mut self.record_offset,
+                        )? {
+                            return Ok(false);
                         }
                         self.base_child += 1;
                     } else {
@@ -1112,7 +1417,16 @@ impl SnapshotValidation {
                         .formats
                         .get(base_sheet_index(key).unwrap_or(usize::MAX))
                         .unwrap_or(&default);
-                    equal_record(left, &sheet.format, 32, budget, &mut self.unit_bytes)?;
+                    if !equal_record(
+                        left,
+                        &sheet.format,
+                        32,
+                        budget,
+                        &mut self.unit_bytes,
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1130,13 +1444,16 @@ impl SnapshotValidation {
                         return Err(invalid());
                     }
                     if let Some(column) = left.get(self.base_child) {
-                        equal_record(
+                        if !equal_record(
                             column,
                             &right[self.base_child],
                             32,
                             budget,
                             &mut self.unit_bytes,
-                        )?;
+                            &mut self.record_offset,
+                        )? {
+                            return Ok(false);
+                        }
                         self.base_child += 1;
                     } else {
                         allowance(64, budget, &mut self.unit_bytes)?;
@@ -1156,13 +1473,16 @@ impl SnapshotValidation {
                             .saturating_add(font.color.as_ref().map_or(0, color_bytes))
                             .saturating_add(64)
                     };
-                    equal_record(
+                    if !equal_record(
                         left,
                         right,
                         size(left).max(size(right)),
                         budget,
                         &mut self.unit_bytes,
-                    )?;
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1177,13 +1497,16 @@ impl SnapshotValidation {
                         xlsx_model::styles::Fill::Solid(color) => color_bytes(color) + 32,
                         _ => 32,
                     };
-                    equal_record(
+                    if !equal_record(
                         left,
                         right,
                         size(left).max(size(right)),
                         budget,
                         &mut self.unit_bytes,
-                    )?;
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1202,13 +1525,16 @@ impl SnapshotValidation {
                                 bytes.saturating_add(edge.color.as_ref().map_or(32, color_bytes))
                             })
                     };
-                    equal_record(
+                    if !equal_record(
                         left,
                         right,
                         size(left).max(size(right)),
                         budget,
                         &mut self.unit_bytes,
-                    )?;
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1218,13 +1544,16 @@ impl SnapshotValidation {
             }
             9 => {
                 if let Some(left) = base.styles.cell_xfs.get(index) {
-                    equal_record(
+                    if !equal_record(
                         left,
                         model.styles.cell_xfs.get(index).ok_or_else(invalid)?,
                         64,
                         budget,
                         &mut self.unit_bytes,
-                    )?;
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1235,13 +1564,16 @@ impl SnapshotValidation {
             10 => {
                 if let Some(left) = base.styles.num_fmts.get(index) {
                     let right = model.styles.num_fmts.get(index).ok_or_else(invalid)?;
-                    equal_record(
+                    if !equal_record(
                         left,
                         right,
                         left.1.len().max(right.1.len()).saturating_add(32),
                         budget,
                         &mut self.unit_bytes,
-                    )?;
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
+                    }
                     self.base_index += 1;
                     return Ok(false);
                 }
@@ -1252,13 +1584,15 @@ impl SnapshotValidation {
             11 => {
                 if let Some(left) = base.styles.indexed_colors.get(index) {
                     let right = model.styles.indexed_colors.get(index).ok_or_else(invalid)?;
-                    allowance(
-                        left.len().max(right.len()).saturating_add(64),
+                    if !equal_record(
+                        left,
+                        right,
+                        0,
                         budget,
                         &mut self.unit_bytes,
-                    )?;
-                    if left != right {
-                        return Err(invalid());
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
                     }
                     self.base_index += 1;
                     return Ok(false);
@@ -1270,13 +1604,15 @@ impl SnapshotValidation {
             12 => {
                 if let Some(left) = base.styles.theme.colors.get(index) {
                     let right = &model.styles.theme.colors[index];
-                    allowance(
-                        left.len().max(right.len()).saturating_add(64),
+                    if !equal_record(
+                        left,
+                        right,
+                        0,
                         budget,
                         &mut self.unit_bytes,
-                    )?;
-                    if left != right {
-                        return Err(invalid());
+                        &mut self.record_offset,
+                    )? {
+                        return Ok(false);
                     }
                     self.base_index += 1;
                     return Ok(false);

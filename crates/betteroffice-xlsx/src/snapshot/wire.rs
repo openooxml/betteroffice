@@ -62,6 +62,8 @@ pub(crate) fn unframe(chunk: &[u8]) -> SnapshotResult<(ChunkKind, u64, &[u8])> {
 #[derive(Debug, Default)]
 pub(crate) struct Writer {
     buf: Vec<u8>,
+    window: Option<(usize, usize)>,
+    position: usize,
 }
 
 impl Writer {
@@ -72,11 +74,20 @@ impl Writer {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
             buf: Vec::with_capacity(capacity),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn window(start: usize, length: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(length),
+            window: Some((start, length)),
+            position: 0,
         }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.buf.len()
+        self.position
     }
 
     pub(crate) fn is_empty(&self) -> bool {
@@ -88,19 +99,19 @@ impl Writer {
     }
 
     pub(crate) fn u8(&mut self, value: u8) {
-        self.buf.push(value);
+        self.raw(&[value]);
     }
 
     pub(crate) fn bool(&mut self, value: bool) {
-        self.buf.push(u8::from(value));
+        self.u8(u8::from(value));
     }
 
     pub(crate) fn var_u64(&mut self, mut value: u64) {
         while value >= 0x80 {
-            self.buf.push((value as u8) | 0x80);
+            self.u8((value as u8) | 0x80);
             value >>= 7;
         }
-        self.buf.push(value as u8);
+        self.u8(value as u8);
     }
 
     pub(crate) fn var_i64(&mut self, value: i64) {
@@ -116,12 +127,12 @@ impl Writer {
     }
 
     pub(crate) fn f64(&mut self, value: f64) {
-        self.buf.extend_from_slice(&value.to_bits().to_le_bytes());
+        self.raw(&value.to_bits().to_le_bytes());
     }
 
     pub(crate) fn bytes(&mut self, value: &[u8]) {
         self.var_usize(value.len());
-        self.buf.extend_from_slice(value);
+        self.raw(value);
     }
 
     pub(crate) fn str(&mut self, value: &str) {
@@ -129,7 +140,18 @@ impl Writer {
     }
 
     pub(crate) fn raw(&mut self, value: &[u8]) {
-        self.buf.extend_from_slice(value);
+        let end = self.position.saturating_add(value.len());
+        if let Some((start, length)) = self.window {
+            let first = start.max(self.position);
+            let last = start.saturating_add(length).min(end);
+            if first < last {
+                self.buf
+                    .extend_from_slice(&value[first - self.position..last - self.position]);
+            }
+        } else {
+            self.buf.extend_from_slice(value);
+        }
+        self.position = end;
     }
 
     pub(crate) fn option<T>(&mut self, value: Option<T>, write: impl FnOnce(&mut Self, T)) {

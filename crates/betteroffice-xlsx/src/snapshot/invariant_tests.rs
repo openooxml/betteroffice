@@ -642,3 +642,74 @@ fn snapshot_anchor_reconstruction_visits_allocations_and_refusal_are_bounded() {
 
 #[path = "measurement_tests.rs"]
 mod measurements;
+
+#[test]
+fn snapshot_large_metadata_windows_reach_ready_and_refuse_a_late_contradiction() {
+    for bytes in [1024, 16_384] {
+        let budget = SnapshotBudget::new(1, bytes).unwrap();
+        let model = WorkbookModel {
+            sheets: vec![crate::Sheet::new("Data")],
+            defined_names: (0..4096)
+                .map(|index| xlsx_model::DefinedName {
+                    name: format!("N_{index}"),
+                    formula: "Data!A1".to_owned(),
+                    local_sheet: None,
+                    hidden: false,
+                })
+                .collect(),
+            shared_strings: vec!["水\"\\\n".repeat(8192)],
+            ..WorkbookModel::default()
+        };
+        let mut worker = Workbook::from_model(model).unwrap();
+        let chunks = encode(&worker, budget);
+        let mut builder = WorkbookSnapshotBuilder::new();
+        for chunk in &chunks {
+            builder.push(chunk).unwrap();
+            assert_step_budget(budget);
+        }
+        let mut ready = false;
+        for _ in 0..200_000 {
+            ready = builder.advance(budget).unwrap().is_ready();
+            let work = assert_step_budget(budget);
+            assert!(work.allocated_bytes <= budget.max_bytes(), "{work:?}");
+            assert!(work.scanned_bytes <= budget.max_bytes(), "{work:?}");
+            if ready {
+                break;
+            }
+        }
+        assert!(ready);
+        let (peer, _) = builder.finish().unwrap().into_parts();
+        assert_current_identity(&worker, &peer);
+        assert_eq!(worker.model.shared_strings, peer.model.shared_strings);
+        let last = worker.model.shared_strings[0].len() - 1;
+        worker.model.shared_strings[0].replace_range(last.., "x");
+        let chunks = encode(&worker, budget);
+        assert!(
+            assert_refuses_before_ready(&chunks, budget).contains("authority and model disagree")
+        );
+    }
+}
+
+#[test]
+fn snapshot_near_allowance_cell_content_validation_is_resumable() {
+    for budget in [SnapshotBudget::new(1, 1024).unwrap(), budgets()[0]] {
+        let mut model = WorkbookModel {
+            sheets: vec![crate::Sheet::new("Data")],
+            ..WorkbookModel::default()
+        };
+        model.sheets[0].set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: "a".repeat(budget.max_bytes() - 384),
+                },
+                ..Cell::default()
+            },
+        );
+        let worker = Workbook::from_model(model).unwrap();
+        let chunks = encode(&worker, budget);
+        let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+        let (peer, _) = builder.finish().unwrap().into_parts();
+        assert_current_identity(&worker, &peer);
+    }
+}
