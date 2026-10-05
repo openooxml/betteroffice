@@ -1,0 +1,326 @@
+use xlsx_model::{Cell, CellRange, CellRef, CellValue, ErrorValue};
+
+use super::style_match_tests::{cells, edit, save};
+use crate::tests::{package, parse_workbook_with_package};
+use crate::{ParsedWorkbook, SheetAxes, with_legacy_save_path};
+
+const SHARED: &str = concat!(
+    r#"<sheetData><row r="1"><c r="A1"><v>1</v></c>"#,
+    r#"<c r="B1"><f t="shared" ref="B1:B3" si="0">A1*2</f><v>2</v></c>"#,
+    r#"<c r="D1"><v>4</v></c></row>"#,
+    r#"<row r="2"><c r="A2"><v>2</v></c><c r="B2"><f t="shared" si="0"/><v>4</v></c></row>"#,
+    r#"<row r="3"><c r="A3"><v>3</v></c><c r="B3"><f t="shared" si="0"/><v>6</v></c></row></sheetData>"#,
+);
+
+fn parsed(source: &str) -> ParsedWorkbook {
+    parse_workbook_with_package(&package(source, &["text &amp; &lt;value&gt;"], false)).unwrap()
+}
+
+fn number(value: f64) -> CellValue {
+    CellValue::Number { value }
+}
+
+fn formula(span: &str) -> &str {
+    let start = span.find("<f").unwrap();
+    let tag_end = start + span[start..].find('>').unwrap() + 1;
+    let end = if span[..tag_end].ends_with("/>") {
+        tag_end
+    } else {
+        tag_end + span[tag_end..].find("</f>").unwrap() + 4
+    };
+    &span[start..end]
+}
+
+#[test]
+fn unrelated_constant_edit_keeps_shared_group_bytes() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "D1", |cell| cell.value = number(9.0));
+
+    let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+    let source = cells(SHARED);
+    for address in ["B1", "B2", "B3"] {
+        assert_eq!(saved[address], source[address], "{address}");
+    }
+}
+
+#[test]
+fn dependent_cache_edit_keeps_shared_formula_bytes() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "A2", |cell| cell.value = number(5.0));
+    edit(&mut workbook, "B2", |cell| cell.value = number(10.0));
+
+    let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+    let source = cells(SHARED);
+    for address in ["B1", "B2", "B3"] {
+        assert_eq!(formula(&saved[address]), formula(&source[address]));
+    }
+    assert_eq!(saved["B2"], source["B2"].replace("<v>4</v>", "<v>10</v>"));
+    for address in ["A1", "B1", "D1", "A3", "B3"] {
+        assert_eq!(saved[address], source[address], "{address}");
+    }
+}
+
+#[test]
+fn cache_edit_keeps_formula_attributes_and_trailing_children() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="A1" ph="1"><f ca="1" aca="1" bx="1" del1="1" del2="1">NOW()</f>"#,
+        r#"<v>1.00</v><extLst><ext uri="value"><value>keep</value></ext></extLst></c></row></sheetData>"#,
+    );
+    let parsed = parsed(source);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "A1", |cell| cell.value = number(2.5));
+
+    let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(
+        saved["A1"],
+        cells(source)["A1"].replace("<v>1.00</v>", "<v>2.5</v>")
+    );
+}
+
+#[test]
+fn cache_type_changes_use_writer_types_and_escaping() {
+    let source =
+        r#"<sheetData><row r="1"><c r="A1" t="n"><f ca="1">A2</f><v>1</v></c></row></sheetData>"#;
+    let parsed = parsed(source);
+    for (value, ty, cached) in [
+        (
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+            Some("e"),
+            Some("#N/A"),
+        ),
+        (
+            CellValue::Text {
+                value: "text & <value>".to_owned(),
+            },
+            Some("str"),
+            Some("text &amp; &lt;value&gt;"),
+        ),
+        (CellValue::Bool { value: false }, Some("b"), Some("0")),
+        (number(3.25), None, Some("3.25")),
+        (CellValue::Empty, None, None),
+    ] {
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = value);
+        let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+        let ty = ty.map_or(String::new(), |ty| format!(r#" t="{ty}""#));
+        let cached = cached.map_or(String::new(), |value| format!("<v>{value}</v>"));
+        assert_eq!(
+            saved["A1"],
+            format!(r#"<c r="A1"{ty}><f ca="1">A2</f>{cached}</c>"#)
+        );
+    }
+}
+
+#[test]
+fn missing_and_empty_cached_values_are_replaced_before_extensions() {
+    for value in ["", "<v/>"] {
+        let source = format!(
+            r#"<sheetData><row r="1"><c r="A1"><f ca="1">A2</f>{value}<extLst><ext uri="value"/></extLst></c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = number(2.0));
+        let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(
+            saved["A1"],
+            r#"<c r="A1"><f ca="1">A2</f><v>2</v><extLst><ext uri="value"/></extLst></c>"#
+        );
+    }
+}
+
+#[test]
+fn empty_formula_markup_and_positional_attributes_survive_unmoved_cache_edits() {
+    for markup in [
+        r#"<f ca="1"/>"#,
+        r#"<f dt2D="1" dtr="1" r1="A2" r2="A3">A2+A3</f>"#,
+        r#"<f  ca='1' >A2 &lt; 3</f>"#,
+    ] {
+        let source =
+            format!(r#"<sheetData><row r="1"><c r="A1">{markup}<v>1</v></c></row></sheetData>"#);
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = number(2.0));
+        let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved["A1"], format!(r#"<c r="A1">{markup}<v>2</v></c>"#));
+    }
+}
+
+#[test]
+fn formula_change_dissolves_shared_group_like_legacy_save() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "B2", |cell| {
+        cell.formula = Some("A2*3".to_owned())
+    });
+
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+    let (legacy, _) =
+        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(saved, legacy);
+    let saved = cells(&saved);
+    for (address, formula) in [("B1", "A1*2"), ("B2", "A2*3"), ("B3", "A3*2")] {
+        assert!(saved[address].contains(&format!("<f>{formula}</f>")));
+        assert!(!saved[address].contains(r#"t="shared""#));
+    }
+}
+
+#[test]
+fn deleted_member_dissolves_shared_group_like_legacy_save() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "B2", |cell| *cell = Cell::default());
+
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+    let (legacy, _) =
+        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(saved, legacy);
+    let saved = cells(&saved);
+    assert!(!saved.contains_key("B2"));
+    assert_eq!(saved["B1"], r#"<c r="B1"><f>A1*2</f><v>2</v></c>"#);
+    assert_eq!(saved["B3"], r#"<c r="B3"><f>A3*2</f><v>6</v></c>"#);
+}
+
+#[test]
+fn removed_formula_dissolves_shared_group_like_legacy_save() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "B2", |cell| cell.formula = None);
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+    let (legacy, _) =
+        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(saved, legacy);
+    assert_eq!(cells(&saved)["B2"], r#"<c r="B2"><v>4</v></c>"#);
+    assert!(!saved.contains(r#"t="shared""#));
+}
+
+#[test]
+fn deleted_source_row_dissolves_shared_group_like_legacy_save() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].remap_cells(|at| match at.row {
+        0 => Some(at),
+        1 => None,
+        _ => Some(CellRef::new(at.row - 1, at.col)),
+    });
+    let mut axes = SheetAxes::default();
+    axes.rows.delete(1, 1);
+    let saved = save(&parsed, &workbook, Some(axes.clone()));
+    let (legacy, _) = with_legacy_save_path(|| save(&parsed, &workbook, Some(axes)));
+    assert_eq!(saved, legacy);
+    assert!(!saved.contains(r#"t="shared""#));
+}
+
+#[test]
+fn inserted_row_remaps_shared_ref_with_and_without_cache_edit() {
+    for cache_edit in [false, true] {
+        let parsed = parsed(SHARED);
+        let mut workbook = parsed.workbook.clone();
+        workbook.sheets[0].remap_cells(|at| Some(CellRef::new(at.row + 1, at.col)));
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(0, 1);
+        if cache_edit {
+            edit(&mut workbook, "B2", |cell| cell.value = number(8.0));
+            edit(&mut workbook, "B3", |cell| cell.value = number(10.0));
+        }
+
+        let saved = cells(&save(&parsed, &workbook, Some(axes)));
+        let source = cells(SHARED);
+        for (before, after) in [("B1", "B2"), ("B2", "B3"), ("B3", "B4")] {
+            let mut expected = source[before]
+                .replace(&format!(r#"r="{before}""#), &format!(r#"r="{after}""#))
+                .replace(r#"ref="B1:B3""#, r#"ref="B2:B4""#);
+            if cache_edit && after == "B2" {
+                expected = expected.replace("<v>2</v>", "<v>8</v>");
+            }
+            if cache_edit && after == "B3" {
+                expected = expected.replace("<v>4</v>", "<v>10</v>");
+            }
+            assert_eq!(saved[after], expected, "{before}: cache edit {cache_edit}");
+        }
+    }
+}
+
+#[test]
+fn equivalent_styles_keep_shared_group_and_source_index() {
+    let source = SHARED.replace(r#"r="B2""#, r#"r="B2" s="2""#);
+    let mut parts = package(&source, &[], false);
+    parts.push(("xl/styles.xml".to_owned(), concat!(
+        r#"<styleSheet><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="2"/>"#,
+        r#"<xf numFmtId="2" applyProtection="1"><protection locked="0"/></xf></cellXfs></styleSheet>"#,
+    ).as_bytes().to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    for cache_edit in [false, true] {
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "B2", |cell| {
+            cell.style = Some(1);
+            if cache_edit {
+                cell.value = number(10.0);
+            }
+        });
+        edit(&mut workbook, "D1", |cell| cell.value = number(9.0));
+        let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+        let original = cells(&source);
+        let expected = if cache_edit {
+            original["B2"].replace("<v>4</v>", "<v>10</v>")
+        } else {
+            original["B2"].clone()
+        };
+        assert_eq!(saved["B2"], expected);
+        assert_eq!(saved["B1"], original["B1"]);
+        assert_eq!(saved["B3"], original["B3"]);
+    }
+}
+
+#[test]
+fn genuine_style_change_keeps_formula_and_writes_new_index() {
+    let parsed = parsed(SHARED);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "B2", |cell| cell.style = Some(1));
+    let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+    let source = cells(SHARED);
+    assert_eq!(
+        saved["B2"],
+        r#"<c r="B2" s="1"><f t="shared" si="0"/><v>4</v></c>"#
+    );
+    assert_eq!(saved["B1"], source["B1"]);
+    assert_eq!(saved["B3"], source["B3"]);
+}
+
+#[test]
+fn uncertain_metadata_and_dirty_arrays_use_legacy_rewrite() {
+    for (attributes, formula) in [
+        (r#"cm="1" vm="2""#, r#"<f ca="1">A2</f>"#),
+        (r#"cm="1""#, r#"<f t="array" ref="A1:A2" ca="1">A3</f>"#),
+        ("", r#"<f t="array" ref="A1:A2" ca="1">A3</f>"#),
+    ] {
+        let source = format!(
+            r#"<sheetData><row r="1"><c r="A1" {attributes}>{formula}<v>1</v></c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = number(2.0));
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+        let (legacy, _) =
+            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved, legacy);
+    }
+}
+
+#[test]
+fn changed_spill_range_uses_legacy_rewrite() {
+    let source = r#"<sheetData><row r="1"><c r="A1" cm="1"><f t="array" ref="A1:A2" ca="1">A3</f><v>1</v></c></row></sheetData>"#;
+    let parsed = parsed(source);
+    let mut workbook = parsed.workbook.clone();
+    let at = CellRef::new(0, 0);
+    workbook.sheets[0].set_array_formula(at, CellRange::new(at, at));
+    edit(&mut workbook, "A1", |cell| cell.style = Some(1));
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+    let (legacy, _) =
+        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(saved, legacy);
+    assert!(cells(&saved)["A1"].contains(r#"<f t="array" ref="A1">A3</f>"#));
+}

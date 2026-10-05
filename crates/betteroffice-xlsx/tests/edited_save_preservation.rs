@@ -175,6 +175,35 @@ fn cell(address: &str) -> CellRef {
 }
 
 #[test]
+fn precedent_edit_keeps_shared_formulas_and_recalculated_caches() {
+    for (name, variant) in VARIANTS {
+        let source = package(variant);
+        let before = parts(&source);
+        let mut workbook = Workbook::open(&source).unwrap();
+        workbook
+            .edit_cell(SheetId(1), cell("A2"), "5", CalculationOptions::default())
+            .unwrap();
+        let after = parts(&workbook.save().unwrap());
+        let source_cells = cells(&text(&before, "xl/worksheets/sheet2.xml"));
+        let saved_cells = cells(&text(&after, "xl/worksheets/sheet2.xml"));
+
+        for address in ["B1", "B2", "B3"] {
+            let expected = if address == "B2" {
+                source_cells[address].replace("<v>4</v>", "<v>10</v>")
+            } else {
+                source_cells[address].clone()
+            };
+            assert_eq!(saved_cells[address], expected, "{name}: {address}");
+            assert!(
+                saved_cells[address].contains(r#"t="shared""#),
+                "{name}: {address}"
+            );
+        }
+        assert!(saved_cells["A2"].contains("<v>5</v>"), "{name}");
+    }
+}
+
+#[test]
 fn unrelated_edit_keeps_equivalent_style_indices_and_other_parts() {
     for (name, variant) in VARIANTS {
         let source = package(variant);
