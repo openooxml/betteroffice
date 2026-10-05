@@ -336,11 +336,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (run.ready) {
         if (!unpreviewedOps.size) {
           flushSync(() => setPreviewDraft(draft));
-          const canvas = previewCanvasRef.current;
-          if (canvas) {
-            canvas.width = 0;
-            canvas.dataset.previewReady = 'false';
-          }
         }
         return;
       }
@@ -364,6 +359,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           run.editPeer?.sentSequence ?? Infinity : Infinity;
         if (unpreviewedOps.size) return;
         flushSync(() => setPreviewDraft(draft));
+        if (run.ready) return;
         const canvas = previewCanvasRef.current;
         const context = canvas?.getContext('2d');
         if (!canvas || !context) throw new Error('Preview canvas context is unavailable');
@@ -697,13 +693,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.dataset.workerZoom = String(request.zoom);
         setPainted(painted);
         if (painted.sequence >= previewState.sequence) {
-          setPreviewDraft(null);
           previewOps.clear();
           previewJournal.length = 0;
           previewPredecessors.clear();
           acceptedCells.clear();
           previewState.request = null;
           previewState.committed = null;
+          flushSync(() => setPreviewDraft(null));
         }
         const sheetId = run.session.state.sheets[request.sheet]?.id;
         presentGridRef.current(sheetId === undefined ? null : {
@@ -1450,6 +1446,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const focusRect = grid && focused ? rangeRect(grid, focused) : null;
   const editRect = editing ? (grid && editing.sheet === painted?.request.sheet ?
     cellRect(grid, editing.row, editing.col) : null) ?? editorRectRef.current : null;
+  const previewRect = previewDraft && grid && previewDraft.sheet === painted?.request.sheet ?
+    rangeRect(grid, expandRangeToMergedCells({ top: previewDraft.row, left: previewDraft.col,
+      bottom: previewDraft.row, right: previewDraft.col }, merged)) : null;
   const chartRect = selectedChart ? frame?.charts?.find((chart) => chart.id === selectedChart.id)?.rect : null;
   const sheets = run?.session.state.sheets ?? [];
   const a11yGrid = frame && painted ? buildA11yGrid(frame, visibleSelection, sheets[painted.request.sheet]?.name ?? '', {
@@ -1502,8 +1501,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                   height: view ? view.contentHeight * zoom : '100%' }} />
                 <div style={{ position: 'sticky', top: 0, left: 0, width: 0, height: 0 }}>
                   <canvas ref={canvasRef} style={{ display: 'block', position: 'absolute', top: 0, left: 0 }} />
-                  {previewDraft && <canvas ref={previewCanvasRef} data-testid="xlsx-commit-preview" aria-hidden
-                    style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }}>{previewDraft.value}</canvas>}
+                  {previewDraft && (run?.ready ? <div data-testid="xlsx-commit-preview" aria-hidden
+                    style={{ ...outline(previewRect ?? { x: 0, y: 0, w: 96, h: 24 }, 'none', '#fff'),
+                      color: '#000', padding: `0 ${8 * paintedZoom}px`, overflow: 'hidden', whiteSpace: 'pre',
+                      display: previewDraft.sheet === active && (!grid || previewRect) ? 'block' : 'none',
+                      font: `${13 * paintedZoom}px system-ui, sans-serif`,
+                      lineHeight: `${(previewRect?.h ?? 24) * paintedZoom}px`, pointerEvents: 'none' }}>{previewDraft.value}</div> :
+                    <canvas ref={previewCanvasRef} data-testid="xlsx-commit-preview" aria-hidden
+                      style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }}>{previewDraft.value}</canvas>)}
                   {pluginHost.managed && <PluginOverlays host={pluginHost.host} activations={pluginHost.activations}
                     layerRef={pluginHost.overlayLayerRef} width={(frame?.width ?? 0) * paintedZoom} height={(frame?.height ?? 0) * paintedZoom} />}
                   <div data-testid="xlsx-overlay-host" style={{ position: 'absolute', top: 0, left: 0, width: 0, height: 0, pointerEvents: 'none' }}>

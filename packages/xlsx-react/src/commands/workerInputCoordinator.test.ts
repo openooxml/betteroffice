@@ -11,6 +11,7 @@ import type { InputDraft, InputSeal } from './inputCoordinator';
 import {
   createWorkerInputCoordinator,
   WorkerInputNotReadyError,
+  WorkerInputRefusal,
   type WorkerInputCoordinator,
 } from './workerInputCoordinator';
 
@@ -120,6 +121,42 @@ async function errorOf(promise: Promise<unknown>): Promise<unknown> {
 }
 
 describe('worker input coordinator', () => {
+  test('awaits a sealed live draft acknowledgement before a dependent host edit and propagates refusal', async () => {
+    for (const refused of [false, true]) {
+      const acknowledgement = deferred<void>();
+      const waiting = deferred<void>();
+      const log: string[] = [];
+      const refusal = new WorkerInputRefusal('A1 was refused');
+      const coordinator = createWorkerInputCoordinator({
+        generation: () => 1,
+        capture: () => ({ sheet: 0, target: 'B1' }),
+        isReady: () => true,
+        whenReady: async () => {},
+        seal: () => ({}),
+        sync: () => {},
+        preview: async () => {},
+        write: (draft) => { log.push(`A1:${draft.value}`); return true; },
+        acknowledgeEdits: () => {
+          if (!log.length) return Promise.resolve();
+          waiting.resolve();
+          return acknowledgement.promise;
+        },
+        requestHydration: () => {},
+        flushEdits: async () => {},
+      });
+      coordinator.setDraft({ generation: 1, sheet: 0, row: 0, col: 0, value: 'live', source: 'cell' });
+      const dependent = coordinator.runAfterPendingInput(() => { log.push('B1:dependent'); }, { kind: 'host' });
+      const result = dependent.catch((error: unknown) => error);
+      await waiting.promise;
+      expect(log).toEqual(['A1:live']);
+      if (refused) acknowledgement.reject(refusal);
+      else acknowledgement.resolve();
+      expect(await result).toBe(refused ? refusal : undefined);
+      expect(log).toEqual(refused ? ['A1:live'] : ['A1:live', 'B1:dependent']);
+      expect(coordinator.unapplied).toEqual([]);
+    }
+  });
+
   test('replays every typed key accepted before readiness in order', async () => {
     const { coordinator, draft, ready, log, hydration } = harness();
     let text = '';

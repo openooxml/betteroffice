@@ -605,6 +605,7 @@ export function createWorkerInputCoordinator(
         entry.intent = Object.freeze({ ...entry.intent, input });
       }
       await write(sealed, entry.intent, activeLease, Object.assign(() => {}, { check: markApplied.check, refuse: markApplied.refuse }));
+      if (sealed && hooks.acknowledgeEdits) await wait(hooks.acknowledgeEdits(), activeLease);
       check(entry.intent, activeLease);
       const result = operation(entry.intent as WorkerInputIntent<T>, markApplied);
       if (!isPromise(result) && result !== false && !entry.refused) markApplied();
@@ -865,7 +866,9 @@ export function createWorkerInputCoordinator(
     },
     retire() {
       const error = new XlsxCommandAdmissionError('document-replaced');
-      for (const entry of entries) entry.reject(error);
+      for (const entry of entries) {
+        if (entry.intent.kind !== 'clipboard') entry.reject(error);
+      }
     },
     reset,
   };

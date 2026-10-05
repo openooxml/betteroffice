@@ -174,10 +174,11 @@ function harness(realFacade = false, normalizeInput = false) {
     cellInputs: mock(async (sheet: number, range: string) => ({ sheet, version: `v${version}`,
       cells: peerMethods.rangeCells(sheet, range) })),
   };
+  const sessionSave = mock<WorkbookSession['save']>(async () => new Uint8Array([0]));
   const session: WorkbookSession = {
     state: { format: 'xlsx', stage: 'ready', version: 0, dirty: false, activeSheet: 0,
       sheets: [{ id: 'sheet:0', index: 0, name: 'First' }, { id: 'sheet:1', index: 1, name: 'Second' }] },
-    call: sessionMethods as unknown as WorkbookSession['call'], save: mock(async () => new Uint8Array([0])),
+    call: sessionMethods as unknown as WorkbookSession['call'], save: sessionSave,
     on: () => () => {},
     onFailure(listener) {
       failureListeners.add(listener);
@@ -238,7 +239,7 @@ function harness(realFacade = false, normalizeInput = false) {
     return attached;
   });
   restorers.push(() => open.mockRestore(), () => hydrate.mockRestore(), () => attach.mockRestore());
-  return { log, cells, charts, peer, peerMethods, edits, editMethods, session, sessionMethods, open, hydrate, replay, preview,
+  return { log, cells, charts, peer, peerMethods, edits, editMethods, session, sessionSave, sessionMethods, open, hydrate, replay, preview,
     get attached() { return attached; },
     fail(error = new SessionFailure('crash', 'Worker stopped')) {
       failure = error;
@@ -325,6 +326,47 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook worker editor', () => {
+  it('shows visible ready commit text while the replacement frame is held without blocking input', async () => {
+    const host = harness(true);
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    const adoption = deferred<void>();
+    const frame = host.sessionMethods.frame.getMockImplementation()!;
+    host.sessionMethods.frame.mockImplementation(async (...args) => {
+      await adoption.promise;
+      return frame(...args);
+    });
+    try {
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+      fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'new value' } });
+      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+      await act(async () => {});
+      expect(host.peerMethods.editCell).toHaveBeenCalledWith(0, 0, 0, 'new value');
+      expect(host.preview).not.toHaveBeenCalled();
+      await advance();
+      const preview = view.getByTestId('xlsx-commit-preview');
+      expect(Number.parseFloat(preview.style.width)).toBeGreaterThan(0);
+      expect(Number.parseFloat(preview.style.height)).toBeGreaterThan(0);
+      expect(preview.tagName).toBe('DIV');
+      expect(preview.textContent).toBe('new value');
+      expect(getComputedStyle(preview).display).not.toBe('none');
+      expect(getComputedStyle(preview).visibility).not.toBe('hidden');
+      expect(preview.style.background).toBeTruthy();
+      expect(preview.style.pointerEvents).toBe('none');
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x' });
+      expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('x');
+      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
+      expect(view.getByTestId('xlsx-commit-preview')).toBe(preview);
+      await act(async () => adoption.resolve());
+      await advance();
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
+    } finally {
+      await act(async () => adoption.resolve());
+      await advance();
+    }
+  });
+
   it('opens retained worker editor sessions with omitted and explicit false readOnly', async () => {
     for (const props of [{ experimentalWorkerOpen: true as const }, { readOnly: false as const, experimentalWorkerOpen: true as const }]) {
       const host = harness();
@@ -1006,7 +1048,7 @@ describe('workbook worker editor', () => {
     expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
   });
 
-  it('commits a chart drag through the ordered facade after its preview', async () => {
+  it('commits a chart drag through the ordered facade without waiting for animation frames', async () => {
     const host = harness();
     host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
       rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
@@ -1017,10 +1059,8 @@ describe('workbook worker editor', () => {
     expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(30px, 20px)');
     fireEvent.mouseUp(window, { clientX: 150, clientY: 140, button: 0 });
     await act(async () => {});
-    await tick();
-    expect(host.editMethods.moveChart).not.toHaveBeenCalled();
-    await tick();
     expect(host.editMethods.moveChart).toHaveBeenCalledWith(0, 'chart:1', 30, 20);
+    expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(0px, 0px)');
   });
 
   it('keeps the origin sheet for a chart drag released after queued navigation', async () => {
@@ -2505,11 +2545,11 @@ it('flushes and saves hidden-tab bulk edits to different cells without any anima
     workerCells.set(`${sheet}:${row}:${col}`, input);
     return reply;
   });
-  host.session.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...workerCells])));
+  host.sessionSave.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...workerCells])));
   const frames = host.sessionMethods.frame.mock.calls.length;
   const count = painted.length;
   const suspended = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => ++nextAnimation);
-  const expected = Array.from({ length: 64 }, (_, index) => [`0:${Math.floor(index / 8)}:${index % 8}`, `edit-${index}`]);
+  const expected = Array.from({ length: 64 }, (_, index): [string, string] => [`0:${Math.floor(index / 8)}:${index % 8}`, `edit-${index}`]);
   try {
     await act(async () => {
       const edits = expected.map(([, input], index) => api.editCellAsync(0, Math.floor(index / 8), index % 8, input));
@@ -2686,7 +2726,7 @@ for (const successor of ['valid', 'refused'] as const) {
   });
 }
 
-it('clears a cold speculative bitmap before a ready write and retains its draft until adoption', async () => {
+it('replaces a cold speculative bitmap with visible ready text until adoption', async () => {
   const host = harness(true);
   const hydration = deferred<WorkbookHandle>();
   host.hydrate.mockReturnValue(hydration.promise);
@@ -2716,10 +2756,12 @@ it('clears a cold speculative bitmap before a ready write and retains its draft 
     expect(api.hydrated).toBe(true);
     expect(host.cells.get('0:0:0')).toBe('cold');
     writing.mockImplementation((sheet, row, col, input) => {
-      expect(view.getByTestId('xlsx-commit-preview')).toBe(canvas);
-      expect(canvas.width).toBe(0);
-      expect(canvas.dataset.previewReady).toBe('false');
-      expect(canvas.textContent).toBe('ready');
+      const preview = view.getByTestId('xlsx-commit-preview');
+      expect(preview).not.toBe(canvas);
+      expect(canvas.isConnected).toBe(false);
+      expect(Number.parseFloat(preview.style.width)).toBeGreaterThan(0);
+      expect(Number.parseFloat(preview.style.height)).toBeGreaterThan(0);
+      expect(preview.textContent).toBe('ready');
       return write(sheet, row, col, input);
     });
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
@@ -2730,8 +2772,8 @@ it('clears a cold speculative bitmap before a ready write and retains its draft 
     expect(host.preview).toHaveBeenCalledTimes(1);
     expect(host.cells.get('0:0:0')).toBe('ready');
     await advance();
-    expect(view.getByTestId('xlsx-commit-preview')).toBe(canvas);
-    expect(canvas.width).toBe(0);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('ready');
+    expect(canvas.isConnected).toBe(false);
     await act(async () => adoption.resolve());
     await advance();
     expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
