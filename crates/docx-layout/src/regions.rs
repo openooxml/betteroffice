@@ -875,6 +875,7 @@ mod tests {
             footnote_ids: None,
             footnote_reserved_height: None,
             float_bands: Vec::new(),
+            opening_fragment_geometry: None,
             footnote_columns: None,
             columns: None,
             section_id: None,

@@ -17,8 +17,12 @@ use wasm_bindgen::prelude::*;
 
 mod retained;
 mod sanitize;
+mod source_bytes;
 
 pub use retained::{PackageBytes, RetainedPackage};
+pub use source_bytes::SourceContainerBuilder;
+#[doc(hidden)]
+pub use source_bytes::SourceContainerInitializer;
 
 pub use sanitize::{
     DocumentKind, DocumentKindError, detect_package_kind, sanitize_package,

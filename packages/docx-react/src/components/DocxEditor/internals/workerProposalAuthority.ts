@@ -34,6 +34,7 @@ import {
   awaitWorkerOpenReplica,
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
+  workerOpenRequest,
 } from './workerOpenReplica';
 
 type SearchRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'searchText'>>>;
@@ -475,7 +476,7 @@ export function handedOverRequest<T extends { expectVersion: string }>(
   session: YrsSession,
   request: T
 ): T {
-  return authorities.get(session)?.handedOverRequest(request) ?? request;
+  return workerOpenRequest(session, authorities.get(session)?.handedOverRequest(request) ?? request);
 }
 
 export function beginWorkerProposalHandover(session: YrsSession): Promise<Handover> | null {

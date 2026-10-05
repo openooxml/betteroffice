@@ -64,6 +64,7 @@ export function DocxEditorPagedArea({
   // Document + section
   document,
   yrsCore,
+  pluginHostOpen,
   collaboration,
   theme,
   initialSectionProperties,
@@ -82,6 +83,9 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  holdInput,
+  inputScope,
+  inputQueries,
   viewerDocumentRead,
   showHiddenText = false,
   onYrsContentChange,
@@ -153,6 +157,7 @@ export function DocxEditorPagedArea({
   editorContentRef: React.RefObject<HTMLDivElement | null>;
   document: Document | null;
   yrsCore: YrsCoreSession;
+  pluginHostOpen?: boolean;
   collaboration?: DocxEditorCollaborationOptions;
   theme: Theme | null | undefined;
   initialSectionProperties: SectionProperties | undefined;
@@ -169,6 +174,9 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  holdInput?: boolean;
+  inputScope?: number;
+  inputQueries?: DisplayListQueries | null;
   /** A viewer session's document reads; see {@link PagedEditorProps.viewerDocumentRead}. */
   viewerDocumentRead?: PagedEditorProps['viewerDocumentRead'];
   showHiddenText?: boolean;
@@ -447,6 +455,7 @@ export function DocxEditorPagedArea({
         commandBridgeRef={commandBridgeRef}
         document={document}
         yrsCore={yrsCore}
+        pluginHostOpen={pluginHostOpen}
         collaboration={collaboration}
         styles={document?.package.styles}
         theme={document?.package.theme || theme}
@@ -466,6 +475,9 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        holdInput={holdInput}
+        inputScope={inputScope}
+        inputQueries={inputQueries}
         viewerDocumentRead={viewerDocumentRead}
         showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}

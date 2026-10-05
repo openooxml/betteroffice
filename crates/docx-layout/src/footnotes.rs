@@ -945,6 +945,7 @@ mod tests {
             number,
             fragments,
             float_bands: Vec::new(),
+            opening_fragment_geometry: None,
             body_margins: None,
             body_anchor_margins: None,
             margins: PageMargins {

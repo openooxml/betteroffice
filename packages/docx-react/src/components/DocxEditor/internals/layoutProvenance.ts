@@ -54,8 +54,9 @@ export function presentedWorkerVersion(
 const supersededLayouts = new WeakSet<object>();
 
 /** Records that the document changed past `layout` before it was shown. */
-export function markSupersededLayout(layout: object): void {
-  supersededLayouts.add(layout);
+export function markSupersededLayout(layout: object, superseded = true): void {
+  if (superseded) supersededLayouts.add(layout);
+  else supersededLayouts.delete(layout);
 }
 
 /** Whether the document changed past `layout` before it was shown; such a layout never settles. */

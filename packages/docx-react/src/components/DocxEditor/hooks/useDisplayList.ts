@@ -83,10 +83,10 @@ import {
 import {
   ensureWorkerOpenReplica,
   failWorkerOpenReplica,
+  notifyWorkerOpenLayoutProgress,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
   workerOpenSourceVersion,
-  type WorkerOpenFallbackReason,
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError, type DocxWorkerErrorStage } from '../internals/docxWorkerError';
 import { bindDisplayWindow, type DisplayWindow } from '../internals/displayWindow';
@@ -103,7 +103,9 @@ import { nearestPages } from './pageBuildOrder';
 import { scheduleIdlePageBuild, type PageBuildTask } from './pageBuildScheduler';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
-  encodeState(): Promise<Uint8Array>;
+  encodeState(prefetch?: boolean): Promise<Uint8Array>;
+  encodeVersionedState?(prefetch?: boolean): ReturnType<ResidentEngineWorkerClient['encodeVersionedState']>;
+  stateRevision?(): { owner: ResidentEngineWorkerClient; sequence: number } | null;
   revisionCount(): Promise<number>;
   proposal: ResidentEngineWorkerClient['proposal'];
   documentRead: ResidentEngineWorkerClient['documentRead'];
@@ -115,7 +117,7 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
     adopt?: (apply: () => void) => void
   ): Promise<ArrayBuffer>;
   exportStructuredWithPages(peer: YrsSession, ...args: Parameters<WorkerOpenExport['export']>): ReturnType<WorkerOpenExport['export']>;
-  fallback(reason?: WorkerOpenFallbackReason): (() => boolean) | void;
+  fallback(): void;
   destroy(): void;
   replicaReady(): void;
   /** Restamps the shown layout after the session started mirroring the worker's version. */
@@ -203,7 +205,9 @@ export interface UseRustDisplayListResult {
   settledDisplayList(
     relayout: (() => void) | null,
     timeoutMs?: number | null,
-    scope?: 'document' | 'window'
+    scope?: 'document' | 'window',
+    signal?: AbortSignal,
+    onPagesPosted?: () => void
   ): Promise<DisplayList>;
   /**
    * Drops the settled display list. Without `failure` a new document is on its way, so waiters
@@ -252,6 +256,7 @@ export interface UseRustDisplayListResult {
   workerSurfacesActive: boolean;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion: YrsSession | null;
+  layoutCompleteSession: RustDisplayListEngine | null;
   workerPresentationActive: boolean;
   setWorkerPresentationActive(active: boolean): void;
   attachOffscreenCanvases(
@@ -516,8 +521,15 @@ export function useRustDisplayList(
   const layoutPreviewKeyRef = useRef<string | null>(null);
   const workerPreviewKeysRef = useRef(new Map<number, string>());
   const settledEpochRef = useRef<number | null>(null);
+  const layoutPassesRef = useRef(new WeakMap<RustDisplayListEngine, object>());
+  const workerLayoutPassesRef = useRef(new WeakMap<Layout, object>());
+  const frameLayoutPassRef = useRef<object | undefined>(undefined);
+  const [layoutCompleteSession, setLayoutCompleteSession] = useState<RustDisplayListEngine | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
-  const settleWaitersRef = useRef(new Map<() => void, 'document' | 'window'>());
+  const settleWaitersRef = useRef(new Map<() => void, {
+    scope: 'document' | 'window';
+    onPagesPosted?: (pages: readonly number[]) => void;
+  }>());
   const settleRelayoutRef = useRef<(() => void) | null>(null);
   const layoutRef = useRef(layout);
   layoutRef.current = layout;
@@ -553,6 +565,13 @@ export function useRustDisplayList(
       if (!failure && !authoritative && isLayoutQueued(engineRef.current)) return;
       settledEpochRef.current = epoch;
       settleErrorRef.current = failure;
+      setLayoutCompleteSession(
+        !failure && epoch !== null && settledEpochRef.current === contentEpochRef.current &&
+          frameEngineRef.current === engineRef.current && !provisionalPageFrameRef.current &&
+          frameLayoutPassRef.current === (engineRef.current ? layoutPassesRef.current.get(engineRef.current) : undefined) &&
+          !isLayoutQueued(engineRef.current)
+          ? engineRef.current ?? null : null
+      );
       for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
     },
     []
@@ -619,23 +638,9 @@ export function useRustDisplayList(
   // Sessions whose worker and page surfaces a successor took over: they never take one back.
   const handedOverEnginesRef = useRef(new WeakSet<YrsSession>());
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
-  const recoveredWorkerEpochsRef = useRef(new WeakMap<YrsSession, number>());
-  const recoveredEngine = useCallback(
-    (engine: YrsSession | null | undefined): boolean =>
-      engine != null && recoveredWorkerEpochsRef.current.has(engine),
-    []
-  );
   const bootstrapFrameEpoch = useCallback(
-    (engine: YrsSession): { frameEpoch?: number } =>
-      recoveredEngine(engine)
-        ? {
-            frameEpoch: Math.max(
-              recoveredWorkerEpochsRef.current.get(engine)!,
-              snapshotRef.current.frame?.frameEpoch ?? 0
-            ),
-          }
-        : followedFrameEpoch(snapshotRef.current.frame),
-    [recoveredEngine]
+    (): { frameEpoch?: number } => followedFrameEpoch(snapshotRef.current.frame),
+    []
   );
   // No worker starts once the hook is gone, whatever failure arrives late.
   const unmountedRef = useRef(false);
@@ -846,6 +851,10 @@ export function useRustDisplayList(
   const residentEngineRef = useRef(residentEngine);
   residentEngineRef.current = residentEngine;
 
+  useEffect(() => {
+    setLayoutCompleteSession(null);
+  }, [engine]);
+
   const setMainFrameDisplayWindow = useCallback((hostEngine: YrsSession | null): void => {
     if (
       !workerOpenEnabledRef.current ||
@@ -1048,6 +1057,7 @@ export function useRustDisplayList(
         (workerOpenEnabledRef.current && workerOpenReplicaPending(residentEngine))
       ) return;
       contentEpochRef.current += 1;
+      setLayoutCompleteSession(null);
       queryEpochGate.invalidate();
       requestSettleRelayout();
       // Update observers fire from inside the wasm transaction. Calling any
@@ -1765,9 +1775,44 @@ export function useRustDisplayList(
       };
       try {
         const opened = await requestOpenedWorker(hostEngine, (owner) => owner.opening!, undefined, 'open');
+        const encodeOpenedState = <T,>(
+          encode: (client: ResidentEngineWorkerClient) => Promise<T>,
+          prefetch?: boolean
+        ): Promise<T> => {
+          if (!prefetch) return requestOpenedWorker(hostEngine, (owner) => encode(owner.client));
+          return (async () => {
+            const previous = workerRef.current;
+            let owner = previous;
+            try {
+              const state = await requestOpenedWorker(hostEngine, (current) => {
+                owner = current;
+                return encode(current.client);
+              });
+              if (
+                owner && owner !== previous && isCurrentWorker(hostEngine, owner) &&
+                !owner.client.bootstrapSent()
+              ) requestLayoutRef.current?.();
+              return state;
+            } catch (error) {
+              if (
+                !(error instanceof ResidentWorkerOutOfMemoryError) && owner &&
+                isCurrentWorker(hostEngine, owner) && owner.client.hasFailed()
+              ) dropWorker(hostEngine, error);
+              throw error;
+            }
+          })();
+        };
         return {
           ...opened,
-          encodeState: () => requestOpenedWorker(hostEngine, (owner) => owner.client.encodeState()),
+          encodeState: (prefetch?: boolean) => encodeOpenedState((client) => client.encodeState(), prefetch),
+          encodeVersionedState: (prefetch?: boolean) =>
+            encodeOpenedState((client) => client.encodeVersionedState(), prefetch),
+          stateRevision: () => {
+            const owner = workerRef.current;
+            return owner?.engine === hostEngine && !owner.client.hasFailed()
+              ? { owner: owner.client, sequence: owner.client.stateSequence() }
+              : null;
+          },
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op) =>
             requestOpenedWorker(hostEngine, async (owner) => {
@@ -1836,7 +1881,7 @@ export function useRustDisplayList(
               serialize: (operation) => registeredWorkerProposalAuthority(peer)?.residentOperation(operation) ?? operation(),
             });
           },
-          fallback: (reason = 'failure') => {
+          fallback: () => {
             const outOfMemory = outOfMemoryRef.current.get(hostEngine);
             if (outOfMemory) throw outOfMemory;
             if (isViewerSession(hostEngine)) {
@@ -1855,23 +1900,8 @@ export function useRustDisplayList(
             if (!owner || !isCurrentWorker(hostEngine, owner)) {
               throw new SupersededPreviewError();
             }
-            const recover = workerOpenEnabledRef.current && reason !== 'failure' &&
-              !outOfMemoryRef.current.has(hostEngine) &&
-              !workerFailureRef.current.has(hostEngine) &&
-              !owner.client.hasFailed() && !holdsWorkerProposals(hostEngine);
             if (!dropWorker(hostEngine)) throw workerFailureRef.current.get(hostEngine);
             needsLayout = true;
-            const recoveryEpoch = recoveryFrameEpochRef.current;
-            if (recover) return () => {
-              if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current ||
-                workerRef.current || workerFallbackEngineRef.current !== hostEngine ||
-                outOfMemoryRef.current.has(hostEngine) || workerFailureRef.current.has(hostEngine)) return false;
-              recoveredWorkerEpochsRef.current.set(hostEngine, recoveryEpoch);
-              workerOpenSourcesRef.current.delete(hostEngine);
-              workerFallbackEngineRef.current = null;
-              needsLayout = false;
-              return true;
-            };
           },
           destroy: () => {
             failWorkerProposalAuthority(hostEngine, new Error('The document changed while opening the replica'));
@@ -2034,6 +2064,7 @@ export function useRustDisplayList(
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
   const release = useCallback((): void => {
+    setLayoutCompleteSession(null);
     // A failed load's failure holds for later waits until the next load.
     replacedLayoutRef.current = {
       layout: null,
@@ -2124,7 +2155,7 @@ export function useRustDisplayList(
       const [start, end] = displayWindowRef.current;
       const settling = settleWaitersRef.current.size > 0;
       const windowOnly = settling
-        ? ![...settleWaitersRef.current.values()].includes('document')
+        ? ![...settleWaitersRef.current.values()].some((waiter) => waiter.scope === 'document')
         : workerOpen;
       const first = windowOnly ? Math.max(0, start - WORKER_OPEN_BUILD_MARGIN_PAGES) : 0;
       const last = windowOnly
@@ -2299,6 +2330,7 @@ export function useRustDisplayList(
         );
         requestLayoutRef.current?.();
       };
+      const provisional = provisionalPageFrameRef.current;
       const request: Promise<DisplayPagesFrame | { superseded: true } | null> = worker
         ? release.length > 0
           ? worker.client.releasePages(
@@ -2319,6 +2351,11 @@ export function useRustDisplayList(
           if (!result || 'superseded' in result || !current()) {
             finish();
             return;
+          }
+          if (worker && build.kind === 'build' && !provisional) {
+            for (const waiter of settleWaitersRef.current.values()) {
+              waiter.onPagesPosted?.(batch);
+            }
           }
           const attach = (nextFrame: RetainedFrame): void => {
             if (!current()) {
@@ -2377,6 +2414,9 @@ export function useRustDisplayList(
                 });
               }
               snapshotRef.current = nextSnapshot;
+              if (worker && release.length === 0 && batch.some((index) =>
+                previous.displayList?.pages[index]?.unbuilt && !nextFrame.displayList.pages[index]?.unbuilt
+              )) notifyWorkerOpenLayoutProgress(targetEngine, 'page');
               publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
               if (background && workerOpen) startTransition(() => setSnapshot(nextSnapshot));
               else setSnapshot(nextSnapshot);
@@ -2589,7 +2629,10 @@ export function useRustDisplayList(
 
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
+      if (hostEngine === engineRef.current) setLayoutCompleteSession(null);
       if (handedOverPreview(hostEngine)) return workerPreviewPassesRef.current.get(hostEngine) ?? null;
+      const layoutPass = {};
+      layoutPassesRef.current.set(hostEngine, layoutPass);
       const terminal = workerFailureRef.current.get(hostEngine);
       if (terminal && isViewerSession(hostEngine)) return rejectedWorkerLayout(terminal);
       if (isViewerSession(hostEngine) && holdsCommittedWorkerProposals(hostEngine) &&
@@ -2730,7 +2773,7 @@ export function useRustDisplayList(
           ? {
               provisionalPages: PROVISIONAL_LAYOUT_PAGES,
               heapLimitBytes: workerHeapLimitRef.current,
-              ...bootstrapFrameEpoch(hostEngine),
+              ...bootstrapFrameEpoch(),
             }
           : {}),
       };
@@ -2746,8 +2789,6 @@ export function useRustDisplayList(
       const unavailable = (
         cause: unknown
       ): Promise<WorkerLayoutComputation | null> | null => {
-        if (recoveredEngine(hostEngine) &&
-          !isCurrentWorker(hostEngine, owner)) return rejectedWorkerLayout(new SupersededPreviewError());
         const current = workerRef.current;
         if (
           unmountedRef.current ||
@@ -2828,6 +2869,11 @@ export function useRustDisplayList(
             hostEngine.residentWorkerProbe()?.layoutRevision !== adoptedRevision) return null;
           computation = workerLayoutComputation(full.layoutJson, result.layoutRevision);
         }
+        if (isCurrentWorker(hostEngine, owner) &&
+          hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision) {
+          notifyWorkerOpenLayoutProgress(hostEngine, result.layoutProvisional ? 'provisional' : 'complete');
+        }
+        workerLayoutPassesRef.current.set(computation.layout, layoutPass);
         if (base === undefined) return computation;
         workerLayoutFramesRef.current.set(computation.layout, {
           result,
@@ -2842,8 +2888,7 @@ export function useRustDisplayList(
       };
       const pass = reply
         .then(async (result): Promise<WorkerLayoutComputation | null> => {
-          if ((recoveredEngine(hostEngine) ||
-            (isViewerSession(hostEngine) && !isViewerPreview(hostEngine))) && !isCurrentWorker(hostEngine, owner)) {
+          if (isViewerSession(hostEngine) && !isViewerPreview(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
             throw new SupersededPreviewError();
           }
           if (holdsWorkerProposals(hostEngine) &&
@@ -2884,8 +2929,6 @@ export function useRustDisplayList(
                 );
                 if (!isCurrentPass()) {
                   if (isViewerSession(hostEngine)) throw new SupersededPreviewError();
-                  if (recoveredEngine(hostEngine) &&
-                    !isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
                   return null;
                 }
                 if (completed) {
@@ -2896,8 +2939,6 @@ export function useRustDisplayList(
                 if (!holdsWorkerProposals(hostEngine)) return null;
               }
               if (isViewerSession(hostEngine)) throw new SupersededPreviewError();
-              if (recoveredEngine(hostEngine) &&
-                !isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
               return null;
             })
             .catch(async (cause: unknown): Promise<LayoutComputation | null> => {
@@ -2928,7 +2969,6 @@ export function useRustDisplayList(
       isViewerSession,
       paintedCaretMachine,
       queryEpochGate,
-      recoveredEngine,
       replaceOutOfMemoryWorker,
       requestOpenedWorker,
       workerFor,
@@ -2997,6 +3037,7 @@ export function useRustDisplayList(
   );
 
   useEffect(() => {
+    setLayoutCompleteSession(null);
     if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
     if (replacedLayoutRef.current && layout && layout !== replacedLayoutRef.current.layout) {
       replacedLayoutRef.current = null;
@@ -3051,6 +3092,8 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
+    const layoutPass = workerLayoutPassesRef.current.get(layout) ??
+      (engine ? layoutPassesRef.current.get(engine) : undefined);
     const line = sourceLine(engine);
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
@@ -3397,7 +3440,7 @@ export function useRustDisplayList(
                       ? WORKER_PREVIEW_DISPLAY_WINDOW
                       : displayWindowRef.current,
                     heapLimitBytes: workerHeapLimitRef.current,
-                    ...bootstrapFrameEpoch(hostEngine),
+                    ...bootstrapFrameEpoch(),
                   })
                 : worker.sync(snapshot, extras, previousFrame?.frameEpoch ?? 0, paintCaret, {
                     ...sent(),
@@ -3405,7 +3448,7 @@ export function useRustDisplayList(
                   });
         return workerFrame
           .then((result) => {
-            if ((recoveredEngine(hostEngine) || isViewerSession(hostEngine)) && !isCurrentWorker(hostEngine, owner)) {
+            if (isViewerSession(hostEngine) && !isCurrentWorker(hostEngine, owner)) {
               throw new SupersededPreviewError();
             }
             const delta = decodeFrameDelta(result.frame);
@@ -3458,7 +3501,7 @@ export function useRustDisplayList(
           delta &&
           appliesTo !== undefined &&
           prebuilt.engine === hostEngine &&
-          (!(recoveredEngine(prebuilt.engine) || isViewerSession(prebuilt.engine)) ||
+          (!isViewerSession(prebuilt.engine) ||
             prebuilt.owner === workerRef.current || handedOverPreviewFrame) &&
           (workerRef.current?.engine === hostEngine || handedOverPreviewFrame) &&
           prebuilt.contentEpoch === contentEpoch &&
@@ -3502,7 +3545,7 @@ export function useRustDisplayList(
     pending
       .then((result) => {
         if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
-        if ((recoveredEngine(residentEngine) || (residentEngine && isViewerSession(residentEngine))) && result.workerOwner &&
+        if (residentEngine && isViewerSession(residentEngine) && result.workerOwner &&
           result.workerOwner !== workerRef.current && !handedOverPreviewFrame) return;
         if (
           generation !== generationRef.current ||
@@ -3528,6 +3571,7 @@ export function useRustDisplayList(
         );
         snapshotRef.current = nextSnapshot;
         provisionalPageFrameRef.current = result.provisional === true;
+        frameLayoutPassRef.current = layoutPass;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
         frameEngineRef.current = residentEngine ?? engine ?? null;
@@ -3607,7 +3651,6 @@ export function useRustDisplayList(
     publishQuerySnapshot,
     queryEpochGate,
     markSettled,
-    recoveredEngine,
     replaceOutOfMemoryWorker,
     requestOpenedWorker,
     requestSettleRelayout,
@@ -3645,12 +3688,40 @@ export function useRustDisplayList(
     (
       relayout: (() => void) | null,
       timeoutMs: number | null = 15_000,
-      scope: 'document' | 'window' = 'document'
+      scope: 'document' | 'window' = 'document',
+      signal?: AbortSignal,
+      onPagesPosted?: () => void
     ): Promise<DisplayList> =>
       new Promise<DisplayList>((resolve, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
+        const waiting: {
+          scope: 'document' | 'window';
+          onPagesPosted?: (pages: readonly number[]) => void;
+        } = { scope };
+        const peerWait = onPagesPosted !== undefined;
+        if (onPagesPosted) waiting.onPagesPosted = (pages) => {
+          if (
+            signal?.aborted || provisionalPageFrameRef.current ||
+            frameEngineRef.current !== (engineRef.current ?? null)
+          ) return;
+          const [start, end] = displayWindowRef.current;
+          const unbuilt = snapshotRef.current.displayList?.pages.some((page, index) =>
+            page.unbuilt &&
+            (scope === 'document' || (
+              index >= start - WORKER_OPEN_BUILD_MARGIN_PAGES &&
+              index < end + WORKER_OPEN_BUILD_MARGIN_PAGES
+            )) && !pages.includes(index)
+          );
+          if (unbuilt) return;
+          const posted = onPagesPosted;
+          onPagesPosted = undefined;
+          waiting.onPagesPosted = undefined;
+          posted?.();
+        };
         const settle = (): boolean => {
-          const failure = settleErrorRef.current;
+          const failure = signal?.aborted
+            ? new Error('The layout wait was cancelled')
+            : settleErrorRef.current;
           const displayList = snapshotRef.current.displayList;
           const [start, end] = displayWindowRef.current;
           const unbuilt = displayList?.pages.some(
@@ -3662,6 +3733,10 @@ export function useRustDisplayList(
           );
           const current =
             displayList !== null &&
+            (!peerWait || (
+              frameEngineRef.current === (engineRef.current ?? null) &&
+              !provisionalPageFrameRef.current
+            )) &&
             settledEpochRef.current === contentEpochRef.current &&
             !isLayoutQueued(engineRef.current) &&
             !unbuilt;
@@ -3670,9 +3745,13 @@ export function useRustDisplayList(
             return false;
           }
           settleWaitersRef.current.delete(waiter);
+          signal?.removeEventListener('abort', waiter);
           if (timer !== undefined) clearTimeout(timer);
           if (failure) reject(failure);
-          else resolve(displayList!);
+          else {
+            waiting.onPagesPosted?.([]);
+            resolve(displayList!);
+          }
           return true;
         };
         const waiter = (): void => {
@@ -3680,10 +3759,12 @@ export function useRustDisplayList(
         };
         if (settle()) return;
         if (relayout) settleRelayoutRef.current = relayout;
-        settleWaitersRef.current.set(waiter, scope);
+        settleWaitersRef.current.set(waiter, waiting);
+        signal?.addEventListener('abort', waiter, { once: true });
         if (timeoutMs !== null) {
           timer = setTimeout(() => {
             settleWaitersRef.current.delete(waiter);
+            signal?.removeEventListener('abort', waiter);
             reject(new Error('The document did not finish rendering'));
           }, timeoutMs);
         }
@@ -3726,6 +3807,10 @@ export function useRustDisplayList(
     workerMemory,
     workerSurfacesActive,
     pendingCompletion: pendingCompletion?.engine ?? null,
+    layoutCompleteSession: layoutCompleteSession === engine &&
+      frameLayoutPassRef.current === (engine ? layoutPassesRef.current.get(engine) : undefined) &&
+      settledEpochRef.current === contentEpochRef.current && !isLayoutQueued(engine)
+      ? layoutCompleteSession : null,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
@@ -3864,6 +3949,7 @@ export interface UseCanvasRendererResult {
   workerSurfacesActive: boolean;
   /** See {@link UseRustDisplayListResult.pendingCompletion}. */
   pendingCompletion: YrsSession | null;
+  layoutCompleteSession: RustDisplayListEngine | null;
   /** sole visible renderer lifecycle */
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
@@ -3883,6 +3969,7 @@ export interface UseCanvasRendererResult {
   resolveImage: ImageResolver;
   /** Rust display-list query facade for adapter interactions. */
   queries: DisplayListQueries | null;
+  inputQueries?: DisplayListQueries | null;
   /** Resolve the newest facade after pending edits and relayouts. */
   resolveQueries: ResolveDisplayListQueries;
   pageNavigation: DisplayPageNavigation;
@@ -4028,6 +4115,7 @@ export function useCanvasRenderer(
     workerMemory,
     workerSurfacesActive,
     pendingCompletion,
+    layoutCompleteSession,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
@@ -4138,6 +4226,7 @@ export function useCanvasRenderer(
     reset,
     resolveImage,
     queries: geometryReady ? snapshotQueries : null,
+    inputQueries: experimentalWorkerOpen ? snapshotQueries : null,
     resolveQueries,
     pageNavigation,
     settledDisplayList,
@@ -4168,6 +4257,7 @@ export function useCanvasRenderer(
     setWorkerPresentationActive,
     workerSurfacesActive,
     pendingCompletion,
+    layoutCompleteSession,
     offscreenReplay,
     paintedCaretActive,
     notifyCaretInput,
