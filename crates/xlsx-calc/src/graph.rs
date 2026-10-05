@@ -230,7 +230,7 @@ impl DepGraph {
             .map(|n| Arc::clone(&n.ast))
     }
 
-    pub(crate) fn clockless_seeds(&self) -> (Vec<(SheetId, CellRef)>, Vec<(SheetId, CellRef)>) {
+    pub(crate) fn clockless_seeds(&self) -> (SeedCells, SeedCells) {
         let mut clocks = Vec::new();
         let mut dynamic = Vec::new();
         for (node, entry) in &self.deps {
@@ -524,6 +524,7 @@ fn push_table_uses<'a>(expr: &'a Expr, uses: &mut Vec<(&'a str, &'a TableSpec)>)
 }
 
 type DefinedNameUse = (SheetId, Option<String>, String);
+type SeedCells = Vec<(SheetId, CellRef)>;
 
 fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<DefinedNameUse>) {
     let mut expressions = vec![expr];
