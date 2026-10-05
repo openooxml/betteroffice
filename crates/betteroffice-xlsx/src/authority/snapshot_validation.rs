@@ -15,7 +15,7 @@ pub(crate) struct SnapshotValidation {
     maps: BTreeMap<SnapshotParent, (usize, &'static str)>,
     sheet_keys: BTreeMap<usize, Arc<str>>,
     sheet_indices: BTreeMap<Arc<str>, usize>,
-    order_keys: Vec<Arc<str>>,
+    order_keys: BTreeMap<usize, Arc<str>>,
     style_components: BTreeSet<(u8, u32)>,
     pending_cell: Option<(CellRef, bool)>,
     spill_after: Option<(u32, u32)>,
@@ -501,19 +501,17 @@ impl SnapshotValidation {
         }
         if self.phase == 9 {
             allowance(128, budget, &mut self.unit_bytes)?;
-            for value in order.iter(&txn) {
+            let index = self.order_keys.len();
+            if index < model.sheets.len() {
+                let value = order.get(&txn, index as u32).ok_or_else(invalid)?;
                 let Out::Any(Any::String(key)) = value else {
                     return Err(invalid());
                 };
-                if key.len() > 64
-                    || self.order_keys.len() == crate::snapshot::yrs_split::SHEET_ORDER_MAX_ITEMS
-                {
+                if key.len() > 64 {
                     return Err(invalid());
                 }
-                self.order_keys.push(key);
-            }
-            if self.order_keys.len() != model.sheets.len() {
-                return Err(invalid());
+                self.order_keys.insert(index, key);
+                return Ok(false);
             }
             self.phase = 8;
             return Ok(false);
@@ -635,7 +633,11 @@ impl SnapshotValidation {
         }
         if self.phase == 1 {
             if let Some(sheet) = model.sheets.get(self.sheet) {
-                let key = self.order_keys.get(self.sheet).ok_or_else(invalid)?.clone();
+                let key = self
+                    .order_keys
+                    .get(&self.sheet)
+                    .ok_or_else(invalid)?
+                    .clone();
                 let map = sheets
                     .get(&txn, &key)
                     .and_then(|value| value.cast::<MapRef>().ok())
@@ -1280,9 +1282,9 @@ impl SnapshotValidation {
             self.maps.pop_first();
             return Ok(false);
         }
-        if let Some(key) = self.order_keys.last() {
+        if let Some((_, key)) = self.order_keys.last_key_value() {
             allowance(key.len() + 128, budget, &mut self.unit_bytes)?;
-            self.order_keys.pop();
+            self.order_keys.pop_last();
             return Ok(false);
         }
         if let Some((_, key)) = self.sheet_keys.first_key_value() {

@@ -952,11 +952,13 @@ impl BaseStreamDecoder {
                         return Err(SnapshotError::new("authority base record is empty"));
                     }
                     if length > xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES {
-                        return Err(SnapshotError::new("authority base record exceeds byte limit"));
+                        return Err(SnapshotError::new(
+                            "authority base record exceeds byte limit",
+                        ));
                     }
-                    self.record.try_reserve_exact(length).map_err(|_| {
-                        SnapshotError::new("cannot allocate authority base record")
-                    })?;
+                    self.record
+                        .try_reserve_exact(length)
+                        .map_err(|_| SnapshotError::new("cannot allocate authority base record"))?;
                     self.length = Some(length);
                     self.varint = 0;
                     self.shift = 0;
@@ -2738,6 +2740,24 @@ impl AuthorityHydrator {
 #[cfg(test)]
 mod ceiling_tests {
     use super::*;
+
+    #[test]
+    fn base_stream_refuses_oversized_declared_record_before_allocation() {
+        let mut decoder = BaseStreamDecoder::default();
+        let mut records = LinkedList::new();
+        let mut payload = Writer::new();
+        payload.var_usize(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1);
+        assert_eq!(
+            decoder
+                .push(&payload.into_bytes(), &mut records)
+                .unwrap_err()
+                .to_string(),
+            "authority base record exceeds byte limit"
+        );
+        assert_eq!(decoder.record.capacity(), 0);
+        assert!(decoder.length.is_none());
+        assert!(records.is_empty());
+    }
 
     #[test]
     fn snapshot_oversized_base_record_refuses_capture_before_chunks() {
