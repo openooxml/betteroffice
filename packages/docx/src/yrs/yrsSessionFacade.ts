@@ -1351,13 +1351,13 @@ export function wrapSession(
         const local = peerProposals.exportState();
         const worker = proposals.exportState();
         const ids = new Set(worker.entries.map(({ record }) => record.id));
-        if (local.entries.some(({ record }) => ids.has(record.id))) {
-          throw new Error('Worker and peer proposal ids conflict during hand-over');
+        const unique = local.entries.filter(({ record }) => !ids.has(record.id));
+        if (unique.length > 0) {
+          proposals.mirror({ version: session.version(), proposals: {
+            previewVersion: worker.previewVersion + local.previewVersion,
+            entries: [...worker.entries, ...unique],
+          } });
         }
-        proposals.mirror({ version: session.version(), proposals: {
-          previewVersion: worker.previewVersion + local.previewVersion,
-          entries: [...worker.entries, ...local.entries],
-        } });
       }
       proposals.mirror(mirror);
       if (!mirror && peerProposals) {

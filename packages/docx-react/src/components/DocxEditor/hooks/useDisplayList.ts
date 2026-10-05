@@ -98,6 +98,7 @@ import { exportWorkerOpenPages, retireWorkerOpenExport, type WorkerOpenExport } 
 import { workerExportVersions } from '../internals/workerExportVersions';
 import {
   failWorkerProposalAuthority,
+  hasEditorWorkerProposalRounds,
   registeredWorkerProposalAuthority,
 } from '../internals/workerProposalAuthority';
 import { nearestPages } from './pageBuildOrder';
@@ -978,7 +979,9 @@ export function useRustDisplayList(
   // takes over from, a spare, or a new one.
   const workerFor = useCallback(
     (hostEngine: YrsSession): NonNullable<typeof workerRef.current> => {
-      if (workerFallbackEngineRef.current === hostEngine) throw new SupersededPreviewError();
+      if (workerFallbackEngineRef.current === hostEngine && hasEditorWorkerProposalRounds(hostEngine)) {
+        throw new SupersededPreviewError();
+      }
       const current = workerRef.current;
       if (current?.engine === hostEngine) return current;
       const failure = workerFailureRef.current.get(hostEngine);
@@ -1060,7 +1063,8 @@ export function useRustDisplayList(
   const dropEditorWorker = useCallback(
     (hostEngine: YrsSession, cause?: unknown): boolean => {
       if (workerFailureRef.current.has(hostEngine)) return false;
-      if (holdsCommittedWorkerProposals(hostEngine)) {
+      const editorRounds = hasEditorWorkerProposalRounds(hostEngine);
+      if (editorRounds ? holdsCommittedWorkerProposals(hostEngine) : holdsWorkerProposals(hostEngine)) {
         failWorkerDocument(
           hostEngine, cause ?? new Error('The resident worker holds proposals the main thread cannot rebuild')
         );
@@ -1070,7 +1074,7 @@ export function useRustDisplayList(
         ensureRebuildableReplica(hostEngine);
       }
       try {
-        if (registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback')) {
+        if (editorRounds && registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback')) {
           if (cause === undefined) {
             console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
           } else {
@@ -1238,7 +1242,7 @@ export function useRustDisplayList(
       if (current && current.engine !== hostEngine) return 'stale';
       // Another request of the failed worker already replaced it.
       if ((current?.client ?? null) !== client) return previous ? 'retry' : 'stale';
-      if (registeredWorkerProposalAuthority(hostEngine) && !isViewerSession(hostEngine)) {
+      if (hasEditorWorkerProposalRounds(hostEngine) && !isViewerSession(hostEngine)) {
         const handedOver = dropEditorWorker(hostEngine, failure);
         if (handedOver) requestLayoutRef.current?.();
         return handedOver ? 'stale' : 'failed';
@@ -1434,7 +1438,7 @@ export function useRustDisplayList(
             return { frameEpoch: null, caretSynchronized: false };
           }
           if (!isCurrentWorker(worker.engine, worker)) return null;
-          if (!registeredWorkerProposalAuthority(worker.engine)) {
+          if (!hasEditorWorkerProposalRounds(worker.engine)) {
             console.error(
               '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
               error
@@ -1705,7 +1709,7 @@ export function useRustDisplayList(
           }
           const failure = workerFailureRef.current.get(hostEngine);
           if (failure) throw failure;
-          if (registeredWorkerProposalAuthority(hostEngine) && !isViewerSession(hostEngine) &&
+          if (hasEditorWorkerProposalRounds(hostEngine) && !isViewerSession(hostEngine) &&
             (owner?.client.hasFailed() || error instanceof ResidentWorkerFailureError ||
               error instanceof ResidentWorkerOutOfMemoryError || stage === 'open' || stage === 'layout') &&
             !(error instanceof SupersededPreviewError) && !(error instanceof WorkerPreviewRefusedError)) {
@@ -2389,7 +2393,7 @@ export function useRustDisplayList(
           return;
         }
         if (!dropWorker(worker.engine, cause)) return;
-        if (!registeredWorkerProposalAuthority(worker.engine)) {
+        if (!hasEditorWorkerProposalRounds(worker.engine)) {
           console.error(
             '[CanvasRenderer] Building display pages failed; falling back to the main-thread engine',
             cause
@@ -2898,7 +2902,7 @@ export function useRustDisplayList(
         if (!dropWorker(hostEngine, cause)) {
           return rejectedWorkerLayout(workerFailureRef.current.get(hostEngine)!);
         }
-        if (!registeredWorkerProposalAuthority(hostEngine)) {
+        if (!hasEditorWorkerProposalRounds(hostEngine)) {
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; laying out on the main thread',
             cause
@@ -3427,7 +3431,7 @@ export function useRustDisplayList(
         if (!dropWorker(hostEngine, nextError)) {
           return Promise.reject(workerFailureRef.current.get(hostEngine));
         }
-        if (!registeredWorkerProposalAuthority(hostEngine)) {
+        if (!hasEditorWorkerProposalRounds(hostEngine)) {
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
             nextError

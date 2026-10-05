@@ -150,6 +150,7 @@ export interface WorkerProposalAuthority {
 
 type PeerSnapshot = { state: Uint8Array; version: string };
 type RegisteredAuthority = WorkerProposalAuthority & {
+  hasEditorRounds(): boolean;
   readsInWorker(): boolean;
   peerSnapshot(): Promise<PeerSnapshot>;
   fail(error: unknown): void;
@@ -218,6 +219,7 @@ export function registerWorkerProposalAuthority(
   let holdsState = false;
   let mutating = 0;
   let admittedRounds = 0;
+  let editorRounds = false;
   let peerHydrated = false;
   let releaseHydration!: () => void;
   const hydrated = new Promise<void>((resolve) => { releaseHydration = resolve; });
@@ -292,6 +294,7 @@ export function registerWorkerProposalAuthority(
   const round = <T>(
     call: () => Promise<T>, main: () => T | Promise<T>, admission?: RoundAdmission
   ): Promise<T> => {
+    if (editorPeer()) editorRounds = true;
     admittedRounds += 1;
     return enqueue(async () => {
       const ready = async () => {
@@ -435,7 +438,7 @@ export function registerWorkerProposalAuthority(
     const revision = layoutRevision;
     const reply = await Promise.race([worker.proposal({ kind: 'snapshot' }), retired.then(() => null)]).catch((error: unknown) => {
       if (retirementReason) return null;
-      if (revision === layoutRevision) initializationFailure = { error };
+      if (revision === layoutRevision && (editorRounds || mirror === null)) initializationFailure = { error };
       throw error;
     });
     assertCurrent();
@@ -478,6 +481,7 @@ export function registerWorkerProposalAuthority(
     releaseHydration();
   };
   const authority: RegisteredAuthority = {
+    hasEditorRounds: () => editorRounds,
     readsInWorker: () => !hooks.passiveEditor || workerOpenDocumentHeld(session) || holdsState || mutating > 0,
     get initialized() { return initialized; },
     snapshot: workerSnapshot,
@@ -680,6 +684,10 @@ export function workerProposalRoundAuthority(session: YrsSession): WorkerProposa
 }
 
 export const registeredWorkerProposalAuthority = workerProposalRoundAuthority;
+
+export function hasEditorWorkerProposalRounds(session: YrsSession): boolean {
+  return authorities.get(session)?.hasEditorRounds() === true;
+}
 
 export function workerProposalFailure(session: YrsSession): unknown {
   return authorities.get(session)?.failure();

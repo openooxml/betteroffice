@@ -435,7 +435,7 @@ test('a worker crash after a completed round hands over once and keeps edits and
   let existing!: ReturnType<typeof snapshot>;
   await act(async () => {
     existing = snapshot(h.peer.proposeChanges({
-      expectVersion: h.peer.version(), proposals: [h.proposal('peer-existing', 'Existing ')],
+      expectVersion: h.peer.version(), proposals: [h.proposal('peer-existing', 'Existing ', 'end')],
     }));
   });
   const expected = snapshot(await h.api.proposeChanges({
@@ -456,7 +456,9 @@ test('a worker crash after a completed round hands over once and keeps edits and
   const retained = [...expected.proposals, ...existing.proposals];
   expect(await h.api.getProposals()).toMatchObject({ proposals: retained });
   expect(h.peer.getProposals().proposals).toEqual(retained);
-  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('local', 'Peer ')] }));
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [{
+    ...h.proposal('local'), op: 'insertText', at: { offset: text(h.peer).indexOf('Alpha') + 2 }, text: 'Peer ',
+  }] }));
   expect(local).toHaveBeenCalledTimes(1);
   expect(text(h.peer)).toContain('Typed ');
   expect(text(h.peer)).toContain('Worker ');
