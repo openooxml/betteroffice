@@ -324,7 +324,7 @@ impl SheetPatch<'_> {
             return Ok(false);
         }
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
-        let Some((slot, value_name)) = self.cache_slot_oracle(data, source, at)? else {
+        let Some(slot) = self.cache_slot_oracle(data, source, at)? else {
             return Ok(false);
         };
 
@@ -345,7 +345,7 @@ impl SheetPatch<'_> {
             Event::Start(element) => attr(&element, b"t")?,
             _ => unreachable!("write_cell emits a cell start tag"),
         };
-        let (cached, _) =
+        let cached =
             cache_span_oracle(&written)?.expect("write_cell emits one formula and cache slot");
         if source.at != at {
             set_attribute(&mut attributes, "r", "r", at.to_a1());
@@ -375,18 +375,7 @@ impl SheetPatch<'_> {
         }
         write_start_tag(out, &name, &attributes, false)?;
         self.emit_source_content_oracle(out, data, source, at, slot.start)?;
-        let mut reader = Reader::from_reader(&written[cached]);
-        let mut writer = Writer::new(std::mem::take(out));
-        loop {
-            let event = match reader.read_event().map_err(xml_err)? {
-                Event::Start(_) => Event::Start(BytesStart::new(&value_name)),
-                Event::End(_) => Event::End(BytesEnd::new(&value_name)),
-                Event::Eof => break,
-                event => event,
-            };
-            writer.write_event(event).map_err(xml_err)?;
-        }
-        *out = writer.into_inner();
+        out.extend_from_slice(&written[cached]);
         out.extend_from_slice(&data[slot.end..source.span.end]);
         Ok(true)
     }
@@ -396,17 +385,16 @@ impl SheetPatch<'_> {
         data: &[u8],
         source: &SourceCell,
         at: CellRef,
-    ) -> Result<Option<(Range<usize>, String)>, ParseError> {
+    ) -> Result<Option<Range<usize>>, ParseError> {
         let Some(formula) = &source.formula else {
             return Ok(None);
         };
-        let (_, cell_attributes) = start_tag(&data[source.tag.clone()])?;
-        if cell_attributes.iter().any(|attribute| {
-            matches!(
-                attribute.name.as_str(),
-                "xmlns:r" | "xmlns:s" | "xmlns:t" | "xmlns:cm" | "xmlns:vm"
-            )
-        }) {
+        let (name, cell_attributes) = start_tag(&data[source.tag.clone()])?;
+        if name != "c"
+            || cell_attributes
+                .iter()
+                .any(|attribute| attribute.name == "xmlns" || attribute.name.contains(':'))
+        {
             return Ok(None);
         }
         let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
@@ -425,14 +413,8 @@ impl SheetPatch<'_> {
                 return Ok(None);
             }
         }
-        Ok(
-            cache_span_oracle(&data[source.span.clone()])?.map(|(span, name)| {
-                (
-                    source.span.start + span.start..source.span.start + span.end,
-                    name,
-                )
-            }),
-        )
+        Ok(cache_span_oracle(&data[source.span.clone()])?
+            .map(|span| source.span.start + span.start..source.span.start + span.end))
     }
 
     fn emit_cell_oracle(
@@ -583,7 +565,7 @@ impl SheetPatch<'_> {
     }
 }
 
-fn cache_span_oracle(cell: &[u8]) -> Result<Option<(Range<usize>, String)>, ParseError> {
+fn cache_span_oracle(cell: &[u8]) -> Result<Option<Range<usize>>, ParseError> {
     let mut reader = Reader::from_reader(cell);
     reader.config_mut().expand_empty_elements = false;
     if !matches!(reader.read_event().map_err(xml_err)?, Event::Start(_)) {
@@ -591,8 +573,6 @@ fn cache_span_oracle(cell: &[u8]) -> Result<Option<(Range<usize>, String)>, Pars
     }
     let mut formulas = Vec::new();
     let mut values = Vec::new();
-    let mut formula_name = None;
-    let mut value_name = None;
     loop {
         let start = reader.buffer_position() as usize;
         let (element, empty) = match reader.read_event().map_err(xml_err)? {
@@ -601,39 +581,36 @@ fn cache_span_oracle(cell: &[u8]) -> Result<Option<(Range<usize>, String)>, Pars
             Event::End(_) | Event::Eof => break,
             _ => continue,
         };
-        if matches!(element.local_name().as_ref(), b"f" | b"v") {
-            let declarations = attributes(&element)?;
-            if declarations
+        if !matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+            || attributes(&element)?
                 .iter()
                 .any(|attribute| attribute.name == "xmlns" || attribute.name.starts_with("xmlns:"))
-            {
-                return Ok(None);
-            }
-            let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-            if element.local_name().as_ref() == b"v" {
-                value_name = Some(name);
-            } else {
-                formula_name = Some(match name.rsplit_once(':') {
-                    Some((prefix, _)) => format!("{prefix}:v"),
-                    None => "v".to_owned(),
-                });
-            }
+        {
+            return Ok(None);
+        }
+        if element.name().as_ref() == b"is" {
+            return Ok(None);
         }
         if !empty {
-            reader.read_to_end(element.name()).map_err(xml_err)?;
+            loop {
+                match reader.read_event().map_err(xml_err)? {
+                    Event::Start(_) | Event::Empty(_) => return Ok(None),
+                    Event::End(_) => break,
+                    Event::Eof => return Ok(None),
+                    _ => {}
+                }
+            }
         }
         let span = start..reader.buffer_position() as usize;
-        match element.local_name().as_ref() {
+        match element.name().as_ref() {
             b"f" => formulas.push(span),
             b"v" => values.push(span),
-            b"is" => return Ok(None),
             _ => {}
         }
     }
-    let span = match (formulas.as_slice(), values.as_slice()) {
+    Ok(match (formulas.as_slice(), values.as_slice()) {
         ([formula], []) => Some(formula.end..formula.end),
         ([formula], [value]) if value.start >= formula.end => Some(value.clone()),
         _ => None,
-    };
-    Ok(span.zip(value_name.or(formula_name)))
+    })
 }

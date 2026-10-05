@@ -593,7 +593,7 @@ impl SheetPatch<'_> {
         {
             return Ok(false);
         }
-        let Some((slot, value_name)) = self.cache_patch_slot(data, source, at)? else {
+        let Some(slot) = self.cache_patch_slot(data, source, at)? else {
             return Ok(false);
         };
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
@@ -632,7 +632,7 @@ impl SheetPatch<'_> {
         if let Some(value) = markup.value {
             let mut writer = Writer::new(std::mem::take(out));
             writer
-                .create_element(value_name)
+                .create_element("v")
                 .write_text_content(BytesText::new(&value))
                 .map_err(xml_err)?;
             *out = writer.into_inner();
@@ -646,17 +646,16 @@ impl SheetPatch<'_> {
         data: &[u8],
         source: &SourceCell,
         at: CellRef,
-    ) -> Result<Option<(Range<usize>, String)>, ParseError> {
+    ) -> Result<Option<Range<usize>>, ParseError> {
         let Some(formula) = &source.formula else {
             return Ok(None);
         };
-        let (_, attributes) = start_tag(&data[source.tag.clone()])?;
-        if attributes.iter().any(|attribute| {
-            matches!(
-                attribute.name.as_str(),
-                "xmlns:r" | "xmlns:s" | "xmlns:t" | "xmlns:cm" | "xmlns:vm"
-            )
-        }) {
+        let (name, attributes) = start_tag(&data[source.tag.clone()])?;
+        if name != "c"
+            || attributes
+                .iter()
+                .any(|attribute| attribute.name.contains(':') || attribute.name == "xmlns")
+        {
             return Ok(None);
         }
         let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
@@ -905,53 +904,41 @@ fn range_changed(reference: CellRange, changed: &BTreeSet<(u32, u32)>) -> bool {
         .any(|&(_, col)| col >= reference.start.col && col <= reference.end.col)
 }
 
-fn cached_value_slot(
-    data: &[u8],
-    cell: &SourceCell,
-) -> Result<Option<(Range<usize>, String)>, ParseError> {
+fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {
     let mut reader = Reader::from_reader(&data[cell.span.clone()]);
     reader.config_mut().expand_empty_elements = false;
     let mut depth = 0_usize;
     let mut child_start = cell.tag.end;
     let mut formula_end = None;
     let mut value = None;
-    let mut formula_name = None;
-    let mut value_name = None;
     loop {
         let before = cell.span.start + reader.buffer_position() as usize;
         let event = reader.read_event().map_err(xml_err)?;
         let after = cell.span.start + reader.buffer_position() as usize;
-        if depth == 1
-            && let Event::Start(element) | Event::Empty(element) = &event
-            && matches!(element.local_name().as_ref(), b"f" | b"v")
-        {
-            if attributes(element)?
-                .iter()
-                .any(|attribute| attribute.name == "xmlns" || attribute.name.starts_with("xmlns:"))
-            {
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            if depth > 1 {
                 return Ok(None);
             }
-            let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
-            if element.local_name().as_ref() == b"f" {
-                formula_name = Some(
-                    name.rsplit_once(':')
-                        .map_or_else(|| "v".to_owned(), |(prefix, _)| format!("{prefix}:v")),
-                );
-            } else {
-                value_name = Some(name);
+            if depth == 1
+                && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+                    || attributes(element)?.iter().any(|attribute| {
+                        attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
+                    }))
+            {
+                return Ok(None);
             }
         }
         match event {
             Event::Start(element) => {
                 if depth == 1 {
                     child_start = before;
-                    if element.local_name().as_ref() == b"is" {
+                    if element.name().as_ref() == b"is" {
                         return Ok(None);
                     }
                 }
                 depth += 1;
             }
-            Event::Empty(element) if depth == 1 => match element.local_name().as_ref() {
+            Event::Empty(element) if depth == 1 => match element.name().as_ref() {
                 b"f" if formula_end.replace(after).is_some() => return Ok(None),
                 b"v" if value.replace(before..after).is_some() => return Ok(None),
                 b"is" => return Ok(None),
@@ -963,7 +950,7 @@ fn cached_value_slot(
                     break;
                 }
                 if depth == 1 {
-                    match element.local_name().as_ref() {
+                    match element.name().as_ref() {
                         b"f" if formula_end.replace(after).is_some() => return Ok(None),
                         b"v" if value.replace(child_start..after).is_some() => return Ok(None),
                         _ => {}
@@ -974,12 +961,11 @@ fn cached_value_slot(
             _ => {}
         }
     }
-    let slot = formula_end.and_then(|end| match value {
+    Ok(formula_end.and_then(|end| match value {
         Some(value) if value.start >= end => Some(value),
         None => Some(end..end),
         _ => None,
-    });
-    Ok(slot.zip(value_name.or(formula_name)))
+    }))
 }
 
 fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {
