@@ -1093,7 +1093,7 @@ describe('worker save availability', () => {
     const opened = await open(synthetic());
     expect(residentEdit(opened)).toBe(true);
     await workerSave(opened);
-    opened.client.destroy();
+    opened.worker.postMessage({ id: -1, type: 'destroy' });
     const client = new ResidentEngineWorkerClient(opened.worker);
     owned.push(client);
     const bytes = synthetic(paragraph('0000B001', 'A new document.'));
