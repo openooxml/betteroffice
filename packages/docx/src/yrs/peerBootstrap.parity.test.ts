@@ -297,6 +297,9 @@ for (const authored of [false, true]) {
     setComment(worker, authored ? 'Worker author' : '', authored ? 'Worker body' : null);
     const { baseline, bootstrapped } = pair(bytes, worker, host);
     compareReads(baseline.session, bootstrapped.session);
+    expect(withoutVersion(bootstrapped.session.exportStructured({ revisionView: 'markup', stories: ['comments'] }))).toEqual(
+      withoutVersion(baseline.session.exportStructured({ revisionView: 'markup', stories: ['comments'] }))
+    );
     await compareBytes(baseline, bootstrapped, host);
     if (!authored) {
       const result = bootstrapped.session.exportStructured({ revisionView: 'markup', stories: ['comments'] });
@@ -308,14 +311,21 @@ for (const authored of [false, true]) {
       peer.loadState(worker.encodeState());
     }
     compareReads(baseline.session, bootstrapped.session);
+    expect(withoutVersion(bootstrapped.session.exportStructured({ revisionView: 'markup', stories: ['comments'] }))).toEqual(
+      withoutVersion(baseline.session.exportStructured({ revisionView: 'markup', stories: ['comments'] }))
+    );
     for (const peer of [baseline.session, bootstrapped.session]) {
       setComment(peer, '', null);
       peer.loadState(worker.encodeState());
     }
     compareReads(baseline.session, bootstrapped.session);
+    const baselineResult = baseline.session.exportStructured({ revisionView: 'markup', stories: ['comments'] });
     const result = bootstrapped.session.exportStructured({ revisionView: 'markup', stories: ['comments'] });
+    expect(withoutVersion(result)).toEqual(withoutVersion(baselineResult));
+    expect(baselineResult.ok).toBe(true);
+    if (baselineResult.ok) expect(baselineResult.content.stories[0]!.comment?.author).toBeNull();
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.content.stories[0]!.comment?.author).toBe('');
+    if (result.ok) expect(result.content.stories[0]!.comment?.author).toBeNull();
     await compareBytes(baseline, bootstrapped, host);
   });
 }
