@@ -1367,23 +1367,24 @@ mod tests {
     }
 
     #[test]
-    fn peer_bootstrap_rejects_unsafe_retained_tables_atomically() {
+    fn peer_bootstrap_normalizes_retained_table_counts() {
         let source = synthetic_package();
         let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
         let metadata = worker.encode_peer_metadata().unwrap();
-        let (json, _) = sections(&metadata).unwrap();
+        let (json, blobs) = sections(&metadata).unwrap();
         let wire: Value = serde_json::from_slice(json).unwrap();
-        for (case, expected) in [
-            ("zero-span", "invalid source table grid count"),
-            ("negative-span", "invalid source table grid count"),
-            ("fractional-span", "invalid source table grid count"),
-            ("oversized-span", "invalid source table grid count"),
-            ("width-overflow", "source table column overflow"),
-            ("omission-overflow", "source table column overflow"),
-            ("leading-count", "invalid source table grid count"),
-            ("trailing-count", "invalid source table grid count"),
-            ("nested-table", "invalid source table grid count"),
-            ("separator-table", "invalid source table grid count"),
+        let state = worker.encode_state_as_update_v1();
+        for case in [
+            "zero-span",
+            "negative-span",
+            "fractional-span",
+            "oversized-span",
+            "width-overflow",
+            "omission-overflow",
+            "leading-count",
+            "trailing-count",
+            "nested-table",
+            "separator-table",
         ] {
             let mut table = json!({
                 "type": "table", "columnWidths": [900, 900],
@@ -1426,7 +1427,14 @@ mod tests {
                     "done": false, "body": body
                 }]);
             }
-            assert_invalid_metadata_is_atomic(&worker, &source, &metadata, &bad, expected);
+            let accepted = frame(&serde_json::to_vec(&bad).unwrap(), blobs).unwrap();
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &accepted, Some(source.clone()))
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            peer.apply_update_v1(&state).unwrap();
+            assert!(peer.source_metadata().is_some(), "{case}");
         }
     }
 
