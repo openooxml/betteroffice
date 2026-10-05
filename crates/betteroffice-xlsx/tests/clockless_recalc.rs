@@ -470,6 +470,9 @@ fn clock_token_calls_gate_regardless_of_arity_or_date_text() {
         "DATEVALUE(\"invalid\")",
         "_xlfn.NOW()",
         "now ()",
+        "_XLFN._XLWS.ToDaY()",
+        "_xlfn._xlws.DATEVALUE(\"3/15/2023\")",
+        "datevalue ()",
     ] {
         let mut workbook = synthetic(
             &[
@@ -561,26 +564,63 @@ fn formula_replacement_updates_clock_presence() {
 }
 
 #[test]
-fn date_coercion_functions_gate_the_workbook() {
-    for formula in [
-        "YEAR(\"3/15\")",
-        "MONTH(\"3/15\")",
-        "DAYS(\"3/15\",1)",
-        "ABS(\"3/15\")",
-        "INDEX(A2:A3,\"3/15\")",
-        "OFFSET(A2,\"3/15\",0)",
-        "RANDBETWEEN(1,\"3/15\")",
-    ] {
-        let mut workbook = synthetic(
-            &[
-                ("A1", formula, number(45_000.0)),
-                ("B1", "Sheet1!A1+1", number(99.0)),
-            ],
-            &[],
-            Vec::new(),
-        );
-        batch_edit(&mut workbook, "A1", "7", None);
-        assert_eq!(value(&workbook, "A1"), number(45_000.0), "{formula}");
-        assert_eq!(value(&workbook, "B1"), number(99.0), "{formula}");
+fn date_coercion_functions_recalculate_without_clock_tokens() {
+    let error = CellValue::Error {
+        value: ErrorValue::Value,
+    };
+    let formulas = [
+        ("A1", "ROUND(Sheet1!A1,\"0\")", number(7.0)),
+        (
+            "B1",
+            "VLOOKUP(Sheet1!A1,Sheet1!A1:A1,\"1\",FALSE)",
+            number(7.0),
+        ),
+        ("C1", "YEAR(\"3/15/2023\")+Sheet1!A1-7", number(2023.0)),
+        (
+            "D1",
+            "DATE(\"2023\",\"3\",\"15\")+Sheet1!A1-7",
+            number(45_000.0),
+        ),
+        ("E1", "ROUND(\"3/15\",Sheet1!A1)", error.clone()),
+        (
+            "F1",
+            "VLOOKUP(Sheet1!A1,Sheet1!A1:A1,\"3/15\",FALSE)",
+            error.clone(),
+        ),
+        ("G1", "YEAR(\"3/15\")+Sheet1!A1", error.clone()),
+        ("H1", "DATE(\"3/15\",3,Sheet1!A1)", error.clone()),
+        ("I1", "MONTH(\"3/15\")+Sheet1!A1", error.clone()),
+        ("J1", "DAYS(\"3/15\",1)+Sheet1!A1", error.clone()),
+        ("K1", "ABS(\"3/15\")+Sheet1!A1", error.clone()),
+        ("L1", "INDEX(A2:A3,\"3/15\")+Sheet1!A1", error.clone()),
+        ("M1", "OFFSET(A2,\"3/15\",0)+Sheet1!A1", error.clone()),
+        ("N1", "RANDBETWEEN(1,\"3/15\")+Sheet1!A1", error),
+        ("O1", "Sheet1!A1+1", number(8.0)),
+    ];
+    let cached = formulas
+        .iter()
+        .map(|(address, formula, _)| (*address, *formula, number(-1.0)))
+        .collect::<Vec<_>>();
+    for batch in [false, true] {
+        let mut workbook = synthetic(&cached, &[], Vec::new());
+        if batch {
+            batch_edit(&mut workbook, "A1", "7", None);
+        } else {
+            workbook
+                .edit_cell(SheetId(0), cell("A1"), "7", CalculationOptions::default())
+                .unwrap();
+        }
+        for (address, formula, expected) in &formulas {
+            assert_eq!(value(&workbook, address), *expected, "{formula}");
+        }
     }
+    let mut workbook = synthetic(&cached, &[], Vec::new());
+    workbook.recalculate_all(CalculationOptions::default());
+    for (address, formula, expected) in &formulas[4..14] {
+        assert_eq!(value(&workbook, address), *expected, "{formula}");
+    }
+    assert_eq!(value(&workbook, "A1"), number(0.0));
+    assert_eq!(value(&workbook, "C1"), number(2016.0));
+    assert_eq!(value(&workbook, "D1"), number(44_993.0));
+    assert_eq!(value(&workbook, "O1"), number(1.0));
 }

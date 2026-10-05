@@ -1751,7 +1751,7 @@ mod tests {
             );
         }
         workbook.sheets.push(sheet);
-        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, Some(45_000.0));
+        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
         assert_eq!(result.limited_cells.len(), 12);
         for col in 0..12 {
             assert_eq!(
@@ -1951,7 +1951,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let (mut graph, result) = crate::rebuild_and_recalc_all(&mut workbook, Some(45_000.0));
+        let (mut graph, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
         assert!(
             result.limited_cells.is_empty(),
             "{:?}",
@@ -1981,12 +1981,7 @@ mod tests {
             .sheet_mut(SheetId(0))
             .unwrap()
             .set_cell(first, number(100_001.0));
-        let result = crate::recalc_after(
-            &mut workbook,
-            &mut graph,
-            &[(SheetId(0), first)],
-            Some(45_000.0),
-        );
+        let result = crate::recalc_after(&mut workbook, &mut graph, &[(SheetId(0), first)], None);
         assert!(
             result.limited_cells.is_empty(),
             "{:?}",
