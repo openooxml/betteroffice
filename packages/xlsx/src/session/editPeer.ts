@@ -3,7 +3,7 @@ import {
   adoptWorkbookPeerVersion, StaleProposalError, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import type { WorkbookSession } from './client';
-import { workbookEditPeerInternals } from './editPeerInternals';
+import { WorkbookRecoveryRefusal, workbookEditPeerInternals } from './editPeerInternals';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 import {
   applyWorkbookReplayOp,
@@ -148,7 +148,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
 
   function recoveryResult(result: WorkbookReplayReply['result']): WorkbookReplayReply['result'] {
     if (workbookReplayRefused(result)) {
-      throw new Error(`Engine refused workbook recovery: ${JSON.stringify(result)}`);
+      throw new WorkbookRecoveryRefusal(result);
     }
     return result;
   }

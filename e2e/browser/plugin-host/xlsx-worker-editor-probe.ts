@@ -12,6 +12,8 @@ export interface WorkerEditorProbe {
   adoptedSequence(): number;
   hostEdit(value: string): Promise<void>;
   queueHostEdit(value: string): void;
+  queueCellHostEdit(value: string): void;
+  queueStyledBatch(): void;
   queueBulkFill(): void;
   bulkFill(): Promise<void>;
   formatCells(): Promise<void>;

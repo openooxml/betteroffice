@@ -225,6 +225,16 @@ window.__xlsxWorkerEditor = {
   },
   async hostEdit(value) { await api!.editCellAsync(0, 1, 1, value); },
   queueHostEdit(value) { void api!.editCellAsync(0, 1, 1, value).catch(() => {}); },
+  queueCellHostEdit(value) { void api!.editCellAsync(0, 0, 0, value).catch(() => {}); },
+  queueStyledBatch() {
+    const version = initialVersions.get(generation);
+    if (!version) throw new Error('Missing edit version');
+    const target = { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } };
+    void api!.applyEdits({ expectVersion: version, steps: [
+      { op: 'setCellInputs', target, inputs: [['styled batch']] },
+      { op: 'patchStyle', target, patch: { fontSize: 24 } },
+    ] }).catch((error) => errors.push(error.message));
+  },
   queueBulkFill() {
     const version = peers.get(generation) ? undefined : initialVersions.get(generation);
     if (!version) throw new Error('Queue a bulk fill before hydration');

@@ -231,3 +231,54 @@ for (const lifecycle of ['replacement', 'disposal', 'StrictMode']) {
     }
   });
 }
+
+for (const route of ['cell', 'host', 'paste'] as const) {
+  for (const [input, normalized] of [['001', '1'], ['true', 'TRUE'], ['false', 'FALSE'], ["'quoted", 'quoted'],
+    ['=RANDBETWEEN(1,1000000)', '=RANDBETWEEN(1,1000000)']]) {
+    test(`adopts a byte-identical normalized or volatile preview (${route}, ${input})`, async ({ page, context }) => {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await open(page, true);
+      const clip = await page.evaluate(() => window.__xlsxWorkerEditor.cellClip());
+      if (route === 'host') await page.evaluate((value) => window.__xlsxWorkerEditor.queueCellHostEdit(value), input);
+      else if (route === 'paste') {
+        await page.evaluate((value) => navigator.clipboard.writeText(value), input);
+        await page.getByTestId('xlsx-scroll').focus();
+        await page.getByTestId('xlsx-scroll').press('ControlOrMeta+v');
+      } else {
+        await page.getByTestId('xlsx-scroll').focus();
+        await page.getByTestId('xlsx-scroll').press('F2');
+        await page.getByTestId('xlsx-cell-editor').fill(input);
+        await page.getByTestId('xlsx-cell-editor').press('Enter');
+      }
+      await expect(page.getByTestId('xlsx-commit-preview')).toHaveAttribute('data-preview-ready', 'true');
+      expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(false);
+      const before = await page.screenshot({ clip, animations: 'disabled' });
+      await page.evaluate(() => window.__xlsxWorkerEditor.releaseHydration());
+      await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.adoptedSequence())).toBeGreaterThanOrEqual(1);
+      await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
+      const after = await page.screenshot({ clip, animations: 'disabled' });
+      expect(before.equals(after)).toBe(true);
+      await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe(normalized);
+      expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries)).toHaveLength(1);
+      expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+    });
+  }
+}
+
+test('shows no speculative canvas for a host batch containing a style step', async ({ page }) => {
+  await open(page, true);
+  await page.evaluate(() => window.__xlsxWorkerEditor.queueStyledBatch());
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(false);
+  await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries)).toEqual([]);
+  await page.evaluate(() => window.__xlsxWorkerEditor.releaseHydration());
+  await page.evaluate(() => window.__xlsxWorkerEditor.flush());
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.adoptedSequence())).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('styled batch');
+  await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries[0])).toMatchObject({ method: 'applyEdits', args: [{
+    steps: [{ op: 'setCellInputs', inputs: [['styled batch']] }, { op: 'patchStyle', patch: { fontSize: 24 } }],
+  }] });
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});

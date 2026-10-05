@@ -7,6 +7,13 @@ export interface WorkbookEditPeerOperations {
   applyRecoveryOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
 }
 
+export class WorkbookRecoveryRefusal extends Error {
+  constructor(readonly result: WorkbookReplayReply['result']) {
+    super(`Engine refused workbook recovery: ${JSON.stringify(result)}`);
+    this.name = 'WorkbookRecoveryRefusal';
+  }
+}
+
 export const workbookEditPeerInternals = new WeakMap<WorkbookEditPeer, WorkbookEditPeerOperations>();
 
 /** @internal */

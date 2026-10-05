@@ -42,7 +42,9 @@ async function advance(count = 8) {
   for (let index = 0; index < count; index++) await tick();
 }
 
-function harness(realFacade = false) {
+function harness(realFacade = false, normalizeInput = false) {
+  const normalize = (input: string) => !normalizeInput ? input : input === '001' ? '1' :
+    input === 'true' ? 'TRUE' : input === 'false' ? 'FALSE' : input.replace(/^'/, '');
   const log: string[] = [];
   const cells = new Map<string, string>([['0:0:0', 'initial']]);
   const workerCells = new Map(cells);
@@ -71,7 +73,7 @@ function harness(realFacade = false) {
     log.push(`edit:${sheet}:${row}:${col}:${input}`);
     if (sheet < 0 || sheet > 1 || row < 0 || row > 1048575 || col < 0 || col > 16383) throw new RangeError('Invalid cell target');
     if (input.length > 32767) throw new Error('Cell text exceeds Excel length limit');
-    cells.set(`${sheet}:${row}:${col}`, input);
+    cells.set(`${sheet}:${row}:${col}`, normalize(input));
     version += 1;
     sequence += 1;
     for (const update of updates) update();
@@ -190,11 +192,24 @@ function harness(realFacade = false) {
   }));
   const preview = mock(async (viewport: xlsx.Viewport, sheet: number, ops: readonly import('../../../xlsx/src/session/replay').WorkbookReplayOp[]) => {
     const values = new Map(cells);
-    for (const op of ops) if (op.method === 'editCell') {
+    for (const op of ops) {
+      if (op.method === 'editCells') {
+        for (const edit of op.args[1]) values.set(`${op.args[0]}:${edit.row}:${edit.col}`, normalize(edit.input));
+      }
+      if (op.method === 'applyEdits') {
+        for (const step of op.args[0].steps) {
+          if (step.op !== 'setCellInputs') continue;
+          const sheet = Number(step.target.sheetId.split(':')[1]);
+          const start = step.target.range.kind === 'rowCol' ? step.target.range.start : { row: 0, col: 0 };
+          step.inputs.forEach((row, dr) => row.forEach((input, dc) =>
+            values.set(`${sheet}:${start.row + dr}:${start.col + dc}`, normalize(input))));
+        }
+      }
+      if (op.method !== 'editCell') continue;
       if (op.args[3].startsWith('=') && new TextEncoder().encode(op.args[3].slice(1)).byteLength > 32768) {
         throw new Error('Formula exceeds the length limit');
       }
-      values.set(`${op.args[0]}:${op.args[1]}:${op.args[2]}`, op.args[3]);
+      values.set(`${op.args[0]}:${op.args[1]}:${op.args[2]}`, normalize(op.args[3]));
     }
     return { sheet, viewport, version: `v${version}`, epoch: 0, sequence,
       mergedRanges: [], displayList: display('preview', values) };
@@ -1625,6 +1640,37 @@ for (const pending of ['read', 'write'] as const) {
   });
 }
 
+for (const route of ['plugin', 'host'] as const) {
+  it(`refuses a retained stale-version batch and recovers valid edits around it (${route})`, async () => {
+    const host = harness(true);
+    let context!: XlsxPluginContext<null>;
+    let api!: XlsxWorkerEditorApi;
+    const plugin = defineXlsxPlugin({ id: 'stale-plugin', createState: () => null, initialize(value) { context = value; } });
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} plugins={[plugin]}
+      pluginGrants={{ 'stale-plugin': { document: 'write', editBatches: true } }} onReady={(value) => { api = value; }} />);
+    await opened();
+    await api.whenHydrated();
+    await waitFor(() => expect(context).toBeTruthy());
+    const request = { ...reviewBatch('refused', host.peer.version()),
+      steps: reviewBatch('refused').steps.map(({ expect: _expect, ...step }) => step) };
+    reviewEdit(view, 'before refusal');
+    act(() => {
+      if (route === 'plugin') void context.run(async (current) => { await current.edits!.applyEdits(request); });
+      else void api.applyEdits(request).catch(() => {});
+    });
+    act(() => { void api.editCellAsync(0, 0, 1, 'after refusal').catch(() => {}); host.fail(); });
+    const saved = await api.recoverySave();
+    expect(saved.recovery).toBe(true);
+    expect(JSON.parse(new TextDecoder().decode(saved.bytes))).toEqual([
+      ['0:0:0', 'before refusal'], ['0:0:1', 'after refusal'],
+    ]);
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/version|refused/i);
+    expect(host.peerMethods.applyEdits).toHaveBeenCalledTimes(1);
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'before refusal'], [0, 0, 1, 'after refusal']]);
+    expect(host.peerMethods.save).toHaveBeenCalledTimes(1);
+  });
+}
+
 it('keeps refused nonmutating commands out of mutation recovery', async () => {
   const host = harness(true);
   const hydration = deferred<WorkbookHandle>();
@@ -1762,7 +1808,7 @@ it('recovers on the first attempt with a pending failed flush', async () => {
   expect(host.session.save).not.toHaveBeenCalled();
 });
 
-for (const route of ['paste', 'delete', 'host', 'bulk', 'formula-save', 'formula-navigation'] as const) {
+for (const route of ['paste', 'cut', 'delete', 'host', 'bulk', 'formula-save', 'formula-navigation'] as const) {
   it(`paints every accepted pre-hydration cell edit before hydration resolves (${route})`, async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
@@ -1772,7 +1818,8 @@ for (const route of ['paste', 'delete', 'host', 'bulk', 'formula-save', 'formula
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
     let accepted: Promise<unknown> | undefined;
-    if (route === 'paste') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+    if (route === 'cut') { promisedClipboard(); fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true }); }
+    else if (route === 'paste') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
     else if (route === 'delete') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'Delete' });
     else if (route === 'host') act(() => { accepted = api.editCellAsync(0, 0, 0, 'host'); });
     else if (route === 'bulk') act(() => { accepted = api.applyEdits(reviewBatch('plugin')); });
@@ -1781,7 +1828,7 @@ for (const route of ['paste', 'delete', 'host', 'bulk', 'formula-save', 'formula
       act(() => { accepted = route === 'formula-save' ? api.save() : api.selectCellsAsync(1, xlsx.selectionAt({ row: 0, col: 0 })); });
     }
     await advance();
-    const expected = route === 'delete' ? '' : route === 'paste' ? 'pasted' : route === 'host' ? 'host' : route === 'bulk' ? 'plugin' : '=24';
+    const expected = route === 'delete' || route === 'cut' ? '' : route === 'paste' ? 'pasted' : route === 'host' ? 'host' : route === 'bulk' ? 'plugin' : '=24';
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(expected);
     expect(host.preview).toHaveBeenCalled();
     expect(painted.some((list) => list.commands.some((cmd) => cmd.op === 'text' && cmd.text === `preview:${expected}`))).toBe(true);
@@ -1900,3 +1947,133 @@ for (const route of ['save', 'saveAsync', 'command', 'shortcut', 'toolbar'] as c
     expect(JSON.parse(new TextDecoder().decode(recovered.bytes))).toEqual([['0:0:0', 'saved']]);
   });
 }
+
+for (const [input, normalized] of [['001', '1'], ['true', 'TRUE'], ['false', 'FALSE'], ["'quoted", 'quoted']]) {
+  for (const route of ['cell', 'host', 'paste'] as const) {
+    it(`retires an engine-normalized preview by operation identity (${route}, ${input})`, async () => {
+      const host = harness(false, true);
+      let api!: XlsxWorkerEditorApi;
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
+      await opened();
+      const frame = host.sessionMethods.frame.getMockImplementation()!;
+      const adoption = deferred<void>();
+      host.sessionMethods.frame.mockImplementation(async (viewport, options) => { await adoption.promise; return frame(viewport, options); });
+      if (route === 'cell') reviewEdit(view, input);
+      else if (route === 'paste') {
+        replaceClipboard('readText', mock(async () => input));
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      } else void api.editCellAsync(0, 0, 0, input);
+      await advance();
+      expect(host.cells.get('0:0:0')).toBe(normalized);
+      expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+      await act(async () => adoption.resolve());
+      await advance();
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+      expect(painted[painted.length - 1].commands.some((cmd) => cmd.op === 'text' && cmd.text === `worker:${normalized}`)).toBe(true);
+    });
+  }
+}
+
+it('reuses the complete volatile host operation and calculation context for preview and replay', async () => {
+  const host = harness(true);
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
+  await opened();
+  const pending = api.editCellAsync(0, 0, 0, '=RANDBETWEEN(1,1000000)');
+  await advance();
+  expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+  const op = host.preview.mock.calls[0][2][0];
+  expect(op.calculation).toBeTruthy();
+  await act(async () => hydration.resolve(host.peer));
+  await advance();
+  await pending;
+  expect(host.replay.mock.calls[0][0].op).toEqual(op);
+  expect(host.replay.mock.calls[0][0].calculation).toEqual(op.calculation);
+  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+});
+
+for (const step of ['patchStyle', 'setFormulas'] as const) {
+  it(`omits a host batch preview when complete semantics cannot be materialized (${step})`, async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
+    await opened();
+    const request = reviewBatch('styled');
+    const target = request.steps[0].target;
+    request.steps.push(step === 'patchStyle' ? { op: 'patchStyle', target, patch: { fontSize: 24 } } :
+      { op: 'setFormulas', target, formulas: [['24']] });
+    const pending = api.applyEdits(request);
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.preview).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect((await pending)?.ok).toBe(true);
+    expect(host.editMethods.applyEdits).toHaveBeenCalledWith(request);
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  });
+}
+
+it('retires a held preview after scroll and zoom change when the covering worker frame is adopted', async () => {
+  const host = harness();
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
+  await opened();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  const adoption = deferred<void>();
+  host.sessionMethods.frame.mockImplementation(async (viewport, options) => { await adoption.promise; return frame(viewport, options); });
+  reviewEdit(view, 'new viewport');
+  await advance();
+  expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+  const scroll = view.getByTestId('xlsx-scroll');
+  scroll.scrollTop = 96;
+  scroll.scrollLeft = 192;
+  fireEvent.scroll(scroll);
+  let zoom!: Promise<unknown>;
+  act(() => { zoom = api.commands.execute('zoom', { scale: 1.25 }); });
+  await advance();
+  await zoom;
+  expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+  await act(async () => adoption.resolve());
+  await advance();
+  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  const canvas = view.container.querySelector('[data-paint-source="worker"]');
+  expect(canvas?.getAttribute('data-worker-sequence')).toBe('1');
+  expect(canvas?.getAttribute('data-worker-zoom')).toBe('1.25');
+  expect(host.sessionMethods.frame.mock.calls[host.sessionMethods.frame.mock.calls.length - 1][0]).toMatchObject({ x: 153.6, y: 76.8 });
+  expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  expect(painted[painted.length - 1].commands.some((cmd) => cmd.op === 'text' && cmd.text === 'worker:new viewport')).toBe(true);
+});
+
+it('restores a pre-hydration cut preview when clipboard writing is refused', async () => {
+  const host = harness();
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  const clipboard = promisedClipboard();
+  const writing = deferred<void>();
+  clipboard.write.mockReturnValue(writing.promise);
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+  await opened();
+  fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+  await advance();
+  expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+  expect(host.cells.get('0:0:0')).toBe('initial');
+  await act(async () => writing.reject(new DOMException('Clipboard denied', 'NotAllowedError')));
+  await advance();
+  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  expect(host.editMethods.editCells).not.toHaveBeenCalled();
+  await act(async () => hydration.resolve(host.peer));
+  await advance();
+  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/clipboard denied/i);
+  expect(host.cells.get('0:0:0')).toBe('initial');
+  expect(host.editMethods.editCells).not.toHaveBeenCalled();
+  expect(host.replay).not.toHaveBeenCalled();
+  expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+});

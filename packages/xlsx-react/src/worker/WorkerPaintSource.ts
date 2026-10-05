@@ -11,14 +11,14 @@ export interface WorkerPaintRequest {
   dpr: number;
 }
 
-export interface WorkerPeerPaint {
+export interface WorkerFramePaint {
   displayList: DisplayList;
   mergedRanges: readonly MergedRange[];
   version: string;
 }
 
-export interface WorkerPaintResult extends WorkerPeerPaint {
-  source: 'peer' | 'worker';
+export interface WorkerPaintResult extends WorkerFramePaint {
+  source: 'worker';
   request: WorkerPaintRequest;
   geometry: GridMeta | undefined;
   sequence: number;
@@ -95,19 +95,6 @@ export class WorkerPaintSource {
     });
   }
 
-  commit(request: WorkerPaintRequest, paint: WorkerPeerPaint): WorkerPaintResult | null {
-    const next = snapshot(request);
-    if (!sameRequest(this.capture(), next)) return null;
-    this.revision += 1;
-    this.cancelFrame();
-    try {
-      return this.publish('peer', next, paint, this.options.sentSequence());
-    } catch (error) {
-      this.fail(error);
-      throw error;
-    }
-  }
-
   fail(error: unknown): void {
     if (!this.current || this.failed) return;
     this.failed = true;
@@ -147,7 +134,7 @@ export class WorkerPaintSource {
 
   private publish(
     source: WorkerPaintResult['source'], request: WorkerPaintRequest,
-    paint: WorkerPeerPaint, sequence: number
+    paint: WorkerFramePaint, sequence: number
   ): WorkerPaintResult {
     const painted: WorkerPaintResult = {
       ...paint, source, request, sequence, geometry: paint.displayList.grid,

@@ -2,6 +2,8 @@ import type {
   CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
 } from '@betteroffice/xlsx';
 import { WorkbookEditPeerFailedError, WorkbookPeerHydrationError } from '@betteroffice/xlsx';
+import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
+import type { WorkbookReplayOp } from '../../../xlsx/src/session/replay';
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
@@ -47,10 +49,10 @@ export interface WorkerEditorApiBridge {
   recoverInput(): Promise<void>;
   selectCells(sheet: number, selection: Selection): boolean;
   selectCellsAsync(sheet: number, selection: Selection): Promise<boolean>;
-  previewEdits?(sheet: number, edits: readonly CellInputEdit[]): Promise<void | (() => Promise<void>)>;
+  previewEdits?(sheet: number, edits: readonly CellInputEdit[], op?: WorkbookReplayOp): Promise<void | (() => Promise<void>)>;
   beforeNavigation?(): Promise<void>;
   canNavigateSync?(): boolean;
-  apply(result: EditResult | XlsxEditResult): void;
+  apply(result: EditResult | XlsxEditResult, op?: WorkbookReplayOp): void;
 }
 
 /** @experimental */
@@ -156,12 +158,15 @@ export function createWorkerEditorApi(
     if (!session.retiring) bridge().apply(result);
     return result;
   };
-  const previewRequest = async (request: Parameters<WorkbookHandle['applyEdits']>[0]) => {
+  const previewRequest = async (request: Parameters<WorkbookHandle['applyEdits']>[0], op: WorkbookReplayOp) => {
+    if (request.steps.some((step) => step.op !== 'setCellInputs')) {
+      return bridge().previewEdits?.(0, [], op);
+    }
     const discards: (() => Promise<void>)[] = [];
     const discard = async () => { for (const cancel of discards.splice(0).reverse()) await cancel(); };
     try {
       for (const step of request.steps) {
-        if (step.op !== 'setCellInputs' && step.op !== 'setFormulas') continue;
+        if (step.op !== 'setCellInputs') continue;
         const sheet = Number(/^sheet:(\d+)$/.exec(step.target.sheetId)?.[1] ?? -1);
         const range = step.target.range;
         let start: { row: number; col: number };
@@ -171,11 +176,10 @@ export function createWorkerEditorApi(
           if (!match) throw new WorkerInputRefusal('Invalid cell range');
           start = { row: Number(match[2]) - 1, col: [...match[1].toUpperCase()].reduce((col, letter) => col * 26 + letter.charCodeAt(0) - 64, 0) - 1 };
         }
-        const matrix = step.op === 'setCellInputs' ? step.inputs : step.formulas;
-        const edits = matrix.flatMap((row, dr) => row.map((value, dc) => ({
-          row: start.row + dr, col: start.col + dc, input: step.op === 'setFormulas' ? `=${value}` : value,
+        const edits = step.inputs.flatMap((row, dr) => row.map((value, dc) => ({
+          row: start.row + dr, col: start.col + dc, input: value,
         })));
-        const cancel = await bridge().previewEdits?.(sheet, edits);
+        const cancel = await bridge().previewEdits?.(sheet, edits, op);
         if (cancel) discards.push(cancel);
       }
     } catch (error) { await discard(); throw error; }
@@ -254,13 +258,22 @@ export function createWorkerEditorApi(
     },
     applyEdits: (request) => {
       const input = structuredClone(request);
+      const op: WorkbookReplayOp = { method: 'applyEdits', args: [input] };
       return ordered('apply-edits', (markApplied) => {
         if (bridge().readOnly() && !session.retiring) return refusal();
-        const result = requirePeer().edits.applyEdits(input);
+        let result: XlsxEditResult;
+        try {
+          result = session.recovering || !bridge().previewEdits ? requirePeer().edits.applyEdits(input) :
+            workbookEditPeerOperations(requirePeer().edits).applyQueuedOp(op) as XlsxEditResult;
+        }
+        catch (error) {
+          if (!(error instanceof WorkbookRecoveryRefusal)) throw error;
+          result = error.result as XlsxEditResult;
+        }
         if (result.ok) markApplied();
-        if (!session.retiring) bridge().apply(result);
+        if (!session.retiring) bridge().apply(result, op);
         return result;
-      }, true, () => previewRequest(input));
+      }, true, () => previewRequest(input, op));
     },
     cell: (sheet, row, col) => readable() ? session.peer!.cell(sheet, row, col) : null,
     cellAsync: (sheet, row, col) => ordered('cell', () => requirePeer().peer.cell(sheet, row, col)),
@@ -272,12 +285,20 @@ export function createWorkerEditorApi(
       if (bridge().readOnly()) throw new Error('The editor is read-only');
       return synchronous((markApplied) => editCell(sheet, row, col, input, markApplied));
     },
-    editCellAsync: (sheet, row, col, input) => ordered('edit-cell', (markApplied) => {
-      if (bridge().readOnly() && !session.retiring) return { error: new Error('The editor is read-only') };
-      return { result: editCell(sheet, row, col, input, markApplied) };
-    }, true, () => bridge().previewEdits?.(sheet, [{ row, col, input }])).then((outcome) => {
-      if (outcome?.error) throw outcome.error;
-      return outcome?.result ?? null;
-    }),
+    editCellAsync: (sheet, row, col, input) => {
+      const op: WorkbookReplayOp = { method: 'editCell', args: [sheet, row, col, input] };
+      return ordered('edit-cell', (markApplied) => {
+        if (bridge().readOnly() && !session.retiring) return { error: new Error('The editor is read-only') };
+        if (!bridge().previewEdits || session.recovering) return { result: editCell(sheet, row, col, input, markApplied) };
+        markApplied.check();
+        const result = workbookEditPeerOperations(requirePeer().edits).applyQueuedOp(op) as EditResult;
+        markApplied();
+        if (!session.retiring) bridge().apply(result, op);
+        return { result };
+      }, true, () => bridge().previewEdits?.(sheet, [{ row, col, input }], op)).then((outcome) => {
+        if (outcome?.error) throw outcome.error;
+        return outcome?.result ?? null;
+      });
+    },
   };
 }

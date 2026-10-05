@@ -38,7 +38,7 @@ import {
   useEditableSessionWorkbook, type EditableSessionWorkbookProps, type EditableWorkbookSession,
 } from './useEditableSessionWorkbook';
 import { workbookSessionInternals, type WorkbookReplayOp } from '../../../xlsx/src/session/replay';
-import { workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
+import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
 import { WorkerPaintSource, type WorkerPaintRequest, type WorkerPaintResult } from './WorkerPaintSource';
 
 const BRAND = '#217346';
@@ -51,7 +51,7 @@ const chartKeys: Record<string, [number, number] | undefined> = {
   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
 };
 
-type WorkerCellDraft = InputDraft & { prefill?: boolean; modified?: boolean; revision?: number };
+type WorkerCellDraft = InputDraft & { prefill?: boolean; modified?: boolean; revision?: number; unchanged?: boolean };
 
 function address(cell: CellAddr): string {
   let column = '';
@@ -167,8 +167,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     recoverInput: () => apiBridgeRef.current!.recoverInput(),
     selectCells: (...args) => apiBridgeRef.current?.selectCells(...args) ?? false,
     selectCellsAsync: (...args) => apiBridgeRef.current?.selectCellsAsync(...args) ?? Promise.resolve(false),
-    apply: (result) => apiBridgeRef.current?.apply(result),
-    previewEdits: (sheet, edits) => apiBridgeRef.current?.previewEdits?.(sheet, edits) ?? Promise.resolve(),
+    apply: (result, op) => apiBridgeRef.current?.apply(result, op),
+    previewEdits: (sheet, edits, op) => apiBridgeRef.current?.previewEdits?.(sheet, edits, op) ?? Promise.resolve(),
     beforeNavigation: () => apiBridgeRef.current?.beforeNavigation?.() ?? Promise.resolve(),
     canNavigateSync: () => apiBridgeRef.current?.canNavigateSync?.() ?? false,
   }));
@@ -180,6 +180,10 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const operationPeer = useMemo(() => ({ current: run?.editPeer ?? null }), [run]);
   if (run?.editPeer && !run.recovering) operationPeer.current = run.editPeer;
   const previewOps = useMemo(() => new Map<string, WorkbookReplayOp>(), [run]);
+  const unchangedPreviews = useMemo(() => new WeakSet<WorkbookReplayOp>(), [run]);
+  const previewJournal = useMemo(() => [] as WorkbookReplayOp[], [run]);
+  const completedPreviews = useMemo(() => new WeakMap<WorkbookReplayOp, number>(), [run]);
+  const unpreviewedOps = useMemo(() => new Set<WorkbookReplayOp>(), [run]);
   const previewState = useMemo(() => ({ revision: 0, sequence: Infinity, request: null as WorkerPaintRequest | null }), [run]);
   const coordinator = useMemo(() => {
     const owner = run;
@@ -259,27 +263,38 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         } };
         draftOperations.set(draft, op);
       }
+      if ((draft as WorkerCellDraft).unchanged) unchangedPreviews.add(op);
+      if (preceding && preceding !== op && unchangedPreviews.has(preceding)) {
+        const index = previewJournal.indexOf(preceding);
+        if (index >= 0) previewJournal.splice(index, 1);
+      }
       previewOps.set(key, op);
+      if (!previewJournal.includes(op)) previewJournal.push(op);
       previewState.sequence = Infinity;
       const revision = ++previewState.revision;
       const request = capture();
+      if (unpreviewedOps.size) { await boundary(); return; }
       if (request) {
         const internal = workbookSessionInternals.get(run.session);
         if (!internal?.preview) throw new Error('Worker cell preview is unavailable');
         let frame: WorkbookFrame;
-        try { frame = await internal.preview(request.viewport, request.sheet, [...previewOps.values()]); }
+        try {
+          frame = await internal.preview(request.viewport, request.sheet,
+            previewJournal.filter((pending) => !completedPreviews.has(pending)));
+        }
         catch (error) {
           if (discardOnFailure && previewOps.get(key) === op) {
             if (preceding) previewOps.set(key, preceding);
             else previewOps.delete(key);
             if (precedingInput !== undefined) acceptedCells.set(key, precedingInput);
             else acceptedCells.delete(key);
+            const index = previewJournal.indexOf(op);
+            if (index >= 0) previewJournal.splice(index, 1);
           }
           if (!previewOps.size && revision === previewState.revision && !run.retiring) {
             setPreviewDraft(null);
             previewState.request = null;
-          } else if (discardOnFailure && run.peer && [...previewOps.values()].every((pending) =>
-            pending.method === 'editCell' && run.peer!.cell(pending.args[0], pending.args[1], pending.args[2]).input === pending.args[3])) {
+          } else if (discardOnFailure && previewJournal.every((pending) => completedPreviews.has(pending))) {
             previewState.sequence = run.editPeer?.sentSequence ?? Infinity;
             sourceRef.current?.schedule();
           }
@@ -287,7 +302,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         }
         if (run.retiring || run.recovering || run.failure || !run.current || revision !== previewState.revision) return;
         previewState.request = request;
-        previewState.sequence = Infinity;
+        previewState.sequence = previewJournal.every((pending) => completedPreviews.has(pending)) ?
+          run.editPeer?.sentSequence ?? Infinity : Infinity;
+        if (unpreviewedOps.size) return;
         flushSync(() => setPreviewDraft(draft));
         const canvas = previewCanvasRef.current;
         const context = canvas?.getContext('2d');
@@ -301,9 +318,20 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }
     await boundary();
-  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations]);
+  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
-  const previewEdits = useCallback(async (sheet: number, edits: readonly CellInputEdit[]) => {
+  const previewEdits = useCallback(async (sheet: number, edits: readonly CellInputEdit[], operation?: WorkbookReplayOp) => {
+    if (operation?.method === 'applyEdits' && operation.args[0].steps.some((step) => step.op !== 'setCellInputs')) {
+      unpreviewedOps.add(operation);
+      previewState.revision += 1;
+      previewState.request = null;
+      setPreviewDraft(null);
+      return async () => { unpreviewedOps.delete(operation); };
+    }
+    if (operation) operation.calculation ??= {
+      nowSerial: Date.now() / 86400000 + 25569,
+      randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0],
+    };
     const preceding = new Map(previewOps);
     const precedingCells = new Map(acceptedCells);
     const recorded = new Map<string, WorkbookReplayOp>();
@@ -318,7 +346,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     for (const edit of edits) {
       const key = `${sheet}:${edit.row}:${edit.col}`;
       acceptedCells.set(key, edit.input);
-      previewOps.set(key, { method: 'editCell', args: [sheet, edit.row, edit.col, edit.input] });
+      const op = operation ?? { method: 'editCell' as const, args: [sheet, edit.row, edit.col, edit.input] as [number, number, number, string] };
+      const previous = preceding.get(key);
+      if (previous && previous !== op && unchangedPreviews.has(previous)) {
+        const index = previewJournal.indexOf(previous);
+        if (index >= 0) previewJournal.splice(index, 1);
+      }
+      previewOps.set(key, op);
+      if (!previewJournal.includes(op)) previewJournal.push(op);
     }
     const restore = async () => {
       let changed = false;
@@ -333,15 +368,19 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         else acceptedCells.delete(key);
         changed = true;
       }
+      for (const op of new Set(recorded.values())) {
+        const index = previewJournal.indexOf(op);
+        if (index >= 0) previewJournal.splice(index, 1);
+      }
       if (!changed || run?.retiring || run?.failure) return;
-      const pending = [...previewOps.values()].reverse().find((op) => op.method === 'editCell');
-      if (pending?.method === 'editCell') {
-        const draft: InputDraft = { generation: run!.generation, sheet: pending.args[0], row: pending.args[1],
-          col: pending.args[2], value: pending.args[3], source: 'cell' };
-        draftOperations.set(draft, pending);
+      const pending = [...previewOps.entries()].reverse()[0];
+      if (pending) {
+        const [sheet, row, col] = pending[0].split(':').map(Number);
+        const draft: InputDraft = { generation: run!.generation, sheet, row, col,
+          value: acceptedCells.get(pending[0]) ?? '', source: 'cell' };
+        draftOperations.set(draft, pending[1]);
         await preview(draft);
-        if (run?.peer && [...previewOps.values()].every((op) => op.method === 'editCell' &&
-          run.peer!.cell(op.args[0], op.args[1], op.args[2]).input === op.args[3])) {
+        if (previewJournal.every((op) => completedPreviews.has(op))) {
           previewState.sequence = run.editPeer?.sentSequence ?? Infinity;
           sourceRef.current?.schedule();
         }
@@ -352,8 +391,10 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     };
     try {
-      const prepared = edits[0] ? preview({ generation: run!.generation, sheet, row: edits[0].row,
-        col: edits[0].col, value: edits[0].input, source: 'cell' }, false) : Promise.resolve();
+      const draft: InputDraft | undefined = edits[0] ? { generation: run!.generation, sheet, row: edits[0].row,
+        col: edits[0].col, value: edits[0].input, source: 'cell' } : undefined;
+      if (draft && operation) draftOperations.set(draft, operation);
+      const prepared = draft ? preview(draft, false) : Promise.resolve();
       for (const edit of edits) {
         const key = `${sheet}:${edit.row}:${edit.col}`;
         recorded.set(key, previewOps.get(key)!);
@@ -364,7 +405,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       throw error;
     }
     return restore;
-  }, [run, preview, acceptedCells, previewOps, previewState, draftOperations]);
+  }, [run, preview, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
   const refreshProposals = useCallback(() => {
     const owner = runRef.current;
@@ -379,12 +420,15 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     sourceRef.current?.schedule();
   }, [run]);
 
-  const trackCommit = useCallback(() => {
-    const complete = run?.peer && [...previewOps.values()].every((op) => op.method === 'editCell' &&
-      run.peer!.cell(op.args[0], op.args[1], op.args[2]).input === op.args[3]);
-    previewState.sequence = complete ? run!.editPeer?.sentSequence ?? Infinity : Infinity;
+  const trackCommit = useCallback((op?: WorkbookReplayOp) => {
+    if (op) {
+      completedPreviews.set(op, run?.editPeer?.sentSequence ?? 0);
+      unpreviewedOps.delete(op);
+    }
+    const complete = !unpreviewedOps.size && previewJournal.every((pending) => completedPreviews.has(pending));
+    previewState.sequence = complete ? Math.max(0, ...previewJournal.map((pending) => completedPreviews.get(pending)!)) : Infinity;
     sourceRef.current?.schedule();
-  }, [run, previewState, previewOps]);
+  }, [run, previewState, completedPreviews, unpreviewedOps, previewJournal]);
 
   const closeWrittenDraft = (draft: InputDraft) => {
     const live = coordinator.draft;
@@ -403,11 +447,16 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     } else setFormulaDraft(null);
   };
 
-  const apply = useCallback((result: EditResult | XlsxEditResult) => {
+  const apply = useCallback((result: EditResult | XlsxEditResult, op?: WorkbookReplayOp) => {
     const owner = run;
     if (!owner?.peer || owner.retiring) return;
     try {
-      trackCommit();
+      if (!op && previewState.request && (!('ok' in result) || result.ok) && result.applied) {
+        previewState.revision += 1;
+        previewState.request = null;
+        setPreviewDraft(null);
+      }
+      trackCommit(op);
       mutationRef.current += 1;
       const info = owner.peer.sheetInfo();
       if (viewRef.current && info.activeSheet === activeRef.current) {
@@ -420,7 +469,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     } catch (error) {
       owner.fail(error);
     }
-  }, [run, commands, peerPaint, refreshProposals, trackCommit]);
+  }, [run, commands, peerPaint, refreshProposals, trackCommit, previewState]);
 
   const afterPaint = useCallback((): Promise<boolean> => {
     const owner = runRef.current;
@@ -585,9 +634,10 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         canvas.dataset.paintSource = painted.source;
         canvas.dataset.workerZoom = String(request.zoom);
         setPainted(painted);
-        if (previewState.request && samePaint(painted, previewState.request, previewState.sequence)) {
+        if ((previewState.request || previewJournal.length) && painted.sequence >= previewState.sequence) {
           setPreviewDraft(null);
           previewOps.clear();
+          previewJournal.length = 0;
           acceptedCells.clear();
           previewState.request = null;
         }
@@ -728,7 +778,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const value = run?.peer ? run.peer.cell(draft.sheet, draft.row, draft.col).input :
         internal?.cellInput ? await internal.cellInput(draft.sheet, draft.row, draft.col) :
         (await run!.session.call.cellInputs(draft.sheet, address(draft))).cells[0]?.[0]?.input ?? '';
-      return { ...draft, value, modified: true } as WorkerCellDraft;
+      return { ...draft, value, modified: true, unchanged: true } as WorkerCellDraft;
     },
     write(draft, markApplied) {
       const owner = run;
@@ -744,8 +794,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const result = op && operations ? (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
           owner.editPeer.editCell(draft.sheet, draft.row, draft.col, draft.value);
         markApplied();
-        apply(result);
-      } else trackCommit();
+        apply(result, op);
+      } else trackCommit(draftOperations.get(draft));
       if (!owner.retiring) closeWrittenDraft(draft);
       return true;
     },
@@ -786,7 +836,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const draft = coordinator.draft;
     if (draft?.source !== source) return;
     if (!coordinator.submit(draft)) return;
-    if ((draft as WorkerCellDraft).modified !== false) {
+    if ((draft as WorkerCellDraft).modified !== false && !unpreviewedOps.size) {
       previewState.sequence = Infinity;
       if (previewCanvasRef.current) previewCanvasRef.current.dataset.previewReady = 'false';
       setPreviewDraft(draft);
@@ -827,7 +877,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }
     const captureClipboard = () => kind === 'paste' ? navigator.clipboard.readText() : '';
     let mutation: Extract<WorkbookReplayOp, { method: 'editCells' }> | undefined;
-    void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
+    let discardPreview: (() => Promise<void>) | undefined;
+    let clipboardRefusal: unknown;
+    void clipboardWrite?.done.catch((error) => {
+      clipboardRefusal = error;
+      if (kind === 'cut' && discardPreview) void discardPreview().catch(reportInputError);
+      reportInputError(error);
+    });
+    const prepareMutation = async (text: string) => {
       if (kind !== 'copy' && !mutation) {
         const edits: CellInputEdit[] = [];
         if (kind === 'paste') {
@@ -840,6 +897,11 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         }
         mutation = { method: 'editCells', args: [sheet, edits] };
       }
+      if (mutation) discardPreview = await previewEdits(sheet, mutation.args[1], mutation);
+      if (clipboardRefusal) { await discardPreview?.(); throw clipboardRefusal; }
+    };
+    void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
+      if (kind !== 'copy' && !mutation) await prepareMutation(text);
       if (kind !== 'paste') {
         const copied = toTsv(owner.peer!.rangeCells(sheet, selectedRange(selected)));
         let written: boolean;
@@ -858,23 +920,19 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const op = mutation!;
       const edits = op.args[1];
       if (edits.length === 0) return;
-      await preview({ generation: owner.generation, source: 'cell', sheet, row: edits[0].row, col: edits[0].col, value: edits[0].input });
       markApplied.check();
       const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer!);
       const result = (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied();
-      apply(result);
+      apply(result, op);
       if (kind === 'paste' && selectionRef.current === selected && activeRef.current === sheet) {
         setSelection({ anchor: { row: range.top, col: range.left }, focus: {
           row: Math.max(...edits.map((edit) => edit.row)), col: Math.max(...edits.map((edit) => edit.col)),
         } });
       }
-    }, { sheet, target: JSON.stringify(range) }, kind === 'paste' ? async (text) => {
-      await previewEdits(sheet, fromTsv(text).flatMap((row, dr) => row.map((input, dc) => ({
-        row: range.top + dr, col: range.left + dc, input,
-      }))));
-    } : undefined, kind !== 'copy').catch((error) => {
+    }, { sheet, target: JSON.stringify(range) }, kind !== 'copy' ? prepareMutation : undefined, kind !== 'copy').catch(async (error) => {
       clipboardWrite?.reject(error);
+      if (inputRefusal(error)) await discardPreview?.();
       reportInputError(error);
     });
   };
@@ -887,12 +945,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     for (let row = range.top; row <= range.bottom; row++) {
       for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
     }
+    const op: WorkbookReplayOp = { method: 'editCells', args: [sheet, edits] };
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
       markApplied.check();
-      const result = run!.editPeer!.editCells(sheet, edits);
-      markApplied(); apply(result);
+      const operations = workbookEditPeerOperations(run!.recovering ? operationPeer.current! : run!.editPeer!);
+      const result = (run!.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
+      markApplied(); apply(result, op);
     }, { kind: 'input', target: { sheet, target: JSON.stringify(range) },
-      prepare: async () => { await previewEdits(sheet, edits); } }).catch(reportInputError);
+      prepare: async () => { await previewEdits(sheet, edits, op); } }).catch(reportInputError);
   };
 
   const navigate = (sheet: number, next: Selection) => {
@@ -1125,7 +1185,12 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           const denied = authorize(owner.recovering);
           if (denied) { applied.refuse(new WorkerInputRefusal('Plugin write permission was refused')); return denied; }
           const write = () => owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op);
-          const result = (owner.recovering ? write() : commit(write)) as XlsxEditResult;
+          let result: XlsxEditResult;
+          try { result = (owner.recovering ? write() : commit(write)) as XlsxEditResult; }
+          catch (error) {
+            if (!(error instanceof WorkbookRecoveryRefusal)) throw error;
+            result = error.result as XlsxEditResult;
+          }
           if (!result.ok) {
             applied.refuse(new WorkerInputRefusal(result.failure.message), true);
             return result;
