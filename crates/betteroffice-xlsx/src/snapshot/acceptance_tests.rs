@@ -303,9 +303,12 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
         canonical_model(peer.model())
     );
     assert_eq!(canonical_base(worker), canonical_base(peer));
-    let reindexed = worker.preserved.axes.iter().flatten().any(|axes| {
-        !axes.rows.is_identity() || !axes.cols.is_identity()
-    });
+    let reindexed = worker
+        .preserved
+        .axes
+        .iter()
+        .flatten()
+        .any(|axes| !axes.rows.is_identity() || !axes.cols.is_identity());
     if reindexed {
         for workbook in [worker, peer] {
             assert_eq!(
