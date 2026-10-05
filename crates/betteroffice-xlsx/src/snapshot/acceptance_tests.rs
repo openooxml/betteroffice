@@ -313,7 +313,9 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
             .source_container
             .as_ref()
             .map(SourceContainer::as_bytes),
-        peer.source_container.as_ref().map(SourceContainer::as_bytes),
+        peer.source_container
+            .as_ref()
+            .map(SourceContainer::as_bytes),
     );
     let facts = |slot: &Option<PackageSlot>| {
         slot.as_ref().map(|slot| match slot {
@@ -483,8 +485,9 @@ fn corrupt_header_counts(
     let logical_ordinal = reader.var_u64().unwrap();
     let length = reader.var_usize().unwrap();
     assert_eq!(reader.var_usize().unwrap(), 0);
-    assert_eq!(reader.rest().len(), length);
-    let (_, _, payload) = unframe(reader.rest()).unwrap();
+    let rest = reader.rest();
+    assert_eq!(rest.len(), length);
+    let (_, _, payload) = unframe(rest).unwrap();
     let mut reader = Reader::new(payload);
     let mut header = SnapshotHeader::decode(reader.bytes().unwrap()).unwrap();
     let flags = [

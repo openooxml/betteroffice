@@ -1526,9 +1526,11 @@ mod tests {
                     let oversized = payload.len() > budget.max_bytes();
                     oversized_chunks += usize::from(oversized);
                     if oversized {
-                        assert!(payload.windows(20 * 1024).any(|bytes| {
-                            bytes.iter().all(|byte| *byte == b'x')
-                        }));
+                        assert!(
+                            payload
+                                .windows(20 * 1024)
+                                .any(|bytes| { bytes.iter().all(|byte| *byte == b'x') })
+                        );
                     }
                     loop {
                         crate::snapshot::step::reset();
