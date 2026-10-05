@@ -3,9 +3,10 @@ import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:t
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef, useEffect, useMemo } from 'react';
-import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { resolveDisplayPageClientRect, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
+import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsInputPositionMap,
@@ -20,6 +21,7 @@ import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
 import { useLayoutPipeline, type UseLayoutPipelineReturn } from './hooks/useLayoutPipeline';
 import { useLayoutTriggers } from './hooks/useLayoutTriggers';
 import { useRevisionPreview } from './hooks/useRevisionPreview';
+import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -152,8 +154,41 @@ async function mount(
 }
 
 async function mountWithPipeline(workerLayout: boolean) {
+  let nextFrame = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const requestFrame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+    const id = ++nextFrame;
+    frames.set(id, callback);
+    return id;
+  });
+  const cancelFrame = spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id) => {
+    frames.delete(id);
+  });
+  restoreMocks.push(() => { requestFrame.mockRestore(); cancelFrame.mockRestore(); });
+  const frame = async () => {
+    await act(async () => {
+      for (const [id, callback] of [...frames]) {
+        if (frames.delete(id)) callback(performance.now());
+      }
+    });
+    expect(frames.size).toBe(0);
+  };
   const mounted = await mount(false, true);
   const { session, input, scroller, view, inputFor, queries, canvasHostRef, onStateChange } = mounted;
+  let currentScrollTop = scroller.scrollTop;
+  const scrollChanges: number[] = [];
+  Object.defineProperty(scroller, 'scrollTop', {
+    configurable: true,
+    get: () => currentScrollTop,
+    set: (value: number) => {
+      if (value !== currentScrollTop) scrollChanges.push(value);
+      currentScrollTop = value;
+    },
+  });
+  const displayQueries = {
+    ...queries,
+    caretRect: mock((position: number) => queries.caretRect(position)),
+  };
   const computation = () => ({ layout: { pages: [] } as unknown as Layout, notesConverged: true });
   const retainedLayout = spyOn(session, 'layoutDocumentWithRegionsRetainedJson')
     .mockImplementation(() => JSON.stringify(computation()));
@@ -171,6 +206,21 @@ async function mountWithPipeline(workerLayout: boolean) {
   };
   let pipeline!: UseLayoutPipelineReturn;
   let frameEpoch = 1;
+  const published: Array<{
+    layout: Layout;
+    origin: UseLayoutPipelineReturn['layoutUpdateOrigin'];
+    frameEpoch: number;
+  }> = [];
+  const onLayoutComputed = (layout: Layout | null) => {
+    if (layout) published.push({ layout, origin: pipeline.layoutUpdateOrigin, frameEpoch });
+  };
+  const getScrollContainer = () => scroller;
+  const getSelectionHead = () => input.current?.displaySelection()?.head ?? 0;
+  const residentMeasurementConfig = () => measurement;
+  const deferLayoutPass = () => false;
+  const viewportLayoutRef = { current: null };
+  const updateSelectionOverlay = () => {};
+  const onError = mock(() => {});
   const handleStateChange: YrsInputProps['onStateChange'] = (...args) => {
     onStateChange(...args);
     if (args[1] && !args[2]) {
@@ -190,66 +240,117 @@ async function mountWithPipeline(workerLayout: boolean) {
       renderEnv,
       pageGap: 24,
       zoom: 1,
-      residentMeasurementConfig: () => measurement,
-      deferLayoutPass: () => false,
-      displayListQueries: queries as unknown as DisplayListQueries,
+      residentMeasurementConfig,
+      deferLayoutPass,
+      displayListQueries: displayQueries as unknown as DisplayListQueries,
       pagesContainerRef: canvasHostRef,
-      viewportLayoutRef: { current: null },
-      getSelectionHead: () => input.current?.displaySelection()?.head ?? 0,
+      viewportLayoutRef,
+      getSelectionHead,
       syncCoordinator,
-      getScrollContainer: () => scroller,
+      getScrollContainer,
       layoutInWorker,
+      onLayoutComputed,
+      onError,
     });
     useLayoutTriggers({
       runLayoutPipeline: pipeline.runLayoutPipeline,
-      updateSelectionOverlay: () => {},
+      updateSelectionOverlay,
       renderEnv,
     });
     useEffect(() => pipeline.runLayoutPipeline(), [session]);
     const displayListFrameEpoch = useMemo(() => ++frameEpoch, [pipeline.layout]);
     return inputFor({
+      displayListQueries: displayQueries as unknown as DisplayListQueries,
       layoutUpdateOrigin: pipeline.layoutUpdateOrigin,
       displayListFrameEpoch,
       onStateChange: handleStateChange,
     });
   }
   await act(async () => view.rerender(<PipelineInput />));
+  await frame();
   expect(pipeline.layout).not.toBeNull();
-  return { ...mounted, pipeline: () => pipeline, layoutInWorker, retainedLayout };
+  expect(onError).not.toHaveBeenCalled();
+  return {
+    ...mounted, queries: displayQueries, pipeline: () => pipeline, layoutInWorker, retainedLayout,
+    frame, frameEpoch: () => frameEpoch, published, scrollChanges, onError,
+  };
+}
+
+function offscreenCaretDelta(t: Awaited<ReturnType<typeof mount>>) {
+  const queries = t.queries as unknown as DisplayListQueries;
+  expect(queries.isReady()).toBe(true);
+  const selection = t.input.current!.displaySelection();
+  expect(selection).not.toBeNull();
+  expect(selection!.anchor).toBe(selection!.head);
+  const caret = queries.caretRect(selection!.head);
+  expect(caret).not.toBeNull();
+  const pageRect = resolveDisplayPageClientRect(
+    t.canvasHostRef.current, queries, caret!.pageIndex
+  );
+  const pageSize = queries.pageSize(caret!.pageIndex);
+  expect(pageRect).not.toBeNull();
+  expect(pageSize).not.toBeNull();
+  expect(pageSize!.height).toBeGreaterThan(0);
+  expect(findVerticalScrollParentOrRoot(t.canvasHostRef.current)).toBe(t.scroller);
+  const scaleY = pageRect!.height / pageSize!.height;
+  const top = pageRect!.top + caret!.y * scaleY;
+  const bottom = top + Math.max(1, caret!.height * scaleY);
+  const viewport = scrollViewport(t.scroller);
+  expect(top < viewport.top || bottom > viewport.bottom).toBe(true);
+  const delta = scrollIntoViewDelta(viewport, top, bottom, 24);
+  expect(delta).not.toBe(0);
+  return delta;
 }
 
 test.each([false, true])(
   'proposal accept, reject and undo preserve scrollTop with an unchanged distant caret (worker layout=%s)',
   async (workerLayout) => {
     const t = await mountWithPipeline(workerLayout);
-    const last = t.session.paragraphs('body').at(-1)!;
-    const proposal = t.session.proposeChanges({
-      expectVersion: t.session.version(),
-      proposals: [{
-        id: 'distant',
-        paragraph: {
-          kind: 'session',
-          sessionId: t.session.paragraphIdentities().sessionId,
-          story: 'body',
-          paraId: last.paraId,
-        },
-        suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
-        op: 'insertText',
-        at: 'end',
-        text: ' proposal',
-      }],
+    const firstText = t.session.paragraphs('body')[0]!.text;
+    await act(async () => {
+      fireEvent.input(t.view.getByTestId('yrs-input'), { target: { value: '12345678' } });
+      await t.input.current!.flushPendingInput();
     });
-    expect(proposal.ok).toBe(true);
-    await act(async () => t.pipeline().runLayoutPipeline());
+    await t.frame();
+    expect(t.session.paragraphs('body')[0]!.text).toBe(`12345678${firstText}`);
+    t.expectCaret(8);
+    expect(t.pipeline().layoutUpdateOrigin).toBe('local');
+    const last = t.session.paragraphs('body').at(-1)!;
+    await act(async () => {
+      const proposal = t.session.proposeChanges({
+        expectVersion: t.session.version(),
+        proposals: [{
+          id: 'distant',
+          paragraph: {
+            kind: 'session',
+            sessionId: t.session.paragraphIdentities().sessionId,
+            story: 'body',
+            paraId: last.paraId,
+          },
+          suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText',
+          at: 'end',
+          text: ' proposal',
+        }],
+      });
+      expect(proposal.ok).toBe(true);
+    });
+    await t.frame();
     const selection = t.session.selection();
     expect(selection).not.toBeNull();
     expect(selection!.anchor).toEqual(selection!.head);
     for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
-      t.scroller.scrollTop = t.scrollTop;
+      const scrollTop = 2300;
+      t.scroller.scrollTop = scrollTop;
       fireEvent.scroll(t.scroller);
-      const caret = t.queries.caretRect(t.input.current!.displaySelection()!.head);
-      expect(caret.y - t.scroller.scrollTop).toBeGreaterThan(t.scroller.clientHeight);
+      expect(offscreenCaretDelta(t)).toBeLessThan(0);
+      t.scrollChanges.length = 0;
       const layout = t.pipeline().layout;
+      const frameEpoch = t.frameEpoch();
+      const publications = t.published.length;
+      const caretQueries = t.queries.caretRect.mock.calls.length;
+      const version = t.session.version();
+      const previewVersion = t.session.getProposals().previewVersion;
       const workerPasses = t.layoutInWorker.mock.calls.length;
       const hostPasses = t.retainedLayout.mock.calls.length;
       await act(async () => {
@@ -260,11 +361,22 @@ test.each([false, true])(
         });
         expect(result.ok).toBe(true);
       });
+      await t.frame();
+      expect(t.session.version()).toBe(version);
+      expect(t.session.getProposals().previewVersion).toBe(previewVersion + 1);
       expect(t.pipeline().layout).not.toBe(layout);
+      expect(t.published).toHaveLength(publications + 1);
+      expect(t.published.at(-1)!.layout).toBe(t.pipeline().layout!);
+      expect(t.published.at(-1)!.frameEpoch).toBeGreaterThan(frameEpoch);
+      expect(t.queries.caretRect.mock.calls.length).toBeGreaterThan(caretQueries);
       expect(t.layoutInWorker).toHaveBeenCalledTimes(workerPasses + 1);
       expect(t.retainedLayout).toHaveBeenCalledTimes(hostPasses + (workerLayout ? 0 : 1));
       expect(t.session.selection()).toEqual(selection);
-      expect(t.scroller.scrollTop).toBe(t.scrollTop);
+      expect(t.scrollChanges).toEqual([]);
+      expect(t.scroller.scrollTop).toBe(scrollTop);
+      expect(t.published.at(-1)!.origin).toBe('remote');
+      expect(t.pipeline().layoutUpdateOrigin).toBe('remote');
+      expect(t.onError).not.toHaveBeenCalled();
     }
   }
 );
@@ -276,16 +388,30 @@ test('a local Delete reveals a distant caret even when its collapsed selection i
   fireEvent.scroll(t.scroller);
   const text = t.session.paragraphs('body')[0]!.text;
   const layout = t.pipeline().layout;
+  const frameEpoch = t.frameEpoch();
+  const publications = t.published.length;
+  const delta = offscreenCaretDelta(t);
+  expect(delta).toBeGreaterThan(0);
+  t.scrollChanges.length = 0;
   await act(async () => {
     fireEvent.keyDown(t.view.getByTestId('yrs-input'), { key: 'Delete' });
     await t.input.current!.flushPendingInput();
-    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
   });
+  const caretQueries = t.queries.caretRect.mock.calls.length;
+  await t.frame();
   expect(t.session.paragraphs('body')[0]!.text).toBe(text.slice(1));
   expect(t.session.selection()).toEqual(selection);
   expect(t.pipeline().layout).not.toBe(layout);
+  expect(t.published).toHaveLength(publications + 1);
+  expect(t.published.at(-1)!.layout).toBe(t.pipeline().layout!);
+  expect(t.published.at(-1)!.frameEpoch).toBeGreaterThan(frameEpoch);
+  expect(t.queries.caretRect.mock.calls.length).toBeGreaterThan(caretQueries);
   expect(t.pipeline().layoutUpdateOrigin).toBe('local');
+  expect(t.published.at(-1)!.origin).toBe('local');
   expect(t.scroller.scrollTop).toBeGreaterThan(t.scrollTop);
+  expect(t.scroller.scrollTop).toBe(t.scrollTop + delta);
+  expect(t.scrollChanges).toEqual([t.scrollTop + delta]);
+  expect(t.onError).not.toHaveBeenCalled();
 });
 
 test('a resident Delete frame reveals an unchanged distant caret after a remote layout', async () => {
