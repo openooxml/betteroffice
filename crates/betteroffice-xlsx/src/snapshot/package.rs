@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use ooxml_opc::SourceContainer;
-use xlsx_parse::{PackageFacts, PackageFactsView, PreservedPackage};
+use xlsx_parse::{PackageFacts, PackageFactsEncoder, PackageFactsView, PreservedPackage};
 
 use super::{SnapshotError, SnapshotResult};
 use crate::{Error, Result};
@@ -46,6 +46,18 @@ impl PackageSlot {
         }
     }
 
+    pub(crate) fn next_facts(
+        &self,
+        encoder: &mut PackageFactsEncoder,
+        max_bytes: usize,
+    ) -> SnapshotResult<Option<Vec<u8>>> {
+        match self {
+            Self::Present(package) => encoder.next(package, max_bytes),
+            Self::Deferred { facts, .. } => encoder.next_from_facts(facts, max_bytes),
+        }
+        .map_err(|failure| SnapshotError::new(failure.to_string()))
+    }
+
     pub(crate) fn materialize(&self) -> Result<&PreservedPackage> {
         match self {
             Self::Present(package) => Ok(package),
@@ -60,10 +72,22 @@ impl PackageSlot {
 }
 
 fn rebuild(source: &SourceContainer) -> std::result::Result<PreservedPackage, String> {
+    #[cfg(test)]
+    REBUILDS.set(REBUILDS.get() + 1);
     let parts = ooxml_opc::unzip_parts(source.as_bytes())?;
     xlsx_parse::parse_workbook_with_owned_package(parts)
         .map(|parsed| parsed.package)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+thread_local! {
+    static REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn rebuild_count() -> usize {
+    REBUILDS.get()
 }
 
 #[cfg(test)]

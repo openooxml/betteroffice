@@ -301,6 +301,27 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
     );
     assert_eq!(canonical_base(worker), canonical_base(peer));
     assert_eq!(canonical_preserved(worker), canonical_preserved(peer));
+    assert_eq!(worker.preserved.origins, peer.preserved.origins);
+    assert_eq!(
+        worker.preserved.shared_string_cells,
+        peer.preserved.shared_string_cells
+    );
+    assert_eq!(worker.preserved.axes, peer.preserved.axes);
+    assert_eq!(worker.preserved.created, peer.preserved.created);
+    assert_eq!(
+        worker
+            .source_container
+            .as_ref()
+            .map(SourceContainer::as_bytes),
+        peer.source_container.as_ref().map(SourceContainer::as_bytes),
+    );
+    let facts = |slot: &Option<PackageSlot>| {
+        slot.as_ref().map(|slot| match slot {
+            PackageSlot::Present(package) => xlsx_parse::PackageFacts::from_package(package),
+            PackageSlot::Deferred { facts, .. } => facts.clone(),
+        })
+    };
+    assert_eq!(facts(&worker.source_package), facts(&peer.source_package));
     assert_eq!(worker.active_sheet, peer.active_sheet);
     assert_eq!(worker.rand_seed, peer.rand_seed);
     assert_eq!(worker.model_epoch, peer.model_epoch);
@@ -327,6 +348,342 @@ fn assert_step_budget(budget: SnapshotBudget) -> crate::snapshot::step::StepWork
     assert!(work.records <= budget.max_records(), "{work:?}");
     assert!(work.bytes <= budget.max_bytes(), "{work:?}");
     work
+}
+
+fn decoded_snapshot(chunks: &[Vec<u8>]) -> Vec<(ChunkKind, u64, Vec<u8>)> {
+    let mut records = Vec::new();
+    let mut logical = Vec::new();
+    for chunk in chunks {
+        let (_, _, payload) = unframe(chunk).unwrap();
+        let mut reader = Reader::new(payload);
+        reader.var_u64().unwrap();
+        reader.var_u64().unwrap();
+        let length = reader.var_usize().unwrap();
+        let offset = reader.var_usize().unwrap();
+        assert_eq!(offset, logical.len());
+        logical.extend_from_slice(reader.rest());
+        if logical.len() != length {
+            continue;
+        }
+        let (kind, ordinal, payload) = unframe(&logical).unwrap();
+        if kind == ChunkKind::Header && ordinal == 0 {
+            let mut reader = Reader::new(payload);
+            let mut header = SnapshotHeader::decode(reader.bytes().unwrap()).unwrap();
+            header.snapshot_id = 0;
+            let mut writer = Writer::new();
+            writer.bytes(&header.encode());
+            writer.raw(reader.rest());
+            records.push((kind, ordinal, writer.into_bytes()));
+        } else if kind != ChunkKind::End {
+            records.push((kind, ordinal, payload.to_vec()));
+        }
+        logical.clear();
+    }
+    assert!(logical.is_empty());
+    records
+}
+
+#[test]
+fn snapshot_unchanged_hydrated_peer_recaptures_without_package_parse() {
+    for budget in budgets() {
+        for bytes in [source(false, false), source(true, true)] {
+            let worker = worker(&bytes);
+            let parses = crate::snapshot::package::rebuild_count();
+            let chunks = encode(&worker, budget);
+            let (peer, _) = completed_builder(&chunks, budget)
+                .finish()
+                .unwrap()
+                .into_parts();
+            assert_current_identity(&worker, &peer);
+            assert!(peer.source_package_is_unmaterialized_for_test());
+            let recaptured = encode(&peer, budget);
+            assert_eq!(decoded_snapshot(&chunks), decoded_snapshot(&recaptured));
+            assert_eq!(crate::snapshot::package::rebuild_count(), parses);
+            assert!(peer.source_package_is_unmaterialized_for_test());
+        }
+        let worker = Workbook::from_model(WorkbookModel {
+            sheets: vec![crate::Sheet::new("Empty")],
+            ..WorkbookModel::default()
+        })
+        .unwrap();
+        let chunks = encode(&worker, budget);
+        let (peer, _) = completed_builder(&chunks, budget)
+            .finish()
+            .unwrap()
+            .into_parts();
+        assert_eq!(
+            decoded_snapshot(&chunks),
+            decoded_snapshot(&encode(&peer, budget))
+        );
+    }
+}
+
+#[test]
+fn snapshot_structured_reference_insert_rows_refusal_matches_source() {
+    let mut worker = worker(&source(false, false));
+    let mut peer = hydrate(&worker, budgets()[0]);
+    assert_edited_identity(&worker, &peer);
+    for workbook in [&mut worker, &mut peer] {
+        workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "7", context())
+            .unwrap();
+        workbook.recalculate_all(context());
+        workbook.set_active_sheet(SheetId(0)).unwrap();
+    }
+    let operation = Op::InsertRows {
+        sheet: SheetId(0),
+        at: 0,
+        count: 1,
+    };
+    for workbook in [&mut worker, &mut peer] {
+        let before = canonical_model(workbook.model());
+        let failure = workbook
+            .apply_ops(vec![operation.clone()], context())
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            crate::Error::Operation(xlsx_ops::OpError::FormulaNotRewritable {
+                sheet: SheetId(0),
+                cell,
+            }) if cell == CellRef::new(2, 0)
+        ));
+        assert_eq!(canonical_model(workbook.model()), before);
+    }
+    assert_edited_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_push_rejects_every_skipped_chunk_without_advance() {
+    let worker = worker(&source(false, false));
+    for budget in budgets() {
+        let chunks = encode(&worker, budget);
+        for skipped in 1..chunks.len() - 1 {
+            let mut builder = WorkbookSnapshotBuilder::new();
+            for chunk in &chunks[..skipped] {
+                builder.push(chunk).unwrap();
+                assert_step_budget(budget);
+            }
+            assert!(
+                builder.push(&chunks[skipped + 1]).is_err(),
+                "skipped {skipped}"
+            );
+            assert_step_budget(budget);
+        }
+    }
+}
+
+fn corrupt_header_counts(
+    chunk: &[u8],
+    source_length: Option<usize>,
+    calculation_counts: Option<[usize; 3]>,
+) -> Vec<u8> {
+    let (kind, ordinal, payload) = unframe(chunk).unwrap();
+    let mut reader = Reader::new(payload);
+    let snapshot_id = reader.var_u64().unwrap();
+    let logical_ordinal = reader.var_u64().unwrap();
+    let length = reader.var_usize().unwrap();
+    assert_eq!(reader.var_usize().unwrap(), 0);
+    assert_eq!(reader.rest().len(), length);
+    let (_, _, payload) = unframe(reader.rest()).unwrap();
+    let mut reader = Reader::new(payload);
+    let mut header = SnapshotHeader::decode(reader.bytes().unwrap()).unwrap();
+    let flags = [
+        reader.bool().unwrap(),
+        reader.bool().unwrap(),
+        reader.bool().unwrap(),
+    ];
+    let source_length = source_length.or(reader.option(Reader::var_usize).unwrap());
+    let mut styles = [0; 7];
+    for count in &mut styles {
+        *count = reader.var_usize().unwrap();
+    }
+    let mut counts = [0; 3];
+    for count in &mut counts {
+        *count = reader.var_usize().unwrap();
+    }
+    reader.finish().unwrap();
+    if let Some(declared) = calculation_counts {
+        counts = declared;
+        header.chunk_counts[index(ChunkKind::Header)] =
+            1 + counts.iter().map(|n| *n as u64).sum::<u64>();
+    }
+    let mut writer = Writer::new();
+    writer.bytes(&header.encode());
+    for flag in flags {
+        writer.bool(flag);
+    }
+    writer.option(source_length, Writer::var_usize);
+    for count in styles.into_iter().chain(counts) {
+        writer.var_usize(count);
+    }
+    let logical = frame(kind, logical_ordinal, &writer.into_bytes());
+    let mut writer = Writer::new();
+    writer.var_u64(snapshot_id);
+    writer.var_u64(logical_ordinal);
+    writer.var_usize(logical.len());
+    writer.var_usize(0);
+    writer.raw(&logical);
+    frame(kind, ordinal, &writer.into_bytes())
+}
+
+#[test]
+fn snapshot_huge_source_length_is_rejected_before_allocation() {
+    let budget = budgets()[0];
+    let worker = worker(&source(false, false));
+    let mut chunks = encode(&worker, budget);
+    chunks[0] = corrupt_header_counts(&chunks[0], Some(usize::MAX / 4), None);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in &chunks[..chunks.len() - 1] {
+        builder.push(chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        assert_eq!(assert_step_budget(budget).initialized_bytes, 0);
+        assert!(builder.source.is_none());
+    }
+    let failure = builder.push(chunks.last().unwrap()).unwrap_err();
+    assert_eq!(failure.to_string(), "snapshot source length differs");
+    assert_step_budget(budget);
+    assert!(builder.source.is_none());
+}
+
+#[test]
+fn snapshot_huge_calculation_counts_do_not_allocate_declared_storage() {
+    let budget = budgets()[0];
+    let worker = worker(&source(false, false));
+    let chunks = encode(&worker, budget);
+    let header = corrupt_header_counts(&chunks[0], None, Some([usize::MAX / 4, 0, 0]));
+    let mut builder = WorkbookSnapshotBuilder::new();
+    builder.push(&header).unwrap();
+    assert_step_budget(budget);
+    builder.advance(budget).unwrap();
+    assert_step_budget(budget);
+    let state = builder.header.as_ref().unwrap();
+    assert_eq!(state.header.last_calculation.changed.capacity(), 0);
+    assert_eq!(state.header.last_calculation.cycle_cells.capacity(), 0);
+    assert_eq!(state.header.last_calculation.limited_cells.capacity(), 0);
+    let mut refused = false;
+    for chunk in &chunks[1..] {
+        match builder.push(chunk) {
+            Ok(_) => {
+                assert_step_budget(budget);
+            }
+            Err(failure) => {
+                assert_eq!(
+                    failure.to_string(),
+                    "snapshot chunks are missing or reordered"
+                );
+                assert_step_budget(budget);
+                refused = true;
+                break;
+            }
+        };
+    }
+    assert!(refused);
+}
+
+#[test]
+fn snapshot_calculation_storage_growth_respects_step_budget() {
+    let budget = budgets()[0];
+    let mut worker = worker(&source(false, false));
+    worker.last_calculation.changed = (0..257)
+        .map(|row| CellAddress {
+            sheet: SheetId(0),
+            cell: CellRef::new(row, 0),
+        })
+        .collect();
+    let chunks = encode(&worker, budget);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in chunks {
+        builder.push(&chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        assert_step_budget(budget);
+    }
+    let mut ready = false;
+    for _ in 0..100_000 {
+        ready = builder.advance(budget).unwrap().is_ready();
+        assert_step_budget(budget);
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+}
+
+#[test]
+fn snapshot_long_defined_name_chain_respects_single_record_budget() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = crate::Sheet::new("Data");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            formula: None,
+            style: None,
+        },
+    );
+    sheet.set_cell(
+        CellRef::new(0, 1),
+        Cell {
+            value: CellValue::Number { value: 3.0 },
+            formula: Some("N_0".to_owned()),
+            style: None,
+        },
+    );
+    model.sheets = vec![sheet];
+    let names = 2_048;
+    model.defined_names = (0..names)
+        .map(|index| xlsx_model::DefinedName {
+            name: format!("N_{index}"),
+            formula: if index + 1 == names {
+                "Data!A1+NOW()".to_owned()
+            } else {
+                format!("N_{}", index + 1)
+            },
+            local_sheet: None,
+            hidden: false,
+        })
+        .collect();
+    let mut worker = Workbook::from_model(model).unwrap();
+    worker.graph = Some(xlsx_calc::graph::DepGraph::build(worker.model()));
+    assert!(worker.graph.is_some());
+    let budget = SnapshotBudget::new(1, 1_024).unwrap();
+    let chunks = encode(&worker, budget);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in chunks {
+        builder.push(&chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        assert_step_budget(budget);
+    }
+    let mut graph_steps = 0;
+    let mut ready = false;
+    for _ in 0..100_000 {
+        let graph = builder.graph.is_some();
+        ready = builder.advance(budget).unwrap().is_ready();
+        let work = assert_step_budget(budget);
+        graph_steps += usize::from(graph && work.records != 0);
+        if ready {
+            break;
+        }
+    }
+    assert!(ready);
+    assert!(graph_steps >= names * 2);
+    let (peer, _) = builder.finish().unwrap().into_parts();
+    assert_current_identity(&worker, &peer);
+    let graph = peer.graph.as_ref().unwrap();
+    assert_eq!(
+        graph
+            .dependents_of(SheetId(0), CellRef::new(0, 0))
+            .collect::<Vec<_>>(),
+        vec![(SheetId(0), CellRef::new(0, 1))]
+    );
+    assert_eq!(
+        graph.volatile_cells().collect::<Vec<_>>(),
+        vec![(SheetId(0), CellRef::new(0, 1))]
+    );
 }
 
 fn single_large_sheet_snapshot(rows: u32) {
@@ -366,6 +723,10 @@ fn single_large_sheet_snapshot(rows: u32) {
     let mut updates = 0;
     let mut initialized = 0;
     let mut initialization_steps = 0;
+    let mut max_push = std::time::Duration::ZERO;
+    let mut max_advance = std::time::Duration::ZERO;
+    let mut max_records = 0;
+    let mut max_bytes = 0;
     while let Some(chunk) = encoder.next(&worker).unwrap() {
         assert!(chunk.len() <= budget.max_bytes());
         let (kind, _, payload) = unframe(&chunk).unwrap();
@@ -377,18 +738,30 @@ fn single_large_sheet_snapshot(rows: u32) {
         if kind == ChunkKind::Yrs && offset == 0 {
             updates += 1;
         }
+        let start = std::time::Instant::now();
         builder.push(&chunk).unwrap();
-        assert_step_budget(budget);
-        builder.advance(budget).unwrap();
+        max_push = max_push.max(start.elapsed());
         let work = assert_step_budget(budget);
+        max_records = max_records.max(work.records);
+        max_bytes = max_bytes.max(work.bytes);
+        let start = std::time::Instant::now();
+        builder.advance(budget).unwrap();
+        max_advance = max_advance.max(start.elapsed());
+        let work = assert_step_budget(budget);
+        max_records = max_records.max(work.records);
+        max_bytes = max_bytes.max(work.bytes);
         initialized += work.initialized_bytes;
         initialization_steps += usize::from(work.initialized_bytes != 0);
     }
     assert!(updates > 2, "the large sheet authority was not subdivided");
     let mut steps = 0;
     loop {
+        let start = std::time::Instant::now();
         let ready = builder.advance(budget).unwrap().is_ready();
+        max_advance = max_advance.max(start.elapsed());
         let work = assert_step_budget(budget);
+        max_records = max_records.max(work.records);
+        max_bytes = max_bytes.max(work.bytes);
         initialized += work.initialized_bytes;
         initialization_steps += usize::from(work.initialized_bytes != 0);
         if ready {
@@ -397,6 +770,12 @@ fn single_large_sheet_snapshot(rows: u32) {
         steps += 1;
         assert!(steps < rows as usize * 40 + bytes.len().div_ceil(budget.max_bytes()) + 10_000);
     }
+    eprintln!(
+        "{rows} x 20: max push={max_push:?}, max advance={max_advance:?}, \
+         max records={max_records}/{}, max bytes={max_bytes}/{}",
+        budget.max_records(),
+        budget.max_bytes(),
+    );
     assert_eq!(initialized, bytes.len());
     assert_eq!(
         initialization_steps,

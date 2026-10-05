@@ -9,6 +9,7 @@ use crate::{ParseError, PreservedPackage, SheetVisibility, SourceSheetKind};
 const MAX_RECORD_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Default)]
+#[doc(hidden)]
 pub struct PackageFactsEncoder {
     chart_parts: Option<Vec<usize>>,
     record_index: usize,
@@ -62,22 +63,75 @@ impl PackageFactsEncoder {
                 }
                 _ => return Ok(None),
             }
-            if writer.0.len() > MAX_RECORD_BYTES {
-                return Err(malformed("facts record exceeds byte limit"));
-            }
-            let mut framed = Writer::default();
-            framed.bytes(&writer.0);
-            self.pending = framed.0;
-            self.offset = 0;
-            self.record_index += 1;
+            self.set_record(writer)?;
         }
+        Ok(Some(self.take_pending(max_bytes)))
+    }
+
+    #[doc(hidden)]
+    pub fn next_from_facts(
+        &mut self,
+        facts: &PackageFacts,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, ParseError> {
+        if max_bytes == 0 {
+            return Err(malformed("facts byte budget must be positive"));
+        }
+        if self.offset == self.pending.len() {
+            let sheets = facts.sheets.len();
+            let references = facts.references.len();
+            let mut writer = Writer::default();
+            match self.record_index {
+                0 => {
+                    writer.uint(0);
+                    writer.uint(1);
+                    writer.bool(facts.any_uncached_formula);
+                    writer.usize(sheets);
+                    writer.usize(references);
+                    writer.usize(facts.charts.len());
+                }
+                index if index <= sheets => {
+                    writer.uint(1);
+                    encode_sheet(&mut writer, &facts.sheets[index - 1]);
+                }
+                index if index <= sheets + references => {
+                    writer.uint(2);
+                    encode_reference(&mut writer, &facts.references[index - sheets - 1]);
+                }
+                index if index <= sheets + references + facts.charts.len() => {
+                    writer.uint(3);
+                    let (path, bytes) = &facts.charts[index - sheets - references - 1];
+                    writer.string(path);
+                    writer.bytes(bytes);
+                }
+                _ => return Ok(None),
+            }
+            self.set_record(writer)?;
+        }
+        Ok(Some(self.take_pending(max_bytes)))
+    }
+
+    fn set_record(&mut self, writer: Writer) -> Result<(), ParseError> {
+        if writer.0.len() > MAX_RECORD_BYTES {
+            return Err(malformed("facts record exceeds byte limit"));
+        }
+        let mut framed = Writer::default();
+        framed.bytes(&writer.0);
+        self.pending = framed.0;
+        self.offset = 0;
+        self.record_index += 1;
+        Ok(())
+    }
+
+    fn take_pending(&mut self, max_bytes: usize) -> Vec<u8> {
         let end = self.offset + max_bytes.min(self.pending.len() - self.offset);
         let payload = self.pending[self.offset..end].to_vec();
         self.offset = end;
-        Ok(Some(payload))
+        payload
     }
 }
 
+#[doc(hidden)]
 pub struct PackageFactsBuilder {
     facts: PackageFacts,
     expected: Option<(usize, usize, usize)>,

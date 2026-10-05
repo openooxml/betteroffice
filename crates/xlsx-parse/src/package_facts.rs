@@ -5,6 +5,7 @@ use xlsx_model::CellRef;
 use crate::{PreservedPackage, SheetVisibility, SourceSheetKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct PackageFacts {
     pub(crate) sheets: Vec<SheetFacts>,
     pub(crate) references: Vec<ReferenceFacts>,
@@ -34,6 +35,7 @@ pub(crate) struct ReferenceAreaFacts {
 }
 
 impl PackageFacts {
+    #[doc(hidden)]
     pub fn from_package(package: &PreservedPackage) -> Self {
         Self {
             sheets: (0..package.source_sheet_count())
@@ -114,6 +116,7 @@ pub(crate) fn chart_part_indices(package: &PreservedPackage) -> Vec<usize> {
 }
 
 #[derive(Clone, Copy)]
+#[doc(hidden)]
 pub struct PackageFactsView<'a>(FactsSource<'a>);
 
 #[derive(Clone, Copy)]

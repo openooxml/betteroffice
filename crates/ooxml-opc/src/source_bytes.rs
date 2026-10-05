@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::SourceContainer;
 
+#[doc(hidden)]
 pub struct SourceContainerBuilder {
     bytes: Arc<[u8]>,
     position: usize,

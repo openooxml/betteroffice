@@ -72,18 +72,21 @@ pub(crate) fn split_update_v1_bounded(
     max_records: usize,
     max_part_bytes: usize,
 ) -> Result<Vec<Vec<u8>>, SplitError> {
+    if max_records == 0 || max_part_bytes == 0 {
+        return Err(SplitError::InvalidLimit);
+    }
+    if max_part_bytes < 2 {
+        return Err(SplitError::OversizedStruct);
+    }
     let parts = split_update_v1_parts(update, max_records, max_part_bytes)?;
     let mut bounded = Vec::new();
     for part in parts {
         let mut cursor = UpdateCursor::default();
-        while let Some(part) = cursor.next(&part, max_records, max_part_bytes)? {
+        while let Some(part) = cursor.next_oversized(&part, max_records, max_part_bytes)? {
             bounded.push(part.bytes);
         }
     }
     if bounded.is_empty() {
-        if max_part_bytes < 2 {
-            return Err(SplitError::OversizedStruct);
-        }
         bounded.push(vec![0, 0]);
     }
     Ok(bounded)
@@ -264,6 +267,25 @@ impl UpdateCursor {
         max_records: usize,
         max_bytes: usize,
     ) -> Result<Option<UpdatePart>, SplitError> {
+        self.next_inner(update, max_records, max_bytes, false)
+    }
+
+    fn next_oversized(
+        &mut self,
+        update: &[u8],
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<Option<UpdatePart>, SplitError> {
+        self.next_inner(update, max_records, max_bytes, true)
+    }
+
+    fn next_inner(
+        &mut self,
+        update: &[u8],
+        max_records: usize,
+        max_bytes: usize,
+        allow_oversized: bool,
+    ) -> Result<Option<UpdatePart>, SplitError> {
         if max_records == 0 || max_bytes == 0 {
             return Err(SplitError::InvalidLimit);
         }
@@ -319,7 +341,8 @@ impl UpdateCursor {
                 } else {
                     2 + var_len(client) + var_len(u64::from(count + 1))
                 };
-                if size.saturating_add(scanner.pos - start) > max_bytes {
+                let oversized = size.saturating_add(scanner.pos - start) > max_bytes;
+                if oversized && (count != 0 || !allow_oversized) {
                     if count == 0 {
                         return Err(SplitError::OversizedStruct);
                     }
@@ -332,6 +355,9 @@ impl UpdateCursor {
                     .ok_or(SplitError::Malformed)?;
                 if next_clock > MAX_CLOCK {
                     return Err(SplitError::Malformed);
+                }
+                if oversized {
+                    break;
                 }
             }
             let bytes = if next.phase == 1 {

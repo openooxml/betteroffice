@@ -14,9 +14,11 @@ pub use crate::workbook::snapshot_assembly::{
 
 use std::fmt;
 
+#[doc(hidden)]
 pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct SnapshotError(String);
 
 impl SnapshotError {
@@ -34,6 +36,7 @@ impl fmt::Display for SnapshotError {
 impl std::error::Error for SnapshotError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct SnapshotBudget {
     max_records: usize,
     max_bytes: usize,
@@ -60,6 +63,7 @@ impl SnapshotBudget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct SnapshotProgress {
     ready: bool,
 }

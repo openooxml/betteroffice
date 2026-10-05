@@ -653,10 +653,7 @@ impl AuthoritySnapshotEncoder {
             .encode_state_as_update_v1(&StateVector::default());
         let (parts, split_fallback) =
             match split_update_v1_bounded(&update, budget.max_records(), budget.max_bytes()) {
-                Ok(parts) if parts.iter().all(|part| part.len() <= budget.max_bytes()) => {
-                    (parts, None)
-                }
-                Ok(_) => (vec![update], Some("oversized_struct".to_owned())),
+                Ok(parts) => (parts, None),
                 Err(reason) => (vec![update], Some(reason.reason().to_owned())),
             };
         let yrs_count = parts.len() as u64;
@@ -850,6 +847,23 @@ pub(crate) struct AuthorityHydrator {
     yrs_cursor: Option<UpdateCursor>,
 }
 
+fn hydrate_snapshot_doc(doc: &Doc, payload: &[u8]) -> Result<(), String> {
+    let update = decode_local_update_v1(payload)?;
+    let mut transaction = doc.transact_mut_with(HYDRATE_ORIGIN);
+    let events = transaction
+        .events()
+        .is_some()
+        .then(|| std::mem::take(transaction.events_mut()));
+    let result = transaction
+        .apply_update(update)
+        .map_err(|failure| failure.to_string());
+    transaction.commit();
+    if let Some(events) = events {
+        *transaction.events_mut() = events;
+    }
+    result
+}
+
 impl AuthorityHydrator {
     pub(crate) fn new(header: &SnapshotHeader) -> SnapshotResult<Self> {
         match header.mode {
@@ -905,7 +919,7 @@ impl AuthorityHydrator {
             if self.failed || self.yrs_chunks >= self.expected_yrs_chunks {
                 return Err(SnapshotError::new("unexpected Yrs snapshot chunk"));
             }
-            hydrate_local_doc(&self.doc, payload).map_err(SnapshotError::new)?;
+            hydrate_snapshot_doc(&self.doc, payload).map_err(SnapshotError::new)?;
             self.yrs_chunks += 1;
             Ok(())
         })();
@@ -932,7 +946,7 @@ impl AuthorityHydrator {
                 }
             })?
         {
-            hydrate_local_doc(&self.doc, &part.bytes).map_err(SnapshotError::new)?;
+            hydrate_snapshot_doc(&self.doc, &part.bytes).map_err(SnapshotError::new)?;
             #[cfg(test)]
             crate::snapshot::step::record(part.records, part.bytes.len());
             if !cursor
@@ -1393,7 +1407,6 @@ mod tests {
         let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
         let header = header(&a, &encoder, budget);
         let mut hydrator = AuthorityHydrator::new(&header).unwrap();
-        push_all(&mut encoder, &mut hydrator, budget);
         let events = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&events);
         let subscription = hydrator
@@ -1402,6 +1415,7 @@ mod tests {
                 observed.fetch_add(1, Ordering::SeqCst);
             })
             .unwrap();
+        push_all(&mut encoder, &mut hydrator, budget);
         assert!(hydrator.advance(budget).unwrap().is_ready());
         let restored = hydrator.finish().unwrap();
         assert!(!restored.has_pending_updates());
@@ -1412,6 +1426,9 @@ mod tests {
         assert!(!restored.can_undo());
         assert!(!restored.can_redo());
         assert_eq!(events.load(Ordering::SeqCst), 0);
+        let map = restored.doc.get_or_insert_map("after-hydration");
+        map.insert(&mut restored.doc.transact_mut(), "value", 1);
+        assert_eq!(events.load(Ordering::SeqCst), 1);
         drop(subscription);
     }
 
@@ -1463,6 +1480,105 @@ mod tests {
             restored.encode_state_as_update_v1(),
             a.encode_state_as_update_v1()
         );
+    }
+
+    #[test]
+    fn oversized_inline_text_struct_is_isolated_in_bounded_hydration() {
+        let mut model = WorkbookModel::default();
+        let mut sheet = Sheet::new("Data");
+        for row in 0..1_000 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                Cell {
+                    value: if row == 500 {
+                        CellValue::Text {
+                            value: "x".repeat(20 * 1024),
+                        }
+                    } else {
+                        CellValue::Number {
+                            value: f64::from(row),
+                        }
+                    },
+                    formula: None,
+                    style: None,
+                },
+            );
+        }
+        model.sheets = vec![sheet];
+        let authority = WorkbookAuthority::from_model(&model).unwrap();
+        let budget = SnapshotBudget::new(7, 1_024).unwrap();
+        let mut encoder = AuthoritySnapshotEncoder::new(&authority, budget).unwrap();
+        assert_eq!(encoder.split_fallback(), None);
+        let header = header(&authority, &encoder, budget);
+        assert!(header.chunk_count(ChunkKind::Yrs) > 2);
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        let mut oversized_chunks = 0;
+        let mut oversized_steps = 0;
+        let mut bounded_steps = 0;
+        while let Some(chunk) = encoder.next(budget).unwrap() {
+            let (kind, _, payload) = unframe(&chunk).unwrap();
+            match kind {
+                ChunkKind::AuthorityBase => {
+                    hydrator.push_base(payload).unwrap();
+                    while !hydrator.advance(budget).unwrap().is_ready() {}
+                }
+                ChunkKind::Yrs => {
+                    let oversized = payload.len() > budget.max_bytes();
+                    oversized_chunks += usize::from(oversized);
+                    if oversized {
+                        assert!(payload.windows(20 * 1024).any(|bytes| {
+                            bytes.iter().all(|byte| *byte == b'x')
+                        }));
+                    }
+                    loop {
+                        crate::snapshot::step::reset();
+                        let progress = match hydrator.advance_yrs(payload, budget) {
+                            Ok(progress) => {
+                                let work = crate::snapshot::step::current();
+                                assert!(work.records <= budget.max_records(), "{work:?}");
+                                assert!(work.bytes <= budget.max_bytes(), "{work:?}");
+                                bounded_steps += usize::from(work.records != 0);
+                                progress
+                            }
+                            Err(failure) => {
+                                assert!(oversized);
+                                assert_eq!(
+                                    failure.to_string(),
+                                    "Yrs snapshot record exceeds advance byte budget"
+                                );
+                                assert_eq!(crate::snapshot::step::current().records, 0);
+                                let larger = SnapshotBudget::new(1, payload.len()).unwrap();
+                                let progress = hydrator.advance_yrs(payload, larger).unwrap();
+                                let work = crate::snapshot::step::current();
+                                assert_eq!(work.records, 1);
+                                assert!(work.bytes > budget.max_bytes());
+                                assert!(work.bytes <= larger.max_bytes());
+                                oversized_steps += 1;
+                                progress
+                            }
+                        };
+                        if progress.is_ready() {
+                            break;
+                        }
+                    }
+                }
+                _ => panic!("unexpected authority chunk"),
+            }
+        }
+        assert_eq!(oversized_chunks, 1);
+        assert_eq!(oversized_steps, 1);
+        assert!(bounded_steps > 2);
+        let restored = hydrator.finish().unwrap();
+        assert_eq!(
+            restored.encode_state_vector_v1(),
+            authority.encode_state_vector_v1()
+        );
+        assert_eq!(
+            restored.encode_state_as_update_v1(),
+            authority.encode_state_as_update_v1()
+        );
+        assert_eq!(restored.materialize().unwrap(), model);
+        assert!(!restored.has_pending_updates());
     }
 
     #[test]
