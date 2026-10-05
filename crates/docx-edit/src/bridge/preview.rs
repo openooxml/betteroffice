@@ -199,6 +199,59 @@ pub(crate) struct PreviewUnits {
 }
 
 #[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+enum AnySnapshot {
+    Null,
+    Undefined,
+    Bool(bool),
+    Number(u64),
+    BigInt(i64),
+    String(String),
+    Buffer(Vec<u8>),
+    Array(Vec<Self>),
+    Map(BTreeMap<String, Self>),
+}
+
+#[cfg(test)]
+impl From<&Any> for AnySnapshot {
+    fn from(value: &Any) -> Self {
+        match value {
+            Any::Null => Self::Null,
+            Any::Undefined => Self::Undefined,
+            Any::Bool(value) => Self::Bool(*value),
+            Any::Number(value) => Self::Number(value.to_bits()),
+            Any::BigInt(value) => Self::BigInt(*value),
+            Any::String(value) => Self::String(value.to_string()),
+            Any::Buffer(value) => Self::Buffer(value.to_vec()),
+            Any::Array(value) => Self::Array(value.iter().map(Self::from).collect()),
+            Any::Map(value) => Self::Map(
+                value
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Self::from(value)))
+                    .collect(),
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn any_snapshot_preserves_variants_and_number_bits() {
+    for (left, right) in [
+        (Any::Number(1.0), Any::BigInt(1)),
+        (Any::Null, Any::Undefined),
+        (Any::Number(f64::NAN), Any::Null),
+        (Any::Number(0.0), Any::Number(-0.0)),
+    ] {
+        let left_snapshot = AnySnapshot::from(&left);
+        let right_snapshot = AnySnapshot::from(&right);
+        assert_ne!(left_snapshot, right_snapshot);
+        assert_eq!(left_snapshot, AnySnapshot::from(&left));
+        assert_eq!(right_snapshot, AnySnapshot::from(&right));
+    }
+}
+
+#[cfg(test)]
 impl PreviewUnits {
     pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug {
         use yrs::types::ToJson;
@@ -212,13 +265,11 @@ impl PreviewUnits {
                     .chunks
                     .iter()
                     .map(|chunk| {
-                        let insert = serde_json::to_value(chunk.insert.to_json(&txn)).unwrap();
+                        let insert = AnySnapshot::from(&chunk.insert.to_json(&txn));
                         let attributes = chunk.attributes.as_ref().map(|attrs| {
                             attrs
                                 .iter()
-                                .map(|(key, value)| {
-                                    (key.to_string(), serde_json::to_value(value).unwrap())
-                                })
+                                .map(|(key, value)| (key.to_string(), AnySnapshot::from(value)))
                                 .collect::<BTreeMap<_, _>>()
                         });
                         (
