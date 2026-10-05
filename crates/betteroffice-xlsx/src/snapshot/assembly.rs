@@ -1547,6 +1547,8 @@ impl WorkbookSnapshotBuilder {
                 && !matches!(
                     failure.to_string().as_str(),
                     "snapshot graph record exceeds advance byte budget"
+                        | "snapshot decoding exceeds advance byte budget"
+                        | "snapshot authority exceeds advance byte budget"
                         | "Yrs snapshot record exceeds advance byte budget"
                         | "snapshot authority validation exceeds advance byte budget"
                         | "snapshot authority retirement exceeds advance byte budget"

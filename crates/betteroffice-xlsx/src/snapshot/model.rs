@@ -442,6 +442,13 @@ pub(crate) struct ModelSnapshotBuilder {
 }
 
 impl ModelSnapshotBuilder {
+    #[cfg(test)]
+    pub(crate) fn pending_string_record(&self) -> Option<(u64, usize)> {
+        self.decode
+            .pending_string_record()
+            .filter(|_| self.runs.front().is_some_and(|&(tag, _)| tag == STRING))
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             model: Workbook::default(),
@@ -478,10 +485,10 @@ impl ModelSnapshotBuilder {
             return Err(SnapshotError::new("snapshot model builder has failed"));
         }
         let result = self.advance_inner(chunk, budget);
-        self.failed |= result
-            .as_ref()
-            .err()
-            .is_some_and(|failure| !budget.is_partial() || !failure.is_budget_refusal());
+        self.failed |= result.as_ref().err().is_some_and(|failure| {
+            (!budget.is_partial() || !failure.is_budget_refusal())
+                && failure.to_string() != "snapshot decoding exceeds advance byte budget"
+        });
         result
     }
 
@@ -496,6 +503,7 @@ impl ModelSnapshotBuilder {
                 "snapshot model chunk is missing or reordered",
             ));
         }
+        let decoding = self.decode.is_pending_for((ordinal, self.offset))?;
         if kind == ChunkKind::Cells {
             return self.advance_cells(chunk, payload, budget);
         }
@@ -529,10 +537,13 @@ impl ModelSnapshotBuilder {
                     "snapshot model exceeds advance byte budget",
                 ));
             }
+            if decoding || extent > budget.max_bytes() {
+                self.preflight_large_record(tag, budget)?;
+            }
             if !self.advance_capacity(tag, budget)? {
                 return Ok(SnapshotProgress::pending());
             }
-            if extent > budget.max_bytes() {
+            if decoding || extent > budget.max_bytes() {
                 let Some(consumed) = self.read_large_record(tag, r.rest(), budget)? else {
                     return Ok(SnapshotProgress::pending());
                 };
@@ -571,6 +582,34 @@ impl ModelSnapshotBuilder {
         }
     }
 
+    fn preflight_large_record(&self, tag: u8, budget: SnapshotBudget) -> SnapshotResult<()> {
+        use crate::authority::snapshot::preflight_record;
+        macro_rules! preflight {
+            ($ty:ty) => {
+                preflight_record::<$ty>(&self.decode, (self.ordinal, self.offset), budget)
+            };
+        }
+        match tag {
+            NAME => preflight!(DefinedName),
+            STRING | THEME | INDEXED | TABLE_COLUMN => preflight!(String),
+            FONT => preflight!(Font),
+            FILL => preflight!(Fill),
+            BORDER => preflight!(Border),
+            XF => preflight!(Xf),
+            NUM_FMT => preflight!((u16, String)),
+            HYPERLINK => preflight!(Hyperlink),
+            CHART_REF => preflight!(ChartRef),
+            TABLE => preflight!((
+                String,
+                (SheetId, (xlsx_model::CellRange, (u32, (u32, usize))))
+            )),
+            CHART => preflight!((String, (String, (usize, (ChartAnchor, usize))))),
+            _ => Err(SnapshotError::new(
+                "snapshot model exceeds advance byte budget",
+            )),
+        }
+    }
+
     fn read_large_record(
         &mut self,
         tag: u8,
@@ -580,7 +619,12 @@ impl ModelSnapshotBuilder {
         use crate::authority::snapshot::decode_record;
         macro_rules! decoded {
             ($ty:ty) => {
-                match decode_record::<$ty>(&mut self.decode, payload, budget)? {
+                match decode_record::<$ty>(
+                    &mut self.decode,
+                    (self.ordinal, self.offset),
+                    payload,
+                    budget,
+                )? {
                     Some(value) => value,
                     None => return Ok(None),
                 }
