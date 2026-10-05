@@ -1537,7 +1537,7 @@ it('renders target-changed and gesture-active command refusals', async () => {
   expect(view.getByTestId('xlsx-chart-selection').getAttribute('data-chart-id')).toBe('chart');
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
   await advance();
-  expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/chart drag/i);
+  expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Finish moving the chart first.');
   expect(host.editMethods.save).not.toHaveBeenCalled();
   expect(api.failure).toBeNull();
   fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });

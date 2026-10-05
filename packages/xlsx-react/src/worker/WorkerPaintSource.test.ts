@@ -173,6 +173,7 @@ describe('WorkerPaintSource', () => {
     expect(callbacks.size).toBe(1);
     tick();
     const worker = frame(requests[2].request, 2);
+    if (!worker.mergedRanges) throw new Error('Missing worker merged ranges');
     await respond(2, worker);
     expect(paints.map((painted) => painted.source)).toEqual(['worker', 'worker']);
     expect(source.painted?.displayList).toBe(worker.displayList);
