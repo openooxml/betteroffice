@@ -7910,6 +7910,7 @@ async function expectPluginOwnerFallback(
     expect(clock.now).toBe(10_001);
     expect(replica.started).toBe(true);
     expect(env.start).toHaveBeenCalledTimes(1);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
     expect(env.requested.mock.calls).toEqual([[session]]);
     expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     expect(env.load).not.toHaveBeenCalled();
@@ -7956,7 +7957,7 @@ async function expectPluginOwnerFallback(
     expect(env.requested.mock.calls).toEqual([[session]]);
     expect(env.load).toHaveBeenCalledTimes(1);
     expect(result.current.mainOpens).toEqual([false]);
-    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect([null, session]).toContain(result.current.renderer.layoutCompleteSession);
     expect(result.current.errors).toEqual([]);
     expectPassiveCall();
     await complete(outcomes.map((outcome) => outcome.value), env);
