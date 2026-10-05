@@ -2900,12 +2900,14 @@ mod tests {
                 })
                 .collect();
             let cell_measures: Vec<_> = (0..2)
-                .map(|_| serde_json::json!({
-                    "width": 80, "height": height,
-                    "blocks": [{"kind": "paragraph", "totalHeight": height,
-                        "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
-                            "width": 40, "ascent": 8, "descent": 2, "lineHeight": height}]}]
-                }))
+                .map(|_| {
+                    serde_json::json!({
+                        "width": 80, "height": height,
+                        "blocks": [{"kind": "paragraph", "totalHeight": height,
+                            "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                                "width": 40, "ascent": 8, "descent": 2, "lineHeight": height}]}]
+                    })
+                })
                 .collect();
             rows.push(serde_json::json!({"id": row, "isHeader": row == 0, "cantSplit": true, "cells": cells}));
             row_measures.push(serde_json::json!({"height": height, "cells": cell_measures}));
@@ -2931,7 +2933,10 @@ mod tests {
         }));
         let all = range_rects(&dl, 2, 4);
         assert_eq!(all.len(), dl.pages.len());
-        let expected: Vec<_> = all.into_iter().filter(|rect| rect.page_index == 5).collect();
+        let expected: Vec<_> = all
+            .into_iter()
+            .filter(|rect| rect.page_index == 5)
+            .collect();
         assert!(!expected.is_empty());
 
         RANGE_RECT_PAGE_VISITS.with(|visits| visits.borrow_mut().clear());
