@@ -89,6 +89,7 @@ impl Case {
             )
             .unwrap()
         });
+        let styles = StyleMatch::new(&self.original.styles, &self.workbook.styles);
         run(&SheetPatch {
             sheet: &self.workbook.sheets[0],
             original: &self.original.sheets[0],
@@ -97,6 +98,7 @@ impl Case {
             sst_index: &sst_index,
             retained: &self.retained,
             plan: plan.as_ref(),
+            styles: &styles,
         })
     }
 

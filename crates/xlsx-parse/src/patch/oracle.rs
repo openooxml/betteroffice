@@ -67,6 +67,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             self.retained,
             self.plan,
+            None,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -256,6 +257,7 @@ impl SheetPatch<'_> {
             &mut writer,
             at,
             cell,
+            cell.style,
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
