@@ -585,21 +585,17 @@ fn snapshot_deletion_parts_accept_a_smaller_receiver_record_budget() {
 }
 
 #[test]
-fn snapshot_json_object_embed_and_format_values_match_worker() {
-    use yrs::{Any, Text, WriteTxn};
+fn snapshot_object_any_values_match_worker() {
+    use yrs::{Any, Array, Map, WriteTxn};
 
     let worker = worker(&source(false, false));
     {
         let mut txn = worker.authority.snapshot_transaction_for_test();
-        let text = txn.get_or_insert_text("snapshot-json");
         let value = Any::Map(Arc::new(HashMap::from([("a".to_owned(), Any::from(0))])));
-        text.insert_embed(&mut txn, 0, value.clone());
-        text.format(
-            &mut txn,
-            0,
-            1,
-            HashMap::from([(std::sync::Arc::<str>::from("format"), value)]),
-        );
+        let array = txn.get_or_insert_array("snapshot-json");
+        array.push_back(&mut txn, value.clone());
+        let map = txn.get_or_insert_map("snapshot-json-map");
+        map.insert(&mut txn, "value", value);
     }
     for budget in [budgets()[0], budgets()[1]] {
         let encode_budget = SnapshotBudget::new(7, 16_384).unwrap();
@@ -1146,10 +1142,9 @@ fn snapshot_single_million_cell_sheet_and_source_steps_respect_budget() {
 #[test]
 #[ignore]
 fn snapshot_single_million_cell_sheet_cleared_history_steps_respect_budget() {
-    assert!(
-        !cfg!(debug_assertions),
-        "run this measurement in release mode",
-    );
+    if cfg!(debug_assertions) {
+        panic!("run this measurement in release mode");
+    }
     let rows = 50_000;
     let mut sheet = xlsx_model::Sheet::new("Large");
     for row in 0..rows {
