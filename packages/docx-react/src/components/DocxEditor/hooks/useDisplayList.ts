@@ -255,6 +255,7 @@ export interface UseRustDisplayListResult {
   workerSurfacesActive: boolean;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion: YrsSession | null;
+  layoutCompleteSession: RustDisplayListEngine | null;
   workerPresentationActive: boolean;
   setWorkerPresentationActive(active: boolean): void;
   attachOffscreenCanvases(
@@ -519,6 +520,7 @@ export function useRustDisplayList(
   const layoutPreviewKeyRef = useRef<string | null>(null);
   const workerPreviewKeysRef = useRef(new Map<number, string>());
   const settledEpochRef = useRef<number | null>(null);
+  const [layoutCompleteSession, setLayoutCompleteSession] = useState<RustDisplayListEngine | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
   const settleWaitersRef = useRef(new Map<() => void, {
     scope: 'document' | 'window';
@@ -559,6 +561,12 @@ export function useRustDisplayList(
       if (!failure && !authoritative && isLayoutQueued(engineRef.current)) return;
       settledEpochRef.current = epoch;
       settleErrorRef.current = failure;
+      setLayoutCompleteSession(
+        !failure && epoch !== null && settledEpochRef.current === contentEpochRef.current &&
+          frameEngineRef.current === engineRef.current && !provisionalPageFrameRef.current &&
+          !isLayoutQueued(engineRef.current)
+          ? engineRef.current ?? null : null
+      );
       for (const waiter of [...settleWaitersRef.current.keys()]) waiter();
     },
     []
@@ -838,6 +846,10 @@ export function useRustDisplayList(
   const residentEngineRef = useRef(residentEngine);
   residentEngineRef.current = residentEngine;
 
+  useEffect(() => {
+    setLayoutCompleteSession(null);
+  }, [engine]);
+
   const setMainFrameDisplayWindow = useCallback((hostEngine: YrsSession | null): void => {
     if (
       !workerOpenEnabledRef.current ||
@@ -1040,6 +1052,7 @@ export function useRustDisplayList(
         (workerOpenEnabledRef.current && workerOpenReplicaPending(residentEngine))
       ) return;
       contentEpochRef.current += 1;
+      setLayoutCompleteSession(null);
       queryEpochGate.invalidate();
       requestSettleRelayout();
       // Update observers fire from inside the wasm transaction. Calling any
@@ -2040,6 +2053,7 @@ export function useRustDisplayList(
 
   const shownFrameEngine = useCallback((): unknown => frameEngineRef.current, []);
   const release = useCallback((): void => {
+    setLayoutCompleteSession(null);
     // A failed load's failure holds for later waits until the next load.
     replacedLayoutRef.current = {
       layout: null,
@@ -2604,6 +2618,7 @@ export function useRustDisplayList(
 
   const layoutInWorker: LayoutInWorker = useCallback<LayoutInWorker>(
     (hostEngine, request) => {
+      if (hostEngine === engineRef.current) setLayoutCompleteSession(null);
       if (handedOverPreview(hostEngine)) return workerPreviewPassesRef.current.get(hostEngine) ?? null;
       const terminal = workerFailureRef.current.get(hostEngine);
       if (terminal && isViewerSession(hostEngine)) return rejectedWorkerLayout(terminal);
@@ -3008,6 +3023,7 @@ export function useRustDisplayList(
   );
 
   useEffect(() => {
+    setLayoutCompleteSession(null);
     if (residentEngine && workerFailureRef.current.has(residentEngine)) return;
     if (replacedLayoutRef.current && layout && layout !== replacedLayoutRef.current.layout) {
       replacedLayoutRef.current = null;
@@ -3774,6 +3790,9 @@ export function useRustDisplayList(
     workerMemory,
     workerSurfacesActive,
     pendingCompletion: pendingCompletion?.engine ?? null,
+    layoutCompleteSession: layoutCompleteSession === engine &&
+      settledEpochRef.current === contentEpochRef.current && !isLayoutQueued(engine)
+      ? layoutCompleteSession : null,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
@@ -3912,6 +3931,7 @@ export interface UseCanvasRendererResult {
   workerSurfacesActive: boolean;
   /** See {@link UseRustDisplayListResult.pendingCompletion}. */
   pendingCompletion: YrsSession | null;
+  layoutCompleteSession: RustDisplayListEngine | null;
   /** sole visible renderer lifecycle */
   status: 'loading' | 'ready' | 'error';
   /** fatal display-list error; non-null exactly while status is `error` */
@@ -4077,6 +4097,7 @@ export function useCanvasRenderer(
     workerMemory,
     workerSurfacesActive,
     pendingCompletion,
+    layoutCompleteSession,
     workerPresentationActive,
     setWorkerPresentationActive,
     attachOffscreenCanvases,
@@ -4218,6 +4239,7 @@ export function useCanvasRenderer(
     setWorkerPresentationActive,
     workerSurfacesActive,
     pendingCompletion,
+    layoutCompleteSession,
     offscreenReplay,
     paintedCaretActive,
     notifyCaretInput,

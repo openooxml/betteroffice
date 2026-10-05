@@ -42,6 +42,7 @@ import {
 } from '../internals/workerProposalAuthority';
 import { registerWorkerOpenSave } from '../internals/workerOpenSave';
 import { registerWorkerOpenExport } from '../internals/workerOpenExport';
+import { registerQueuedOpeningInput } from '../internals/queuedOpeningInput';
 
 export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
@@ -117,6 +118,7 @@ interface WorkerOpenOptions {
   refreshWorkerLayout?: () => void;
   /** The engine whose provisional layout is shown with the rest not yet asked of the worker. */
   pendingCompletion?: unknown;
+  layoutCompleteSession?: unknown;
   /** A worker-held proposal changed document content. */
   onWorkerContentChange?: () => void;
   /** The worker found tracked changes of its own in the opened document. */
@@ -359,6 +361,8 @@ export function useYrsCoreSession(
   const workerLaidOutRef = useRef<(() => void) | null>(null);
   const replicaGateRef = useRef<{ reached: boolean } | null>(null);
   const requestReplicaRef = useRef<(() => void) | null>(null);
+  const openingInputSessionRef = useRef<YrsSession | null>(null);
+  const eagerPeerStartRef = useRef<{ session: YrsSession; start(): void } | null>(null);
   const openReplicaGate = useCallback((): void => {
     const gate = replicaGateRef.current;
     const start = startReplicaRef.current;
@@ -414,6 +418,7 @@ export function useYrsCoreSession(
     let openedWorker: WorkerOpenedDocument | null = null;
     let unregisterSave: (() => void) | null = null;
     let unregisterExport: (() => void) | null = null;
+    let unregisterOpeningInput: (() => void) | null = null;
     inputPositionMapsRef.current.clear();
     dirtyStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
@@ -768,6 +773,11 @@ export function useYrsCoreSession(
               };
               replicaGateRef.current = gate;
               requestReplicaRef.current = request;
+              unregisterOpeningInput = registerQueuedOpeningInput(next, () => {
+                if (stale() || sessionRef.current !== next || !pending.pending) return;
+                openingInputSessionRef.current = next;
+                if (eagerPeerStartRef.current?.session === next) eagerPeerStartRef.current.start();
+              });
               startReplicaRef.current = () => {
                 if (
                   stale() ||
@@ -876,6 +886,8 @@ export function useYrsCoreSession(
       replicaStatePrefetchRef.current = null;
       unregisterSave?.();
       unregisterExport?.();
+      unregisterOpeningInput?.();
+      openingInputSessionRef.current = null;
       pendingReplicaRef.current?.cancel();
       pendingReplicaRef.current = null;
       startReplicaRef.current = null;
@@ -986,6 +998,7 @@ export function useYrsCoreSession(
       workerOpen?.viewer ||
       workerOpenDocumentHeld(session) ||
       !pending?.pending ||
+      pending.started ||
       !startReplicaRef.current ||
       previewing
     ) return;
@@ -996,6 +1009,7 @@ export function useYrsCoreSession(
     let timer: ReturnType<typeof setTimeout> | null = null;
     const cleanup = (): void => {
       controller.abort();
+      if (eagerPeerStartRef.current === eagerStart) eagerPeerStartRef.current = null;
       clearTimeout(fallbackTimer);
       if (timer !== null) clearTimeout(timer);
       if (frameId !== null) cancelAnimationFrame(frameId);
@@ -1011,10 +1025,15 @@ export function useYrsCoreSession(
       if (visibilityDocument?.visibilityState === 'hidden') startPeer();
     };
     const fallbackTimer = setTimeout(startPeer, 10_000);
+    const eagerStart = { session, start: startPeer };
+    eagerPeerStartRef.current = eagerStart;
     visibilityDocument?.addEventListener('visibilitychange', onVisibilityChange);
     if (visibilityDocument?.visibilityState === 'hidden') {
       startPeer();
+    } else if (openingInputSessionRef.current === session) {
+      startPeer();
     } else if (
+      workerOpen?.layoutCompleteSession === session &&
       hasOwnWorkerFrame && retiringRef.current === null &&
       workerOpen?.pendingCompletion !== session &&
       (!handoffFrom || options?.shownEngine === session)
@@ -1053,6 +1072,7 @@ export function useYrsCoreSession(
     openReplicaGate,
     replicaRequestVersion,
     workerOpen?.pendingCompletion,
+    workerOpen?.layoutCompleteSession,
     workerOpen?.viewer,
     previewing,
     handoffFrom,

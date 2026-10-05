@@ -41,6 +41,7 @@ import {
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplicaReadiness } from './internals/workerOpenReplica';
+import { requestQueuedOpeningInput } from './internals/queuedOpeningInput';
 import { scrollIntoViewDelta, scrollViewport } from './internals/viewportBand';
 import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
@@ -336,17 +337,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
   const onPendingInputChangeRef = useRef(onPendingInputChange);
   onPendingInputChangeRef.current = onPendingInputChange;
+  const requestOpeningPeer = useCallback((): void => {
+    if (enabled && session && (holdInput || replicaReadyRef?.current === false)) {
+      requestQueuedOpeningInput(session);
+    }
+  }, [enabled, holdInput, replicaReadyRef, session]);
   const holdOperation = useCallback(
     (entry: HeldInput): boolean => {
       if (!holdInput) return false;
       if (!readOnly) {
         entry.inputTime ??= performance.now();
         heldInputRef.current.entries.push(entry);
+        if (entry.kind !== 'selection') requestOpeningPeer();
         onPendingInputChangeRef.current?.(true);
       }
       return true;
     },
-    [holdInput, readOnly]
+    [holdInput, readOnly, requestOpeningPeer]
   );
   const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
   const queuedSessionRef = useRef(session);
@@ -449,7 +456,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       operation: (waited: boolean) => void | Promise<void>,
       kind: 'mutation' | 'selection' = 'selection',
       onDropped?: () => void,
-      inTable?: () => boolean
+      inTable?: () => boolean,
+      openingInput = kind === 'mutation'
     ): void => {
       sealInputBatches();
       const replay = heldReplayBatchRef.current;
@@ -473,6 +481,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         admitted && replicaReadyRef?.current === false
           ? awaitWorkerOpenReplica(admitted)
           : undefined;
+      if (replica && openingInput && (!readOnly || kind === 'selection')) requestOpeningPeer();
       if (!replica) {
         const apply = () => {
           if (!isCurrentInput(admitted, queue)) return onDropped?.();
@@ -514,11 +523,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
       });
     },
-    [isCurrentInput, preparePendingSelections, readOnly, replicaReadyRef, sealInputBatches, session, watchReaderScroll]
+    [isCurrentInput, preparePendingSelections, readOnly, replicaReadyRef, requestOpeningPeer, sealInputBatches, session, watchReaderScroll]
   );
 
   const replaySelection = useCallback((entry: HeldSelection): void => {
-    enqueueInputOperation(() => entry.apply?.(), 'mutation', undefined, entry.inTable);
+    enqueueInputOperation(() => entry.apply?.(), 'mutation', undefined, entry.inTable, false);
   }, [enqueueInputOperation]);
   const queueSelection = useCallback(
     (prepare: HeldSelection['prepare'], force = false, inTable?: () => boolean): boolean => {
@@ -1191,7 +1200,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           }
         }
         setSelection(extend ? current.anchor : next, next);
-      });
+      }, 'selection', undefined, undefined, true);
     },
     [
       displayPositionToLoc,
@@ -1222,7 +1231,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         { story: activeStory, paraId: first.paraId, offset: 0 },
         { story: activeStory, paraId: last.paraId, offset: last.length }
       );
-    });
+    }, 'selection', undefined, undefined, true);
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
   const deleteSelection = useCallback(
@@ -1385,7 +1394,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       await Promise.all(batch.operations);
       if (prepareFailure) throw prepareFailure.error;
-    }, 'mutation', undefined, last?.inTable);
+    }, 'mutation', undefined, last?.inTable, entries.some((entry) => entry.kind !== 'selection'));
   }, [emitSelection, enqueueInputOperation, ensureSelection, onCaretInput, readOnly, replayHeldEntry, replicaReadyRef, session]);
   const heldReplayHandlersRef = useRef({ replayHeldBatch, replayHeldEntry, enqueueInputOperation });
   heldReplayHandlersRef.current = { replayHeldBatch, replayHeldEntry, enqueueInputOperation };
@@ -1564,10 +1573,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionCommitRef.current = '';
       event.currentTarget.value = '';
       if (replicaReadyRef) holdOperation({ kind: 'undo-boundary' });
+      if (!readOnly) requestOpeningPeer();
       onCaretInterrupt?.();
       onPendingInputChangeRef.current?.(true);
     },
-    [holdInput, holdOperation, onCaretInterrupt, replicaReadyRef]
+    [holdInput, holdOperation, onCaretInterrupt, readOnly, replicaReadyRef, requestOpeningPeer]
   );
 
   const handleCompositionUpdate = useCallback(
@@ -1654,6 +1664,16 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       insertText(event.clipboardData.getData('text/plain'));
     },
     [insertText]
+  );
+
+  const handleCut = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (readOnly || (!holdInput && replicaReadyRef?.current !== false)) return;
+      event.preventDefault();
+      if (!holdInput) copyAfterReplica();
+      deleteSelection(true);
+    },
+    [copyAfterReplica, deleteSelection, holdInput, readOnly, replicaReadyRef]
   );
 
   const hasHeldInput = useCallback(
@@ -2045,6 +2065,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       onCompositionEnd={handleCompositionEnd}
       onCopy={handleCopy}
       onPaste={handlePaste}
+      onCut={handleCut}
       onFocus={(event) => {
         event.currentTarget.classList.add('ProseMirror-focused');
         onFocusChange?.(true);

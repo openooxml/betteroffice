@@ -1278,6 +1278,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             settledDisplayList: canvasRenderer.settledDisplayList,
             pendingCompletion: canvasRenderer.pendingCompletion,
+            layoutCompleteSession: canvasRenderer.layoutCompleteSession,
             onWorkerContentChange: () => workerContentChangeRef.current(),
             onWorkerRevisions: () => workerRevisionsRef.current(),
           }
