@@ -1,5 +1,5 @@
 export type WorkbookPeerHydrationErrorCode =
-  | 'mutation-before-attachment'
+  | 'mutation-outside-replay'
   | 'version-mismatch'
   | 'missing-hydration'
   | 'missing-module';

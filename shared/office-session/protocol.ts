@@ -12,7 +12,8 @@ export interface ReplyError {
 }
 
 export type HostMessage =
-  | { protocol: 1; kind: 'wasm-module'; url: string; module: WebAssembly.Module; hydration?: string }
+  | { protocol: 1; kind: 'wasm-module'; url: string; module: WebAssembly.Module;
+      hydration?: string; version?: string; sequence?: number }
   | { protocol: 1; kind: 'reply'; id: number; ok: true; value: unknown }
   | { protocol: 1; kind: 'reply'; id: number; ok: false; error: ReplyError }
   | { protocol: 1; kind: 'event'; name: string; payload: unknown }

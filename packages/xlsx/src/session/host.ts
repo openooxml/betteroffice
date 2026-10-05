@@ -79,7 +79,7 @@ export function createWorkbookSessionHost(
     replay(_, envelope) {
       validateWorkbookReplayEnvelope(envelope);
       if (retainedHydration && !peerAttached) {
-        throw new WorkbookPeerHydrationError('mutation-before-attachment',
+        throw new WorkbookPeerHydrationError('mutation-outside-replay',
           'Workbook replay requires an attached edit peer');
       }
       const opened = workbook();
@@ -94,7 +94,9 @@ export function createWorkbookSessionHost(
         opened.setCalculationContext(envelope.calculation);
         let result: ReturnType<typeof applyWorkbookReplayOp> = undefined;
         try {
-          result = applyWorkbookReplayOp(opened, op);
+          result = applyWorkbookReplayOp(opened, !retainedHydration && op.method === 'applyEdits' ? {
+            method: 'applyEdits', args: [{ ...op.args[0], expectVersion: before }],
+          } : op);
           if (envelope.staleProposal) throw new Error('Expected a stale proposal refresh');
         } catch (error) {
           if (!(error instanceof StaleProposalError) || !envelope.staleProposal ||
@@ -146,9 +148,7 @@ export function createWorkbookSessionHost(
         if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
           transport.post({
             protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
-            hydration: JSON.stringify({
-              ...JSON.parse(workbookPeerHydration(opened)), version: opened.version(), sequence,
-            }),
+            hydration: workbookPeerHydration(opened), version: opened.version(), sequence,
           });
         }
         const info = opened.sheetInfo();
@@ -234,7 +234,7 @@ export function createWorkbookSessionHost(
       const policy = typeof configured === 'function'
         ? (configured as (...args: unknown[]) => MethodPolicy)(...args.slice(1)) : configured;
       if (retainedHydration && policy.mutates) {
-        throw new WorkbookPeerHydrationError('mutation-before-attachment',
+        throw new WorkbookPeerHydrationError('mutation-outside-replay',
           `Cannot call ${method} outside workbook edit-peer replay in retained hydration mode`);
       }
       return handler(...args);

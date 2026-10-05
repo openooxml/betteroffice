@@ -381,7 +381,8 @@ struct CachedChartSpace {
 type PeerHydrationCell = (CellRef, CellValue, Option<String>, Option<u32>);
 
 #[derive(Serialize, Deserialize)]
-struct PeerHydration {
+#[doc(hidden)]
+pub struct PeerHydration {
     cells: Vec<Vec<PeerHydrationCell>>,
     delta: bool,
     deleted_cells: Vec<Vec<CellRef>>,
@@ -394,11 +395,19 @@ struct PeerHydration {
     version_nonce: String,
     committed_changes: u64,
     client_id: Option<u64>,
+    #[serde(default)]
+    proposal_id_counter: u64,
 }
 
 impl Workbook {
     #[doc(hidden)]
     pub fn peer_hydration_json(&self) -> Result<String> {
+        serde_json::to_string(&self.peer_hydration()?)
+            .map_err(|error| Error::InvalidRequest(error.to_string()))
+    }
+
+    #[doc(hidden)]
+    pub fn peer_hydration(&self) -> Result<PeerHydration> {
         if self.edited_since_open || !self.proposals.list().is_empty() {
             return Err(Error::InvalidOperation(
                 "Peer hydration requires an unedited workbook without proposals".into(),
@@ -425,7 +434,7 @@ impl Workbook {
                     .collect();
             }
         }
-        serde_json::to_string(&PeerHydration {
+        Ok(PeerHydration {
             cells,
             delta,
             deleted_cells,
@@ -443,14 +452,19 @@ impl Workbook {
             version_nonce: self.version_nonce.clone(),
             committed_changes: self.committed_changes,
             client_id: self.is_collaborative().then(|| self.client_id()),
+            proposal_id_counter: self.proposals.id_counter(),
         })
-        .map_err(|error| Error::InvalidRequest(error.to_string()))
     }
 
     #[doc(hidden)]
     pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self> {
         let hydration: PeerHydration = serde_json::from_str(hydration)
             .map_err(|error| Error::InvalidRequest(error.to_string()))?;
+        Self::open_with_peer_hydration(bytes, hydration)
+    }
+
+    #[doc(hidden)]
+    pub fn open_with_peer_hydration(bytes: &[u8], hydration: PeerHydration) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, hydration.client_id)?;
         if hydration.cells.len() != workbook.model.sheets.len()
             || hydration.arrays.len() != workbook.model.sheets.len()
@@ -504,6 +518,7 @@ impl Workbook {
         workbook.set_active_sheet(hydration.active_sheet)?;
         workbook.version_nonce = hydration.version_nonce;
         workbook.committed_changes = hydration.committed_changes;
+        workbook.proposals = ProposalSet::with_id_counter(hydration.proposal_id_counter);
         Ok(workbook)
     }
 
@@ -4767,6 +4782,48 @@ mod tests {
             worker.peer_hydration_json(),
             Err(Error::InvalidOperation(_))
         ));
+    }
+
+    #[test]
+    fn peer_hydration_preserves_rejected_proposal_id_counter() {
+        let bytes = source_with_sheet_data(
+            r#"<sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>"#,
+        );
+        let options = CalculationOptions::default();
+        let mut worker = Workbook::open_recalculated(&bytes, options).unwrap();
+        let request = ProposalRequest {
+            agent_id: "agent".into(),
+            note: None,
+            edits: vec![crate::ProposalEditInput {
+                sheet: SheetId(0),
+                cell: CellRef::new(0, 0),
+                input: "3".into(),
+                number_format: None,
+            }],
+        };
+        let first = worker.propose(request.clone(), options).unwrap();
+        assert_eq!(first.id, "p1");
+        assert!(worker.reject_proposal(&first.id));
+        assert!(worker.proposals().is_empty());
+        let hydration = worker.peer_hydration_json().unwrap();
+        let mut peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        let original_proposal = worker.propose(request.clone(), options).unwrap();
+        let peer_proposal = peer.propose(request, options).unwrap();
+        assert_eq!(original_proposal.id, "p2");
+        assert_eq!(peer_proposal.id, original_proposal.id);
+        assert_eq!(peer_proposal, original_proposal);
+        let accepted = worker
+            .accept_proposal(&peer_proposal.id, false, options)
+            .unwrap();
+        assert_eq!(accepted.proposal_id, peer_proposal.id);
+        assert!(accepted.mutation.applied);
+        let peer_accepted = peer
+            .accept_proposal(&peer_proposal.id, false, options)
+            .unwrap();
+        assert_eq!(peer_accepted, accepted);
+        assert_eq!(peer.model, worker.model);
+        assert_eq!(peer.version(), worker.version());
+        assert_eq!(peer.save().unwrap(), worker.save().unwrap());
     }
 
     fn opening_hydration_bytes() -> Vec<u8> {

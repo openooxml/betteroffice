@@ -2,7 +2,8 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
+    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op,
+    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
     UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
@@ -15,7 +16,7 @@ pub struct Session {
 
 #[derive(Serialize, Deserialize)]
 struct PeerHydration {
-    workbook: serde_json::Value,
+    workbook: WorkbookPeerHydration,
     calculation_context: Option<CalculationOptions>,
 }
 
@@ -302,10 +303,10 @@ impl Session {
     pub fn peer_hydration_json(&self) -> Result<String, String> {
         let workbook = self
             .workbook
-            .peer_hydration_json()
+            .peer_hydration()
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&PeerHydration {
-            workbook: serde_json::from_str(&workbook).map_err(|error| error.to_string())?,
+            workbook,
             calculation_context: self.calculation_context,
         })
         .map_err(|error| error.to_string())
@@ -315,9 +316,8 @@ impl Session {
     pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self, String> {
         let hydration: PeerHydration = serde_json::from_str(hydration)
             .map_err(|error| format!("bad peer hydration: {error}"))?;
-        let workbook =
-            Workbook::open_with_peer_hydration_json(bytes, &hydration.workbook.to_string())
-                .map_err(|error| error.to_string())?;
+        let workbook = Workbook::open_with_peer_hydration(bytes, hydration.workbook)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             workbook,
             calculation_context: hydration.calculation_context,

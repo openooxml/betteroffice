@@ -121,7 +121,10 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
   if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
   if (source.hydration === undefined) throw new WorkbookPeerHydrationError('missing-hydration',
     'Workbook worker did not retain peer calculation state');
-  return openWorkbookPeer(source.bytes, source.options, source.hydration);
+  try { return openWorkbookPeer(source.bytes, source.options, source.hydration); } catch (error) {
+    throw new WorkbookPeerHydrationError('missing-hydration',
+      `Workbook worker supplied invalid peer hydration: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 /** @internal */
@@ -184,7 +187,7 @@ export async function createWorkbookSession(
     }
     client = createSessionClient<Methods, Events>(transport, {
       methods: { ...WORKBOOK_SESSION_METHODS, ...WORKBOOK_INTERNAL_SESSION_METHODS },
-      onWasmModule: (url, module, hydration) => {
+      onWasmModuleMessage: ({ url, module, hydration, version, sequence }) => {
         if (url !== wasmAssetUrl().href) return;
         if (peerSource) {
           if (hydration === undefined) {
@@ -192,23 +195,16 @@ export async function createWorkbookSession(
               'Workbook worker did not retain peer calculation state'));
             return;
           }
-          let captured: { version?: string; sequence?: number };
-          try { captured = JSON.parse(hydration); } catch {
-            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
-              'Workbook worker supplied invalid peer hydration'));
-            return;
-          }
-          if (!captured || typeof captured.version !== 'string' ||
-            typeof captured.sequence !== 'number' || !Number.isSafeInteger(captured.sequence) ||
-            captured.sequence < 0) {
+          if (typeof version !== 'string' || typeof sequence !== 'number' ||
+            !Number.isSafeInteger(sequence) || sequence < 0) {
             rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
               'Workbook worker hydration is missing its committed version or sequence'));
             return;
           }
           peerSource.module = module;
           peerSource.hydration = hydration;
-          peerSource.version = captured.version;
-          peerSource.sequence = captured.sequence;
+          peerSource.version = version;
+          peerSource.sequence = sequence;
         }
         if (options.wasm === undefined && !options.worker && !wasmModules.has(url)) {
           wasmModules.set(url, module);
@@ -259,7 +255,7 @@ export async function createWorkbookSession(
           ? (configured as (...args: unknown[]) => MethodPolicy)(...args) : configured;
         if (policy.mutates) {
           if (peerSource) {
-            return Promise.reject(new WorkbookPeerHydrationError('mutation-before-attachment',
+            return Promise.reject(new WorkbookPeerHydrationError('mutation-outside-replay',
               `Cannot call ${method} outside workbook edit-peer replay in retained hydration mode`));
           }
           return Promise.reject(new Error(`Cannot call ${method} while a workbook edit peer is attached`));
@@ -290,7 +286,12 @@ export async function createWorkbookSession(
     },
   };
   const replay = async (envelope: WorkbookReplayEnvelope) => {
-    const reply = await client.call.replay(envelope);
+    const reply = await client.call.replay(envelope).catch((error: unknown) => {
+      if (error instanceof Error && error.name === 'WorkbookPeerHydrationError') {
+        throw new WorkbookPeerHydrationError('mutation-outside-replay', error.message);
+      }
+      throw error;
+    });
     if (envelope.op.method === 'setActiveSheet') {
       state = { ...state, activeSheet: envelope.op.args[0] };
     } else if (reply.result !== null && typeof reply.result === 'object' && 'sheetInfo' in reply.result) {

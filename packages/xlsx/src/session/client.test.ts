@@ -1,17 +1,20 @@
 import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
-import { isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
+import {
+  isClientMessage, isHostMessage, SessionFailure, type SessionTransport,
+} from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import * as workbookWasm from '../wasm/loader';
+import { wasmAssetUrl } from '../wasm/asset';
 import { XlsxDocument } from '../wasm/generated/xlsx_wasm.js';
 import { openWorkbook, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
 import { createWorkbookSession, hydratePeer } from './client';
-import { createWorkbookEditPeer, WorkbookEditPeerFailedError } from './editPeer';
+import { createWorkbookEditPeer, WorkbookEditPeerFailedError, type WorkbookEditPeer } from './editPeer';
 import { workbookEditPeerOperations } from './editPeerInternals';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_POLICIES } from './methods';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
-import type { WorkbookReplayOp } from './replay';
+import { workbookSessionInternals, type WorkbookReplayOp } from './replay';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
 let fixture: Uint8Array;
@@ -40,47 +43,65 @@ function crashableHost(): {
 }
 
 describe('workbook peer hydration', () => {
-  test('refuses retained worker mutations before attachment without changing document state', async () => {
+  test('refuses retained public mutations before attachment and after peer disposal without changing document state', async () => {
     const pair = createInProcessPair();
     createWorkbookSessionHost(pair.host);
     const session = await createWorkbookSession(fixture, {
       calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
     }, pair.client);
+    let peer: WorkbookHandle | undefined;
+    let edits: WorkbookEditPeer | undefined;
+    const applyEdits = session.call.applyEdits;
     try {
-      const version = await session.call.version();
-      const saved = await session.save();
-      const input = {
-        expectVersion: version,
-        steps: [{
-          op: 'setCellInputs' as const,
-          target: { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } },
-          inputs: [['refused before attachment']],
-        }],
-      };
-      const mutators = Object.entries(WORKBOOK_SESSION_POLICIES)
-        .filter(([, policy]) => typeof policy !== 'function' && policy.mutates)
-        .map(([method]) => method);
-      expect(mutators).toEqual(['applyEdits']);
-      await expect(session.call.applyEdits(input)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
-      await expect(session.call.applyEdits(input)).rejects.toMatchObject({ code: 'mutation-before-attachment' });
-      const reply = new Promise<unknown>((resolve) => {
-        const off = pair.client.listen((message) => {
-          if (isHostMessage(message) && message.kind === 'reply' && message.id === 10_000) {
-            off();
-            resolve(message);
-          }
+      for (const phase of ['before attachment', 'after peer disposal']) {
+        if (phase === 'after peer disposal') {
+          peer = await hydratePeer(session);
+          edits = createWorkbookEditPeer({ session, peer });
+          await edits.flush();
+          edits.dispose();
+        }
+        const version = await session.call.version();
+        const saved = await session.save();
+        const state = structuredClone(session.state);
+        const input = {
+          expectVersion: version,
+          steps: [{
+            op: 'setCellInputs' as const,
+            target: { sheetId: 'sheet:0', range: { kind: 'a1' as const, a1: 'A1' } },
+            inputs: [['refused before attachment']],
+          }],
+        };
+        const mutators = Object.entries(WORKBOOK_SESSION_POLICIES)
+          .filter(([, policy]) => typeof policy !== 'function' && policy.mutates)
+          .map(([method]) => method);
+        expect(mutators).toEqual(['applyEdits']);
+        await expect(session.call.applyEdits(input)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+        await expect(session.call.applyEdits(input)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+        await expect(applyEdits(input)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+        const reply = new Promise<unknown>((resolve) => {
+          const off = pair.client.listen((message) => {
+            if (isHostMessage(message) && message.kind === 'reply' && message.id === 10_000) {
+              off();
+              resolve(message);
+            }
+          });
         });
-      });
-      pair.client.post({ protocol: 1, kind: 'call', id: 10_000, method: 'applyEdits', args: [input] });
-      expect(await reply).toMatchObject({
-        ok: false, error: { name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-before-attachment' } },
-      });
-      expect(await session.call.version()).toBe(version);
-      expect(await session.save()).toEqual(saved);
-      expect(session.state).toMatchObject({ version: 0, dirty: false, stage: 'ready' });
-      expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBe(0);
-      expect(session.failure).toBeUndefined();
-    } finally { await session.dispose(); }
+        pair.client.post({ protocol: 1, kind: 'call', id: 10_000, method: 'applyEdits', args: [input] });
+        expect(await reply).toMatchObject({
+          ok: false, error: { name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-outside-replay' } },
+        });
+        expect(await session.call.version()).toBe(version);
+        expect(await session.save()).toEqual(saved);
+        expect(session.state).toMatchObject({ version: 0, dirty: false, stage: 'ready' });
+        expect(session.state).toEqual(state);
+        expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBe(0);
+        expect(session.failure).toBeUndefined();
+      }
+    } finally {
+      edits?.dispose();
+      peer?.dispose();
+      await session.dispose();
+    }
   });
 
   test('refuses retained peer attachment after a worker-side state change with a typed error', async () => {
@@ -123,7 +144,7 @@ describe('workbook peer hydration', () => {
       ...transport,
       post(message, transfer) {
         if (isHostMessage(message) && message.kind === 'wasm-module' && message.hydration !== undefined) {
-          message = { ...message, hydration: JSON.stringify({ ...JSON.parse(message.hydration), sequence: 1 }) };
+          message = { ...message, sequence: 1 };
         }
         transport.post(message, transfer);
       },
@@ -142,6 +163,128 @@ describe('workbook peer hydration', () => {
       peer.dispose();
       await session.dispose();
     }
+  });
+
+  test('refuses queued retained replays after failed attachment without worker mutation', async () => {
+    const requests: string[] = [];
+    const refusals: unknown[] = [];
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call') requests.push(message.method);
+        listener(message);
+      }),
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'wasm-module') {
+          message = { ...message, sequence: 1 };
+        }
+        if (isHostMessage(message) && message.kind === 'reply' && !message.ok) {
+          refusals.push(message.error);
+        }
+        transport.post(message, transfer);
+      },
+    }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+    const peer = await hydratePeer(session);
+    const version = await session.call.version();
+    const saved = await session.save();
+    const state = structuredClone(session.state);
+    requests.length = 0;
+    const edits = createWorkbookEditPeer({ session, peer });
+    try {
+      expect(edits.editCell(0, 0, 0, 'queued after attachment').applied).toBe(true);
+      await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      expect(await session.call.version()).toBe(version);
+      expect(requests.slice(0, 2)).toEqual(['attachPeer', 'replay']);
+      expect(refusals).toContainEqual(expect.objectContaining({
+        name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-outside-replay' },
+      }));
+      expect(edits.error).toBeInstanceOf(WorkbookPeerHydrationError);
+      expect(edits.error).toMatchObject({ code: 'version-mismatch' });
+      expect(edits.state).toBe('failed');
+      expect(edits.sentSequence).toBe(1);
+      expect(edits.acknowledgedSequence).toBe(0);
+      expect(peer.cell(0, 0, 0).input).toBe('queued after attachment');
+      expect(await session.save()).toEqual(saved);
+      expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBe(0);
+      expect(session.state).toEqual(state);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('keeps retained hydration opaque during open and consumes only wire version and sequence', async () => {
+    const attachments: unknown[][] = [];
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'attachPeer') {
+          attachments.push(message.args);
+        }
+        listener(message);
+      }),
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'wasm-module') {
+          message = { ...message, hydration: 'opaque invalid JSON', version: 'wire-version', sequence: 7 };
+        }
+        transport.post(message, transfer);
+      },
+    }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+    try {
+      expect(session.state.stage).toBe('ready');
+      const internal = workbookSessionInternals.get(session);
+      expect(internal?.initialVersion).toBe('wire-version');
+      if (!internal?.attachPeer) throw new Error('Missing retained peer attachment');
+      await expect(internal.attachPeer('wire-version')).rejects.toMatchObject({ code: 'version-mismatch' });
+      expect(attachments).toEqual([['wire-version', 7]]);
+      await expect(hydratePeer(session)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      await expect(hydratePeer(session)).rejects.toMatchObject({ code: 'missing-hydration' });
+      expect(session.failure).toBeUndefined();
+    } finally { await session.dispose(); }
+  });
+
+  test('fails retained open with a typed error when hydration wire version or sequence is missing', async () => {
+    for (const missing of ['version', 'sequence'] as const) {
+      const opening = createTestWorkbookSession(fixture, (transport) => ({
+        ...transport,
+        post(message, transfer) {
+          if (isHostMessage(message) && message.kind === 'wasm-module') {
+            message = { ...message, [missing]: undefined };
+          }
+          transport.post(message, transfer);
+        },
+      }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+      await expect(opening).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      await expect(opening).rejects.toMatchObject({ code: 'missing-hydration' });
+    }
+  });
+
+  test('accepts legacy module advertisements without hydration headers for ordinary sessions', async () => {
+    const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'event' && message.name === 'peerOpened') {
+          transport.post({ protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module });
+        }
+        transport.post(message, transfer);
+      },
+    }), { calculation });
+    try {
+      expect(session.state.stage).toBe('ready');
+      expect(await session.call.applyEdits({
+        expectVersion: await session.call.version(),
+        steps: [{
+          op: 'setCellInputs',
+          target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1' } },
+          inputs: [['ordinary edit']],
+        }],
+      })).toMatchObject({ ok: true, applied: true });
+      expect((await session.call.cellInputs(0, 'A1')).cells[0][0].input).toBe('ordinary edit');
+      expect(session.failure).toBeUndefined();
+    } finally { await session.dispose(); }
   });
 
   test('fails retained open with a typed error when the worker module has no hydration payload', async () => {

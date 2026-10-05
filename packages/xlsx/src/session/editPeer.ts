@@ -114,7 +114,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   }
 
   function enqueue(envelope: WorkbookReplayEnvelope): void {
-    const sent = attachment ? attachment.then(() => replay(envelope)) : replay(envelope);
+    const sent = replay(envelope);
     tail = Promise.all([tail, sent]).then(([, reply]) => {
       if (reply.sequence !== envelope.sequence) {
         throw new Error(`Workbook replay acknowledgement mismatch at sequence ${envelope.sequence} (${envelope.op.method})`);

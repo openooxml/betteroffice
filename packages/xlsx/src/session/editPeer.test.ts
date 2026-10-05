@@ -10,6 +10,7 @@ import {
 } from './editPeer';
 import { workbookEditPeerOperations } from './editPeerInternals';
 import { WORKBOOK_SESSION_METHODS, WORKBOOK_SESSION_POLICIES } from './methods';
+import { WorkbookPeerHydrationError } from './peerHydrationError';
 import {
   WORKBOOK_INTERNAL_SESSION_POLICIES,
   workbookSessionInternals,
@@ -142,6 +143,80 @@ describe('workbook edit peers', () => {
         expect(frame.displayList).toEqual(peer.displayList(viewport));
         expect(session.state.activeSheet).toBe(1);
         await matchingDigest(1, 'setActiveSheet', edits, peer, session);
+      } finally {
+        edits.dispose();
+        peer.dispose();
+        await session.dispose();
+      }
+    }
+  });
+
+  test('refuses retained replay before attachment without mutation and remains usable', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    let peer: WorkbookHandle | undefined;
+    let edits: WorkbookEditPeer | undefined;
+    try {
+      const initial = await session.save();
+      const initialVersion = await session.call.version();
+      const initialState = structuredClone(session.state);
+      const initialSequence = (await session.call.frame(viewport)).sequence;
+      const envelope: WorkbookReplayEnvelope = {
+        sequence: 1, calculation, op: { method: 'editCell', args: [0, 2, 1, 'refused replay'] },
+      };
+      await expect(replay(session, envelope)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      await expect(replay(session, envelope)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+      expect(await session.call.version()).toBe(initialVersion);
+      expect((await session.call.frame(viewport)).sequence).toBe(initialSequence);
+      expect(await session.save()).toEqual(initial);
+      expect(session.state).toEqual(initialState);
+      expect(session.failure).toBeUndefined();
+      peer = await hydratePeer(session);
+      expect(peer.version()).toBe(initialVersion);
+      edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+      await matchingDigest(0, 'open', edits, peer, session);
+      expect(edits.editCell(0, 2, 1, 'accepted replay').applied).toBe(true);
+      await matchingDigest(1, 'editCell', edits, peer, session);
+      expect(peer.version()).toBe(await session.call.version());
+      expect((await session.call.frame(viewport)).sequence).toBe(1);
+      expect((await session.call.cellInputs(0, 'B3')).cells[0][0].input).toBe('accepted replay');
+      expect(session.failure).toBeUndefined();
+    } finally {
+      edits?.dispose();
+      peer?.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('serves immediate retained frames, reads and saves after peer edits without awaiting flush', async () => {
+    for (const wrapHost of [undefined, batchRequests]) {
+      const session = await createTestWorkbookSession(fixture, wrapHost, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      const peer = await hydratePeer(session);
+      const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+      try {
+        await matchingDigest(0, 'open', edits, peer, session);
+        const initial = await digest(await session.save());
+        expect(peer.sheetCount()).toBeGreaterThan(1);
+        expect(edits.editCell(0, 2, 1, 'immediate retained edit').applied).toBe(true);
+        edits.setActiveSheet(1);
+        const pendingFrame = session.call.frame(viewport);
+        const pendingRead = session.call.cellInputs(0, 'B3');
+        const pendingSave = session.save();
+        expect(edits.sentSequence).toBe(2);
+        expect(edits.acknowledgedSequence).toBe(0);
+        const [frame, read, saved] = await Promise.all([pendingFrame, pendingRead, pendingSave]);
+        expect(frame.sequence).toBe(2);
+        expect(frame.sheet).toBe(1);
+        expect(frame.displayList).toEqual(peer.displayList(viewport));
+        expect(read.cells[0][0].input).toBe('immediate retained edit');
+        expect(read.version).toBe(peer.version());
+        expect(await digest(saved)).toBe(await digest(peer.save()));
+        expect(await digest(saved)).not.toBe(initial);
+        expect(session.state.activeSheet).toBe(1);
+        await matchingDigest(2, 'setActiveSheet', edits, peer, session);
       } finally {
         edits.dispose();
         peer.dispose();
@@ -390,8 +465,14 @@ describe('workbook edit peers', () => {
       const stale = { ...request(peer, 'B3', 'stale'), expectVersion: initialVersion };
       const refusal = edits.applyEdits(stale);
       expect(refusal).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      expect(await session.call.validateEdits(stale)).toEqual(refusal);
+      const workerVersion = await session.call.version();
+      const workerDigest = await digest(await session.save());
       edits.dispose();
-      expect(await session.call.applyEdits(stale)).toEqual(refusal);
+      await expect(session.call.applyEdits(stale)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      await expect(session.call.applyEdits(stale)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+      expect(await session.call.version()).toBe(workerVersion);
+      expect(await digest(await session.save())).toBe(workerDigest);
       expect(peer.version()).toBe(await session.call.version());
       expect(await digest(peer.save())).toBe(await digest(await session.save()));
       expect(envelopes).toHaveLength(1);
@@ -804,14 +885,11 @@ describe('workbook edit peers', () => {
   });
 
   test('rejects gaps, duplicates and malformed envelopes without mutation and remains usable', async () => {
-    const session = await createTestWorkbookSession(fixture, batchRequests, {
-      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
-    });
-    const peer = await hydratePeer(session);
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
     try {
       const initial = await digest(await session.save());
       const initialVersion = await session.call.version();
-      expect(peer.version()).toBe(initialVersion);
       const envelope: WorkbookReplayEnvelope = {
         sequence: 1, calculation, op: { method: 'setActiveSheet', args: [0] },
       };
@@ -845,6 +923,87 @@ describe('workbook edit peers', () => {
         { ...envelope, sequence: 2, op: { method: 'applyFormat', args: [0, 'B3', {
           rows: 1, columns: 1, formats: [new Map()],
         }] } },
+      ];
+      for (const entry of [null, 42, {}]) {
+        const operations = [
+          { method: 'editCells', args: [0, [entry]] },
+          { method: 'editCells', args: [0, entry] },
+          { method: 'applyOps', args: [[entry]] },
+          { method: 'applyOps', args: [entry] },
+          { method: 'applyEdits', args: [{ expectVersion: '', steps: [entry] }] },
+          { method: 'applyEdits', args: [entry] },
+          { method: 'applyFormat', args: [0, 'B3', { rows: 1, columns: 1, formats: [entry] }] },
+          { method: 'applyFormat', args: [0, 'B3', entry] },
+          { method: 'patchRangeStyle', args: [0, 'B3', [entry]] },
+          { method: 'patchRangeStyle', args: [0, 'B3', { clear: [entry] }] },
+          { method: 'setNumberFormat', args: [0, 'B3', entry] },
+          { method: 'setNumberFormat', args: [0, 'B3', [entry]] },
+          { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
+            op: 'setCellInputs', target: target('B3'), inputs: [[entry]],
+          }] }] },
+          { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
+            op: 'setFormulas', target: target('B3'), formulas: [[entry]],
+          }] }] },
+          { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
+            op: 'setCellInputs', target: entry, inputs: [['invalid']],
+          }] }] },
+        ];
+        malformedEnvelopes.push(...operations.map((op) => ({ ...envelope, sequence: 2, op })));
+      }
+      for (const malformed of malformedEnvelopes) {
+        await expect(replay(session, malformed as WorkbookReplayEnvelope)).rejects.toMatchObject({
+          name: 'WorkbookReplayValidationError',
+        });
+        expect(await digest(await session.save())).toBe(initial);
+        expect(await session.call.version()).toBe(initialVersion);
+        expect((await session.call.frame(viewport)).sequence).toBe(1);
+        expect(session.state).toMatchObject({ version: 0, dirty: false, stage: 'ready' });
+        expect(session.failure).toBeUndefined();
+        expect(await digest(peer.save())).toBe(initial);
+      }
+      const accepted = request(peer, 'B3', '777');
+      expect(peer.applyEdits(accepted)).toMatchObject({ ok: true, applied: true });
+      const changed = await replay(session, {
+        sequence: 2, calculation, op: { method: 'applyEdits', args: [accepted] },
+      });
+      expect(changed).toMatchObject({ sequence: 2, revision: 1, version: 1, result: { ok: true, applied: true } });
+      expect(await digest(await session.save())).toBe(await digest(peer.save()));
+      expect((await session.call.frame(viewport)).sequence).toBe(2);
+      expect(session.failure).toBeUndefined();
+      expect(await replay(session, {
+        sequence: 3, calculation, op: { method: 'applyEdits', args: [request(peer, 'B3', '777')] },
+      })).toMatchObject({ sequence: 3, revision: 1, version: 1, result: { ok: true, applied: false } });
+      expect((await session.call.frame(viewport)).sequence).toBe(3);
+    } finally {
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('rejects malformed proposal replay envelopes without mutation and remains usable', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      const initial = await digest(await session.save());
+      const initialVersion = await session.call.version();
+      expect(peer.version()).toBe(initialVersion);
+      const envelope: WorkbookReplayEnvelope = {
+        sequence: 1, calculation, op: { method: 'setActiveSheet', args: [0] },
+      };
+      await expect(replay(session, { ...envelope, sequence: 2 })).rejects.toMatchObject({
+        name: 'WorkbookReplayOrderError',
+      });
+      expect(await digest(await session.save())).toBe(initial);
+      peer.setCalculationContext(calculation);
+      peer.setActiveSheet(0);
+      expect(await replay(session, envelope)).toMatchObject({ sequence: 1, revision: 0, version: 0 });
+      for (const sequence of [1, 3]) {
+        await expect(replay(session, { ...envelope, sequence })).rejects.toMatchObject({
+          name: 'WorkbookReplayOrderError',
+        });
+      }
+      const malformedEnvelopes: unknown[] = [
         { ...envelope, sequence: 2, op: { method: 'propose', args: [42, null, []] } },
         { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', undefined, []] } },
         { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', null, [{
@@ -862,29 +1021,8 @@ describe('workbook edit peers', () => {
       ];
       for (const entry of [null, 42, {}]) {
         const operations = [
-          { method: 'editCells', args: [0, [entry]] },
-          { method: 'editCells', args: [0, entry] },
-          { method: 'applyOps', args: [[entry]] },
-          { method: 'applyOps', args: [entry] },
-          { method: 'applyEdits', args: [{ expectVersion: '', steps: [entry] }] },
-          { method: 'applyEdits', args: [entry] },
-          { method: 'applyFormat', args: [0, 'B3', { rows: 1, columns: 1, formats: [entry] }] },
-          { method: 'applyFormat', args: [0, 'B3', entry] },
-          { method: 'patchRangeStyle', args: [0, 'B3', [entry]] },
-          { method: 'patchRangeStyle', args: [0, 'B3', { clear: [entry] }] },
-          { method: 'setNumberFormat', args: [0, 'B3', entry] },
-          { method: 'setNumberFormat', args: [0, 'B3', [entry]] },
           { method: 'propose', args: ['agent', null, [entry]] },
           { method: 'propose', args: ['agent', null, entry] },
-          { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
-            op: 'setCellInputs', target: target('B3'), inputs: [[entry]],
-          }] }] },
-          { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
-            op: 'setFormulas', target: target('B3'), formulas: [[entry]],
-          }] }] },
-          { method: 'applyEdits', args: [{ expectVersion: '', steps: [{
-            op: 'setCellInputs', target: entry, inputs: [['invalid']],
-          }] }] },
         ];
         malformedEnvelopes.push(...operations.map((op) => ({ ...envelope, sequence: 2, op })));
       }
@@ -915,6 +1053,7 @@ describe('workbook edit peers', () => {
       expect((await session.call.frame(viewport)).sequence).toBe(3);
       expect(peer.version()).toBe(await session.call.version());
     } finally {
+      edits.dispose();
       peer.dispose();
       await session.dispose();
     }
