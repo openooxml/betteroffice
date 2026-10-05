@@ -8791,10 +8791,21 @@ test.each([false, true])('a cut without the Clipboard API queues no deletion wit
     act(() => textarea.focus());
     selectOpeningText(opened);
     fireEvent.cut(textarea);
-    expect(opened.editor.current!.hasPendingInput()).toBe(false);
     expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    act(() => opened.releaseHeldInput());
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
     expect(remove).not.toHaveBeenCalled();
     expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
     expect(opened.harness.errors).toEqual([]);
   } finally {
     remove.mockRestore();
