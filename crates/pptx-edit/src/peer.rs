@@ -9,7 +9,8 @@ use crate::{DeckSession, UndoCaptureMode, decode_update_v1, doc_with_client_id, 
 #[derive(Debug, thiserror::Error, Serialize)]
 #[serde(rename_all = "camelCase")]
 #[error("{code}: {message}")]
-pub(crate) struct PeerError {
+#[doc(hidden)]
+pub struct PeerError {
     pub code: String,
     pub message: String,
 }
@@ -43,7 +44,8 @@ impl From<serde_json::Error> for PeerError {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct PeerFont {
+#[doc(hidden)]
+pub struct PeerFont {
     pub family: String,
     pub bold: bool,
     pub italic: bool,
@@ -123,7 +125,8 @@ impl PeerIdentity {
 }
 
 impl DeckSession {
-    pub(crate) fn open_replay_baseline(
+    #[doc(hidden)]
+    pub fn open_replay_baseline(
         source: &[u8],
         client_id: Option<u64>,
         initial_update: Option<&[u8]>,
@@ -182,7 +185,8 @@ impl DeckSession {
         Ok(())
     }
 
-    pub(crate) fn peer_identity(&self, fonts: Vec<PeerFont>) -> Result<String, PeerError> {
+    #[doc(hidden)]
+    pub fn peer_identity(&self, fonts: Vec<PeerFont>) -> Result<String, PeerError> {
         self.verify_pristine()?;
         self.undo.borrow().assert_replay_capture()?;
         let identity = PeerIdentity {
@@ -210,7 +214,8 @@ impl DeckSession {
         Ok(json)
     }
 
-    pub(crate) fn open_peer_deck(
+    #[doc(hidden)]
+    pub fn open_peer_deck(
         source: &[u8],
         identity: &str,
         initial_update: Option<&[u8]>,
@@ -234,7 +239,8 @@ impl DeckSession {
         Ok(session)
     }
 
-    pub(crate) fn register_peer_fonts(&self, fonts: Vec<PeerFont>) -> Result<(), PeerError> {
+    #[doc(hidden)]
+    pub fn register_peer_fonts(&self, fonts: Vec<PeerFont>) -> Result<(), PeerError> {
         let mut state = self.replay_state.borrow_mut();
         let opening = state
             .opening
@@ -250,7 +256,8 @@ impl DeckSession {
         Ok(())
     }
 
-    pub(crate) fn adopt_peer_identity(&self) -> Result<(), PeerError> {
+    #[doc(hidden)]
+    pub fn adopt_peer_identity(&self) -> Result<(), PeerError> {
         self.verify_pristine()?;
         self.undo.borrow().assert_replay_capture()?;
         let mut state = self.replay_state.borrow_mut();

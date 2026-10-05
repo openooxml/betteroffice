@@ -611,7 +611,8 @@ impl DeckSession {
         )
     }
 
-    pub(crate) fn replay_json(&self, input: &str) -> Result<String, PeerError> {
+    #[doc(hidden)]
+    pub fn replay_json(&self, input: &str) -> Result<String, PeerError> {
         if input.len() > crate::MAX_REQUEST_BYTES {
             return Err(PeerError::new("arguments", "envelope exceeds engine limit"));
         }
@@ -708,13 +709,14 @@ mod tests {
     use crate::{ProposalEdit, ProposalRequest};
 
     fn assert_observable(worker: &DeckSession, peer: &DeckSession, prefix: &str) {
+        let snapshot = worker.snapshot().unwrap();
         assert_eq!(
             worker.save().unwrap(),
             peer.save().unwrap(),
             "save bytes at {prefix}"
         );
         assert_eq!(
-            worker.snapshot().unwrap(),
+            snapshot,
             peer.snapshot().unwrap(),
             "stories and paragraph ids at {prefix}"
         );
@@ -729,11 +731,58 @@ mod tests {
             "counters and history at {prefix}"
         );
         assert_eq!(
-            worker.undo.borrow().stack_diagnostics(),
-            peer.undo.borrow().stack_diagnostics(),
-            "history contents at {prefix}"
+            worker.undo.borrow().stack_clock_counts(),
+            peer.undo.borrow().stack_clock_counts(),
+            "history entry clock counts at {prefix}"
         );
         assert_eq!(worker.version(), peer.version(), "versions at {prefix}");
+        for slide in &snapshot.slides {
+            for shape in &slide.shapes {
+                for story in &shape.text_stories {
+                    for index in 0..story.length {
+                        let worker_anchor = worker.anchor_caret(&story.id, index).unwrap();
+                        let peer_anchor = peer.anchor_caret(&story.id, index).unwrap();
+                        assert_eq!(
+                            worker.resolve_caret_anchor(&worker_anchor),
+                            Some(index),
+                            "worker caret at {prefix}/{index}"
+                        );
+                        assert_eq!(
+                            peer.resolve_caret_anchor(&peer_anchor),
+                            Some(index),
+                            "peer caret at {prefix}/{index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_ordered_history(worker: &DeckSession, peer: &DeckSession, prefix: &str) {
+        assert_eq!(
+            worker.undo.borrow().stack_diagnostics(),
+            peer.undo.borrow().stack_diagnostics(),
+            "history ids before restoration at {prefix}"
+        );
+        for slide in worker.snapshot().unwrap().slides {
+            for shape in slide.shapes {
+                for story in shape.text_stories {
+                    for index in 0..story.length {
+                        let anchor = worker.anchor_caret(&story.id, index).unwrap();
+                        assert_eq!(
+                            anchor,
+                            peer.anchor_caret(&story.id, index).unwrap(),
+                            "caret ids before restoration at {prefix}/{index}"
+                        );
+                        assert_eq!(
+                            peer.resolve_caret_anchor(&anchor),
+                            Some(index),
+                            "shared caret before restoration at {prefix}/{index}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     fn history_paths(worker: &DeckSession, peer: &DeckSession, prefix: &str) {
@@ -849,6 +898,11 @@ mod tests {
                     &peer,
                     &format!("prefix {end}, operation {index}: {op}"),
                 );
+                assert_ordered_history(
+                    &worker,
+                    &peer,
+                    &format!("prefix {end}, operation {index}"),
+                );
             }
             let label = format!(
                 "prefix {end}: {}",
@@ -865,6 +919,8 @@ mod tests {
         let (worker, peer) = pair();
         for op in operations(&worker) {
             apply_pair(&worker, &peer, &op);
+            assert_observable(&worker, &peer, &format!("full replay: {op}"));
+            assert_ordered_history(&worker, &peer, &format!("full replay: {op}"));
         }
         history_paths(&worker, &peer, "full replay");
     }
