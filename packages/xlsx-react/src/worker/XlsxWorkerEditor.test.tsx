@@ -2259,6 +2259,7 @@ it('keeps a mixed batch preview cleared after an earlier UI refusal until frame 
     expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('2');
     expect(painted[painted.length - 1].commands.some((command) =>
       command.op === 'text' && command.text === 'worker:batch')).toBe(true);
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
     expect(api.cell(0, 0, 0)?.input).toBe('batch');
   } finally {
     try {
