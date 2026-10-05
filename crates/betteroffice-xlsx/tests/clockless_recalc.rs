@@ -168,6 +168,74 @@ fn clockless_full_recalculation_preserves_caches_and_arrays() {
 }
 
 #[test]
+fn clockless_full_recalculation_updates_stale_scalars_and_preserves_clock_caches() {
+    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
+    let sheet = parts
+        .iter_mut()
+        .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
+        .unwrap();
+    sheet.1 = String::from_utf8(std::mem::take(&mut sheet.1))
+        .unwrap()
+        .replace(r#"<c r="F1"><f>A1+1</f><v>45001</v></c>"#, r#"<c r="F1"><f>A1+1</f><v>99</v></c>"#)
+        .replacen("</row>", r#"<c r="J1"><f>1+1</f><v>99</v></c><c r="K1"><f>G1+1</f><v>45001</v></c><c r="L1"><f>G1+1</f></c><c r="M1"><f>L1+1</f><v>45002</v></c><c r="N1"><f>L1+1</f></c><c r="O1"><f>O1+IFERROR(TODAY(),0)</f><v>45000</v></c><c r="P1"><f>P1+IFERROR(TODAY(),0)</f></c></row>"#, 1)
+        .replace("</sheetData>", r#"<row r="7"><c r="A7"><f t="array" ref="A7:B7">A7+IFERROR(TODAY(),0)</f><v>45000</v></c><c r="B7"><v>45001</v></c></row><row r="9"><c r="A9"><f t="array" ref="A9:B9">A9+IFERROR(TODAY(),0)</f></c><c r="B9"><v>45001</v></c></row></sheetData>"#)
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    assert_eq!(value(&workbook, "F1"), number(99.0));
+    assert_eq!(value(&workbook, "J1"), number(99.0));
+    assert_eq!(
+        workbook
+            .recalculate_all(CalculationOptions::default())
+            .changed
+            .iter()
+            .map(|address| (address.sheet, address.cell))
+            .collect::<Vec<_>>(),
+        vec![(SheetId(1), cell("F1")), (SheetId(1), cell("J1"))]
+    );
+    let saved = workbook.save().unwrap();
+    let reopened = Workbook::open(&saved).unwrap();
+    for workbook in [&workbook, &reopened] {
+        assert_source_caches(workbook);
+        for (address, expected) in [
+            ("J1", number(2.0)),
+            ("K1", number(45_001.0)),
+            ("L1", CellValue::Empty),
+            ("M1", number(45_002.0)),
+            ("N1", CellValue::Empty),
+            ("O1", number(45_000.0)),
+            ("P1", CellValue::Empty),
+            ("A7", number(45_000.0)),
+            ("B7", number(45_001.0)),
+            ("A9", CellValue::Empty),
+            ("B9", number(45_001.0)),
+        ] {
+            assert_eq!(value(workbook, address), expected, "{address}");
+        }
+        for (anchor, range) in [("A7", "A7:B7"), ("A9", "A9:B9")] {
+            assert_eq!(
+                workbook
+                    .sheet(SheetId(1))
+                    .unwrap()
+                    .array_formula(cell(anchor)),
+                Some(CellRange::parse_a1(range).unwrap())
+            );
+        }
+    }
+    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert!(
+        !std::str::from_utf8(part(&parts, "xl/worksheets/sheet2.xml"))
+            .unwrap()
+            .contains("t=\"e\"")
+    );
+    assert!(
+        std::str::from_utf8(part(&parts, "xl/workbook.xml"))
+            .unwrap()
+            .contains("fullCalcOnLoad=\"1\"")
+    );
+}
+
+#[test]
 fn explicit_clock_updates_caches_after_clockless_recalculation() {
     let bytes = fixture();
     for batch in [false, true] {

@@ -147,12 +147,17 @@ fn run_recalc(
     let mut limited_cells = Vec::new();
     let mut cycle_cells: Vec<(SheetId, CellRef)> = Vec::new();
     let mut pending = recompute;
+    let mut withheld = HashSet::new();
 
     for _ in 0..MAX_SPILL_ROUNDS {
         let (order, cycle) = topo_order(graph, &pending);
         let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
         for u in &order {
-            let (value, limited) = eval_node(wb, *u, context, Rc::clone(&budget), graph);
+            if withheld.contains(u) {
+                continue;
+            }
+            let (value, limited) =
+                eval_node(wb, *u, context, Rc::clone(&budget), graph, &mut withheld);
             if limited {
                 limited_cells.push((u.0, cell_of(*u)));
             }
@@ -185,9 +190,10 @@ fn run_recalc(
             &budget,
             &mut changed,
             &mut limited_cells,
+            &mut withheld,
         );
         for u in &circular {
-            if write_if_changed(wb, *u, circular_value(wb, *u)) {
+            if !withheld.contains(u) && write_if_changed(wb, *u, circular_value(wb, *u)) {
                 changed.push((u.0, cell_of(*u)));
             }
             cycle_cells.push((u.0, cell_of(*u)));
@@ -347,15 +353,47 @@ fn settle_deferred(
     budget: &Rc<EvaluationBudget>,
     changed: &mut Vec<(SheetId, CellRef)>,
     limited_cells: &mut Vec<(SheetId, CellRef)>,
+    withheld: &mut HashSet<Key>,
 ) -> Vec<Key> {
-    if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
+    if cycle.is_empty() {
+        return Vec::new();
+    }
+    if cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
+        if context.now_serial.is_none() {
+            for u in cycle {
+                if withheld.contains(u) {
+                    continue;
+                }
+                let (_, limited) = eval_node(wb, *u, context, Rc::clone(budget), graph, withheld);
+                if limited {
+                    limited_cells.push((u.0, cell_of(*u)));
+                }
+            }
+            let circular: HashSet<Key> = cycle.iter().copied().collect();
+            let mut pending: Vec<Key> = withheld
+                .iter()
+                .copied()
+                .filter(|u| matches!(wb.value_cow(u.0, cell_of(*u)).as_ref(), CellValue::Empty))
+                .collect();
+            while let Some(u) = pending.pop() {
+                for (sheet, cell) in graph.dependents_of(u.0, cell_of(u)) {
+                    let dependent = key(sheet, cell);
+                    if circular.contains(&dependent)
+                        && withheld.insert(dependent)
+                        && matches!(wb.value_cow(sheet, cell).as_ref(), CellValue::Empty)
+                    {
+                        pending.push(dependent);
+                    }
+                }
+            }
+        }
         return cycle.to_vec();
     }
     let mut unsettled: HashSet<Key> = cycle.iter().copied().collect();
     for _ in 0..cycle.len() {
         let mut settled_any = false;
         for u in cycle {
-            if !unsettled.contains(u) {
+            if !unsettled.contains(u) || withheld.contains(u) {
                 continue;
             }
             let log = ReadLog {
@@ -363,7 +401,11 @@ fn settle_deferred(
                 watch: &unsettled,
                 touched: Flag::new(false),
             };
-            let (value, limited) = eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph);
+            let (value, limited) =
+                eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph, withheld);
+            if withheld.contains(u) {
+                settled_any = true;
+            }
             // a spill rewrites a rectangle, which the ordered pass owns
             if log.touched.get() || matches!(value, Some(NodeValue::Spill(_) | NodeValue::Refused))
             {
@@ -466,8 +508,9 @@ fn eval_node(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
+    withheld: &mut HashSet<Key>,
 ) -> (Option<NodeValue>, bool) {
-    eval_node_with(wb, wb, u, context, budget, graph)
+    eval_node_with(wb, wb, u, context, budget, graph, withheld)
 }
 
 /// evaluate one node, reading cells through `provider` while `wb` supplies the
@@ -479,6 +522,7 @@ fn eval_node_with(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
+    withheld: &mut HashSet<Key>,
 ) -> (Option<NodeValue>, bool) {
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
@@ -491,15 +535,20 @@ fn eval_node_with(
     ctx.rand_seed = context.rand_seed.map(|seed| cell_random_seed(seed, u));
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
+    ctx.withheld_cells = Some(withheld);
     let value = match authored {
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
-    if ctx.has_missing_clock()
-        || (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty)
-    {
+    if ctx.has_missing_clock() {
+        let exhausted = ctx.exhausted();
+        drop(ctx);
+        withheld.insert(u);
+        return (None, exhausted);
+    }
+    if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
     if refused && authored.is_some() {
@@ -1116,6 +1165,215 @@ mod tests {
         put_cached_formula(&mut wb, s, "B1", "SUM(A1,A1)", num(99.0));
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(4.0));
+    }
+
+    #[test]
+    fn clockless_uncached_dependents_keep_their_source_caches() {
+        for cached in [num(45_001.0), CellValue::Empty] {
+            let (mut wb, s) = one_sheet();
+            put_formula(&mut wb, s, "A1", "TODAY()");
+            put_cached_formula(&mut wb, s, "B1", "A1+1", cached.clone());
+            put_cached_formula(&mut wb, s, "C1", "B1+1", num(99.0));
+            put_cached_formula(&mut wb, s, "D1", "SUM(A1:A1)+1", num(45_001.0));
+            put_formula(&mut wb, s, "E1", "ANCHORARRAY(A1)+1");
+            put_cached_formula(&mut wb, s, "F1", "Z1+1", num(99.0));
+            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+            assert_eq!(value(&wb, s, "B1"), cached);
+            assert_eq!(value(&wb, s, "C1"), num(99.0));
+            assert_eq!(value(&wb, s, "D1"), num(45_001.0));
+            assert_eq!(value(&wb, s, "E1"), CellValue::Empty);
+            assert_eq!(value(&wb, s, "F1"), num(99.0));
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert!(result.limited_cells.is_empty());
+            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+            assert_eq!(value(&wb, s, "B1"), cached);
+            assert_eq!(
+                value(&wb, s, "C1"),
+                if cached == CellValue::Empty {
+                    num(99.0)
+                } else {
+                    num(45_002.0)
+                }
+            );
+            assert_eq!(value(&wb, s, "D1"), num(45_001.0));
+            assert_eq!(value(&wb, s, "E1"), CellValue::Empty);
+            assert_eq!(value(&wb, s, "F1"), num(1.0));
+        }
+    }
+
+    #[test]
+    fn clockless_cached_precedents_allow_dependents_to_commit() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "A1", "TODAY()", num(45_000.0));
+        put_cached_formula(&mut wb, s, "B1", "A1+1", num(99.0));
+        put_formula(&mut wb, s, "C1", "B1+1");
+        assert_eq!(value(&wb, s, "A1"), num(45_000.0));
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "A1"), num(45_000.0));
+        assert_eq!(value(&wb, s, "B1"), num(45_001.0));
+        assert_eq!(value(&wb, s, "C1"), num(45_002.0));
+        assert_eq!(result.changed, vec![(s, a1("B1")), (s, a1("C1"))]);
+    }
+
+    #[test]
+    fn clockless_cycles_keep_cached_and_uncached_values() {
+        for cached in [num(45_000.0), CellValue::Empty] {
+            let (mut wb, s) = one_sheet();
+            put_cached_formula(&mut wb, s, "A1", "A1+IFERROR(TODAY(),0)", cached.clone());
+            put_cached_formula(&mut wb, s, "B1", "C1+1", cached.clone());
+            put_cached_formula(&mut wb, s, "C1", "B1+IFERROR(TODAY(),0)", cached.clone());
+            for address in ["A1", "B1", "C1"] {
+                assert_eq!(value(&wb, s, address), cached);
+            }
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert!(result.limited_cells.is_empty());
+            assert_eq!(value(&wb, s, "A1"), cached);
+            assert_eq!(value(&wb, s, "C1"), cached);
+            assert_eq!(
+                value(&wb, s, "B1"),
+                if cached == CellValue::Empty {
+                    cached
+                } else {
+                    num(0.0)
+                }
+            );
+            assert!(result.cycle_cells.contains(&(s, a1("A1"))));
+        }
+    }
+
+    #[test]
+    fn clockless_circular_array_anchors_keep_cached_and_uncached_values() {
+        for cached in [num(45_000.0), CellValue::Empty] {
+            let (mut wb, s) = one_sheet();
+            put_cached_formula(&mut wb, s, "A1", "A1+IFERROR(TODAY(),0)", cached.clone());
+            wb.sheet_mut(s)
+                .unwrap()
+                .set_array_formula(a1("A1"), CellRange::parse_a1("A1:B1").unwrap());
+            put_num(&mut wb, s, "B1", 45_001.0);
+            assert_eq!(value(&wb, s, "A1"), cached);
+            assert_eq!(value(&wb, s, "B1"), num(45_001.0));
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert!(result.changed.is_empty());
+            assert_eq!(value(&wb, s, "A1"), cached);
+            assert_eq!(value(&wb, s, "B1"), num(45_001.0));
+            assert_eq!(
+                wb.sheet(s).unwrap().array_formula(a1("A1")),
+                Some(CellRange::parse_a1("A1:B1").unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn clockless_large_cycles_keep_clock_caches_and_uncached_dependents() {
+        let (mut wb, s) = one_sheet();
+        for row in 1..=MAX_DEFERRED_CYCLE_CELLS + 1 {
+            let address = format!("A{row}");
+            let cached = if row % 2 == 0 {
+                CellValue::Empty
+            } else {
+                num(45_000.0)
+            };
+            put_cached_formula(
+                &mut wb,
+                s,
+                &address,
+                &format!("{address}+IFERROR(TODAY(),0)"),
+                cached.clone(),
+            );
+            assert_eq!(value(&wb, s, &address), cached);
+        }
+        put_cached_formula(&mut wb, s, "B1", "B1+1", num(99.0));
+        put_formula(&mut wb, s, "C1", "D1+1");
+        put_formula(&mut wb, s, "D1", "D1+IFERROR(TODAY(),0)");
+        put_cached_formula(&mut wb, s, "E1", "C1+1", num(45_002.0));
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "D1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "E1"), num(45_002.0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.limited_cells.is_empty());
+        assert_eq!(result.changed, vec![(s, a1("B1"))]);
+        for row in 1..=MAX_DEFERRED_CYCLE_CELLS + 1 {
+            assert_eq!(
+                value(&wb, s, &format!("A{row}")),
+                if row % 2 == 0 {
+                    CellValue::Empty
+                } else {
+                    num(45_000.0)
+                }
+            );
+        }
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
+        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "D1"), CellValue::Empty);
+        assert_eq!(value(&wb, s, "E1"), num(45_002.0));
+    }
+
+    #[test]
+    fn clockless_deferred_dependents_keep_cached_and_uncached_values() {
+        for cached in [num(45_001.0), CellValue::Empty] {
+            let (mut wb, s) = one_sheet();
+            put_formula(&mut wb, s, "A1", "TODAY()");
+            put_cached_formula(&mut wb, s, "B1", "INDEX(A1:B1,1,1)+1", cached.clone());
+            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+            assert_eq!(value(&wb, s, "B1"), cached);
+            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+            assert!(result.changed.is_empty());
+            assert!(result.cycle_cells.is_empty());
+            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
+            assert_eq!(value(&wb, s, "B1"), cached);
+        }
+    }
+
+    #[test]
+    fn clockless_name_expansion_keeps_caches_within_the_shared_budget() {
+        let (mut wb, s) = one_sheet();
+        wb.defined_names.push(DefinedName {
+            name: "N_0".into(),
+            formula: "1".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        for index in 1..=20 {
+            wb.defined_names.push(DefinedName {
+                name: format!("N_{index}"),
+                formula: format!("N_{}+N_{}", index - 1, index - 1),
+                local_sheet: None,
+                hidden: false,
+            });
+        }
+        for row in 1..=10 {
+            let cached = if row % 2 == 0 {
+                CellValue::Empty
+            } else {
+                num(99.0)
+            };
+            put_cached_formula(
+                &mut wb,
+                s,
+                &format!("A{row}"),
+                "IFERROR(TODAY(),0)+N_20",
+                cached.clone(),
+            );
+            assert_eq!(value(&wb, s, &format!("A{row}")), cached);
+        }
+        put_cached_formula(&mut wb, s, "B1", "1+1", num(99.0));
+        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(result.limited_cells.is_empty());
+        assert_eq!(result.changed, vec![(s, a1("B1"))]);
+        for row in 1..=10 {
+            assert_eq!(
+                value(&wb, s, &format!("A{row}")),
+                if row % 2 == 0 {
+                    CellValue::Empty
+                } else {
+                    num(99.0)
+                }
+            );
+        }
+        assert_eq!(value(&wb, s, "B1"), num(2.0));
     }
 
     /// OFFSET reads its anchor's coordinates, not its value, so a cell may

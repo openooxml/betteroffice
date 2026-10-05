@@ -180,6 +180,7 @@ describe('workbook calculation context', () => {
   it('changes the handle context and restores the default clock and random path with null', () => {
     const handle = openWorkbook(volatileBytes());
     try {
+      expect(handle.editCell(0, 39, 24, '=Z40+1').applied).toBe(true);
       handle.setCalculationContext(CONTEXT);
       handle.editCell(0, 39, 25, '1');
       const pinned = values(handle);
@@ -202,8 +203,18 @@ describe('workbook calculation context', () => {
       expect(draws.some((draw) => JSON.stringify(draw) !== JSON.stringify(pinned[3]))).toBe(true);
       const cached = values(handle)[0];
       expect(cached).toMatchObject({ kind: 'number' });
-      expect(handle.applyEdits(request(handle, '7')).ok).toBe(true);
+      const result = handle.applyEdits(request(handle, '7'));
+      expect(result.ok).toBe(true);
+      expect(result.applied).toBe(true);
       expect(values(handle)[0]).toEqual(cached);
+      const read = handle.readCells({
+        ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'Y40:Z40' } }],
+      });
+      if (!read.ok) throw new Error(read.failure.message);
+      expect(read.ranges[0].cells[0].map((cell) => cell.value)).toEqual([
+        { kind: 'number', value: 8 },
+        { kind: 'number', value: 7 },
+      ]);
     } finally {
       handle.dispose();
     }
