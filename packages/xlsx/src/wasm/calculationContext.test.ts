@@ -200,8 +200,10 @@ describe('workbook calculation context', () => {
         draws.push(values(handle)[3]);
       }
       expect(draws.some((draw) => JSON.stringify(draw) !== JSON.stringify(pinned[3]))).toBe(true);
+      const cached = values(handle)[0];
+      expect(cached).toMatchObject({ kind: 'number' });
       expect(handle.applyEdits(request(handle, '7')).ok).toBe(true);
-      expect(values(handle)[0]).toMatchObject({ kind: 'error' });
+      expect(values(handle)[0]).toEqual(cached);
     } finally {
       handle.dispose();
     }
