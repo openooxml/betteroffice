@@ -501,6 +501,15 @@ export class ResidentEngineWorkerClient {
     return new Uint8Array(response.state);
   }
 
+  /** @internal */
+  async encodeVersionedState(): Promise<{ state: Uint8Array; version: string | undefined }> {
+    const response = await this.request({ type: 'encodeState' });
+    if (!response.state) {
+      throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
+    }
+    return { state: new Uint8Array(response.state), version: response.version };
+  }
+
   /**
    * @internal Saves the opened document in the worker. With the editor copy's
    * `stateVector`, `updates` carry what the worker holds beyond it (the

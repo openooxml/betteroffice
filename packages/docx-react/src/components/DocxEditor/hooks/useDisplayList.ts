@@ -103,7 +103,8 @@ import { nearestPages } from './pageBuildOrder';
 import { scheduleIdlePageBuild, type PageBuildTask } from './pageBuildScheduler';
 
 export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
-  encodeState(prefetch?: boolean): Promise<{ state: Uint8Array; version: string }>;
+  encodeState(prefetch?: boolean): Promise<Uint8Array>;
+  encodeVersionedState?(prefetch?: boolean): ReturnType<ResidentEngineWorkerClient['encodeVersionedState']>;
   stateRevision?(): { owner: ResidentEngineWorkerClient; sequence: number } | null;
   revisionCount(): Promise<number>;
   proposal: ResidentEngineWorkerClient['proposal'];
@@ -1774,32 +1775,38 @@ export function useRustDisplayList(
       };
       try {
         const opened = await requestOpenedWorker(hostEngine, (owner) => owner.opening!, undefined, 'open');
+        const encodeOpenedState = <T,>(
+          encode: (client: ResidentEngineWorkerClient) => Promise<T>,
+          prefetch?: boolean
+        ): Promise<T> => {
+          if (!prefetch) return requestOpenedWorker(hostEngine, (owner) => encode(owner.client));
+          return (async () => {
+            const previous = workerRef.current;
+            let owner = previous;
+            try {
+              const state = await requestOpenedWorker(hostEngine, (current) => {
+                owner = current;
+                return encode(current.client);
+              });
+              if (
+                owner && owner !== previous && isCurrentWorker(hostEngine, owner) &&
+                !owner.client.bootstrapSent()
+              ) requestLayoutRef.current?.();
+              return state;
+            } catch (error) {
+              if (
+                !(error instanceof ResidentWorkerOutOfMemoryError) && owner &&
+                isCurrentWorker(hostEngine, owner) && owner.client.hasFailed()
+              ) dropWorker(hostEngine, error);
+              throw error;
+            }
+          })();
+        };
         return {
           ...opened,
-          encodeState: (prefetch?: boolean) => {
-            if (!prefetch) return requestOpenedWorker(hostEngine, (owner) => owner.client.handOver());
-            return (async () => {
-              const previous = workerRef.current;
-              let owner = previous;
-              try {
-                const state = await requestOpenedWorker(hostEngine, (current) => {
-                  owner = current;
-                  return current.client.handOver();
-                });
-                if (
-                  owner && owner !== previous && isCurrentWorker(hostEngine, owner) &&
-                  !owner.client.bootstrapSent()
-                ) requestLayoutRef.current?.();
-                return state;
-              } catch (error) {
-                if (
-                  !(error instanceof ResidentWorkerOutOfMemoryError) && owner &&
-                  isCurrentWorker(hostEngine, owner) && owner.client.hasFailed()
-                ) dropWorker(hostEngine, error);
-                throw error;
-              }
-            })();
-          },
+          encodeState: (prefetch?: boolean) => encodeOpenedState((client) => client.encodeState(), prefetch),
+          encodeVersionedState: (prefetch?: boolean) =>
+            encodeOpenedState((client) => client.encodeVersionedState(), prefetch),
           stateRevision: () => {
             const owner = workerRef.current;
             return owner?.engine === hostEngine && !owner.client.hasFailed()

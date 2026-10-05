@@ -685,7 +685,7 @@ export function useYrsCoreSession(
             };
             const deferEditorReplica = (): ReturnType<typeof deferWorkerOpenReplica> => {
               type StateRevision = NonNullable<ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>>;
-              type StateSnapshot = Awaited<ReturnType<WorkerOpenedDocument['encodeState']>>;
+              type StateSnapshot = Awaited<ReturnType<NonNullable<WorkerOpenedDocument['encodeVersionedState']>>>;
               type PrefetchedState = {
                 revision: StateRevision;
                 result: Promise<StateSnapshot>;
@@ -698,15 +698,19 @@ export function useYrsCoreSession(
                 const current = worker.stateRevision?.();
                 return current?.owner === revision.owner && current.sequence === revision.sequence;
               };
+              const encodeState = async (prefetch?: boolean): Promise<StateSnapshot> =>
+                worker.encodeVersionedState
+                  ? worker.encodeVersionedState(prefetch)
+                  : { state: await worker.encodeState(prefetch), version: undefined };
               const encodeReplicaState = async (): Promise<StateSnapshot> => {
                 const cached = prefetchedState;
                 clearPrefetchedState();
                 let update: StateSnapshot;
                 if (cached && sameRevision(cached.revision)) {
                   update = await cached.result;
-                  if (!sameRevision(cached.revision)) update = await worker.encodeState();
+                  if (!sameRevision(cached.revision)) update = await encodeState();
                 } else {
-                  update = await worker.encodeState();
+                  update = await encodeState();
                 }
                 if (stale() || sessionRef.current !== next || !pending.pending) {
                   throw new Error('The document changed while opening the replica');
@@ -729,7 +733,9 @@ export function useYrsCoreSession(
                     () => next.loadState(update.state),
                     () => {
                       if (handedOver) handedOver.complete();
-                      else adoptWorkerOpenHandoverVersion(next, update.version);
+                      else if ('version' in update && update.version !== undefined) {
+                        adoptWorkerOpenHandoverVersion(next, update.version);
+                      }
                     },
                   ];
                 },
@@ -770,7 +776,7 @@ export function useYrsCoreSession(
                   ) return;
                   const revision = worker.stateRevision?.();
                   if (!revision) return;
-                  const result = worker.encodeState(true);
+                  const result = encodeState(true);
                   prefetchedState = { revision, result };
                   void result.catch(() => {});
                 },

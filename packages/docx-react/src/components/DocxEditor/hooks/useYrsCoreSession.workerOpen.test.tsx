@@ -7843,7 +7843,7 @@ async function openingPluginFallback() {
   const readinessRequested = spyOn(replicaHelpers, 'requestWorkerOpenReplicaReadiness');
   const ready = spyOn(replicaHelpers, 'awaitWorkerOpenReplica');
   const load = spyOn(session, 'loadState');
-  const apply = spyOn(session, 'applyEdits');
+  const apply = spyOn<YrsSession, 'applyEdits'>(session, 'applyEdits');
   const selection = spyOn(session, 'setSelection');
   const binding = testBinding();
   binding.state.admission = async () => {
@@ -7931,6 +7931,9 @@ async function expectPluginOwnerFallback(
     expect(replica.pending).toBe(true);
     const hydratedVersion = replica.readyVersion;
     expect(hydratedVersion).toBeDefined();
+    if (hydratedVersion === undefined || replica.loadedVersion === undefined) {
+      throw new Error('The replica did not record its hydrated versions');
+    }
     expect(session.version()).toBe(hydratedVersion);
     expect(hydratedVersion).toBe(replica.loadedVersion);
     expect(hydratedVersion).not.toBe(env.version);
@@ -7951,12 +7954,15 @@ async function expectPluginOwnerFallback(
     }
     expect(replica.pending).toBe(false);
     expect(result.current.core.replicaReady).toBe(true);
-    const applied = env.apply.mock.results.find((call) => call.value?.ok && call.value.applied)?.value;
+    const applied = env.apply.mock.results
+      .flatMap((call) => call.type === 'return' && call.value ? [call.value] : [])
+      .find((value) => value.ok && value.applied);
     expect(session.version()).toBe(applied?.version ?? hydratedVersion);
     expect(env.start).toHaveBeenCalledTimes(1);
     expect(env.requested.mock.calls).toEqual([[session]]);
     expect(env.load).toHaveBeenCalledTimes(1);
     expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.core.session).toBe(session);
     expect([null, session]).toContain(result.current.renderer.layoutCompleteSession);
     expect(result.current.errors).toEqual([]);
     expectPassiveCall();
@@ -8051,17 +8057,21 @@ test('mutations and commands issued after worker open wait for the owner fallbac
     }),
     env.clients.commands.execute('reviewNext', null),
   ], (values, env) => {
+    const readyVersion = env.replica.readyVersion;
+    if (readyVersion === undefined) throw new Error('The replica did not record its ready version');
     expect(values[0]).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
     expect(values[1]).toEqual({ ok: true, status: 'executed' });
     expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
     expect(env.apply).toHaveBeenCalledTimes(1);
     expect(env.binding.calls).toEqual([{ id: 'reviewNext', args: null, ordered: true }]);
-    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(env.replica.readyVersion);
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(readyVersion);
   });
 });
 
 test('a pre-hydration worker version applies after unchanged owner hydration and becomes stale after an edit', async () => {
   await expectPluginOwnerFallback(() => [], async (_values, env) => {
+    const readyVersion = env.replica.readyVersion;
+    if (readyVersion === undefined) throw new Error('The replica did not record its ready version');
     const request = {
       expectVersion: env.version,
       steps: [{
@@ -8071,10 +8081,10 @@ test('a pre-hydration worker version applies after unchanged owner hydration and
       }],
     };
     expect(env.replica.handoverVersion).toBe(env.version);
-    expect(env.session.version()).toBe(env.replica.readyVersion);
+    expect(env.session.version()).toBe(readyVersion);
     const applied = await env.clients.edits!.applyEdits(request);
     expect(applied).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
-    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(env.replica.readyVersion);
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(readyVersion);
     expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
     const editedVersion = env.session.version();
     expect(editedVersion).not.toBe(env.replica.readyVersion);
