@@ -1,6 +1,7 @@
 import type { MethodPolicies } from '../../../../shared/office-session';
-import type { StaleProposalTarget, WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
+import type { StaleProposalTarget, Viewport, WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
 import type { WorkbookSession } from './client';
+import type { WorkbookFrame, WorkbookWireFrame } from './methods';
 
 export const WORKBOOK_REPLAY_MUTATORS = {
   editCell: true,
@@ -23,7 +24,7 @@ export type WorkbookReplayMethod = keyof typeof WORKBOOK_REPLAY_MUTATORS;
 
 export type WorkbookReplayOp = {
   [K in WorkbookReplayMethod]: { method: K; args: Parameters<WorkbookHandle[K]> }
-}[WorkbookReplayMethod];
+}[WorkbookReplayMethod] & { calculation?: WorkbookCalculationContext };
 
 export interface WorkbookReplayEnvelope {
   sequence: number;
@@ -43,11 +44,13 @@ export type WorkbookInternalSessionMethods = {
   attachPeer(version: string, sequence: number): void;
   detachPeer(): void;
   replay(envelope: WorkbookReplayEnvelope): WorkbookReplayReply;
+  preview(viewport: Viewport, sheet: number, ops: readonly WorkbookReplayOp[]): WorkbookWireFrame;
 };
 
-export const WORKBOOK_INTERNAL_SESSION_METHODS = { attachPeer: true, detachPeer: true, replay: true } as const;
+export const WORKBOOK_INTERNAL_SESSION_METHODS = { attachPeer: true, detachPeer: true, replay: true, preview: true } as const;
 
 export const WORKBOOK_INTERNAL_SESSION_POLICIES: MethodPolicies<WorkbookInternalSessionMethods> = {
+  preview: { lane: 'input', reorderable: false },
   attachPeer: { lane: 'input', reorderable: false },
   detachPeer: { lane: 'input', reorderable: false },
   replay: { lane: 'input', mutates: true, userInput: true, reorderable: false },
@@ -59,6 +62,9 @@ export const workbookSessionInternals = new WeakMap<WorkbookSession, {
   attachPeer?(version: string): Promise<void>;
   detachPeer?(): Promise<void>;
   editPeerAttached: boolean;
+  cellInput?(sheet: number, row: number, col: number): Promise<string>;
+  initialCalculation?: WorkbookCalculationContext | null;
+  preview?(viewport: Viewport, sheet: number, ops: readonly WorkbookReplayOp[]): Promise<WorkbookFrame>;
 }>();
 
 function record(value: unknown): value is Record<string, unknown> {

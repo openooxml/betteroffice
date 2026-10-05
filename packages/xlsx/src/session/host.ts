@@ -4,7 +4,7 @@ import type { SessionTransport } from '../../../../shared/office-session/transpo
 import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, openWorkbook, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
+  initWasm, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
   type SheetInfo, type WorkbookHandle,
 } from '../wasm/loader';
 import {
@@ -19,6 +19,7 @@ import {
   workbookReplayRefused,
   WORKBOOK_INTERNAL_SESSION_POLICIES,
   type WorkbookInternalSessionMethods,
+  type WorkbookReplayEnvelope,
 } from './replay';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
 
@@ -47,6 +48,8 @@ export function createWorkbookSessionHost(
   let revision = 0;
   let retainedHydration = false;
   let peerAttached = false;
+  let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
+  const committed: WorkbookReplayEnvelope[] = [];
   const encoder = new TextEncoder();
 
   function workbook(): WorkbookHandle {
@@ -60,6 +63,8 @@ export function createWorkbookSessionHost(
     const opened = handle;
     handle = undefined;
     opened?.dispose();
+    previewSource = undefined;
+    committed.length = 0;
   }
 
   function checkSheet(opened: WorkbookHandle, sheet: number): void {
@@ -69,6 +74,28 @@ export function createWorkbookSessionHost(
   }
 
   const internalHandlers: MethodHandlers<WorkbookInternalSessionMethods, null> = {
+    preview(_, viewport, sheet, ops) {
+      const opened = workbook();
+      checkSheet(opened, sheet);
+      if (!previewSource) throw new Error('Worker preview requires retained hydration');
+      const speculative = openWorkbookPeer(previewSource.bytes, {}, previewSource.hydration);
+      try {
+        for (const envelope of committed) {
+          speculative.setCalculationContext(envelope.calculation);
+          try { applyWorkbookReplayOp(speculative, envelope.op); }
+          catch (error) { if (!(error instanceof StaleProposalError) || !envelope.staleProposal) throw error; }
+        }
+        for (const op of ops) {
+          validateWorkbookReplayEnvelope({ sequence: 1, calculation: { nowSerial: 0, randSeed: 0 }, op });
+          if (op.calculation) speculative.setCalculationContext(op.calculation);
+          const result = applyWorkbookReplayOp(speculative, op);
+          if (workbookReplayRefused(result)) throw new Error(`Preview refused: ${JSON.stringify(result)}`);
+        }
+        const buffer = encoder.encode(workbookDisplayListJson(speculative, viewport, sheet)).buffer;
+        return transferable({ displayList: buffer, version: speculative.version(), epoch: 0,
+          sequence, sheet, viewport, mergedRanges: speculative.visibleMergedRanges(sheet, viewport) }, [buffer]);
+      } finally { speculative.dispose(); }
+    },
     attachPeer(_, peerVersion, peerSequence) {
       peerAttached = false;
       if (peerVersion !== workbook().version() || peerSequence !== sequence) {
@@ -111,6 +138,7 @@ export function createWorkbookSessionHost(
         if (workbookReplayRefused(result)) throw new Error(`Engine refused replay: ${JSON.stringify(result)}`);
         const changed = opened.version() !== before;
         sequence = envelope.sequence;
+        if (previewSource) committed.push(structuredClone(envelope));
         if (changed) {
           revision += 1;
           version += 1;
@@ -149,10 +177,13 @@ export function createWorkbookSessionHost(
         calculation,
       });
       try {
+        if (retainPeerHydration) previewSource = {
+          bytes: new Uint8Array(bytes).slice(), hydration: workbookPeerHydration(opened),
+        };
         if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
           transport.post({
             protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
-            hydration: workbookPeerHydration(opened), version: opened.version(), sequence,
+            hydration: previewSource!.hydration, version: opened.version(), sequence,
           });
         }
         const info = opened.sheetInfo();

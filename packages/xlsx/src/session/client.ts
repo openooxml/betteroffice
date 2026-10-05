@@ -317,6 +317,21 @@ export async function createWorkbookSession(
   workbookSessionInternals.set(session, {
     replay, initialVersion: peerSource?.version ?? initialVersion, attachPeer,
     detachPeer: source ? () => client.call.detachPeer() : undefined, editPeerAttached: false,
+    cellInput: source ? async (sheet, row, col) => {
+      let column = '';
+      for (let at = col + 1; at > 0; at = Math.floor((at - 1) / 26)) {
+        column = String.fromCharCode(65 + (at - 1) % 26) + column;
+      }
+      return (await client.call.cellInputs(sheet, `${column}${row + 1}`)).cells[0]?.[0]?.input ?? '';
+    } : undefined,
+    preview: source ? async (viewport, sheet, ops) => decodeFrame(await client.call.preview(viewport, sheet, ops)) : undefined,
+    get initialCalculation() {
+      if (!source?.hydration) return undefined;
+      const snapshot = JSON.parse(source.hydration);
+      return snapshot.calculation_context ? {
+        nowSerial: snapshot.calculation_context.now_serial, randSeed: snapshot.workbook.rand_seed,
+      } : null;
+    },
   });
   if (peerSource) peerSources.set(session, peerSource);
   return session;

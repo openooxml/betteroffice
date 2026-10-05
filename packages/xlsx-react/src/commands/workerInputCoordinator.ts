@@ -27,15 +27,41 @@ export interface WorkerInputOperationOptions<T = unknown> {
   readonly kind?: Exclude<WorkerInputKind, 'commit'>;
   readonly target?: WorkerInputTarget;
   readonly input?: T;
+  readonly recover?: boolean;
+  readonly barrier?: boolean;
+  readonly prepare?: () => void | Promise<void>;
+}
+
+export interface WorkerInputLease {
+  (): void;
+  check(): void;
+  refuse(error: unknown, barrier?: boolean): void;
+}
+
+export class WorkerInputRefusal extends XlsxCommandAdmissionError {
+  constructor(message: string, readonly barrier = false) {
+    super('input-failed');
+    this.message = message;
+  }
+}
+
+export function inputRefusal(error: unknown): WorkerInputRefusal | null {
+  if (error instanceof WorkerInputRefusal) return error;
+  if (error instanceof Error && (error.name === 'NotAllowedError' || error.name === 'NotFoundError' ||
+    error instanceof RangeError || /32,?767|out of range|invalid (sheet|cell|input|formula)|(text|formula).*limit/i.test(error.message))) {
+    return new WorkerInputRefusal(error.message);
+  }
+  return null;
 }
 
 export type WorkerInputOperation<T, R> = (
   intent: WorkerInputIntent<T>,
-  markApplied: () => void
+  markApplied: WorkerInputLease
 ) => R | Promise<R>;
 
 export interface WorkerInputCoordinatorHooks
-  extends Pick<InputCoordinatorHooks, 'generation' | 'seal' | 'sync' | 'write'> {
+  extends Pick<InputCoordinatorHooks, 'generation' | 'seal' | 'sync'> {
+  write(draft: InputDraft, markApplied: WorkerInputLease): boolean;
   capture(): WorkerInputTarget;
   isReady(): boolean;
   /** Waits passively for the edit peer. */
@@ -46,6 +72,7 @@ export interface WorkerInputCoordinatorHooks
   requestHydration(reason: string): void | Promise<void>;
   flushEdits(): Promise<void>;
   onError?(error: unknown): void;
+  onRefusal?(error: unknown, draft?: InputDraft): void;
 }
 
 export class WorkerInputNotReadyError extends Error {
@@ -75,8 +102,10 @@ export interface WorkerInputCoordinator {
   /** Captures clipboard access in the gesture; false refuses its write. */
   clipboard<T, R>(
     capture: () => T | Promise<T>,
-    operation: (input: T, intent: WorkerInputIntent<T>, markApplied: () => void) => R | Promise<R>,
-    target?: WorkerInputTarget
+    operation: (input: T, intent: WorkerInputIntent<T>, markApplied: WorkerInputLease) => R | Promise<R>,
+    target?: WorkerInputTarget,
+    prepare?: (input: T) => void | Promise<void>,
+    recover?: boolean
   ): Promise<R>;
   /** Async mutators call markApplied before awaiting acknowledgement of an applied edit. */
   runAfterPendingInput<T, R>(
@@ -84,13 +113,14 @@ export interface WorkerInputCoordinator {
     options?: WorkerInputOperationOptions<T>
   ): Promise<R>;
   runSync<T, R>(
-    operation: (intent: WorkerInputIntent<T>, markApplied: () => void) => R,
+    operation: (intent: WorkerInputIntent<T>, markApplied: WorkerInputLease) => R,
     options?: WorkerInputOperationOptions<T>
   ): R;
   requestHydration(reason: string): Promise<void>;
   flush(): Promise<void>;
   fail(error: unknown): void;
   recover(): Promise<void>;
+  drain(): Promise<void>;
   reset(): void;
 }
 
@@ -124,8 +154,13 @@ interface Entry {
   state: 'queued' | 'running' | 'failed';
   applied: boolean;
   draftWrite: boolean;
+  recover: boolean;
+  refused: boolean;
+  prepared?: Promise<void>;
+  barrier: boolean;
+  barrierAfter: number;
   error?: unknown;
-  run(markApplied: () => void): unknown | Promise<unknown>;
+  run(markApplied: WorkerInputLease): unknown | Promise<unknown>;
   resolve(value: unknown): void;
   reject(error: unknown): void;
 }
@@ -139,6 +174,8 @@ export function createWorkerInputCoordinator(
   let entries: Entry[] = [];
   let snapshots = new WeakMap<InputDraft, InputDraft>();
   let written = new WeakSet<InputDraft>();
+  let preparedDrafts = new WeakMap<InputDraft, Promise<InputDraft>>();
+  let preparation: Promise<void> = Promise.resolve();
   let generation = hooks.generation();
   let epoch = 0;
   let cycle = deferred<never>();
@@ -151,6 +188,8 @@ export function createWorkerInputCoordinator(
   let inputFailed = false;
   let syncRunning = false;
   let nextId = 1;
+  let refused: { id: number; error: unknown }[] = [];
+  let acknowledgedRefusal = 0;
 
   const snapshot = (value: InputDraft): InputDraft => {
     let saved = snapshots.get(value);
@@ -174,10 +213,14 @@ export function createWorkerInputCoordinator(
     work = null;
     recovery = null;
     entries = [];
+    refused = [];
+    acknowledgedRefusal = 0;
     rejected = [];
     draft = null;
     snapshots = new WeakMap();
     written = new WeakSet();
+    preparedDrafts = new WeakMap();
+    preparation = Promise.resolve();
     failure = null;
     reported = false;
     inputFailed = false;
@@ -209,7 +252,17 @@ export function createWorkerInputCoordinator(
     failure = { error };
     cycle.reject(error);
     for (const entry of entries) entry.reject(error);
-    entries = entries.filter((entry) => !entry.applied);
+    for (const entry of entries) {
+      if (!entry.applied && !entry.recover) {
+        hooks.onRefusal?.(error);
+        if (entry.intent.draft && !written.has(entry.intent.draft)) {
+          entry.intent = Object.freeze({ ...entry.intent, kind: 'commit' });
+          entry.recover = true;
+          entry.run = (applied) => write(entry.intent.draft, entry.intent, cycle, applied);
+        }
+      }
+    }
+    entries = entries.filter((entry) => !entry.applied && entry.recover);
     if (!reported) {
       reported = true;
       try {
@@ -218,18 +271,30 @@ export function createWorkerInputCoordinator(
     }
   };
 
-  const write = async (value: InputDraft | null, intent: WorkerInputIntent, lease: typeof cycle) => {
+  const prepareDraft = (value: InputDraft): Promise<InputDraft> => {
+    const existing = preparedDrafts.get(value);
+    if (existing) return existing;
+    const prepared = Promise.resolve().then(async () => {
+      const resolved = hooks.resolveDraft ? await hooks.resolveDraft(value) : value;
+      preparedDrafts.set(resolved, prepared);
+      await hooks.preview(resolved);
+      return resolved;
+    });
+    preparedDrafts.set(value, prepared);
+    void prepared.catch(() => {});
+    return prepared;
+  };
+
+  const write = async (value: InputDraft | null, intent: WorkerInputIntent, lease: typeof cycle, markApplied: WorkerInputLease) => {
     if (!value || written.has(value)) return;
     check(intent, lease);
     if (value.generation !== intent.generation) {
       throw new XlsxCommandAdmissionError('document-replaced');
     }
-    const resolved = hooks.resolveDraft ? await wait(hooks.resolveDraft(value), lease) : value;
-    check(intent, lease);
-    await wait(hooks.preview(resolved), lease);
+    const resolved = await wait(prepareDraft(value), lease);
     check(intent, lease);
     if (!hooks.isReady()) throw new WorkerInputNotReadyError();
-    if (!hooks.write(resolved)) {
+    if (!hooks.write(resolved, markApplied)) {
       inputFailed = true;
       const correction = entries.some(
         (entry) =>
@@ -245,6 +310,7 @@ export function createWorkerInputCoordinator(
       throw new XlsxCommandAdmissionError('input-failed');
     }
     written.add(value);
+    written.add(resolved);
     const committed = entries.find((entry) => entry.intent.id === intent.id);
     if (committed?.intent.kind === 'commit') committed.applied = true;
     settleRejected(value);
@@ -288,23 +354,44 @@ export function createWorkerInputCoordinator(
         entry.state = 'running';
         try {
           check(entry.intent, lease);
+          if (entry.prepared) await wait(entry.prepared, lease);
           await wait(hooks.whenReady(), lease);
           check(entry.intent, lease);
           if (!hooks.isReady()) throw new WorkerInputNotReadyError();
-          const result = await wait(
-            entry.run(() => {
+          const markApplied: WorkerInputLease = Object.assign(() => {
+            check(entry.intent, lease);
+            entry.applied = true;
+          }, {
+            check: () => check(entry.intent, lease),
+            refuse(error: unknown, barrier = false) {
               check(entry.intent, lease);
-              entry.applied = true;
-            }),
-            lease
-          );
+              entry.refused = true;
+              if (barrier) refused.push({ id: entry.intent.id, error });
+              hooks.onRefusal?.(error, entry.intent.kind === 'commit' ? entry.intent.draft ?? undefined : undefined);
+            },
+          });
+          if (entry.barrier) {
+            const covering = refused.find((item) => item.id > entry.barrierAfter && item.id < entry.intent.id);
+            if (covering) {
+              acknowledgedRefusal = Math.max(acknowledgedRefusal, covering.id);
+              throw new WorkerInputRefusal(covering.error instanceof Error ? covering.error.message : String(covering.error));
+            }
+          }
+          const result = await wait(entry.run(markApplied), lease);
           check(entry.intent, lease);
-          entry.applied = true;
+          if (!entry.refused) entry.applied = true;
           entry.resolve(result);
           entries = entries.filter((candidate) => candidate !== entry);
         } catch (error) {
           if (lease !== cycle) return;
           entry.reject(error);
+          const local = inputRefusal(error);
+          if (local) {
+            if (local.barrier) refused.push({ id: entry.intent.id, error: local });
+            hooks.onRefusal?.(local, entry.intent.kind === 'commit' ? entry.intent.draft ?? undefined : undefined);
+            entries = entries.filter((candidate) => candidate !== entry);
+            continue;
+          }
           if (entry.applied) entries = entries.filter((candidate) => candidate !== entry);
           else {
             entry.state = 'failed';
@@ -312,8 +399,9 @@ export function createWorkerInputCoordinator(
           }
           if (error instanceof XlsxCommandAdmissionError) {
             if (error.code === 'document-replaced') {
-              reset();
-              return;
+              hooks.onRefusal?.(error);
+              entries = entries.filter((candidate) => candidate !== entry);
+              continue;
             }
             if (error.code === 'input-failed') inputFailed = true;
           } else {
@@ -353,7 +441,7 @@ export function createWorkerInputCoordinator(
 
   const record = <R>(
     saved: WorkerInputIntent,
-    run: (entry: Entry, lease: typeof cycle, markApplied: () => void) => R | Promise<R>
+    run: (entry: Entry, lease: typeof cycle, markApplied: WorkerInputLease) => R | Promise<R>
   ) => {
     const result = deferred<R>();
     const entry: Entry = {
@@ -361,6 +449,10 @@ export function createWorkerInputCoordinator(
       state: 'queued',
       applied: false,
       draftWrite: false,
+      recover: true,
+      refused: false,
+      barrier: false,
+      barrierAfter: acknowledgedRefusal,
       run: (markApplied) => run(entry, cycle, markApplied),
       resolve: (value) => result.resolve(value as R),
       reject: result.reject,
@@ -371,11 +463,18 @@ export function createWorkerInputCoordinator(
 
   const accept = <R>(
     saved: WorkerInputIntent,
-    run: (entry: Entry, lease: typeof cycle, markApplied: () => void) => R | Promise<R>,
-    draftWrite = false
+    run: (entry: Entry, lease: typeof cycle, markApplied: WorkerInputLease) => R | Promise<R>,
+    draftWrite = false,
+    options: WorkerInputOperationOptions = {}
   ): Promise<R> => {
     const { entry, result } = record(saved, run);
     entry.draftWrite = draftWrite;
+    entry.recover = options.recover ?? true;
+    entry.barrier = options.barrier ?? false;
+    if (options.prepare) {
+      entry.prepared = preparation.then(options.prepare);
+      preparation = entry.prepared.catch(() => {});
+    }
     if (failure) entry.reject(failure.error);
     const blocked = entries[0];
     if (blocked?.state === 'failed' && !(saved.kind === 'commit' && saved.draft &&
@@ -400,7 +499,13 @@ export function createWorkerInputCoordinator(
       sheet: saved.sheet,
       target: `cell:${saved.row}:${saved.col}`,
     });
-    return accept(accepted, (entry, lease) => write(saved, entry.intent, lease), true);
+    return accept(accepted, (entry, lease, applied) => write(entry.intent.draft, entry.intent, lease, applied), true, {
+      prepare: async () => {
+        const resolved = await prepareDraft(saved);
+        const entry = entries.find((item) => item.intent.id === accepted.id);
+        if (entry) entry.intent = Object.freeze({ ...entry.intent, draft: resolved });
+      },
+    });
   };
 
   const runAfterPendingInput = <T, R>(
@@ -467,12 +572,18 @@ export function createWorkerInputCoordinator(
         check(entry.intent, activeLease);
         entry.intent = Object.freeze({ ...entry.intent, input });
       }
-      await write(sealed, entry.intent, activeLease);
+      await write(sealed, entry.intent, activeLease, Object.assign(() => {}, { check: markApplied.check, refuse: markApplied.refuse }));
       check(entry.intent, activeLease);
       const result = operation(entry.intent as WorkerInputIntent<T>, markApplied);
-      if (!isPromise(result)) markApplied();
       return result;
-    }, true);
+    }, true, { ...options, prepare: async () => {
+      if (saved.draft && !composed) {
+        const resolved = await prepareDraft(saved.draft);
+        const entry = entries.find((item) => item.intent.id === saved.id);
+        if (entry) entry.intent = Object.freeze({ ...entry.intent, draft: resolved });
+      }
+      await options.prepare?.();
+    } });
   };
 
   const requestHydration = async (reason: string) => {
@@ -523,6 +634,10 @@ export function createWorkerInputCoordinator(
       draft = next;
     },
     submit(finished) {
+      if (!finished.value.startsWith('=') && [...finished.value.replace(/^'/, '')].length > 32767) {
+        hooks.onRefusal?.(new WorkerInputRefusal('Cell text exceeds 32,767 characters'), finished);
+        return false;
+      }
       void submit(finished).catch(() => {});
       return true;
     },
@@ -546,10 +661,10 @@ export function createWorkerInputCoordinator(
         const writing = operation(entry.intent, markApplied);
         if (!isPromise(writing) && writing !== false) markApplied();
         const result = await wait(writing, lease);
-        if (result === false) throw new XlsxCommandAdmissionError('input-failed');
+        if (result === false) throw new WorkerInputRefusal('Input could not be written');
       });
     },
-    clipboard(capture, operation, target) {
+    clipboard(capture, operation, target, prepare, recover = true) {
       current();
       const origin = { ...(target ?? hooks.capture()) };
       const acceptedEpoch = epoch;
@@ -569,19 +684,20 @@ export function createWorkerInputCoordinator(
       if (isPromise(data)) void data.catch(() => {});
       return runAfterPendingInput(
         async (intent, markApplied) => {
-          const writing = operation(await data, intent, markApplied);
+          markApplied.check();
+          const writing = operation(intent.input as Awaited<typeof data>, intent, markApplied);
           if (!isPromise(writing) && writing !== false) markApplied();
           const result = await writing;
-          if (result === false) throw new XlsxCommandAdmissionError('input-failed');
+          if (result === false) throw new WorkerInputRefusal('Input could not be written');
           return result;
         },
-        { kind: 'clipboard', target: origin },
+        { kind: 'clipboard', target: origin, recover, prepare: prepare ? async () => prepare(await data) : undefined },
         { input: data }
       );
     },
     runAfterPendingInput,
     runSync<T, R>(
-      operation: (intent: WorkerInputIntent<T>, markApplied: () => void) => R,
+      operation: (intent: WorkerInputIntent<T>, markApplied: WorkerInputLease) => R,
       options: WorkerInputOperationOptions<T> = {}
     ) {
       current();
@@ -604,9 +720,15 @@ export function createWorkerInputCoordinator(
       });
       entry.state = 'running';
       try {
-        const value = operation(saved, () => {
+        const lease = cycle;
+        const value = operation(saved, Object.assign(() => {
+          check(saved, lease);
           entry.applied = true;
-        });
+        }, { check: () => check(saved, lease), refuse(error: unknown, barrier = false) {
+          entry.refused = true;
+          if (barrier) refused.push({ id: saved.id, error });
+          hooks.onRefusal?.(error);
+        } }));
         entry.applied = true;
         entries = entries.filter((candidate) => candidate !== entry);
         result.resolve(value);
@@ -616,7 +738,11 @@ export function createWorkerInputCoordinator(
         entry.error = error;
         entry.reject(error);
         if (entry.applied) entries = entries.filter((candidate) => candidate !== entry);
-        if (error instanceof XlsxCommandAdmissionError) {
+        const local = inputRefusal(error);
+        if (local) {
+          hooks.onRefusal?.(local);
+          entries = entries.filter((candidate) => candidate !== entry);
+        } else if (error instanceof XlsxCommandAdmissionError) {
           if (error.code === 'input-failed') inputFailed = true;
         } else {
           fail(error);
@@ -631,10 +757,11 @@ export function createWorkerInputCoordinator(
     flush() {
       current();
       const lease = cycle;
+      const barrierAfter = acknowledgedRefusal;
       const flushed = runAfterPendingInput(async (_, markApplied) => {
         markApplied();
         await hooks.flushEdits();
-      }, { kind: 'host' });
+      }, { kind: 'host', recover: false, barrier: true });
       void flushed.catch(() => {});
       return Promise.all([requestHydration('flush'), flushed]).then(async () => {
         const throwFailure = () => { if (failure) throw failure.error; };
@@ -644,6 +771,11 @@ export function createWorkerInputCoordinator(
           current();
           if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
           throwFailure();
+          const covering = refused.find((item) => item.id > barrierAfter);
+          if (covering) {
+            acknowledgedRefusal = Math.max(acknowledgedRefusal, covering.id);
+            throw new WorkerInputRefusal(covering.error instanceof Error ? covering.error.message : String(covering.error));
+          }
           if (entries.some((entry) => !entry.applied)) {
             throw new XlsxCommandAdmissionError('input-failed');
           }
@@ -669,7 +801,9 @@ export function createWorkerInputCoordinator(
         failure = null;
         inputFailed = false;
         rejected = [];
-        for (const entry of entries) entry.state = 'queued';
+        preparedDrafts = new WeakMap();
+        preparation = Promise.resolve();
+        for (const entry of entries) { entry.state = 'queued'; entry.prepared = undefined; }
         do {
           await pump(true);
         } while (entries[0]?.state === 'queued' && !coordinatorError());
@@ -685,6 +819,16 @@ export function createWorkerInputCoordinator(
       });
       recovery = result;
       return result;
+    },
+    async drain() {
+      if (draft) await submit(draft);
+      await pump();
+      if (entries.some((entry) => !entry.applied)) {
+        const error = failure?.error ?? new XlsxCommandAdmissionError('input-failed');
+        hooks.onRefusal?.(error);
+        throw error;
+      }
+      await hooks.flushEdits();
     },
     reset,
   };

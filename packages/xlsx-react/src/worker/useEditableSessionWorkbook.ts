@@ -42,6 +42,8 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   editPeer: WorkbookEditPeer | null = null;
   failure: Error | null = null;
   recovering = false;
+  retiring = false;
+  beforeRetire: (() => void) | null = null;
   private painted = false;
   private hydration: Promise<void> | null = null;
   private readonly hydrated: Promise<void>;
@@ -73,7 +75,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     if (session.failure) this.fail(session.failure);
   }
 
-  get current(): boolean { return this.alive && this.options.isCurrent(); }
+  get current(): boolean { return this.alive && (this.retiring || this.options.isCurrent()); }
 
   get ready(): boolean {
     return this.current && (!this.failure || this.recovering) && this.peer !== null &&
@@ -88,8 +90,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   }
 
   connectInput(input: WorkerInputCoordinator | null): void {
-    if (!this.current || this.input === input) return;
-    this.input?.reset();
+    if (!this.current || this.retiring || this.input === input) return;
     this.input = input;
     if (this.failure) input?.fail(this.failure);
   }
@@ -152,7 +153,22 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     try { this.options.onError(this.failure); } catch {}
   }
 
+  reportRefusal(value: unknown): void {
+    try { this.options.onError(asError(value)); } catch {}
+  }
+
   dispose(): void {
+    if (!this.alive || this.retiring) return;
+    this.retiring = true;
+    try { this.beforeRetire?.(); } catch (error) { this.reportRefusal(error); }
+    if (this.input?.pending || this.input?.draft) {
+      void this.input.drain().catch((error) => {
+        this.reportRefusal(error);
+      }).finally(() => this.destroy());
+    } else this.destroy();
+  }
+
+  private destroy(): void {
     if (!this.alive) return;
     this.alive = false;
     const error = new XlsxCommandAdmissionError('document-replaced');
@@ -255,6 +271,7 @@ export function useEditableSessionWorkbook(
   useLayoutEffect(() => {
     if (run?.current) run.connectInput(bridge.coordinator());
   });
+  useLayoutEffect(() => () => run?.dispose(), [run, props.file, collaboration]);
 
   return { run: run?.current ? run : null, error, loading, reportError };
 }

@@ -68,6 +68,8 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   const now = options.now ?? Date.now;
   const seed = options.randomSeed ?? randomSeed;
   let error: Error | undefined;
+  let precedingCalculation = internal.attachPeer ? internal.initialCalculation : undefined;
+  const trackCalculation = Boolean(internal.attachPeer) && precedingCalculation !== undefined;
   let acknowledgedSequence = 0;
   let sentSequence = 0;
   let recovered = false;
@@ -158,7 +160,8 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
       return recovery ? recoveryResult(outcome.result) : outcome.result;
     }
     if (applying.has(op)) throw new Error('Workbook queued operation is already applying');
-    const calculation: WorkbookCalculationContext = {
+    const previousCalculation = precedingCalculation;
+    const calculation: WorkbookCalculationContext = op.calculation ?? {
       nowSerial: now() / 86_400_000 + 25_569,
       randSeed: seed(),
     };
@@ -179,12 +182,16 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
         validateWorkbookReplayEnvelope({ sequence: 1, ...envelope });
       }
       peer.setCalculationContext(calculation);
+      if (trackCalculation) precedingCalculation = calculation;
       const result = applyWorkbookReplayOp(peer, op);
       outcomes.set(op, { result });
       if (recovery) return recoveryResult(result);
       if (!workbookReplayRefused(result)) {
         if (envelope) slot.envelope = envelope;
         else fail(snapshotFailure);
+      } else if (trackCalculation && precedingCalculation === calculation) {
+        peer.setCalculationContext(previousCalculation ?? null);
+        precedingCalculation = previousCalculation;
       }
       return result;
     } catch (cause) {
@@ -195,6 +202,10 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
             ...envelope, staleProposal: structuredClone({ cells: cause.cells, targets: cause.targets }),
           };
         } else fail(snapshotFailure);
+      }
+      if (!slot.envelope && trackCalculation && precedingCalculation === calculation) {
+        peer.setCalculationContext(previousCalculation ?? null);
+        precedingCalculation = previousCalculation;
       }
       if (!outcomes.has(op)) outcomes.set(op, { error: cause });
       throw cause;
@@ -214,7 +225,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   function assertRecovery(): void {
     synchronizeFailure();
     if (!error) throw new Error('Recovery requires a failed workbook edit peer');
-    if (disposed) throw new Error('Workbook edit peer was disposed');
+    if (disposed && internal?.attachPeer) throw new Error('Workbook edit peer was disposed');
     if (recovered) throw new Error('Workbook edit peer recovery was already saved');
     if (activeApplications) throw new Error('Workbook queued operation is still applying');
   }

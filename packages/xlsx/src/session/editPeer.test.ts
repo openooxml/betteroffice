@@ -1,8 +1,9 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { isClientMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
+import JSZip from 'jszip';
+import { isClientMessage, isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
 import type { XlsxEditRequest, XlsxRangeTarget } from '../edits';
 import {
-  openWorkbook, StaleProposalError, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
+  openWorkbook, workbookPeerHydration, StaleProposalError, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import { hydratePeer, type WorkbookSession } from './client';
 import {
@@ -1319,4 +1320,66 @@ describe('workbook edit peers', () => {
       }
     }
   });
+});
+
+
+test('keeps calculation context equal after a refused hydrated mutation', async () => {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Volatile" sheetId="1" r:id="rId1"/></sheets></workbook>');
+  zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>TODAY()</f><v>0</v></c><c r="C1"><f>RANDBETWEEN(1,1000000)</f><v>0</v></c></row></sheetData></worksheet>');
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  let retained = '';
+  const session = await createTestWorkbookSession(bytes, (transport) => ({
+    ...transport,
+    post(message, transfer) {
+      if (isHostMessage(message) && message.kind === 'wasm-module') retained = message.hydration ?? '';
+      transport.post(message, transfer);
+    },
+  }), { wasm: wasmBytes.buffer, retainPeerHydration: true, calculation: { nowSerial: 46000.5, randSeed: 41 } });
+  const peer = await hydratePeer(session);
+  const edits = createWorkbookEditPeer({ session, peer,
+    now: () => (46001.75 - 25569) * 86400000, randomSeed: () => 42 });
+  try {
+    const original = JSON.parse(retained);
+    expect(JSON.parse(workbookPeerHydration(peer))).toEqual(original);
+    const before = await session.call.readCells({ ranges: [target('A1:C1')] });
+    if (!before.ok) throw new Error(before.failure.message);
+    expect(before.ranges[0].cells[0].map((cell) => cell.value.kind)).toEqual(['number', 'number', 'number']);
+    expect(edits.applyEdits({ ...request(peer, 'A1', 'refused'), expectVersion: 'stale' })).toMatchObject({ ok: false });
+    await edits.flush();
+    expect(JSON.parse(workbookPeerHydration(peer))).toEqual(original);
+    expect(peer.version()).toBe(await session.call.version());
+    expect(peer.readCells({ ranges: [target('A1:C1')] })).toEqual(before);
+    expect(peer.listProposals()).toEqual([]);
+    expect(JSON.parse(workbookPeerHydration(peer)).workbook.proposal_id_counter).toBe(original.workbook.proposal_id_counter);
+    expect(edits.sentSequence).toBe(0);
+    expect(edits.acknowledgedSequence).toBe(0);
+    expect(await digest(peer.save())).toBe(await digest(await session.save()));
+  } finally { edits.dispose(); peer.dispose(); await session.dispose(); }
+});
+
+test('preserves ordinary disposed-wrapper recovery while refusing disposed worker peers', async () => {
+  for (const retained of [false, true]) {
+    const session = await createTestWorkbookSession(fixture, undefined, {
+      calculation, ...(retained ? { retainPeerHydration: true, wasm: wasmBytes.buffer } : {}),
+    });
+    const peer = retained ? await hydratePeer(session) : openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      edits.editCell(0, 2, 1, 'retained ordinary recovery');
+      await edits.flush();
+      edits.dispose();
+      if (retained) expect(() => edits.recoverySave()).toThrow('disposed');
+      else {
+        const recovered = edits.recoverySave();
+        expect(recovered.recovery).toBe(true);
+        const reopened = openWorkbook(new Uint8Array(recovered.bytes), { calculation });
+        try { expect(reopened.cell(0, 2, 1).input).toBe('retained ordinary recovery'); }
+        finally { reopened.dispose(); }
+      }
+    } finally { edits.dispose(); peer.dispose(); await session.dispose(); }
+  }
 });

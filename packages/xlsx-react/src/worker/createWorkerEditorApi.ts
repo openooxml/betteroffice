@@ -1,12 +1,12 @@
 import type {
-  CellEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
+  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
 } from '@betteroffice/xlsx';
 import { WorkbookEditPeerFailedError, WorkbookPeerHydrationError } from '@betteroffice/xlsx';
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
 import {
-  WorkerInputNotReadyError, type WorkerInputCoordinator,
+  WorkerInputNotReadyError, WorkerInputRefusal, inputRefusal, type WorkerInputCoordinator, type WorkerInputLease,
 } from '../commands/workerInputCoordinator';
 
 /** @experimental */
@@ -33,6 +33,7 @@ export interface WorkerEditorSessionAccess {
   readonly editPeer: WorkbookEditPeer | null;
   readonly failure: Error | null;
   readonly recovering?: boolean;
+  readonly retiring?: boolean;
   whenHydrated(): Promise<void>;
   requestHydration(reason: string): Promise<void>;
 }
@@ -46,6 +47,9 @@ export interface WorkerEditorApiBridge {
   recoverInput(): Promise<void>;
   selectCells(sheet: number, selection: Selection): boolean;
   selectCellsAsync(sheet: number, selection: Selection): Promise<boolean>;
+  previewEdits?(sheet: number, edits: readonly CellInputEdit[]): Promise<void | (() => Promise<void>)>;
+  beforeNavigation?(): Promise<void>;
+  canNavigateSync?(): boolean;
   apply(result: EditResult | XlsxEditResult): void;
 }
 
@@ -94,29 +98,43 @@ export function createWorkerEditorApi(
     return { peer: session.peer, edits: session.editPeer };
   };
   const ordered = <T,>(
-    reason: string, operation: (markApplied: () => void) => T | Promise<T>, mutation = false
+    reason: string, operation: (markApplied: WorkerInputLease) => T | Promise<T>, mutation = false,
+    prepare?: () => void | (() => Promise<void>) | Promise<void | (() => Promise<void>)>
   ): Promise<T | null> => {
-    if (!session.current) return Promise.resolve(null);
+    if (!session.current || session.retiring) return Promise.resolve(null);
     if (session.failure) return Promise.reject(session.failure);
     try {
       const hydration = session.requestHydration(reason);
       void hydration.catch(() => {});
+      let discardPreview: (() => Promise<void>) | undefined;
       return coordinator().runAfterPendingInput(async (_, markApplied) => {
         await (session.recovering ? session.requestHydration('recovery') : hydration);
+        markApplied.check();
         requirePeer();
         if (session.recovering && !mutation) { markApplied(); return null; }
-        const result = operation(markApplied);
-        if (session.recovering && result !== null && typeof result === 'object' &&
-          ('ok' in result && result.ok === false || 'error' in result && result.error)) {
-          throw new XlsxCommandAdmissionError('input-failed');
+        let value: T;
+        try { value = await operation(markApplied); }
+        catch (error) {
+          if (inputRefusal(error)) await discardPreview?.();
+          throw error;
         }
-        markApplied();
-        const value = await result;
+        if (value !== null && typeof value === 'object' &&
+          ('ok' in value && value.ok === false || 'error' in value && value.error)) {
+          await discardPreview?.();
+          markApplied.check();
+          markApplied.refuse(new WorkerInputRefusal('Cell operation was refused'), mutation);
+        }
         return session.current ? value : null;
-      }, { kind: 'host' });
+      }, { kind: 'host', recover: mutation, barrier: reason === 'save', prepare: prepare ? async () => {
+        if (!session.retiring) {
+          const cancel = await prepare();
+          discardPreview = typeof cancel === 'function' ? cancel : undefined;
+        }
+      } : undefined });
     } catch (error) { return Promise.reject(error); }
   };
-  const synchronous = <T,>(operation: (markApplied: () => void) => T): T => {
+  const synchronous = <T,>(operation: (markApplied: WorkerInputLease) => T): T => {
+    if (session.retiring) throw new XlsxCommandAdmissionError('document-replaced');
     if (session.failure) throw session.failure;
     requirePeer();
     try { return coordinator().runSync((_, markApplied) => operation(markApplied), { kind: 'host' }); }
@@ -130,20 +148,46 @@ export function createWorkerEditorApi(
     failure: { code: 'read-only' as const, message: 'The editor is read-only' },
   });
   const editCell = (
-    sheet: number, row: number, col: number, input: string, markApplied: () => void
+    sheet: number, row: number, col: number, input: string, markApplied: WorkerInputLease
   ) => {
+    markApplied.check();
     const result = requirePeer().edits.editCell(sheet, row, col, input);
     markApplied();
-    bridge().apply(result);
+    if (!session.retiring) bridge().apply(result);
     return result;
   };
+  const previewRequest = async (request: Parameters<WorkbookHandle['applyEdits']>[0]) => {
+    const discards: (() => Promise<void>)[] = [];
+    const discard = async () => { for (const cancel of discards.splice(0).reverse()) await cancel(); };
+    try {
+      for (const step of request.steps) {
+        if (step.op !== 'setCellInputs' && step.op !== 'setFormulas') continue;
+        const sheet = Number(/^sheet:(\d+)$/.exec(step.target.sheetId)?.[1] ?? -1);
+        const range = step.target.range;
+        let start: { row: number; col: number };
+        if (range.kind === 'rowCol') start = range.start;
+        else {
+          const match = /^\$?([A-Z]+)\$?(\d+)/i.exec(range.a1);
+          if (!match) throw new WorkerInputRefusal('Invalid cell range');
+          start = { row: Number(match[2]) - 1, col: [...match[1].toUpperCase()].reduce((col, letter) => col * 26 + letter.charCodeAt(0) - 64, 0) - 1 };
+        }
+        const matrix = step.op === 'setCellInputs' ? step.inputs : step.formulas;
+        const edits = matrix.flatMap((row, dr) => row.map((value, dc) => ({
+          row: start.row + dr, col: start.col + dc, input: step.op === 'setFormulas' ? `=${value}` : value,
+        })));
+        const cancel = await bridge().previewEdits?.(sheet, edits);
+        if (cancel) discards.push(cancel);
+      }
+    } catch (error) { await discard(); throw error; }
+    return discard;
+  };
   const save = () => ordered('save', async () => new Uint8Array(await requirePeer().edits.save()));
-  const readable = () => session.current && session.ready && !session.failure &&
+  const readable = () => session.current && !session.retiring && session.ready && !session.failure &&
     !bridge().coordinator()?.unapplied.length && !bridge().coordinator()?.draft;
 
   return {
     handle: null, commands,
-    get hydrated() { return session.ready && !session.failure; },
+    get hydrated() { return session.ready && !session.retiring && !session.failure; },
     get failure() { return session.failure; },
     whenHydrated: () => session.whenHydrated(),
     async flush() {
@@ -175,7 +219,8 @@ export function createWorkerEditorApi(
     focus: () => { if (session.current && !session.failure) bridge().focus(); },
     refreshProposals: () => { if (session.ready) bridge().refreshProposals(); },
     selectCells(sheet, selection) {
-      if (session.failure || !session.ready || !session.peer || !validSelection(session.peer, sheet, selection)) return false;
+      if (session.failure || !session.ready || !session.peer || !validSelection(session.peer, sheet, selection) ||
+        bridge().canNavigateSync?.() === false) return false;
       return synchronous((markApplied) => {
         requirePeer().edits.setActiveSheet(sheet);
         markApplied();
@@ -184,9 +229,11 @@ export function createWorkerEditorApi(
     },
     selectCellsAsync(sheet, selection) {
       const target = structuredClone(selection);
-      return ordered('select-cells', (markApplied) => {
+      return ordered('select-cells', async (markApplied) => {
         const { peer, edits } = requirePeer();
         if (!validSelection(peer, sheet, target)) return false;
+        if (!session.retiring && !session.recovering) await bridge().beforeNavigation?.();
+        markApplied.check();
         edits.setActiveSheet(sheet);
         markApplied();
         return bridge().selectCellsAsync(sheet, target);
@@ -208,12 +255,12 @@ export function createWorkerEditorApi(
     applyEdits: (request) => {
       const input = structuredClone(request);
       return ordered('apply-edits', (markApplied) => {
-        if (bridge().readOnly()) return refusal();
+        if (bridge().readOnly() && !session.retiring) return refusal();
         const result = requirePeer().edits.applyEdits(input);
-        markApplied();
-        bridge().apply(result);
+        if (result.ok) markApplied();
+        if (!session.retiring) bridge().apply(result);
         return result;
-      }, true);
+      }, true, () => previewRequest(input));
     },
     cell: (sheet, row, col) => readable() ? session.peer!.cell(sheet, row, col) : null,
     cellAsync: (sheet, row, col) => ordered('cell', () => requirePeer().peer.cell(sheet, row, col)),
@@ -226,9 +273,9 @@ export function createWorkerEditorApi(
       return synchronous((markApplied) => editCell(sheet, row, col, input, markApplied));
     },
     editCellAsync: (sheet, row, col, input) => ordered('edit-cell', (markApplied) => {
-      if (bridge().readOnly()) return { error: new Error('The editor is read-only') };
+      if (bridge().readOnly() && !session.retiring) return { error: new Error('The editor is read-only') };
       return { result: editCell(sheet, row, col, input, markApplied) };
-    }, true).then((outcome) => {
+    }, true, () => bridge().previewEdits?.(sheet, [{ row, col, input }])).then((outcome) => {
       if (outcome?.error) throw outcome.error;
       return outcome?.result ?? null;
     }),
