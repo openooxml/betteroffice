@@ -6468,6 +6468,37 @@ test('a ready drag queued behind navigation replays its final range once', async
   }
 });
 
+test('a ready image click queued behind navigation selects the image instead of a drag', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  let armed = false;
+  const image = { pos: 6, rect: { x: 0, y: 0, width: 1, height: 1 } } as unknown as NonNullable<ReturnType<DisplayListQueries['imageAtPoint']>>;
+  const spies = [...new Set([opened.harness.renderer.queries!, opened.harness.renderer.inputQueries!])]
+    .map((queries) => spyOn(queries, 'imageAtPoint').mockImplementation(() => (armed ? image : null)));
+  try {
+    await startNavigation();
+    const before = opened.session.selection();
+    armed = true;
+    fireEvent.mouseDown(opened.canvas, pointAt(6));
+    armed = false;
+    fireEvent.mouseMove(window, pointAt(10));
+    fireEvent.mouseUp(window, pointAt(10));
+    expect(opened.session.selection()).toEqual(before);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    const anchor = { story: 'body', paraId: opened.session.paragraphs('body')[0].paraId, offset: 5 };
+    expect(opened.session.selection()).toEqual({ anchor, head: { ...anchor, offset: 6 } });
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    for (const spy of spies.reverse()) spy.mockRestore();
+    opened.close();
+  }
+});
+
 test('a composition started during opening commits exactly once after the switch', async () => {
   const opened = await openingEditor();
   const insert = spyOn(opened.preview, 'insertText');
@@ -9014,7 +9045,9 @@ test('a ready copy queued behind navigation writes the new selection once and an
   try {
     const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
     act(() => textarea.focus());
-    selectOpeningText(opened);
+    fireEvent.mouseDown(opened.canvas, pointAt(1));
+    fireEvent.mouseMove(window, pointAt(6));
+    fireEvent.mouseUp(window, pointAt(6));
     await act(async () => opened.editor.current!.flushPendingInput());
     expect(opened.session.selection()?.anchor.offset).toBe(0);
     expect(opened.session.selection()?.head.offset).toBe(5);
