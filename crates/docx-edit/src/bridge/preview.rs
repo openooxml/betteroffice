@@ -199,6 +199,71 @@ pub(crate) struct PreviewUnits {
 }
 
 #[cfg(test)]
+impl PreviewUnits {
+    pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug {
+        use yrs::types::ToJson;
+
+        let txn = doc.yrs_doc().transact();
+        let records = self
+            .records
+            .iter()
+            .map(|record| {
+                let chunks = record
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        let insert = serde_json::to_value(chunk.insert.to_json(&txn)).unwrap();
+                        let attributes = chunk.attributes.as_ref().map(|attrs| {
+                            attrs
+                                .iter()
+                                .map(|(key, value)| {
+                                    (key.to_string(), serde_json::to_value(value).unwrap())
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        });
+                        (
+                            std::mem::discriminant(&chunk.insert),
+                            insert,
+                            attributes,
+                            format!("{:?}", chunk.ychange),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    record.ids.as_ref().clone(),
+                    record.chunk_range.clone(),
+                    chunks,
+                    record.blocks.clone(),
+                    record.revealable.clone(),
+                    record.stories.clone(),
+                    record.paragraphs.clone(),
+                    record.pm.clone(),
+                    record.seed.as_deref().cloned(),
+                    record.after.as_ref().clone(),
+                    record.capture_raw,
+                )
+            })
+            .collect::<Vec<_>>();
+        let comments = self
+            .comments
+            .iter()
+            .map(|comment| (comment.start, comment.end, comment.id))
+            .collect::<Vec<_>>();
+        (records, comments, self.sequences)
+    }
+
+    pub(crate) fn raw_ranges(&self) -> Vec<Range<u32>> {
+        self.records
+            .iter()
+            .map(|record| {
+                record.seed.as_ref().unwrap().position.story_index
+                    ..record.after.position.story_index
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RecordingWork {
     pub(crate) chunks: usize,
