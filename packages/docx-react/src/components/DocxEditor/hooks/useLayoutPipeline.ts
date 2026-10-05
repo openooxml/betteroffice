@@ -163,7 +163,7 @@ function addsFontChainsOnly(
 }
 
 function workerProposalRenderEnv(session: YrsSession, renderEnv: YrsRenderEnv): YrsRenderEnv {
-  return registeredWorkerProposalAuthority(session)?.initialized
+  return registeredWorkerProposalAuthority(session)?.snapshot()
     ? { ...renderEnv, revisionPreview: registeredWorkerProposalAuthority(session)!.revisionPreview() ??
         proposalRevisionPreview(session.getProposals()) }
     : renderEnv;
@@ -283,7 +283,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (
       layout &&
       session &&
-      registeredWorkerProposalAuthority(session)?.initialized &&
+      registeredWorkerProposalAuthority(session)?.snapshot() &&
       !isSupersededLayout(layout) &&
       sourceVersionOf(layout) === session.version() &&
       revisionPreviewKeyOf(layout) ===

@@ -86,6 +86,7 @@ import {
   notifyWorkerOpenLayoutProgress,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
+  workerOpenReplicaReady,
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError, type DocxWorkerErrorStage } from '../internals/docxWorkerError';
@@ -98,6 +99,7 @@ import { workerExportVersions } from '../internals/workerExportVersions';
 import {
   failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
+  workerProposalRegistryState,
 } from '../internals/workerProposalAuthority';
 import { nearestPages } from './pageBuildOrder';
 import { scheduleIdlePageBuild, type PageBuildTask } from './pageBuildScheduler';
@@ -129,6 +131,12 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   /** Restamps the shown layout after the session started mirroring the worker's version. */
   mirrorReady(): void;
 }
+
+const workerProposalSnapshot = (
+  session: YrsSession, snapshot: NonNullable<ReturnType<YrsSession['residentWorkerSnapshot']>>, viewer: boolean
+) => !viewer && registeredWorkerProposalAuthority(session) && !workerOpenDocumentHeld(session) && workerOpenReplicaReady(session)
+  ? { ...snapshot, peerProposals: workerProposalRegistryState(session) ?? { previewVersion: 0, entries: [] } }
+  : snapshot;
 
 const holdsWorkerProposals = (session: YrsSession): boolean =>
   registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true;
@@ -1570,6 +1578,17 @@ export function useRustDisplayList(
         if (outcome !== 'failed') throw new SupersededPreviewError();
         return false;
       }
+      if (workerOpenReplicaReady(hostEngine) && workerProposalRegistryState(hostEngine)?.entries.length) {
+        const owner = workerRef.current?.engine === hostEngine ? workerRef.current : null;
+        const outcome = replaceOutOfMemoryWorker(hostEngine, owner,
+          cause instanceof Error ? cause : new Error('The document worker is unavailable'));
+        if (outcome === 'retry') {
+          registeredWorkerProposalAuthority(hostEngine)?.restart();
+          requestLayoutRef.current?.();
+        }
+        if (outcome !== 'failed') throw new SupersededPreviewError();
+        return false;
+      }
       if (holdsWorkerProposals(hostEngine)) {
         failWorkerDocument(
           hostEngine, cause ?? new Error('The resident worker holds proposals the main thread cannot rebuild')
@@ -1579,6 +1598,7 @@ export function useRustDisplayList(
       if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
         ensureRebuildableReplica(hostEngine);
       }
+      if (workerOpenReplicaReady(hostEngine)) registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback');
       adoptHostEngine(hostEngine);
       if (workerRef.current?.engine === hostEngine) {
         workerRef.current.client.destroy();
@@ -1600,6 +1620,7 @@ export function useRustDisplayList(
       request: (owner: NonNullable<typeof workerRef.current>) => Promise<T>,
       onOwner?: (owner: NonNullable<typeof workerRef.current>) => void,
       stage: DocxWorkerErrorStage = 'render',
+      recoverProposalRead = false,
     ): Promise<T> => {
       const source = workerOpenSourcesRef.current.get(hostEngine);
       const load = sessionLoad(hostEngine);
@@ -1699,6 +1720,15 @@ export function useRustDisplayList(
           } else {
             if (!owner || !isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
             if (owner.client.hasFailed()) {
+              if (recoverProposalRead && workerOpenReplicaReady(hostEngine) && !holdsWorkerProposals(hostEngine)) {
+                const outcome = replaceOutOfMemoryWorker(hostEngine, owner,
+                  error instanceof Error ? error : new Error(String(error)), stage);
+                if (outcome === 'retry') {
+                  registeredWorkerProposalAuthority(hostEngine)?.restart();
+                  requestLayoutRef.current?.();
+                  continue;
+                }
+              }
               if (holdsCommittedWorkerProposals(hostEngine)) {
                 throw failWorkerDocument(hostEngine, error);
               }
@@ -1824,11 +1854,14 @@ export function useRustDisplayList(
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op, prepare) =>
             requestOpenedWorker(hostEngine, async (owner) => {
+              if (!isViewerSession(hostEngine) && workerOpenReplicaReady(hostEngine)) {
+                await owner.client.whenBootstrapSent();
+              }
               owner.proposalFontRequirements = undefined;
               const reply = await owner.client.proposal(prepare ? prepare() : op);
               owner.proposalFontRequirements = reply.fontRequirements;
               return reply;
-            }),
+            }, undefined, 'render', op.kind === 'snapshot'),
           documentRead: (read) =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
@@ -2804,7 +2837,7 @@ export function useRustDisplayList(
         workerPresentationActiveRef.current &&
         paintedCaretMachine.shouldPaint(performance.now());
       const reply = bootstrapping
-        ? worker.bootstrap(snapshot, '', options)
+        ? worker.bootstrap(workerProposalSnapshot(hostEngine, snapshot, isViewerSession(hostEngine)), '', options)
         : worker.sync(snapshot, '', previousFrame?.frameEpoch ?? 0, paintCaret, options);
       // A worker out of memory runs the pass again in a fresh worker; once
       // that one runs out too, the pass rejects and nothing lays out here.
@@ -3455,7 +3488,7 @@ export function useRustDisplayList(
                   displayWindowRef.current
                 )
               : bootstrapping
-                ? worker.bootstrap(snapshot, extras, {
+                ? worker.bootstrap(workerProposalSnapshot(hostEngine, snapshot, isViewerSession(hostEngine)), extras, {
                     ...sent(),
                     ...(owner.opened ? { opened: true } : {}),
                     displayWindow: workerPreviewEnginesRef.current.has(hostEngine)

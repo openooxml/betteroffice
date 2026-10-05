@@ -45,6 +45,7 @@ import {
   requestWorkerOpenReplica,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
+  workerOpenReplicaReady,
 } from '../internals/workerOpenReplica';
 import {
   handedOverRequest,
@@ -56,6 +57,10 @@ import {
 
 import { isWorkerViewer } from '../internals/workerViewer';
 import { warnDeprecatedViewerMember } from '../internals/deprecatedViewerMembers';
+
+class ProposalAdmissionRefusal extends Error {
+  constructor(readonly result: DocxProposalResult) { super('The editor is read-only'); }
+}
 
 export const DOCX_REF_ASYNC_TWINS = {
   getDocument: ['readParagraphs', 'exportStructuredWithPages'],
@@ -700,12 +705,36 @@ export function useDocxEditorRefApi({
     const session = pagedEditorRef.current?.getYrsSession();
     return experimentalWorkerOpen && session ? workerProposalRoundAuthority(session) : null;
   };
+  const roundAdmission = (mutation: boolean) => {
+    const session = pagedEditorRef.current?.getYrsSession();
+    const validate = () => {
+      if (!session || pagedEditorRef.current?.getYrsSession() !== session) {
+        throw new Error('The document changed while applying proposals');
+      }
+      if (mutation && !hostProposalsAllowed()) throw new ProposalAdmissionRefusal({
+        ok: false, version: session.version(),
+        failure: { code: 'read-only', message: 'The editor is read-only' },
+      });
+    };
+    return {
+      validate,
+      flush: async () => {
+        validate();
+        if (session && !workerOpenDocumentHeld(session) && workerOpenReplicaReady(session)) {
+          const flushed = await flushEditorInput(pagedEditorRef);
+          if (!flushed.ok) throw flushed.error;
+        }
+        validate();
+      },
+    };
+  };
   /** Executes a proposal round on the session's authority. */
   const routedProposalCall = <R extends { expectVersion: string }>(
     request: R,
     onWorker: (
       authority: WorkerProposalAuthority,
-      main: (request: R) => Promise<DocxProposalResult>
+      main: (request: R) => Promise<DocxProposalResult>,
+      admission: ReturnType<typeof roundAdmission>
     ) => Promise<DocxProposalResult>,
     call: (session: YrsSession, request: R) => DocxProposalResult
   ): Promise<DocxProposalResult> => {
@@ -728,7 +757,10 @@ export function useDocxEditorRefApi({
         failure: { code: 'read-only', message: 'The editor is read-only' },
       });
     }
-    return onWorker(authority, main);
+    return onWorker(authority, main, roundAdmission(true)).catch((error: unknown) => {
+      if (error instanceof ProposalAdmissionRefusal) return error.result;
+      throw error;
+    });
   };
   const createApi = (): DocxEditorRef => {
     const held = () => {
@@ -834,21 +866,21 @@ export function useDocxEditorRefApi({
       },
 
       proposeChanges: (request) =>
-        routedProposalCall(request, (authority, main) => authority.propose(request, main), (session, input) =>
+        routedProposalCall(request, (authority, main, admission) => authority.propose(request, main, admission), (session, input) =>
           session.proposeChanges(input)
         ),
       setProposalStates: (request) =>
-        routedProposalCall(request, (authority, main) => authority.setStates(request, main), (session, input) =>
+        routedProposalCall(request, (authority, main, admission) => authority.setStates(request, main, admission), (session, input) =>
           session.setProposalStates(input)
         ),
       withdrawProposals: (request) =>
-        routedProposalCall(request, (authority, main) => authority.withdraw(request, main), (session, input) =>
+        routedProposalCall(request, (authority, main, admission) => authority.withdraw(request, main, admission), (session, input) =>
           session.withdrawProposals(input)
         ),
       getProposals: () => {
         const main = async () =>
           (await mainSession()).session.getProposals();
-        return roundAuthority()?.getProposals(main) ?? main();
+        return roundAuthority()?.getProposals(main, roundAdmission(false)) ?? main();
       },
 
       exportStructuredWithPages: (options) => {

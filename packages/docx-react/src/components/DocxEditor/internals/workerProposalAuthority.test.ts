@@ -385,15 +385,14 @@ test('hydration releases reads waiting for the first layout without posting init
     return () => { h.mainVersion('main-2'); };
   }, () => { throw new Error('unexpected fallback'); }, () => {});
 
-  laidOut.resolve();
   await requestWorkerOpenReplica(h.session);
-  expect<unknown>(await read).toEqual({ ok: true, version: 'worker-1', view: 'accepted', paragraphs: [] });
+  expect(await read).toEqual({ sessionId: 'session', packageSha256: null, paragraphs: [] });
   expect(h.session.version()).toBe('main-2');
-  expect(main).not.toHaveBeenCalled();
-  expect(h.worker.proposal).toHaveBeenCalledTimes(2);
-  expect(h.worker.documentRead).toHaveBeenCalledTimes(1);
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
   expect(h.worker.handOver).toHaveBeenCalledTimes(1);
-  expect(h.authority.initialized).toBe(true);
+  expect(h.authority.initialized).toBe(false);
   expect(workerProposalAuthority(h.session)).toBeNull();
 });
 
@@ -1175,4 +1174,69 @@ test('retirement clears worker coverage and correspondence permanently', async (
   expect(h.authority.workerCoversPeer(version)).toBe(false);
   expect(h.worker.proposal).toHaveBeenCalledTimes(calls);
   expect(h.authority.snapshot()).toEqual(h.session.getProposals());
+});
+
+
+test('save stays behind a round admitted before the first layout and initialization snapshot', async () => {
+  const layout = deferred<void>();
+  const waiting = deferred<void>();
+  const h = harness(() => { waiting.resolve(); return layout.promise; });
+  const pending = h.authority.propose(request, unusedMain);
+  const save = mock(async () => { h.events.push('save'); return 'saved'; });
+  const saving = h.authority.save(save);
+  await waiting.promise;
+  expect(save).not.toHaveBeenCalled();
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  layout.resolve();
+  expect(await pending).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('save stays behind a round admitted during a held initialization snapshot', async () => {
+  const h = harness();
+  const initializing = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementationOnce(async () => { h.events.push('snapshot'); posted.resolve(); return initializing.promise; });
+  const initialization = h.authority.initialize();
+  await posted.promise;
+  const round = h.authority.propose(request, unusedMain);
+  const saving = h.authority.save(async () => { h.events.push('save'); return 'saved'; });
+  initializing.resolve(reply());
+  await initialization;
+  expect(await round).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('replacement initialization keeps an admitted round ahead of a later save', async () => {
+  let layout = deferred<void>();
+  const waiting = deferred<void>();
+  const h = harness(() => { waiting.resolve(); return layout.promise; });
+  const initialSnapshot = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementationOnce(async () => { h.events.push('snapshot'); posted.resolve(); return initialSnapshot.promise; });
+  const round = h.authority.propose(request, unusedMain);
+  await waiting.promise;
+  layout.resolve();
+  await posted.promise;
+  layout = deferred<void>();
+  h.authority.restart();
+  const saving = h.authority.save(async () => { h.events.push('save'); return 'saved'; });
+  initialSnapshot.resolve(reply());
+  layout.resolve();
+  expect(await round).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events.at(-2)).toBe('save');
+  expect(h.events.indexOf('propose')).toBeLessThan(h.events.indexOf('save'));
+});
+
+test('an unchanged empty state round does not latch worker state', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  expect(await h.authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, unusedMain))
+    .toMatchObject({ ok: true });
+  expect(h.authority.holdsCommittedWorkerState()).toBe(false);
+  h.authority.restart();
+  expect(h.authority.initialized).toBe(false);
 });

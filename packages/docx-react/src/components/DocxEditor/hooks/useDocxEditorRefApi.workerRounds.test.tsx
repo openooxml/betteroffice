@@ -123,6 +123,8 @@ async function editor(holdHydration = false) {
     isWorkerViewer: () => false, getLayout: () => null,
   } as unknown as PagedEditorRef;
   const pagedEditorRef = { current: editor };
+  const modeRef = { current: 'editing' as 'editing' | 'viewing' };
+  const allowHostProposalsRef = { current: true };
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
@@ -134,8 +136,7 @@ async function editor(holdHydration = false) {
       setComments: () => {}, setShowCommentsSidebar: () => {},
       contentChangeSubscribersRef: { current: new Set() }, selectionChangeSubscribersRef: { current: new Set() },
       getCachedStyleResolver: createStyleResolver, commentIdAllocator: createCommentIdAllocator(),
-      commands: UNAVAILABLE_DOCX_COMMANDS, modeRef: { current: 'editing' },
-      allowHostProposalsRef: { current: true },
+      commands: UNAVAILABLE_DOCX_COMMANDS, modeRef, allowHostProposalsRef,
       hostSearch: {
         search: async () => ({ query: '', options: { caseSensitive: false }, total: 0, current: -1 }),
         searchNext: () => null, searchPrevious: () => null, searchGoTo: () => null, clearSearch: () => {},
@@ -157,7 +158,7 @@ async function editor(holdHydration = false) {
   };
   return {
     peer, worker, authority, replica, ready, release: () => release.resolve(), events, refresh, peerProjection,
-    api: hook.result.current.api.current!, hook, pagedEditorRef, proposal, type,
+    api: hook.result.current.api.current!, hook, renderer, pagedEditorRef, proposal, type, modeRef, allowHostProposalsRef,
     workerText: () => text(worker.sessions[0]!.proposalEngine),
   };
 }
@@ -309,4 +310,130 @@ test('plugin peer batches map a worker token through every correspondence and re
   expect(handedOverRequest(h.peer, { expectVersion: workerVersion }).expectVersion).toBe(workerVersion);
   const stale = await applyEditBatch(h.pagedEditorRef, () => 'editing', { expectVersion: workerVersion, steps: [step] });
   expect(stale).toMatchObject({ result: { ok: false, failure: { code: 'stale-version' } } });
+});
+
+
+test.each(['propose', 'setStates', 'withdraw', 'snapshot'] as const)(
+  'ready %s rounds reserve their position while composition flushes', async (kind) => {
+    const h = await editor();
+    const started = deferred<void>();
+    const composition = deferred<void>();
+    spyOn(h.pagedEditorRef.current, 'flushPendingInput').mockImplementationOnce(async () => {
+      started.resolve();
+      await composition.promise;
+      h.type('Composed ');
+    });
+    const token = h.peer.version();
+    const before = h.worker.requests.filter((type) => type === 'proposal').length;
+    const pending = kind === 'propose'
+      ? h.api.proposeChanges({ expectVersion: token, proposals: [h.proposal('composition')] })
+      : kind === 'setStates'
+        ? h.api.setProposalStates({ expectVersion: token, expectPreviewVersion: 0, changes: [] })
+        : kind === 'withdraw'
+          ? h.api.withdrawProposals({ expectVersion: token, ids: ['composition'] })
+          : h.api.getProposals();
+    const save = mock(async () => text(h.peer));
+    const saving = h.authority.save(save);
+    await started.promise;
+    expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
+    expect(save).not.toHaveBeenCalled();
+    composition.resolve();
+    const result = await pending;
+    if (kind === 'snapshot') expect(result).toMatchObject({ version: h.peer.version(), proposals: [] });
+    else expect(result).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    expect(await saving).toBe('Composed Alpha');
+  }
+);
+
+test('accepted queued input is flushed before ready round version validation', async () => {
+  const h = await editor();
+  const token = h.peer.version();
+  const flush = spyOn(h.pagedEditorRef.current, 'flushPendingInput').mockImplementationOnce(async () => {
+    h.type('Accepted ');
+  });
+  expect(await h.api.proposeChanges({ expectVersion: token, proposals: [h.proposal('accepted')] }))
+    .toMatchObject({ ok: false, version: h.peer.version(), failure: { code: 'stale-version' } });
+  expect(flush).toHaveBeenCalledTimes(1);
+  expect(text(h.peer)).toBe('Accepted Alpha');
+});
+
+test('a queued ready mutation rechecks permission when its queue position runs', async () => {
+  const h = await editor();
+  const started = deferred<void>();
+  const release = deferred<void>();
+  const held = h.authority.residentOperation(async () => { started.resolve(); await release.promise; });
+  await started.promise;
+  const pending = h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('denied')] });
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  h.modeRef.current = 'viewing';
+  h.allowHostProposalsRef.current = false;
+  release.resolve();
+  await held;
+  expect(await pending).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
+  expect(text(h.peer)).toBe('Alpha');
+});
+
+test('ready round admission rejects a replaced document after input flush', async () => {
+  const h = await editor();
+  spyOn(h.pagedEditorRef.current, 'flushPendingInput').mockImplementationOnce(async () => {
+    h.pagedEditorRef.current = { getYrsSession: () => null } as unknown as PagedEditorRef;
+  });
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  await expect(h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('replaced')] }))
+    .rejects.toThrow('document changed');
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
+});
+
+test('an identical ref retry accepts its original token while a fresh edit refuses it', async () => {
+  const h = await editor();
+  const request = { expectVersion: h.peer.version(), proposals: [h.proposal('retry')] };
+  const first = snapshot(await h.api.proposeChanges(request));
+  expect(snapshot(await h.api.proposeChanges(request))).toEqual(first);
+  expect(text(h.peer)).toBe('Worker Alpha');
+  expect(await h.api.proposeChanges({ ...request, proposals: [h.proposal('fresh', 'Fresh ', 'end')] }))
+    .toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+});
+
+
+test('a permanent hydrated worker layout drop retires proposal rounds to the peer', async () => {
+  const h = await editor();
+  const error = new Error('non-terminal layout failure');
+  const send = h.worker.postMessage.bind(h.worker);
+  spyOn(h.worker, 'postMessage').mockImplementation((message, transfer) => {
+    if (message.type === 'sync') queueMicrotask(() => h.worker.onmessage?.({
+      data: { id: message.id, ok: false, error: error.message },
+    } as MessageEvent));
+    else send(message, transfer);
+  });
+  spyOn(console, 'error').mockImplementation(() => {});
+  await act(async () => { expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).toBeNull(); });
+  expect(h.authority.retirementReason()).toBe('source-fallback');
+  expect(h.authority.workerCoversPeer(h.peer.version())).toBe(false);
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  const peer = spyOn(h.peer, 'proposeChanges');
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('fallback')] }));
+  expect(peer).toHaveBeenCalledTimes(1);
+  expect((await h.api.getProposals()).proposals.map(({ id }) => id)).toEqual(['fallback']);
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
+  expect(text(h.peer)).toBe('Worker Alpha');
+});
+
+
+test('ready round admission rechecks permission after an active input flush', async () => {
+  const h = await editor();
+  const flushing = deferred<void>();
+  const release = deferred<void>();
+  spyOn(h.pagedEditorRef.current, 'flushPendingInput').mockImplementationOnce(async () => {
+    flushing.resolve();
+    await release.promise;
+  });
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  const round = h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('mode-during-flush')] });
+  await flushing.promise;
+  h.modeRef.current = 'viewing';
+  h.allowHostProposalsRef.current = false;
+  release.resolve();
+  expect(await round).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
 });
