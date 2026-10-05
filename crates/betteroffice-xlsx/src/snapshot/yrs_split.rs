@@ -528,10 +528,7 @@ impl UpdateCursor {
                     }
                     match scanner.block() {
                         Ok(block) => block.len,
-                        Err(SplitError::OversizedStruct) if count != 0 => {
-                            scanner.pos = end;
-                            break;
-                        }
+                        Err(SplitError::OversizedStruct) if count != 0 => break,
                         Err(failure) => return Err(failure),
                     }
                 } else {
@@ -621,11 +618,13 @@ impl SnapshotParent {
 
 pub(crate) type SnapshotKeys = BTreeSet<(SnapshotParent, std::sync::Arc<str>)>;
 
+type SnapshotLocations = BTreeMap<(u64, u32), (u32, SnapshotParent, Option<std::sync::Arc<str>>)>;
+
 #[derive(Default)]
 pub(crate) struct CausalState {
     clocks: BTreeMap<u64, u32>,
     kinds: BTreeMap<(u64, u32), (u32, u8)>,
-    locations: BTreeMap<(u64, u32), (u32, SnapshotParent, Option<std::sync::Arc<str>>)>,
+    locations: SnapshotLocations,
     keys: SnapshotKeys,
     order_seen: bool,
 }

@@ -2218,12 +2218,13 @@ mod ceiling_tests {
 
     #[test]
     fn snapshot_oversized_base_record_refuses_capture_before_chunks() {
-        let workbook = crate::Workbook::from_model(WorkbookModel {
+        let model = WorkbookModel {
             sheets: vec![Sheet::new("Data")],
             ..WorkbookModel::default()
-        })
-        .unwrap();
-        let mut authority = workbook.authority;
+        };
+        let mut authority = WorkbookAuthority::from_source_with_projection(&model, None, &[], None)
+            .unwrap()
+            .0;
         Arc::make_mut(&mut authority.base)
             .shared_strings
             .push("a".repeat(xlsx_parse::SNAPSHOT_RECORD_MAX_BYTES + 1));
