@@ -813,6 +813,60 @@ mod tests {
     }
 
     #[test]
+    fn defined_name_tokens_gate_even_unused_and_sheet_scoped() {
+        for local_sheet in [None, Some(SheetId(1))] {
+            let (mut wb, s) = one_sheet();
+            wb.sheets.push(Sheet::new("Sheet2"));
+            put_cached_formula(&mut wb, SheetId(1), "A1", "Sheet1!A1+1", num(99.0));
+            wb.defined_names.push(DefinedName {
+                name: "UnusedClock".into(),
+                formula: "=NOW()".into(),
+                local_sheet,
+                hidden: false,
+            });
+            let mut graph = DepGraph::build(&wb);
+            put_num(&mut wb, s, "A1", 7.0);
+            let skipped = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+            assert!(skipped.changed.is_empty());
+            assert_eq!(value(&wb, SheetId(1), "A1"), num(99.0));
+            wb.defined_names.clear();
+            let mut rebuilt = DepGraph::build(&wb);
+            rebuilt.inherit_pending_recalculation(&graph);
+            recalc_after(&mut wb, &mut rebuilt, &[], None);
+            assert_eq!(value(&wb, SheetId(1), "A1"), num(8.0));
+        }
+    }
+
+    #[test]
+    fn defined_name_replacement_refreshes_clock_presence() {
+        let (mut wb, s) = one_sheet();
+        wb.sheets.push(Sheet::new("Sheet2"));
+        put_cached_formula(&mut wb, SheetId(1), "A1", "Sheet1!A1+1", num(99.0));
+        let mut graph = DepGraph::build(&wb);
+        assert_eq!(graph.begin_recalculation(None), Some(false));
+        wb.defined_names.push(DefinedName {
+            name: "Clock".into(),
+            formula: "TODAY()".into(),
+            local_sheet: None,
+            hidden: false,
+        });
+        let mut rebuilt = DepGraph::build(&wb);
+        rebuilt.inherit_pending_recalculation(&graph);
+        let skipped = recalc_after(&mut wb, &mut rebuilt, &[], None);
+        assert!(skipped.changed.is_empty());
+        assert_eq!(value(&wb, SheetId(1), "A1"), num(99.0));
+        put_num(&mut wb, s, "A1", 7.0);
+        let skipped = recalc_after(&mut wb, &mut rebuilt, &[(s, a1("A1"))], None);
+        assert!(skipped.changed.is_empty());
+        assert_eq!(value(&wb, SheetId(1), "A1"), num(99.0));
+        wb.defined_names[0].formula = "1".into();
+        let mut graph = DepGraph::build(&wb);
+        graph.inherit_pending_recalculation(&rebuilt);
+        recalc_after(&mut wb, &mut graph, &[], None);
+        assert_eq!(value(&wb, SheetId(1), "A1"), num(8.0));
+    }
+
+    #[test]
     fn pending_clockless_gate_clears_after_full_recalculation() {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 1.0);

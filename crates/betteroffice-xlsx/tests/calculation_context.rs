@@ -243,7 +243,7 @@ fn sharing_only_the_clock_keeps_random_draws_unpinned() {
 
 #[test]
 fn workbook_seed_can_be_pinned_changed_and_cleared() {
-    let options = CalculationOptions::default();
+    let options = context();
     let mut workbook = Workbook::open_recalculated(&fixture(), options).unwrap();
     assert_eq!(workbook.rand_seed(), None);
     workbook.set_rand_seed(Some(42));

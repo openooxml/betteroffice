@@ -4,7 +4,6 @@ use betteroffice_xlsx::{
 };
 use serde_json::json;
 use xlsx_model::{DefinedName, ErrorValue};
-use xlsx_ops::Op;
 
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -298,67 +297,6 @@ fn clocked_full_recalculation_catches_up_pending() {
     });
     assert_eq!(value(&workbook, "J1"), number(8.0));
     assert_eq!(value(&workbook, "F1"), number(46_001.0));
-}
-
-#[test]
-fn defined_name_tokens_gate_even_unused_and_sheet_scoped() {
-    for local_sheet in [None, Some(SheetId(1))] {
-        let mut workbook = synthetic(
-            &[("A1", "Sheet1!A1+1", number(99.0))],
-            &[],
-            vec![DefinedName {
-                name: "UnusedClock".into(),
-                formula: "=NOW()".into(),
-                local_sheet,
-                hidden: false,
-            }],
-        );
-        batch_edit(&mut workbook, "A1", "7", None);
-        assert_eq!(value(&workbook, "A1"), number(99.0));
-        workbook
-            .apply_ops(
-                vec![Op::SetDefinedNames {
-                    defined_names: Vec::new(),
-                }],
-                CalculationOptions::default(),
-            )
-            .unwrap();
-        assert_eq!(value(&workbook, "A1"), number(8.0));
-    }
-}
-
-#[test]
-fn defined_name_replacement_refreshes_clock_presence() {
-    let mut workbook = synthetic(&[("A1", "Sheet1!A1+1", number(99.0))], &[], Vec::new());
-    workbook
-        .apply_ops(
-            vec![Op::SetDefinedNames {
-                defined_names: vec![DefinedName {
-                    name: "Clock".into(),
-                    formula: "TODAY()".into(),
-                    local_sheet: None,
-                    hidden: false,
-                }],
-            }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(value(&workbook, "A1"), number(99.0));
-    batch_edit(&mut workbook, "A1", "7", None);
-    workbook
-        .apply_ops(
-            vec![Op::SetDefinedNames {
-                defined_names: vec![DefinedName {
-                    name: "Clock".into(),
-                    formula: "1".into(),
-                    local_sheet: None,
-                    hidden: false,
-                }],
-            }],
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_eq!(value(&workbook, "A1"), number(8.0));
 }
 
 #[test]
