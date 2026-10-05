@@ -2199,6 +2199,79 @@ for (const route of ['host', 'clipboard'] as const) {
   });
 }
 
+it('keeps a mixed batch preview cleared after an earlier UI refusal until frame adoption', async () => {
+  const host = harness(true);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const writes = deferred<void>();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  const flush = spyOn(host.attached!, 'flush');
+  let blocked: Promise<void> | undefined;
+  let batch: ReturnType<XlsxWorkerEditorApi['applyEdits']> | undefined;
+  try {
+    await act(async () => { await api.editCellAsync(0, 0, 0, 'accepted'); });
+    await advance();
+    expect(host.attached!.acknowledgedSequence).toBe(1);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
+    flush.mockReturnValue(writes.promise);
+    act(() => { blocked = api.flush(); });
+    await act(async () => {});
+    expect(flush).toHaveBeenCalledTimes(1);
+    host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid UI formula'); });
+    reviewEdit(view, '=uiRefused()');
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=uiRefused()');
+    const initial = reviewBatch('batch', host.peer.version());
+    const request: XlsxEditRequest = { ...initial, steps: [...initial.steps.map(({ expect: _expect, ...step }) => step),
+      { op: 'setFormulas', target: { sheetId: 'sheet:0',
+        range: { kind: 'rowCol', start: { row: 0, col: 1 }, end: { row: 0, col: 1 } } }, formulas: [['24']] }] };
+    act(() => { batch = api.applyEdits(request); });
+    await act(async () => {});
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'accepted']]);
+    expect(host.peerMethods.applyEdits).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    await act(async () => writes.resolve());
+    await advance();
+    await blocked;
+    expect(await batch).toMatchObject({ ok: true, applied: true });
+    expect(host.peerMethods.applyEdits).toHaveBeenCalledWith(request);
+    expect(host.peerMethods.editCell.mock.calls).toEqual([
+      [0, 0, 0, 'accepted'], [0, 0, 0, '=uiRefused()'],
+    ]);
+    expect(api.failure).toBeNull();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Invalid UI formula');
+    expect(host.cells.get('0:0:0')).toBe('batch');
+    expect(host.attached!.acknowledgedSequence).toBe(2);
+    expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('0');
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    await act(async () => adoption.resolve());
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('2');
+    expect(painted[painted.length - 1].commands.some((command) =>
+      command.op === 'text' && command.text === 'worker:batch')).toBe(true);
+    expect(api.cell(0, 0, 0)?.input).toBe('batch');
+  } finally {
+    try {
+      await act(async () => { writes.resolve(); adoption.resolve(); });
+      await advance();
+      await Promise.all([blocked, batch]);
+    } finally {
+      flush.mockRestore();
+      host.sessionMethods.frame.mockImplementation(frame);
+    }
+  }
+});
+
 it('unlinks two refused host predecessors before a same-cell UI refusal', async () => {
   const host = harness(true);
   let api!: XlsxWorkerEditorApi;
