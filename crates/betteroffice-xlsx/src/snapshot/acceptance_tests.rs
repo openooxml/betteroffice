@@ -1448,8 +1448,11 @@ fn snapshot_ungc_conflict_history_steps_respect_budget() {
         let writer = Doc::with_client_id(client);
         {
             let mut txn = writer.transact_mut();
-            txn.get_or_insert_map("snapshot-ungc-conflicts")
-                .insert(&mut txn, "scalar", client as i64);
+            txn.get_or_insert_map("snapshot-ungc-conflicts").insert(
+                &mut txn,
+                "scalar",
+                client as i64,
+            );
         }
         let bytes = writer
             .transact()
@@ -1457,7 +1460,8 @@ fn snapshot_ungc_conflict_history_steps_respect_budget() {
         let mut txn = worker.authority.snapshot_transaction_for_test();
         assert!(txn.doc().skip_gc());
         assert_eq!(txn.state_vector().get(&writer.client_id()), 0);
-        txn.apply_update(Update::decode_v1(&bytes).unwrap()).unwrap();
+        txn.apply_update(Update::decode_v1(&bytes).unwrap())
+            .unwrap();
     }
     let budget = SnapshotBudget::new(1, 16_384).unwrap();
     let chunks = encode(&worker, budget);
