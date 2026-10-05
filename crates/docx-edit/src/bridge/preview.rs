@@ -253,8 +253,11 @@ fn any_snapshot_preserves_variants_and_number_bits() {
 
 #[cfg(test)]
 impl BoundaryState {
-    fn exact_snapshot(&self) -> (String, BoundaryContext) {
-        (format!("{:?}", self.position), self.context.as_ref().clone())
+    fn exact_snapshot(&self) -> (String, String) {
+        (
+            format!("{:?}", self.position),
+            format!("{:?}", self.context.as_ref()),
+        )
     }
 }
 
