@@ -474,8 +474,19 @@ fn snapshot_singleton_strings_survive_alternating_allowances() {
     }
     let mut pending = std::collections::BTreeSet::new();
     let mut ready = false;
-    for advance in 0..200_000 {
-        let budget = if advance % 2 == 0 { small } else { large };
+    // One record per advance and 2,048 > 1,024 guarantee pending decoding while copies and
+    // migrations use the small allowance; switch only once the string is pending.
+    for _ in 0..200_000 {
+        let budget = if builder
+            .model
+            .as_ref()
+            .and_then(|model| model.pending_string_record())
+            .is_some()
+        {
+            large
+        } else {
+            small
+        };
         ready = builder.advance(budget).unwrap().is_ready();
         assert_step_budget(budget);
         if let Some(record) = builder
@@ -491,7 +502,7 @@ fn snapshot_singleton_strings_survive_alternating_allowances() {
     }
     assert!(
         pending.len() >= 3,
-        "too few strings entered pending decoding"
+        "too few strings entered pending decoding: {pending:?}"
     );
     assert!(ready);
     let (peer, _) = builder.finish().unwrap().into_parts();
