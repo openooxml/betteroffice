@@ -39,7 +39,7 @@ impl SheetPatch<'_> {
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
-        let dirty = self.dirty_formulas_oracle(&rows);
+        let dirty = self.dirty_formulas_oracle(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
         let mut source_rows = rows
@@ -314,8 +314,7 @@ impl SheetPatch<'_> {
         cell: &Cell,
         dirty: &DirtyFormulas,
     ) -> Result<bool, ParseError> {
-        let (Some(formula), Some(original)) = (&source.formula, self.original.cell(source.at))
-        else {
+        let (Some(_), Some(original)) = (&source.formula, self.original.cell(source.at)) else {
             return Ok(false);
         };
         if cell.formula.is_none()
@@ -325,26 +324,9 @@ impl SheetPatch<'_> {
             return Ok(false);
         }
         let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
-        let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
-        if attributes
-            .iter()
-            .any(|attribute| matches!(attribute.local_name(), "cm" | "vm"))
-            || formula_attributes
-                .iter()
-                .any(|attribute| attribute.local_name() == "t" && attribute.value == "array")
-        {
-            let rectangle = self.original.array_formula(source.at);
-            if rectangle.is_none()
-                || rectangle != formula.reference
-                || rectangle != self.sheet.array_formula(at)
-            {
-                return Ok(false);
-            }
-        }
-        let Some(slot) = cache_span_oracle(&data[source.span.clone()])? else {
+        let Some((slot, value_name)) = self.cache_slot_oracle(data, source, at)? else {
             return Ok(false);
         };
-        let slot = source.span.start + slot.start..source.span.start + slot.end;
 
         let mut writer = Writer::new(Vec::new());
         write_cell(
@@ -363,26 +345,83 @@ impl SheetPatch<'_> {
             Event::Start(element) => attr(&element, b"t")?,
             _ => unreachable!("write_cell emits a cell start tag"),
         };
-        let cached =
+        let (cached, _) =
             cache_span_oracle(&written)?.expect("write_cell emits one formula and cache slot");
         if source.at != at {
             set_attribute(&mut attributes, "r", "r", at.to_a1());
         }
-        if cell.style != original.style {
+        if !self.equivalent_style_oracle(original.style, cell.style) {
             remove_attribute(&mut attributes, "s");
             if let Some(style) = cell.style {
                 set_attribute(&mut attributes, "s", "s", style.to_string());
             }
         }
-        match ty {
-            Some(ty) => set_attribute(&mut attributes, "t", "t", ty),
-            None => remove_attribute(&mut attributes, "t"),
+        if let Some(ty) = ty {
+            match attributes
+                .iter_mut()
+                .find(|attribute| attribute.name == "t")
+            {
+                Some(attribute) => attribute.value = ty,
+                None => attributes.push(XmlAttribute {
+                    name: "t".to_owned(),
+                    value: ty,
+                }),
+            }
+        } else {
+            attributes.retain(|attribute| attribute.name != "t");
         }
         write_start_tag(out, &name, &attributes, false)?;
         self.emit_source_content_oracle(out, data, source, at, slot.start)?;
-        out.extend_from_slice(&written[cached]);
+        let mut reader = Reader::from_reader(&written[cached]);
+        let mut writer = Writer::new(std::mem::take(out));
+        loop {
+            let event = match reader.read_event().map_err(xml_err)? {
+                Event::Start(_) => Event::Start(BytesStart::new(&value_name)),
+                Event::End(_) => Event::End(BytesEnd::new(&value_name)),
+                Event::Eof => break,
+                event => event,
+            };
+            writer.write_event(event).map_err(xml_err)?;
+        }
+        *out = writer.into_inner();
         out.extend_from_slice(&data[slot.end..source.span.end]);
         Ok(true)
+    }
+
+    fn cache_slot_oracle(
+        &self,
+        data: &[u8],
+        source: &SourceCell,
+        at: CellRef,
+    ) -> Result<Option<(Range<usize>, String)>, ParseError> {
+        let Some(formula) = &source.formula else {
+            return Ok(None);
+        };
+        let (_, cell_attributes) = start_tag(&data[source.tag.clone()])?;
+        let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
+        if cell_attributes
+            .iter()
+            .any(|attribute| matches!(attribute.local_name(), "cm" | "vm"))
+            || formula_attributes
+                .iter()
+                .any(|attribute| attribute.local_name() == "t" && attribute.value == "array")
+        {
+            let rectangle = self.original.array_formula(source.at);
+            if rectangle.is_none()
+                || rectangle != formula.reference
+                || rectangle != self.sheet.array_formula(at)
+            {
+                return Ok(None);
+            }
+        }
+        Ok(
+            cache_span_oracle(&data[source.span.clone()])?.map(|(span, name)| {
+                (
+                    source.span.start + span.start..source.span.start + span.end,
+                    name,
+                )
+            }),
+        )
     }
 
     fn emit_cell_oracle(
@@ -418,8 +457,13 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn dirty_formulas_oracle(&self, rows: &[SourceRow]) -> DirtyFormulas {
+    fn dirty_formulas_oracle(
+        &self,
+        data: &[u8],
+        rows: &[SourceRow],
+    ) -> Result<DirtyFormulas, ParseError> {
         let mut changed = self.changed_source_cells_oracle();
+        let mut arrays = BTreeSet::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
             if cell.formula.is_none() {
                 continue;
@@ -430,6 +474,7 @@ impl SheetPatch<'_> {
                 .and_then(|at| self.sheet.array_formula(at));
             if source_array.and_then(|range| self.remap_range(range)) != current_array {
                 changed.insert((cell.at.row, cell.at.col));
+                arrays.insert((cell.at.row, cell.at.col));
             }
         }
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
@@ -446,6 +491,16 @@ impl SheetPatch<'_> {
                         .mapped(cell.at)
                         .is_none_or(|at| self.inverse(at) != Some(cell.at))
                         || (changed.contains(&key) && self.source_formula_changed_oracle(cell.at));
+                    entry.0 |= arrays.contains(&key);
+                    if !entry.0
+                        && formula.reference.is_some()
+                        && let Some(at) = self.mapped(cell.at)
+                    {
+                        let moved_positional = cell.at != at && formula.positional;
+                        let cache_fallback = changed.contains(&key)
+                            && self.cache_slot_oracle(data, cell, at)?.is_none();
+                        entry.0 |= moved_positional || cache_fallback;
+                    }
                     if let Some(reference) = formula.reference
                         && entry.1.replace(reference).is_some()
                     {
@@ -457,7 +512,7 @@ impl SheetPatch<'_> {
                 }
             }
         }
-        DirtyFormulas {
+        Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
                 .filter(|(_, (dirty, master))| {
@@ -468,14 +523,15 @@ impl SheetPatch<'_> {
             masters: masters
                 .into_iter()
                 .filter(|(key, reference)| {
-                    changed.contains(key)
+                    arrays.contains(key)
+                        || (reference.is_some() && changed.contains(key))
                         || reference.is_some_and(|reference| {
                             !self.moves_uniformly(reference) || range_changed(reference, &changed)
                         })
                 })
                 .map(|(key, _)| key)
                 .collect(),
-        }
+        })
     }
 
     fn source_formula_changed_oracle(&self, source: CellRef) -> bool {
@@ -516,7 +572,7 @@ impl SheetPatch<'_> {
     }
 }
 
-fn cache_span_oracle(cell: &[u8]) -> Result<Option<Range<usize>>, ParseError> {
+fn cache_span_oracle(cell: &[u8]) -> Result<Option<(Range<usize>, String)>, ParseError> {
     let mut reader = Reader::from_reader(cell);
     reader.config_mut().expand_empty_elements = false;
     if !matches!(reader.read_event().map_err(xml_err)?, Event::Start(_)) {
@@ -524,6 +580,8 @@ fn cache_span_oracle(cell: &[u8]) -> Result<Option<Range<usize>>, ParseError> {
     }
     let mut formulas = Vec::new();
     let mut values = Vec::new();
+    let mut formula_name = None;
+    let mut value_name = None;
     loop {
         let start = reader.buffer_position() as usize;
         let (element, empty) = match reader.read_event().map_err(xml_err)? {
@@ -532,6 +590,24 @@ fn cache_span_oracle(cell: &[u8]) -> Result<Option<Range<usize>>, ParseError> {
             Event::End(_) | Event::Eof => break,
             _ => continue,
         };
+        if matches!(element.local_name().as_ref(), b"f" | b"v") {
+            let declarations = attributes(&element)?;
+            if declarations
+                .iter()
+                .any(|attribute| attribute.name == "xmlns" || attribute.name.starts_with("xmlns:"))
+            {
+                return Ok(None);
+            }
+            let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+            if element.local_name().as_ref() == b"v" {
+                value_name = Some(name);
+            } else {
+                formula_name = Some(match name.rsplit_once(':') {
+                    Some((prefix, _)) => format!("{prefix}:v"),
+                    None => "v".to_owned(),
+                });
+            }
+        }
         if !empty {
             reader.read_to_end(element.name()).map_err(xml_err)?;
         }
@@ -543,9 +619,10 @@ fn cache_span_oracle(cell: &[u8]) -> Result<Option<Range<usize>>, ParseError> {
             _ => {}
         }
     }
-    Ok(match (formulas.as_slice(), values.as_slice()) {
+    let span = match (formulas.as_slice(), values.as_slice()) {
         ([formula], []) => Some(formula.end..formula.end),
         ([formula], [value]) if value.start >= formula.end => Some(value.clone()),
         _ => None,
-    })
+    };
+    Ok(span.zip(value_name.or(formula_name)))
 }

@@ -16,6 +16,16 @@ fn parsed(source: &str) -> ParsedWorkbook {
     parse_workbook_with_package(&package(source, &["text &amp; &lt;value&gt;"], false)).unwrap()
 }
 
+fn reopen(xml: &str) -> ParsedWorkbook {
+    let mut parts = package("", &[], false);
+    parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1 = xml.as_bytes().to_vec();
+    parse_workbook_with_package(&parts).unwrap()
+}
+
 fn number(value: f64) -> CellValue {
     CellValue::Number { value }
 }
@@ -307,6 +317,12 @@ fn uncertain_metadata_and_dirty_arrays_use_legacy_rewrite() {
         let (legacy, _) =
             with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
         assert_eq!(saved, legacy);
+        let expected = if formula.contains(r#"t="array""#) {
+            r#"<c r="A1"><f t="array" ref="A1:A2">A3</f><v>2</v></c>"#
+        } else {
+            r#"<c r="A1"><f>A2</f><v>2</v></c>"#
+        };
+        assert_eq!(cells(&saved)["A1"], expected);
     }
 }
 
@@ -403,4 +419,202 @@ fn shared_cache_edits_and_uniform_moves_match_oracle() {
             format!(r#"<c r="{follower}" s="1"><f t="shared" si="0"/><v>10</v></c>"#)
         );
     }
+}
+
+#[test]
+fn shared_master_metadata_fallback_rewrites_followers_and_reopens() {
+    for metadata in [r#"cm="1""#, r#"vm="1""#] {
+        let source = SHARED.replace(r#"r="B1""#, &format!(r#"r="B1" {metadata}"#));
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "B1", |cell| cell.value = number(8.0));
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+        let (oracle, _) =
+            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved, oracle);
+        let saved_cells = cells(&saved);
+        let reopened = reopen(&saved);
+        for (address, formula, value) in [
+            ("B1", "A1*2", 8.0),
+            ("B2", "A2*2", 4.0),
+            ("B3", "A3*2", 6.0),
+        ] {
+            assert_eq!(
+                saved_cells[address],
+                format!(r#"<c r="{address}"><f>{formula}</f><v>{value}</v></c>"#)
+            );
+            let at = CellRef::parse_a1(address).unwrap();
+            assert_eq!(
+                reopened.workbook.sheets[0].cell(at),
+                workbook.sheets[0].cell(at)
+            );
+        }
+    }
+}
+
+#[test]
+fn cache_type_edits_preserve_namespace_and_prefixed_attributes() {
+    const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    for source_type in ["", r#" t="n""#] {
+        let source = format!(
+            r#"<sheetData><row r="1"><c r="A1" xmlns:t="{MAIN}" t:t="keep"{source_type}><t:f>A2</t:f><t:v>1</t:v></c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        for (value, ty, cached) in [
+            (number(2.0), "", "2"),
+            (CellValue::Bool { value: true }, r#" t="b""#, "1"),
+        ] {
+            let mut workbook = parsed.workbook.clone();
+            edit(&mut workbook, "A1", |cell| cell.value = value);
+            let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+            let (oracle, _) =
+                with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+            assert_eq!(saved, oracle);
+            assert_eq!(
+                cells(&saved)["A1"],
+                format!(
+                    r#"<c r="A1" xmlns:t="{MAIN}" t:t="keep"{ty}><t:f>A2</t:f><t:v>{cached}</t:v></c>"#
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn prefixed_cache_values_keep_their_namespace_after_default_reset() {
+    const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+    for cached in ["<x:v>1</x:v>", "<x:v/>", ""] {
+        let source = format!(
+            r#"<sheetData><row r="1"><x:c r="A1" xmlns="" xmlns:x="{MAIN}"><x:f>A2</x:f>{cached}</x:c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = number(2.0));
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+        let (oracle, _) =
+            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved, oracle);
+        assert_eq!(
+            saved,
+            format!(
+                r#"<worksheet><sheetData><row r="1"><x:c r="A1" xmlns="" xmlns:x="{MAIN}"><x:f>A2</x:f><x:v>2</x:v></x:c></row></sheetData></worksheet>"#
+            )
+        );
+        assert_eq!(
+            reopen(&saved).workbook.sheets[0].cell(CellRef::new(0, 0)),
+            workbook.sheets[0].cell(CellRef::new(0, 0))
+        );
+    }
+}
+
+#[test]
+fn added_array_state_with_cache_edit_rewrites_and_reopens() {
+    let source =
+        r#"<sheetData><row r="1"><c r="A1"><f ca="1">A3:A4</f><v>1</v></c></row></sheetData>"#;
+    let parsed = parsed(source);
+    let mut workbook = parsed.workbook.clone();
+    let at = CellRef::new(0, 0);
+    let range = CellRange::new(at, CellRef::new(1, 0));
+    workbook.sheets[0].set_array_formula(at, range);
+    edit(&mut workbook, "A1", |cell| cell.value = number(2.0));
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+    let (oracle, _) =
+        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(saved, oracle);
+    assert_eq!(
+        cells(&saved)["A1"],
+        r#"<c r="A1"><f t="array" ref="A1:A2">A3:A4</f><v>2</v></c>"#
+    );
+    let reopened = reopen(&saved);
+    assert_eq!(reopened.workbook.sheets[0].array_formula(at), Some(range));
+    assert_eq!(
+        reopened.workbook.sheets[0].cell(at),
+        workbook.sheets[0].cell(at)
+    );
+}
+
+#[test]
+fn source_cache_type_transitions_match_oracle() {
+    for (source_type, source_value, value, ty, cached) in [
+        (
+            "n",
+            "1",
+            CellValue::Text {
+                value: "text".to_owned(),
+            },
+            r#" t="str""#,
+            "text",
+        ),
+        (
+            "str",
+            "text",
+            CellValue::Bool { value: true },
+            r#" t="b""#,
+            "1",
+        ),
+        ("e", "#N/A", number(2.0), "", "2"),
+    ] {
+        let source = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="{source_type}"><f ca="1">A2</f><v>{source_value}</v></c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = value);
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+        let (oracle, _) =
+            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved, oracle);
+        assert_eq!(
+            cells(&saved)["A1"],
+            format!(r#"<c r="A1"{ty}><f ca="1">A2</f><v>{cached}</v></c>"#)
+        );
+    }
+}
+
+#[test]
+fn ambiguous_cache_children_use_full_rewrite() {
+    for children in [
+        "<v>1</v><v>2</v>",
+        "<is><t>text</t></is>",
+        r#"<v xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">1</v>"#,
+    ] {
+        let source = format!(
+            r#"<sheetData><row r="1"><c r="A1"><f ca="1">A2</f>{children}</c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        let mut workbook = parsed.workbook.clone();
+        edit(&mut workbook, "A1", |cell| cell.value = number(3.0));
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+        let (oracle, _) =
+            with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+        assert_eq!(saved, oracle);
+        assert_eq!(cells(&saved)["A1"], r#"<c r="A1"><f>A2</f><v>3</v></c>"#);
+    }
+}
+
+#[test]
+fn equivalent_style_cache_edit_keeps_source_index_like_oracle() {
+    let source =
+        r#"<sheetData><row r="1"><c r="A1" s="2"><f ca="1">A2</f><v>1</v></c></row></sheetData>"#;
+    let parsed = super::style_match_tests::parsed_sheet(source);
+    let mut workbook = parsed.workbook.clone();
+    edit(&mut workbook, "A1", |cell| {
+        cell.style = Some(1);
+        cell.value = number(2.0);
+    });
+    assert_ne!(
+        parsed.workbook.sheets[0]
+            .cell(CellRef::new(0, 0))
+            .unwrap()
+            .style,
+        workbook.sheets[0].cell(CellRef::new(0, 0)).unwrap().style
+    );
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+    let (oracle, _) =
+        with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+    assert_eq!(saved, oracle);
+    assert_eq!(
+        cells(&saved)["A1"],
+        r#"<c r="A1" s="2"><f ca="1">A2</f><v>2</v></c>"#
+    );
 }
