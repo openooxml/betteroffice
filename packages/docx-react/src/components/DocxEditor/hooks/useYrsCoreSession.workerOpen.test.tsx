@@ -1493,8 +1493,9 @@ function expectReadyMutations(api: DocxEditorRef, session: YrsSession, editor: P
   expect(api.getEditorRef()).toBe(editor);
   const first = session.paragraphs('body')[0]!;
   expect(api.findInDocument(first.text)).toContainEqual(expect.objectContaining({ paraId: first.paraId, match: first.text }));
+  const revealed = reveals.length;
   expect(api.scrollToParaId(paraId)).toBe(true);
-  expect(editor.scrollToParaId).toHaveBeenCalledWith(paraId, undefined);
+  expect(reveals.slice(revealed)).toEqual([editor.yrsLocToDisplayPosition({ story: 'body', paraId, offset: 0 })]);
   expect(reveals).toContain(editor.yrsLocToDisplayPosition({ story: 'body', paraId, offset: 0 }));
   const last = session.paragraphs('body').at(-1)!;
   const search = 'Replica contract';
@@ -2637,6 +2638,7 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
     await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     expectReadyMutations(openingApi, session, result.current.pagedEditorRef.current!, result.current.searchReveals);
+    act(() => result.current.pipeline.scheduleLayout('remote', true));
     expect(openingApi.getEditorRef()?.getYrsSession()).toBe(session);
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);

@@ -121,7 +121,7 @@ function apiFor(viewer = false, pendingReplica = false, settledDisplayList?: Par
     readPositionAtPoint: mock(async () => null),
     readViewerSelectionInfo: mock(async () => INFO),
     navigateViewer: mock(async (..._args: Parameters<PagedEditorRef['navigateViewer']>) => true),
-    scrollToParaId: mock(() => { events.push('paragraph'); return true; }),
+    scrollToParaId: mock((..._args: Parameters<PagedEditorRef['scrollToParaId']>) => { events.push('paragraph'); return true; }),
     scrollToCommentId: mock(() => { events.push('comment'); return false; }),
     scrollToChangeId: mock(() => { events.push('change'); return true; }),
     syncYrsInputState: () => { events.push('sync'); return true; },

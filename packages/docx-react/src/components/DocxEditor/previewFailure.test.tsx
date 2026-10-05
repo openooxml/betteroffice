@@ -528,8 +528,10 @@ test('a stale worker open failure keeps the replacement preview accepting input'
     });
     await act(async () => ref.current!.flushPendingInput());
     expect(session.paragraphs('body')[0]!.text).toBe(`${queuedText}${first.text}`);
+    const target = { story: 'body', paraId: first.paraId, offset: 0 };
+    act(() => session.setSelection({ ...target, offset: queuedText.length }));
     expect(ref.current!.scrollToParaId(first.paraId)).toBe(true);
-    expect(navigate).toHaveBeenCalledWith(first.paraId, undefined);
+    expect(session.selection()).toEqual({ anchor: target, head: target });
     const breaks = session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak').length;
     act(() => {
       for (const member of ['addComment', 'applyFormatting', 'setParagraphStyle', 'proposeChange', 'insertBreak'] as const) {
