@@ -1170,7 +1170,7 @@ mod tests {
             put_num(&mut wb, s, cell, v);
         }
         put_formula(&mut wb, s, "A1", "SUM(OFFSET(A1,1,0,3,1))");
-        let report = rebuild_and_recalc_all(&mut wb, Some(45_000.0)).1;
+        let report = rebuild_and_recalc_all(&mut wb, None).1;
         assert!(report.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "A1"), num(6.0));
     }
@@ -1231,11 +1231,11 @@ mod tests {
             put_num(&mut wb, s, cell, (i + 1) as f64);
         }
         put_formula(&mut wb, s, "B1", "SUM(OFFSET(A1, 1, 0, 3, 1))");
-        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(9.0));
 
         put_num(&mut wb, s, "A3", 100.0);
-        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], Some(45_000.0));
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
         assert_eq!(value(&wb, s, "B1"), num(106.0));
         assert_eq!(changed_a1(&r), vec!["B1"]);
     }
@@ -1248,15 +1248,15 @@ mod tests {
         }
         put_num(&mut wb, s, "D1", 2.0);
         put_formula(&mut wb, s, "B1", "OFFSET(A1, D1, 0)");
-        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(3.0));
 
         put_num(&mut wb, s, "A3", 30.0);
-        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], Some(45_000.0));
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
         assert_eq!(value(&wb, s, "B1"), num(30.0));
 
         put_num(&mut wb, s, "D1", 1.0);
-        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], Some(45_000.0));
+        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
         assert_eq!(value(&wb, s, "B1"), num(2.0));
     }
 
@@ -1383,7 +1383,7 @@ mod tests {
         put_formula(&mut wb, s, "B1", "A1");
         put_formula(&mut wb, s, "B2", "INDEX(B1:B3,1)+1");
         put_formula(&mut wb, s, "B3", "INDEX(B1:B3,2)+1");
-        let (_, r) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(5.0));
         assert_eq!(value(&wb, s, "B2"), num(6.0));
@@ -1401,7 +1401,7 @@ mod tests {
         put_formula(&mut wb, s, "B3", "INDEX(B1:B3,2)+1");
         put_formula(&mut wb, s, "D1", "D2+1");
         put_formula(&mut wb, s, "D2", "D1+1");
-        let (_, r) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         let mut cyc: Vec<String> = r.cycle_cells.iter().map(|(_, c)| c.to_a1()).collect();
         cyc.sort();
         assert_eq!(cyc, vec!["D1", "D2"]);
@@ -1424,12 +1424,12 @@ mod tests {
                 &format!("INDEX(B1:B8,{})+1", row - 1),
             );
         }
-        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
+        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, None);
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B8"), num(8.0));
 
         put_num(&mut wb, s, "A1", 10.0);
-        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], Some(45_000.0));
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B8"), num(17.0));
     }
@@ -1664,13 +1664,13 @@ mod tests {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 1.0);
         put_formula(&mut wb, s, "B1", "RANDBETWEEN(1, 1000000)");
-        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(graph.volatile_cells().count(), 1);
 
         let sentinel = num(-1.0);
         set_cached(&mut wb, s, "B1", sentinel.clone());
         put_num(&mut wb, s, "A1", 2.0);
-        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], Some(45_000.0));
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
         assert_eq!(changed_a1(&r), vec!["B1"]);
         match value(&wb, s, "B1") {
             CellValue::Number { value } => assert!((1.0..=1_000_000.0).contains(&value)),
