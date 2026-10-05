@@ -272,6 +272,7 @@ async function expectReadyMutations(host: ReturnType<typeof apiFor>) {
   spyOn(session, 'formatTextTarget').mockImplementation(backend.formatTextTarget);
   spyOn(session, 'applyParagraphStyle').mockImplementation(backend.applyParagraphStyle);
   spyOn(session, 'applyEdits').mockImplementation(backend.applyEdits);
+  spyOn(session, 'splitParagraph').mockImplementation(backend.splitParagraph);
   spyOn(session, 'insertPageBreak').mockImplementation(backend.insertPageBreak);
   expect(api.getDocument()).toBe(editor.getDocument());
   expect(api.getEditorRef()).toBe(editor as unknown as PagedEditorRef);
