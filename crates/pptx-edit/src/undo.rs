@@ -108,6 +108,36 @@ impl DeckUndoManager {
         Ok(Self { inner, clock })
     }
 
+    pub(crate) fn assert_replay_capture(&self) -> Result<(), crate::peer::PeerError> {
+        if self.capture_mode() != UndoCaptureMode::Manual {
+            return Err(crate::peer::PeerError::new(
+                "capturePolicy",
+                "replay requires manual undo capture",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn diagnostics(&self) -> (usize, usize) {
+        (self.inner.undo_stack().len(), self.inner.redo_stack().len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stack_diagnostics(
+        &self,
+    ) -> (Vec<(yrs::IdSet, yrs::IdSet)>, Vec<(yrs::IdSet, yrs::IdSet)>) {
+        let capture = |stack: &[yrs::undo::StackItem<()>]| {
+            stack
+                .iter()
+                .map(|item| (item.deletions().clone(), item.insertions().clone()))
+                .collect()
+        };
+        (
+            capture(self.inner.undo_stack()),
+            capture(self.inner.redo_stack()),
+        )
+    }
+
     pub fn capture_mode(&self) -> UndoCaptureMode {
         self.clock.mode()
     }
