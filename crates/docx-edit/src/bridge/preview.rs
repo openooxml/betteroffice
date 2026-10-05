@@ -493,8 +493,8 @@ impl UnitRecorder {
         }
         if self.window.is_none() {
             let reused = self.units.refresh.as_mut().and_then(|refresh| {
-                refresh.valid &= position.safe
-                    && position.story_index == refresh.ranges[refresh.cursor].start;
+                refresh.valid &=
+                    position.safe && position.story_index == refresh.ranges[refresh.cursor].start;
                 (!refresh.edited[refresh.cursor]).then_some(refresh.cursor)
             });
             self.window = Some(Window {
@@ -530,7 +530,9 @@ impl UnitRecorder {
             });
             if window.position.safe && (standalone || has_reads || window.reused.is_some()) {
                 let previous = window.reused.and_then(|index| {
-                    self.units.refresh.as_ref()?.previous.records[index].seed.as_ref()
+                    self.units.refresh.as_ref()?.previous.records[index]
+                        .seed
+                        .as_ref()
                 });
                 let seed = if let Some(previous) = previous {
                     previous.refresh(
@@ -611,19 +613,11 @@ impl UnitRecorder {
             seed: window.seed,
             capture_raw: window.capture_raw,
             after: Rc::new(if let Some(previous) = previous {
-                previous.after.refresh(
-                    position,
-                    list_state,
-                    opaque_sequences,
-                    hidden_field_blocks,
-                )
+                previous
+                    .after
+                    .refresh(position, list_state, opaque_sequences, hidden_field_blocks)
             } else {
-                BoundaryState::capture(
-                    position,
-                    list_state,
-                    opaque_sequences,
-                    hidden_field_blocks,
-                )
+                BoundaryState::capture(position, list_state, opaque_sequences, hidden_field_blocks)
             }),
         });
         #[cfg(test)]
@@ -724,12 +718,10 @@ pub(crate) fn lower_refreshed(
         local,
         &mut preview,
     )?;
-    if preview.as_ref().is_some_and(|units| {
-        units
-            .refresh
-            .as_ref()
-            .is_some_and(|refresh| !refresh.valid)
-    }) {
+    if preview
+        .as_ref()
+        .is_some_and(|units| units.refresh.as_ref().is_some_and(|refresh| !refresh.valid))
+    {
         *local = local::LocalLowering::new(!local.blocked);
         return lower_recorded(doc, story, env, local, true);
     }

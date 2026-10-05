@@ -1,6 +1,10 @@
 use super::*;
 
-fn assert_preview_refresh_record(session: &EngineSession, doc: &crate::EditingDoc, env: &RenderEnv) {
+fn assert_preview_refresh_record(
+    session: &EngineSession,
+    doc: &crate::EditingDoc,
+    env: &RenderEnv,
+) {
     let (blocks, map, revealable, recorded) = crate::bridge::preview::lower_recorded(
         doc,
         "body",
@@ -11,9 +15,10 @@ fn assert_preview_refresh_record(session: &EngineSession, doc: &crate::EditingDo
     .unwrap();
     let render = session.render.borrow();
     let story = &render.stories["body"];
+    let recorded = recorded.unwrap();
     assert_eq!(
         story.preview.as_ref().unwrap().snapshot(session.doc()),
-        recorded.unwrap().snapshot(doc)
+        recorded.snapshot(doc)
     );
     assert_eq!(
         preview_mapped_snapshot(&story.blocks, &story.map, &story.revealable_blocks),
@@ -123,9 +128,13 @@ fn preview_refresh_edit_oracle(bytes: &[u8], font: u32) {
     let positions = {
         let render = engine.render.borrow();
         let story = &render.stories["body"];
-        story.map.spans.iter()
+        story
+            .map
+            .spans
+            .iter()
             .filter(|span| {
-                !span.atom && span.raw_end > span.raw_start
+                !span.atom
+                    && span.raw_end > span.raw_start
                     && story.map.paragraphs[span.paragraph as usize].0 == 0
             })
             .map(|span| span.raw_start)
@@ -173,7 +182,10 @@ fn preview_refresh_plain_edits_match_recorded_outputs() {
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font(LIBERATION).unwrap();
     for bytes in [
-        preview_fixture::document(&preview_fixture::paragraph(1, &preview_fixture::run("Plain"))),
+        preview_fixture::document(&preview_fixture::paragraph(
+            1,
+            &preview_fixture::run("Plain"),
+        )),
         preview_fixture::plain(),
         preview_fixture::nested(),
         preview_fixture::breaks(),
@@ -282,7 +294,10 @@ fn preview_refresh_revision_unit_boundary_edits_match_recording() {
         let work = recording_work(&engine);
         assert_eq!(work.reused_units, 1, "{case}: {text}");
         assert!(work.copied_chunks > 0, "{case}: {text}");
-        assert!(work.chunks < recording_work(&oracle).chunks, "{case}: {text}");
+        assert!(
+            work.chunks < recording_work(&oracle).chunks,
+            "{case}: {text}"
+        );
         assert_live_revision_previews(
             &engine,
             &oracle,
@@ -326,7 +341,11 @@ fn preview_refresh_empty_revision_text_matches_recording() {
                 .unwrap();
             assert_eq!(session.doc().story_len("body").unwrap(), length - 7);
             assert!(
-                session.doc().list_revisions().unwrap().iter()
+                session
+                    .doc()
+                    .list_revisions()
+                    .unwrap()
+                    .iter()
                     .all(|revision| revision.change.revision_id != "1")
             );
         }
@@ -391,9 +410,14 @@ fn preview_refresh_reuses_unedited_units_without_copying_chunks() {
     }
     let raw = {
         let render = engine.render.borrow();
-        render.stories["body"].map.spans.iter()
+        render.stories["body"]
+            .map
+            .spans
+            .iter()
             .find(|span| span.paragraph == 50)
-            .unwrap().raw_start + 1
+            .unwrap()
+            .raw_start
+            + 1
     };
     for text in [Some("x"), None] {
         for session in [&engine, &oracle] {
@@ -479,16 +503,19 @@ fn preview_refresh_multiple_pending_edits_use_full_recording() {
             );
             assert_eq!(engine.render.borrow().stories["body"].doc_epoch, epoch);
         }
-        assert!(engine.render.borrow().stories["body"].preview_edit.is_none());
+        assert!(
+            engine.render.borrow().stories["body"]
+                .preview_edit
+                .is_none()
+        );
         assert_preview_refresh_outputs(&engine, &oracle, &request, RelayoutTrigger::Interactive);
         let work = recording_work(&engine);
         assert_eq!(work.reused_units, 0);
         assert!(work.copied_chunks > 0);
         for decision in [RevisionPreview::Accepted, RevisionPreview::Rejected] {
-            request["renderEnv"] = serde_json::to_value(
-                RenderEnv::default().with_revision_preview("1", decision),
-            )
-            .unwrap();
+            request["renderEnv"] =
+                serde_json::to_value(RenderEnv::default().with_revision_preview("1", decision))
+                    .unwrap();
             assert_preview_refresh_outputs(&engine, &oracle, &request, RelayoutTrigger::Preview);
         }
         request["renderEnv"] = json!({});

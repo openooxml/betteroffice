@@ -3700,9 +3700,13 @@ impl EngineSession {
     ) -> crate::OpResult<crate::Receipt> {
         let before = self.doc_epoch();
         let preview_length = self.doc.story_len(&range.story)?;
-        let preview_plain = text.is_some_and(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
+        let preview_plain = text
+            .is_some_and(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
             || (text.is_none()
-                && self.doc.segment_index(&range.story)?.is_text_range(range.start, range.end));
+                && self
+                    .doc
+                    .segment_index(&range.story)?
+                    .is_text_range(range.start, range.end));
         let index_epoch = (self.local_lowering.get()
             && (text.is_none() || range.start == range.end))
             .then(|| self.doc.committed_epoch());
@@ -3785,15 +3789,17 @@ impl EngineSession {
                 && self.doc_epoch() == before.wrapping_add(1)
                 && receipt.new_para_ids.is_empty()
                 && receipt.revision_ids.is_empty()
-                && range.end.checked_sub(range.start)
+                && range
+                    .end
+                    .checked_sub(range.start)
                     .and_then(|removed| preview_length.checked_sub(removed))
                     .and_then(|length| length.checked_add(inserted))
                     == self.doc.story_len(&range.story).ok())
-                .then(|| crate::bridge::preview::TextEdit {
-                    range: range.start..range.end,
-                    inserted,
-                    epochs: (before, self.doc_epoch()),
-                });
+            .then(|| crate::bridge::preview::TextEdit {
+                range: range.start..range.end,
+                inserted,
+                epochs: (before, self.doc_epoch()),
+            });
             lowered.local.edit = receipt
                 .range
                 .as_ref()
@@ -3978,8 +3984,8 @@ impl EngineSession {
                 && lowered.env == *env
                 && lowered.media == self.doc.media_sources()
                 && lowered.local.matches_source(&self.doc))
-                .then(|| crate::bridge::preview::refresh(lowered.preview.as_ref()?, edit))
-                .flatten()
+            .then(|| crate::bridge::preview::refresh(lowered.preview.as_ref()?, edit))
+            .flatten()
         });
         let (blocks, map, revealable_blocks, preview) = if let Some(units) = refreshed {
             crate::bridge::preview::lower_refreshed(&self.doc, story, env, &mut local, units)?
