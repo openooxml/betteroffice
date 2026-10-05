@@ -70,7 +70,7 @@ use crate::{
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, StorySegment, TabStop, TableLocator, TableRange,
+    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange,
     TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
@@ -740,34 +740,6 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
         default_text_formatting,
         other,
     })
-}
-
-fn segments_json(segments: Vec<StorySegment>) -> Result<Vec<Value>, JsValue> {
-    segments
-        .into_iter()
-        .map(|segment| {
-            let attributes = attrs_value(&segment.attributes)?;
-            Ok(match segment.content {
-                SegmentContent::Text(text) => {
-                    json!({ "kind": "text", "text": text, "attributes": attributes })
-                }
-                SegmentContent::Pilcrow(properties) => json!({
-                    "kind": "pilcrow",
-                    "paraId": properties.para_id,
-                    "properties": attrs_value(&properties.values)?,
-                    "attributes": attributes,
-                }),
-                SegmentContent::OtherEmbed { kind, payload } => {
-                    json!({
-                        "kind": "embed",
-                        "embedKind": kind,
-                        "payload": attrs_value(&payload)?,
-                        "attributes": attributes,
-                    })
-                }
-            })
-        })
-        .collect()
 }
 
 fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
@@ -4732,7 +4704,7 @@ impl EditSession {
     /// tracked-change stamps. Errors on an unknown story.
     pub fn story_segments(&self, story: &str) -> Result<String, JsValue> {
         let segments = self.engine.doc().story_segments(story).map_err(js_err)?;
-        serde_json::to_string(&segments_json(segments)?).map_err(js_err)
+        crate::segment_json::segments_json_string(&segments).map_err(js_err)
     }
 
     /// `story_segments` split after each pilcrow into units, as one hex digest
@@ -4765,7 +4737,7 @@ impl EditSession {
                 let unit = all
                     .get(index as usize)
                     .ok_or_else(|| js_err(format!("no segment unit {index} in {story}")))?;
-                segments_json(unit.clone())
+                crate::segment_json::segments_json(unit.clone()).map_err(js_err)
             })
             .collect::<Result<Vec<Vec<Value>>, JsValue>>()?;
         serde_json::to_string(&requested).map_err(js_err)
