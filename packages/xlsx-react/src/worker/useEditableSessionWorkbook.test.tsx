@@ -289,18 +289,20 @@ describe('editable session workbook', () => {
     const next = session(log);
     const opener = open(old.value);
     const { peer, edits } = resources(log);
-    const readyCleanup = mock(() => { throw new Error('Cleanup failed'); });
+    const error = new Error('Cleanup failed');
+    const errors = mock((_error: Error) => {});
+    const readyCleanup = mock(() => { throw error; });
     const commands = createXlsxCommandController().store;
     const controls = bridge();
     const { result, rerender, unmount } = renderHook(
       (props: EditableSessionWorkbookProps) => useEditableSessionWorkbook(props, commands, controls),
-      { initialProps: { file, onReady: () => readyCleanup } }
+      { initialProps: { file, onError: errors, onReady: () => readyCleanup } }
     );
     await waitFor(() => expect(result.current.run).not.toBeNull());
     const first = result.current.run!;
     await act(async () => { first.firstPaint(); await first.whenHydrated(); });
     opener.mockResolvedValue(next.value);
-    expect(() => rerender({ file: new Uint8Array([4]), onReady: () => readyCleanup })).not.toThrow();
+    expect(() => rerender({ file: new Uint8Array([4]), onError: errors, onReady: () => readyCleanup })).not.toThrow();
     await waitFor(() => expect(result.current.run?.session).toBe(next.value));
     expect(readyCleanup).toHaveBeenCalledTimes(1);
     expect(edits.dispose).toHaveBeenCalledTimes(1);
@@ -308,6 +310,8 @@ describe('editable session workbook', () => {
     expect(old.value.dispose).toHaveBeenCalledTimes(1);
     expect(first.current).toBe(false);
     expect(result.current.error).toBeNull();
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveBeenCalledWith(error);
     unmount();
     expect(next.value.dispose).toHaveBeenCalledTimes(1);
   });
@@ -358,11 +362,15 @@ describe('editable session workbook', () => {
     const log: string[] = [];
     const { value } = session(log);
     resources(log);
-    const run = owner(value, { onReady: () => () => { throw new Error('Cleanup failed'); } });
+    const error = new Error('Cleanup failed');
+    const errors = mock((_error: Error) => {});
+    const run = owner(value, { onError: errors, onReady: () => () => { throw error; } });
     run.firstPaint();
     await run.whenHydrated();
     log.length = 0;
     expect(() => run.dispose()).not.toThrow();
     expect(log).toEqual(['off', 'facade', 'peer', 'session']);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveBeenCalledWith(error);
   });
 });

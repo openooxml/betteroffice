@@ -97,6 +97,14 @@ function harness(realFacade = false) {
     }),
     applyEdits: mock(() => { throw new Error('Direct peer batch forbidden'); }),
     setActiveSheet: mock(() => { throw new Error('Direct peer navigation forbidden'); }),
+    moveChart: mock((_sheet: number, id: string, dx: number, dy: number) => {
+      if (!realFacade) throw new Error('Direct peer chart mutation forbidden');
+      const chart = charts.find((entry) => entry.id === id)!;
+      chart.rect = { ...chart.rect, x: chart.rect.x + dx, y: chart.rect.y + dy };
+      log.push(`recover:chart:${id}:${dx}:${dy}`);
+      version += 1;
+      return result();
+    }),
     save: mock(() => {
       if (realFacade) return new TextEncoder().encode(JSON.stringify([...cells]));
       throw new Error('Full peer save forbidden');
@@ -170,6 +178,34 @@ function harness(realFacade = false) {
       for (const listener of [...failureListeners]) listener(error);
       return error;
     } };
+}
+
+function promisedClipboard() {
+  const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+  const originalWrite = Object.getOwnPropertyDescriptor(navigator.clipboard, 'write');
+  class Item {
+    constructor(readonly data: Record<string, Promise<Blob>>) {}
+  }
+  const payloads: Promise<Blob>[] = [];
+  const writes: Promise<void>[] = [];
+  const copied: string[] = [];
+  const write = mock((items: Item[]) => {
+    const payload = items[0].data['text/plain'];
+    payloads.push(payload);
+    const writing = payload.then(async (blob) => { copied.push(await blob.text()); });
+    void writing.catch(() => {});
+    writes.push(writing);
+    return writing;
+  });
+  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
+  Object.defineProperty(navigator.clipboard, 'write', { configurable: true, value: write });
+  restorers.push(() => {
+    if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+    if (originalWrite) Object.defineProperty(navigator.clipboard, 'write', originalWrite);
+    else Reflect.deleteProperty(navigator.clipboard, 'write');
+  });
+  return { write, payloads, writes, copied };
 }
 
 async function opened() {
@@ -385,6 +421,32 @@ describe('workbook worker editor', () => {
       cells: [[{ a1: 'A1', input: 'initial', isFormula: false }]] }));
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
     expect(host.cells.get('0:0:0')).toBe('initial');
+
+    view.unmount();
+    for (const restore of restorers.splice(-3).reverse()) restore();
+    const reopenedHost = harness();
+    const nextHydration = deferred<WorkbookHandle>();
+    const nextPrefill = deferred<xlsx.WorkbookCellInputs>();
+    reopenedHost.hydrate.mockReturnValue(nextHydration.promise);
+    reopenedHost.sessionMethods.cellInputs.mockReturnValue(nextPrefill.promise);
+    const reopened = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.keyDown(reopened.getByTestId('xlsx-scroll'), { key: 'n' });
+    fireEvent.change(reopened.getByTestId('xlsx-cell-editor'), { target: { value: 'new' } });
+    fireEvent.keyDown(reopened.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(reopened.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(reopened.getByTestId('xlsx-scroll'), { key: 'F2' });
+    await act(async () => nextPrefill.resolve({ sheet: 0, version: 'v1',
+      cells: [[{ a1: 'A1', input: 'initial', isFormula: false }]] }));
+    expect((reopened.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
+    fireEvent.keyDown(reopened.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    expect(reopenedHost.cells.get('0:0:0')).toBe('initial');
+    expect(reopenedHost.editMethods.editCell).not.toHaveBeenCalled();
+    await act(async () => nextHydration.resolve(reopenedHost.peer));
+    await advance();
+    expect(reopenedHost.cells.get('0:0:0')).toBe('new');
+    expect(reopenedHost.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'new']]);
+    expect(reopened.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
   it('retains later typing across queued host navigation and saves its original target', async () => {
@@ -412,6 +474,151 @@ describe('workbook worker editor', () => {
     expect(await saving).toEqual(new Uint8Array([8, 9]));
     expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'a'], [0, 0, 1, 'later typing']]);
     expect(host.log.indexOf('sheet:1')).toBeLessThan(host.log.indexOf('edit:0:0:1:later typing'));
+  });
+
+  it('continues cell input at its original target after queued navigation paints another sheet', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'a' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Tab' });
+    let navigation!: Promise<boolean>;
+    act(() => { navigation = api.selectCellsAsync(1, xlsx.selectionAt({ row: 2, col: 2 })); });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'b' });
+    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'before navigation' } });
+    input.setSelectionRange(3, 3);
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(await navigation).toBe(true);
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    expect(view.getByTestId('xlsx-cell-editor')).toBe(input);
+    expect(input.value).toBe('before navigation');
+    expect(input.selectionStart).toBe(3);
+    expect(document.activeElement).toBe(input);
+    fireEvent.change(input, { target: { value: 'continued cell input' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:1')).toBe('continued cell input');
+    expect(host.cells.has('1:2:2')).toBe(false);
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'g' });
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('g');
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.editMethods.editCell.mock.calls).toEqual([
+      [0, 0, 0, 'a'], [0, 0, 1, 'continued cell input'], [1, 1, 1, 'g'],
+    ]);
+  });
+
+  it('continues formula input at its original target after queued navigation executes', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen
+      toolbar={<EditorToolbar mode="commands"><EditorToolbar.FormulaBar /></EditorToolbar>}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'a' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Tab' });
+    let navigation!: Promise<boolean>;
+    act(() => { navigation = api.selectCellsAsync(1, xlsx.selectionAt({ row: 2, col: 2 })); });
+    const input = view.getByTestId('xlsx-formula-input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '=1' } });
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(await navigation).toBe(true);
+    expect(input.value).toBe('=1');
+    fireEvent.change(input, { target: { value: '=12' } });
+    fireEvent.change(input, { target: { value: '=123' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:1')).toBe('=123');
+    expect(host.cells.has('1:2:2')).toBe(false);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'g' });
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('g');
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.editMethods.editCell.mock.calls).toEqual([
+      [0, 0, 0, 'a'], [0, 0, 1, '=123'], [1, 1, 1, 'g'],
+    ]);
+  });
+
+  it('enqueues a continued cell draft at its original target before replacing it with formula input', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen
+      toolbar={<EditorToolbar mode="commands"><EditorToolbar.FormulaBar /></EditorToolbar>}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    let navigation!: Promise<boolean>;
+    act(() => { navigation = api.selectCellsAsync(1, xlsx.selectionAt({ row: 2, col: 2 })); });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'c' });
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(await navigation).toBe(true);
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'continued' } });
+    fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: '=4' } });
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 'Enter' });
+    await advance();
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'continued'], [1, 2, 2, '=4']]);
+  });
+
+  it('keeps an untouched stale prefill open while its preceding accepted commit drains', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    const prefill = deferred<xlsx.WorkbookCellInputs>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    host.sessionMethods.cellInputs.mockReturnValue(prefill.promise);
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'new' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    await act(async () => prefill.resolve({ sheet: 0, version: 'v1',
+      cells: [[{ a1: 'A1', input: 'initial', isFormula: false }]] }));
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
+    expect(host.cells.get('0:0:0')).toBe('new');
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('new');
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'new']]);
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  });
+
+  it('preserves an accepted commit when untouched hydrated prefill precedes its preview', async () => {
+    const host = harness();
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'new' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await act(async () => {});
+    await tick();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('new');
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'new']]);
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
   it('admits cut in the gesture and copies the preceding accepted value before clearing it', async () => {
@@ -474,6 +681,181 @@ describe('workbook worker editor', () => {
     expect(document.activeElement).toBe(input);
   });
 
+  it('keeps a newer entry open when an earlier commit writes the same cell and value', async () => {
+    const host = harness();
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'a' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'a' });
+    const input = view.getByTestId('xlsx-cell-editor') as HTMLInputElement;
+    await advance();
+    expect(view.getByTestId('xlsx-cell-editor')).toBe(input);
+    expect(input.value).toBe('a');
+    fireEvent.change(input, { target: { value: 'later same cell' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await advance();
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'a'], [0, 0, 0, 'later same cell']]);
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+  });
+
+  it('rejects the pending cut payload and clipboard write when the document is replaced', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const clipboard = promisedClipboard();
+    const errors = mock((_error: Error) => {});
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onError={errors} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+    expect(clipboard.write).toHaveBeenCalledTimes(1);
+    expect(clipboard.copied).toEqual([]);
+    view.rerender(<XlsxEditor file={new Uint8Array([4])} experimentalWorkerOpen showToolbar={false} onError={errors} />);
+    await expect(clipboard.payloads[0]).rejects.toMatchObject({ code: 'document-replaced' });
+    await expect(clipboard.writes[0]).rejects.toMatchObject({ code: 'document-replaced' });
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it('rejects the pending cut payload and clipboard write when admission is refused', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const clipboard = promisedClipboard();
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    let navigation!: Promise<boolean>;
+    act(() => { navigation = api.selectCellsAsync(1, xlsx.selectionAt({ row: 0, col: 0 })); });
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(await navigation).toBe(true);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+    expect(clipboard.write).toHaveBeenCalledTimes(1);
+    await expect(clipboard.payloads[0]).rejects.toMatchObject({ code: 'gesture-active' });
+    await expect(clipboard.writes[0]).rejects.toMatchObject({ code: 'gesture-active' });
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(api.failure).toBeNull();
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+  });
+
+  it('refuses cut before admission without promised clipboard writes and keeps editing available', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: undefined });
+    const write = spyOn(navigator.clipboard, 'writeText').mockRejectedValue(new Error('Gesture expired'));
+    restorers.push(() => {
+      if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+      else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+      write.mockRestore();
+    });
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'new' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(write).not.toHaveBeenCalled();
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('new');
+    expect(api.failure).toBeNull();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'still editable' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('still editable');
+  });
+
+  it('refuses cut when ClipboardItem rejects promised payloads without failing the editor', async () => {
+    const host = harness();
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    class Item {
+      constructor() { throw new TypeError('Promised clipboard data is unavailable'); }
+    }
+    Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: Item });
+    restorers.push(() => {
+      if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+      else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+    });
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+    await advance();
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(api.failure).toBeNull();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('s');
+  });
+
+  for (const held of [true, false]) {
+    it(`copies the preceding accepted value while ${held ? 'hydration' : 'its preview'} waits`, async () => {
+      const host = harness();
+      const hydration = deferred<WorkbookHandle>();
+      if (held) host.hydrate.mockReturnValue(hydration.promise);
+      const clipboard = promisedClipboard();
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+      await opened();
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+      fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'new' } });
+      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'c', ctrlKey: true });
+      expect(clipboard.write).toHaveBeenCalledTimes(1);
+      expect(clipboard.copied).toEqual([]);
+      expect(host.cells.get('0:0:0')).toBe('initial');
+      if (held) await act(async () => hydration.resolve(host.peer));
+      await advance();
+      expect(clipboard.copied).toEqual(['new']);
+      expect(host.cells.get('0:0:0')).toBe('new');
+      expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    });
+  }
+
+  it('copies through the FIFO without promised clipboard writes', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const originalItem = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+    Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: undefined });
+    const write = spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
+    restorers.push(() => {
+      if (originalItem) Object.defineProperty(globalThis, 'ClipboardItem', originalItem);
+      else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+      write.mockRestore();
+    });
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'new' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'c', ctrlKey: true });
+    expect(write).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledWith('new');
+    expect(host.cells.get('0:0:0')).toBe('new');
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+  });
+
   it('rejects stale worker frames without erasing pending text or peer pixels', async () => {
     const host = harness();
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
@@ -526,6 +908,60 @@ describe('workbook worker editor', () => {
     expect(host.editMethods.moveChart).not.toHaveBeenCalled();
     await tick();
     expect(host.editMethods.moveChart).toHaveBeenCalledWith(0, 'chart:1', 30, 20);
+  });
+
+  it('keeps the origin sheet for a chart drag released after queued navigation', async () => {
+    const host = harness();
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    let navigation!: Promise<boolean>;
+    act(() => { navigation = api.selectCellsAsync(1, xlsx.selectionAt({ row: 0, col: 0 })); });
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(await navigation).toBe(true);
+    expect(view.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true');
+    await act(async () => { expect(await api.commands.execute('zoom', { scale: 2 })).toMatchObject({ ok: true }); });
+    await advance();
+    fireEvent.mouseUp(window, { clientX: 150, clientY: 140, button: 0 });
+    await advance();
+    expect(host.editMethods.moveChart.mock.calls).toEqual([[0, 'chart:1', 30, 20]]);
+    expect(host.log.indexOf('sheet:1')).toBeLessThan(host.log.indexOf('chart:chart:1:30:20'));
+    expect(api.failure).toBeNull();
+  });
+
+  it('recovers an accepted chart nudge when the worker fails before its timer fires', async () => {
+    const host = harness(true);
+    host.charts.push({ id: 'chart:1', label: 'Chart', movable: true,
+      rect: { x: 100, y: 100, w: 200, h: 100 }, clip: { x: 100, y: 100, w: 200, h: 100 } });
+    host.peerMethods.save.mockImplementation(() => new TextEncoder().encode(JSON.stringify(host.charts[0].rect)));
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.mouseUp(window, { clientX: 120, clientY: 120, button: 0 });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowDown', shiftKey: true });
+    expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(1px, 10px)');
+    expect(host.peerMethods.moveChart).not.toHaveBeenCalled();
+    act(() => host.fail());
+    let saved!: { bytes: Uint8Array; recovery: true };
+    await act(async () => { saved = await api.recoverySave(); });
+    expect(saved.recovery).toBe(true);
+    expect(JSON.parse(new TextDecoder().decode(saved.bytes))).toEqual({ x: 101, y: 110, w: 200, h: 100 });
+    expect(host.peerMethods.moveChart.mock.calls).toEqual([[0, 'chart:1', 1, 10]]);
+    expect(host.replay).not.toHaveBeenCalled();
+    expect(host.session.save).not.toHaveBeenCalled();
+    expect(host.peerMethods.save).toHaveBeenCalledTimes(1);
+    await advance();
+    expect(host.peerMethods.moveChart).toHaveBeenCalledTimes(1);
   });
 
   it('saves pending formula input through the facade and keeps PNG unavailable', async () => {
@@ -611,6 +1047,28 @@ describe('workbook worker editor', () => {
       'dispose:ready', 'dispose:facade', 'dispose:peer', 'dispose:session',
     ]);
     expect(host.editMethods.editCell).not.toHaveBeenCalled();
+  });
+
+  it('reports throwing readiness cleanup while replacing the document and disposing its resources', async () => {
+    const host = harness();
+    const error = new Error('Cleanup failed');
+    const errors = mock((_error: Error) => {});
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onError={errors} onReady={() => () => { throw error; }} />);
+    await opened();
+    view.rerender(<XlsxEditor file={new Uint8Array([4])} experimentalWorkerOpen showToolbar={false}
+      onError={errors} />);
+    await opened();
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveBeenCalledWith(error);
+    expect(host.editMethods.dispose).toHaveBeenCalledTimes(1);
+    expect(host.peerMethods.dispose).toHaveBeenCalledTimes(1);
+    expect(host.session.dispose).toHaveBeenCalledTimes(1);
+    expect(view.queryByRole('alert')).toBeNull();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'r' });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(host.cells.get('0:0:0')).toBe('r');
   });
 
   it('activates plugins after the real peer and routes granted batches through the facade', async () => {

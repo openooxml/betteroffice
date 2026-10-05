@@ -162,7 +162,9 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     this.input?.reset();
     this.input = null;
     try { if (typeof this.cleanup === 'function') this.cleanup(); }
-    catch {}
+    catch (error) {
+      try { this.options.onError(asError(error)); } catch {}
+    }
     finally {
       try { this.editPeer?.dispose(); }
       finally {
@@ -225,7 +227,10 @@ export function useEditableSessionWorkbook(
         if (!current()) { void session.dispose().catch(() => {}); return; }
         opened = new EditableWorkbookSession(session, token, {
           changed, isCurrent: current,
-          onError: (error) => { if (current()) reportError(error); },
+          onError: (error) => {
+            if (current()) reportError(error);
+            else { try { latest.current.props.onError?.(error); } catch {} }
+          },
           onReady: () => current() ? latest.current.props.onReady?.(api) : undefined,
         });
         const api = createWorkerEditorApi(opened, commands, () => latest.current.bridge);
