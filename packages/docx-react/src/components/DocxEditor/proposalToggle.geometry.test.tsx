@@ -22,7 +22,9 @@ import { awaitWorkerOpenReplica, requestWorkerOpenReplica } from './internals/wo
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
-const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await step(
+  'load testing library', () => import('@testing-library/react')
+);
 const restores: Array<() => void> = [];
 const workers: InProcessResidentWorker[] = [];
 const sessions: YrsSession[] = [];
@@ -31,11 +33,40 @@ const font = readFileSync(resolve(
   import.meta.dir, '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 ));
 
+async function step<T>(label: string, run: () => T | PromiseLike<T>, flushReact = false): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let expired = false;
+  let done = false;
+  const pending = Promise.resolve().then(run);
+  void pending.then(() => { done = true; }, () => { done = true; });
+  const flush = async () => {
+    while (!done && !expired) {
+      await act(async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      });
+    }
+    return pending;
+  };
+  try {
+    return await Promise.race([
+      flushReact ? flush() : pending,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          expired = true;
+          reject(new Error(`stalled at ${label}`));
+        }, 5000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 beforeAll(async () => {
-  await preloadEditWasm(new Uint8Array(readFileSync(resolve(
+  await step('preload edit wasm', () => preloadEditWasm(new Uint8Array(readFileSync(resolve(
     import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
-  ))));
-  startWorker = await residentWorkerFactory();
+  )))));
+  startWorker = await step('create worker factory', () => residentWorkerFactory());
 });
 
 beforeEach(() => {
@@ -67,7 +98,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
-  if (ownsDom) await GlobalRegistrator.unregister();
+  if (ownsDom) await step('unregister DOM', () => GlobalRegistrator.unregister());
 });
 
 function installWorker() {
@@ -182,11 +213,11 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
     ref={ref} documentBuffer={documentBuffer()} allowHostProposals experimentalWorkerOpen
     measurementFontProvider={provider} plugins={[plugin]} onPluginError={(error) => errors.push(error)}
   />, { container: host });
-  const scrollElement = await waitFor(() => {
+  const scrollElement = await step('find scroll container', () => waitFor(() => {
     const element = host.querySelector<HTMLElement>('.docx-editor__scroll-container');
     expect(element).not.toBeNull();
     return element!;
-  }, { timeout: 10_000 });
+  }, { timeout: 10_000 }));
   scroller = scrollElement;
   scrollElement.style.overflowY = 'auto';
   scrollElement.style.height = '400px';
@@ -198,8 +229,8 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
       set: (value: number) => { sample(); scrollTop = value; sample(); },
     },
   });
-  await waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy());
-  await act(async () => { await ref.current!.whenLayoutComplete(); });
+  await step('wait for session', () => waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy()));
+  await step('initial layout', () => ref.current!.whenLayoutComplete(), true);
   const worker = workers.find((worker) => worker.requests.includes('open'))!;
   expect(worker).toBeDefined();
   const assertWorkerAvailable = () => expect(ref.current!.getMemoryStats().worker).not.toBeNull();
@@ -207,42 +238,38 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
   const editor = ref.current!.getEditorRef()!;
   const session = editor.getYrsSession()!;
   sessions.push(session);
-  await act(async () => {
+  await step('hydrate worker replica', () => {
     requestWorkerOpenReplica(session);
-    await awaitWorkerOpenReplica(session);
-  });
+    return awaitWorkerOpenReplica(session);
+  }, true);
   assertWorkerAvailable();
-  await act(async () => {
+  act(() => {
     const caret = session.paragraphs('body')[caretPage]!;
     session.setSelection({ story: 'body', paraId: caret.paraId, offset: 0 });
     editor.syncYrsInputState(false);
   });
-  const identities = await ref.current!.getParagraphIdentities();
+  const identities = await step('get paragraph identities', () => ref.current!.getParagraphIdentities(), true);
   const targets = identities.paragraphs.filter(({ session }) => session?.story === 'body').slice(8, 18);
   expect(targets).toHaveLength(10);
-  await act(async () => {
-    const before = await ref.current!.getProposals();
-    expect(await ref.current!.proposeChanges({
-      expectVersion: before.version,
-      proposals: targets.map((entry, index) => ({
-        id: `toggle-${index}`, paragraph: entry.session!,
-        suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-        op: 'replaceText' as const, search: 'Target', replaceWith: 'Change',
-      })),
-    })).toMatchObject({ ok: true });
-    await ref.current!.whenLayoutComplete();
-  });
-  await waitFor(() => expect(geometry?.getAnchorGeometry({ kind: 'proposal', id: 'toggle-0' }).ok).toBe(true));
-  const frames = async () => {
-    await act(async () => {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    });
+  const before = await step('get proposals before creation', () => ref.current!.getProposals(), true);
+  expect(await step('create proposals', () => ref.current!.proposeChanges({
+    expectVersion: before.version,
+    proposals: targets.map((entry, index) => ({
+      id: `toggle-${index}`, paragraph: entry.session!,
+      suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      op: 'replaceText' as const, search: 'Target', replaceWith: 'Change',
+    })),
+  }), true)).toMatchObject({ ok: true });
+  await step('created proposal layout', () => ref.current!.whenLayoutComplete(), true);
+  await step('wait for proposal geometry', () => waitFor(() => expect(geometry?.getAnchorGeometry({ kind: 'proposal', id: 'toggle-0' }).ok).toBe(true)));
+  const frames = async (label: string) => {
+    await step(`${label} frame 1`, () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())), true);
+    await step(`${label} frame 2`, () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())), true);
   };
-  await frames();
+  await frames('created proposals');
   scrollTop = 8 * 1072 + 24;
   fireEvent.scroll(scrollElement);
-  await frames();
+  await frames('initial scroll');
   const selection = session.selection();
   const failures: unknown[] = [];
   for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
@@ -251,16 +278,14 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
     samples.length = 0;
     recording = true;
     sample();
-    const before = await ref.current!.getProposals();
+    const before = await step(`${state} get proposals`, () => ref.current!.getProposals(), true);
     const postedBefore = worker.requests.length;
-    await act(async () => {
-      expect(await ref.current!.setProposalStates({
-        expectVersion: before.version, expectPreviewVersion: before.previewVersion,
-        changes: [{ id: 'toggle-0', state }],
-      })).toMatchObject({ ok: true });
-    });
-    await act(async () => { await ref.current!.whenLayoutComplete(); });
-    await frames();
+    expect(await step(`${state} set proposal states`, () => ref.current!.setProposalStates({
+      expectVersion: before.version, expectPreviewVersion: before.previewVersion,
+      changes: [{ id: 'toggle-0', state }],
+    }), true)).toMatchObject({ ok: true });
+    await step(`${state} layout`, () => ref.current!.whenLayoutComplete(), true);
+    await frames(`${state} settled`);
     sample();
     recording = false;
     assertWorkerAvailable();
@@ -281,7 +306,7 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
     expect(session.selection()).toEqual(selection);
     scrollTop = 8 * 1072 + 24;
     fireEvent.scroll(scrollElement);
-    await frames();
+    await frames(`${state} scroll`);
   }
   assertWorkerAvailable();
   expect(worker.requests).toContain('open');
