@@ -188,6 +188,14 @@ export class ViewerSelectionController {
       : null;
   }
 
+  hasPendingInput(): boolean {
+    return this.liveSelection() !== null && this.settledCapture() === null;
+  }
+
+  async flushPendingInput(): Promise<void> {
+    if (this.hasPendingInput()) await this.whenSettled(this.gesture);
+  }
+
   whenSettled(gesture: number, timeoutMs = 10_000): Promise<string> {
     if (!this.isCurrent(gesture) || this.selection?.gesture !== gesture) {
       return Promise.reject(new Error('Selection gesture changed'));
@@ -328,7 +336,7 @@ export class ViewerSelectionController {
         return;
       }
       const pending = unit === 'story' && this.frame!.preview;
-      if (selection.anchor === outcome.value.anchor && selection.head === outcome.value.head) {
+      if (unit !== 'story' && selection.anchor === outcome.value.anchor && selection.head === outcome.value.head) {
         selection.unitPending = pending;
         this.emit();
       } else {

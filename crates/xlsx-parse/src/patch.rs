@@ -19,6 +19,18 @@ use crate::write::{
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
+#[cfg(any(test, feature = "test-oracle"))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod oracle;
+#[cfg(test)]
+mod oracle_tests;
+
+#[cfg(any(test, feature = "test-oracle"))]
+thread_local! {
+    static EMISSION_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DETECTOR_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One edited sheet against the source it was read from.
 pub(crate) struct SheetPatch<'a> {
     pub(crate) sheet: &'a Sheet,
@@ -90,9 +102,63 @@ struct WidthPiece {
     changed: Option<Option<f64>>,
 }
 
+struct SourceCellCursor<'a, I: Iterator> {
+    sheet: &'a Sheet,
+    cells: Peekable<I>,
+    source: Option<(u32, u32)>,
+    current: Option<(u32, u32)>,
+}
+
+impl<'a, I> SourceCellCursor<'a, I>
+where
+    I: Iterator<Item = (CellRef, &'a Cell)>,
+{
+    fn new(sheet: &'a Sheet, cells: I) -> Self {
+        Self {
+            sheet,
+            cells: cells.peekable(),
+            source: None,
+            current: None,
+        }
+    }
+
+    fn at(&mut self, source: CellRef, current: CellRef) -> (Option<&'a Cell>, bool) {
+        let source_key = (source.row, source.col);
+        let current_key = (current.row, current.col);
+        let source_ordered = self.source.is_none_or(|previous| previous < source_key);
+        let current_ordered = self.current.is_none_or(|previous| previous < current_key);
+        self.source = Some(self.source.map_or(source_key, |last| last.max(source_key)));
+        self.current = Some(
+            self.current
+                .map_or(current_key, |last| last.max(current_key)),
+        );
+        let original = if source_ordered {
+            while self
+                .cells
+                .peek()
+                .is_some_and(|(at, _)| (at.row, at.col) < source_key)
+            {
+                self.cells.next();
+            }
+            self.cells
+                .next_if(|(at, _)| (at.row, at.col) == source_key)
+                .map(|(_, cell)| cell)
+        } else {
+            #[cfg(test)]
+            EMISSION_LOOKUPS.with(|count| count.set(count.get() + 1));
+            self.sheet.cell(source)
+        };
+        (original, source_ordered && current_ordered)
+    }
+}
+
 impl SheetPatch<'_> {
     /// Patched `<sheetData>`; `None` when the source resists cell-by-cell patching.
     pub(crate) fn sheet_data(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path() {
+            return self.sheet_data_oracle(source);
+        }
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
@@ -109,6 +175,7 @@ impl SheetPatch<'_> {
             })
             .peekable();
         let mut cells = self.sheet.iter_cells().peekable();
+        let mut originals = SourceCellCursor::new(self.original, self.original.iter_cells());
         let mut heights = self.sheet.row_heights.keys().copied().peekable();
         loop {
             let next_source = source_rows.peek().map(|(current, _)| *current);
@@ -126,10 +193,20 @@ impl SheetPatch<'_> {
             }
             if next_source == Some(row) {
                 let (_, source_row) = source_rows.next().expect("peeked");
-                self.emit_source_row(&mut out, source, source_row, row, &mut cells, &dirty)?;
+                self.emit_source_row(
+                    &mut out,
+                    source,
+                    source_row,
+                    row,
+                    &mut cells,
+                    &mut originals,
+                    &dirty,
+                )?;
             } else {
                 self.emit_generated_row(&mut out, row, &mut cells)?;
             }
+            let current = (row, u32::MAX);
+            originals.current = Some(originals.current.map_or(current, |last| last.max(current)));
         }
         let tail = rows
             .last()
@@ -268,17 +345,20 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn emit_source_row<'c, I>(
+    #[allow(clippy::too_many_arguments)]
+    fn emit_source_row<'c, 'o, I, O>(
         &self,
         out: &mut Vec<u8>,
         data: &[u8],
         source: &SourceRow,
         row: u32,
         cells: &mut Peekable<I>,
+        originals: &mut SourceCellCursor<'o, O>,
         dirty: &DirtyFormulas,
     ) -> Result<(), ParseError>
     where
         I: Iterator<Item = (CellRef, &'c Cell)>,
+        O: Iterator<Item = (CellRef, &'o Cell)>,
     {
         let mut body = Vec::new();
         let mut columns: Option<(u32, u32)> = None;
@@ -305,8 +385,19 @@ impl SheetPatch<'_> {
                 (next_source == Some(col)).then(|| source_cells.next().expect("peeked").1);
             let model_cell = (next_model == Some(col)).then(|| cells.next().expect("peeked").1);
             let at = CellRef::new(row, col);
+            let verbatim = source_cell.is_some_and(|source_cell| {
+                let (original, ordered) = originals.at(source_cell.at, at);
+                let model = if ordered {
+                    model_cell
+                } else {
+                    #[cfg(test)]
+                    EMISSION_LOOKUPS.with(|count| count.set(count.get() + 1));
+                    self.sheet.cell(at)
+                };
+                self.verbatim(source_cell, at, model, original, dirty)
+            });
             match source_cell {
-                Some(source_cell) if self.verbatim(source_cell, at, dirty) => {
+                Some(source_cell) if verbatim => {
                     body.extend_from_slice(&data[source_cell.before.clone()]);
                     self.emit_source_cell(&mut body, data, source_cell, at)?;
                 }
@@ -363,9 +454,15 @@ impl SheetPatch<'_> {
     }
 
     /// Whether a source cell can stand for the model cell now at `at`.
-    fn verbatim(&self, cell: &SourceCell, at: CellRef, dirty: &DirtyFormulas) -> bool {
-        let model = self.sheet.cell(at);
-        if model != self.original.cell(cell.at) {
+    fn verbatim(
+        &self,
+        cell: &SourceCell,
+        at: CellRef,
+        model: Option<&Cell>,
+        original: Option<&Cell>,
+        dirty: &DirtyFormulas,
+    ) -> bool {
+        if model != original {
             return false;
         }
         if cell.shared_string
@@ -499,19 +596,77 @@ impl SheetPatch<'_> {
         }
     }
 
-    /// Source addresses whose cell changed, moved, or is gone.
+    /// Source addresses whose cell changed or is gone.
     fn changed_source_cells(&self) -> BTreeSet<(u32, u32)> {
+        #[cfg(any(test, feature = "test-oracle"))]
+        if crate::save_oracle::use_legacy_save_path() {
+            return self.changed_source_cells_oracle();
+        }
+        let mut changed = BTreeSet::new();
+        let mut cells = self.sheet.iter_cells().peekable();
+        let mut previous = None;
+        for (source, original) in self.original.iter_cells() {
+            let Some(mapped) = self.mapped(source) else {
+                changed.insert((source.row, source.col));
+                continue;
+            };
+            let key = (mapped.row, mapped.col);
+            if previous.is_some_and(|previous| previous >= key)
+                || self.inverse(mapped) != Some(source)
+            {
+                return self.changed_source_cells_by_lookup();
+            }
+            previous = Some(key);
+            while cells.peek().is_some_and(|(at, _)| (at.row, at.col) < key) {
+                let (at, _) = cells.next().expect("peeked");
+                if !self.record_unmatched_source(at, &mut changed) {
+                    return self.changed_source_cells_by_lookup();
+                }
+            }
+            let current = cells
+                .next_if(|(at, _)| (at.row, at.col) == key)
+                .map(|(_, cell)| cell);
+            if current != Some(original) {
+                changed.insert((source.row, source.col));
+            }
+        }
+        for (at, _) in cells {
+            if !self.record_unmatched_source(at, &mut changed) {
+                return self.changed_source_cells_by_lookup();
+            }
+        }
+        changed
+    }
+
+    fn record_unmatched_source(&self, at: CellRef, changed: &mut BTreeSet<(u32, u32)>) -> bool {
+        if let Some(source) = self.inverse(at) {
+            if self.mapped(source) != Some(at) {
+                return false;
+            }
+            changed.insert((source.row, source.col));
+        }
+        true
+    }
+
+    fn changed_source_cells_by_lookup(&self) -> BTreeSet<(u32, u32)> {
         let mut changed = BTreeSet::new();
         for (at, cell) in self.original.iter_cells() {
-            if self.mapped(at).and_then(|mapped| self.sheet.cell(mapped)) != Some(cell) {
+            let current = self.mapped(at).and_then(|mapped| {
+                #[cfg(test)]
+                DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
+                self.sheet.cell(mapped)
+            });
+            if current != Some(cell) {
                 changed.insert((at.row, at.col));
             }
         }
         for (at, cell) in self.sheet.iter_cells() {
-            if let Some(source) = self.inverse(at)
-                && self.original.cell(source) != Some(cell)
-            {
-                changed.insert((source.row, source.col));
+            if let Some(source) = self.inverse(at) {
+                #[cfg(test)]
+                DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
+                if self.original.cell(source) != Some(cell) {
+                    changed.insert((source.row, source.col));
+                }
             }
         }
         changed

@@ -547,6 +547,7 @@ pub struct EditingDoc {
     id_counter: AtomicU64,
     direct_batches: AtomicBool,
     direct_batches_applied: AtomicU64,
+    host_edit_depth: Arc<AtomicU32>,
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
     /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
@@ -610,6 +611,7 @@ impl EditingDoc {
             id_counter: AtomicU64::new(0),
             direct_batches: AtomicBool::new(false),
             direct_batches_applied: AtomicU64::new(0),
+            host_edit_depth: Arc::new(AtomicU32::new(0)),
             epoch,
             instance: DOC_INSTANCES.fetch_add(1, Ordering::Relaxed),
             version_nonce: AtomicU64::new(batch::mint_nonce(client_id, 0)),
@@ -1439,6 +1441,8 @@ impl EditingDoc {
 
     /// Applies an update, then repairs any paragraph identities it duplicated.
     pub(crate) fn integrate_update(&self, update: Update, origin: UpdateOrigin) -> EditResult<()> {
+        let _host_edit = matches!(origin, UpdateOrigin::Host)
+            .then(|| batch::HostEditGuard::new(&self.host_edit_depth));
         let watch = identity::IdentityWatch::new(self);
         let reanchored = comment_references::CommentWatch::new(self);
         let result = match origin {

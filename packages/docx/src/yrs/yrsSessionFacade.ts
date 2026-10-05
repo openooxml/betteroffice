@@ -1357,6 +1357,9 @@ export function wrapSession(
     destroy: () => {
       if (destroyed) return;
       destroyed = true;
+      residentFonts.length = 0;
+      docxSource = null;
+      docxSourceKeys = null;
       resetMedia();
       listeners.clear();
       proposals.destroy();

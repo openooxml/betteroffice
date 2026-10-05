@@ -1,6 +1,8 @@
 pub(crate) mod batch;
 #[cfg(test)]
 mod edit_tests;
+#[cfg(test)]
+mod save_oracle_tests;
 #[path = "snapshot/assembly.rs"]
 pub(crate) mod snapshot_assembly;
 mod staging;

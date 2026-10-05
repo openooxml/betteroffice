@@ -178,7 +178,15 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
             .find(|previous| {
                 previous.section_index == checkpoint.section_index
                     && previous.page_number == checkpoint.page_number
-                    && previous.flow == checkpoint.flow
+                    && if suffix_matches {
+                        flow_matches_from_page(
+                            &previous.flow,
+                            &checkpoint.flow,
+                            checkpoint.page_number,
+                        )
+                    } else {
+                        previous.flow == checkpoint.flow
+                    }
             })?;
         if suffix_matches {
             return Some(Convergence::Suffix {
@@ -216,6 +224,36 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
             dirty_index: next_dirty,
         })
     }
+}
+
+fn flow_matches_from_page(
+    previous: &PageFlowGeometry,
+    next: &PageFlowGeometry,
+    page_number: u32,
+) -> bool {
+    if previous == next {
+        return true;
+    }
+    let mut flow = previous.clone();
+    flow.footnote_reserved_heights
+        .clone_from(&next.footnote_reserved_heights);
+    if flow != *next {
+        return false;
+    }
+    let previous = previous.footnote_reserved_heights.as_deref();
+    let next = next.footnote_reserved_heights.as_deref();
+    let reservation = |heights: Option<&std::collections::BTreeMap<String, f64>>, page: u32| {
+        heights
+            .and_then(|heights| heights.get(&page.to_string()).copied())
+            .unwrap_or(0.0)
+    };
+    previous
+        .into_iter()
+        .flat_map(|heights| heights.keys())
+        .chain(next.into_iter().flat_map(|heights| heights.keys()))
+        .filter_map(|key| key.parse::<u32>().ok())
+        .filter(|&page| page > 0 && page >= page_number)
+        .all(|page| reservation(previous, page) == reservation(next, page))
 }
 
 /// Whether placement restarted at `checkpoint` lays out what follows as the walk
@@ -257,6 +295,8 @@ fn resumable(
                 before.size == page.size
                     && before.margins == page.margins
                     && before.columns == page.columns
+                    && before.float_bands == page.float_bands
+                    && before.footnote_reserved_height == page.footnote_reserved_height
             })
     });
     same_geometry
@@ -661,6 +701,15 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             }
             None => (0, 0, 0, origin_paginator(&initial_config, &plan, options)?),
         };
+        if segments.is_empty() && !checkpoints.is_empty() {
+            let reservations = paginator.snapshot_geometry().footnote_reserved_heights;
+            for checkpoint in &mut checkpoints {
+                checkpoint
+                    .flow
+                    .footnote_reserved_heights
+                    .clone_from(&reservations);
+            }
+        }
         let convergence = ConvergenceInput {
             previous_checkpoints,
             previous_fingerprints,
@@ -753,6 +802,10 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                         .map(|mut checkpoint| {
                             checkpoint.page_index =
                                 (checkpoint.page_index as isize + page_shift) as usize;
+                            checkpoint
+                                .flow
+                                .footnote_reserved_heights
+                                .clone_from(&next.flow.footnote_reserved_heights);
                             checkpoint
                         }),
                 );
@@ -2496,6 +2549,211 @@ mod pagination_rule_tests {
         assert!(incremental.placed_blocks < full.placed_blocks);
         assert_eq!(incremental.rebuilt_page_start, 0);
         assert_eq!(incremental.rebuilt_page_end, 1);
+    }
+
+    #[test]
+    fn incremental_resumes_when_note_reservations_change_after_the_checkpoint() {
+        let measured: Vec<_> = (0..30)
+            .map(|id| paragraph(id, 1, 20.0, json!({})))
+            .collect();
+        for (previous_reservations, next_reservations) in [
+            (json!({"4": 20}), json!({"3": 20})),
+            (json!({"3": 20}), json!({"4": 20})),
+            (json!({"4": 20}), json!({"1": 0, "2": 0, "3": 20})),
+            (json!({"1": 0, "2": 0, "3": 20}), json!({"4": 20})),
+        ] {
+            let mut previous_input = input(measured.clone());
+            previous_input.options.footnote_reserved_heights =
+                serde_json::from_value(previous_reservations).unwrap();
+            let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+            let mut next = measured.clone();
+            next[11] = paragraph(11, 1, 40.0, json!({}));
+            let mut next_input = input(next);
+            next_input.options.footnote_reserved_heights =
+                serde_json::from_value(next_reservations).unwrap();
+            let previous_fingerprints = vec![1_u64; measured.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[11] = 2;
+            let incremental = layout_document_incremental(
+                &mut next_input.clone(),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                10,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut next_input).unwrap();
+            assert_eq!(incremental.rebuilt_page_start, 1);
+            assert_eq!(incremental.rebuilt_page_end, full.layout.pages.len());
+            assert_eq!(incremental.placed_blocks, measured.len() - 5);
+            assert!(incremental.placed_blocks < full.placed_blocks);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
+    fn incremental_converges_after_changed_note_reservations() {
+        let measured: Vec<_> = (0..28)
+            .map(|id| {
+                paragraph(
+                    id,
+                    1,
+                    20.0,
+                    json!({"pageBreakBefore": id > 0 && id % 4 == 0}),
+                )
+            })
+            .collect();
+        for (previous_reservations, next_reservations) in [
+            (json!({"3": 10}), json!({"4": 10, "5": 0, "40": 0})),
+            (json!({"4": 10, "5": 0, "40": 0}), json!({"3": 10})),
+        ] {
+            let mut previous_input = input(measured.clone());
+            previous_input.options.footnote_reserved_heights =
+                serde_json::from_value(previous_reservations).unwrap();
+            let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+            let mut next = measured.clone();
+            next[9]["block"]["runs"][0]["text"] = json!("y");
+            let mut next_input = input(next);
+            next_input.options.footnote_reserved_heights =
+                serde_json::from_value(next_reservations).unwrap();
+            let previous_fingerprints = vec![1_u64; measured.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[9] = 2;
+            let incremental = layout_document_incremental(
+                &mut next_input.clone(),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                8,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut next_input).unwrap();
+            assert_eq!(incremental.rebuilt_page_start, 1);
+            assert_eq!(incremental.rebuilt_page_end, 4);
+            assert!(incremental.placed_blocks < full.placed_blocks);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
+    fn incremental_does_not_converge_before_a_changed_suffix_reservation() {
+        let measured: Vec<_> = (0..28)
+            .map(|id| {
+                paragraph(
+                    id,
+                    1,
+                    20.0,
+                    json!({"pageBreakBefore": id > 0 && id % 4 == 0}),
+                )
+            })
+            .collect();
+        for changed_page in [5_u32, 6] {
+            let mut previous_input = input(measured.clone());
+            previous_input.options.footnote_reserved_heights =
+                serde_json::from_value(json!({"3": 10})).unwrap();
+            let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+            let mut next = measured.clone();
+            next[9]["block"]["runs"][0]["text"] = json!("y");
+            let mut next_input = input(next);
+            next_input.options.footnote_reserved_heights =
+                serde_json::from_value(json!({"4": 10})).unwrap();
+            next_input
+                .options
+                .footnote_reserved_heights
+                .as_mut()
+                .unwrap()
+                .insert(changed_page.to_string(), 10.0);
+            let previous_fingerprints = vec![1_u64; measured.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[9] = 2;
+            let incremental = layout_document_incremental(
+                &mut next_input.clone(),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                8,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut next_input).unwrap();
+            assert_eq!(incremental.rebuilt_page_start, 1);
+            assert_eq!(incremental.rebuilt_page_end, changed_page as usize);
+            assert!(incremental.placed_blocks < full.placed_blocks);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
+    fn incremental_refuses_note_reservation_changes_at_or_before_the_checkpoint() {
+        let measured: Vec<_> = (0..30)
+            .map(|id| paragraph(id, 1, 20.0, json!({})))
+            .collect();
+        let mut previous_input = input(measured.clone());
+        previous_input.options.footnote_reserved_heights =
+            serde_json::from_value(json!({"4": 20})).unwrap();
+        let previous = layout_document_checkpointed(&mut previous_input).unwrap();
+        for changed_page in [1_u32, 2] {
+            let mut next = measured.clone();
+            next[11] = paragraph(11, 1, 40.0, json!({}));
+            let mut next_input = input(next);
+            let mut reservations = previous_input.options.footnote_reserved_heights.clone();
+            reservations
+                .as_mut()
+                .unwrap()
+                .insert(changed_page.to_string(), 20.0);
+            next_input.options.footnote_reserved_heights = reservations;
+            let previous_fingerprints = vec![1_u64; measured.len()];
+            let mut next_fingerprints = previous_fingerprints.clone();
+            next_fingerprints[11] = 2;
+            let mut retained = previous.layout.clone();
+            let result = layout_document_incremental(
+                &mut next_input.clone(),
+                &mut retained,
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                10,
+            );
+            assert!(matches!(
+                result,
+                Err(LayoutError::Unsupported(message))
+                    if message == "checkpoint note reservations changed"
+            ));
+            assert_eq!(
+                serde_json::to_vec(&retained).unwrap(),
+                serde_json::to_vec(&previous.layout).unwrap()
+            );
+            let incremental = layout_document_incremental(
+                &mut next_input.clone(),
+                &mut retained,
+                &previous.checkpoints,
+                &previous_fingerprints,
+                &next_fingerprints,
+                (changed_page as usize - 1) * 5,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut next_input).unwrap();
+            assert_eq!(incremental.rebuilt_page_start, 0);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
     }
 
     #[test]

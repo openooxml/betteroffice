@@ -11,6 +11,8 @@ mod package_facts;
 mod patch;
 mod read;
 mod reference;
+#[cfg(any(test, feature = "test-oracle"))]
+mod save_oracle;
 mod styles;
 mod tree;
 mod write;
@@ -28,6 +30,9 @@ pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
 pub use reference::UnpatchableReference;
+#[cfg(any(test, feature = "test-oracle"))]
+#[doc(hidden)]
+pub use save_oracle::with_legacy_save_path;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,

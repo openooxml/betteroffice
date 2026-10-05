@@ -318,6 +318,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     count: number;
   } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
+  const pendingLocalCaretRevealRef = useRef<{
+    scroller: HTMLElement;
+    scrollTop: number;
+  } | null>(null);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
@@ -490,16 +494,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [displaySelection, onStateChange]
   );
 
+  const requestLocalCaretReveal = useCallback((): void => {
+    const host = canvasHostRef?.current;
+    const scroller = host ? findVerticalScrollParentOrRoot(host) : null;
+    pendingLocalCaretRevealRef.current = scroller ? { scroller, scrollTop: scroller.scrollTop } : null;
+  }, [canvasHostRef]);
+
   const setSelection = useCallback(
     (anchor: YrsLoc, head: YrsLoc = anchor, emit = true): void => {
       if (!session) return;
       session.setSelection(anchor, head);
       if (emit) {
+        if (!readOnly) requestLocalCaretReveal();
         onCaretInterrupt?.();
         emitSelection(false);
       }
     },
-    [emitSelection, onCaretInterrupt, session]
+    [emitSelection, onCaretInterrupt, readOnly, requestLocalCaretReveal, session]
   );
 
   const finishMutation = useCallback(
@@ -509,12 +520,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       dirtyStories?: string | readonly string[]
     ): void => {
       verticalCaretGoalRef.current.reset();
+      if (residentLayoutReady) requestLocalCaretReveal();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onCaretInput?.();
       onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput]
+    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
   );
 
   const finishResidentMutation = useCallback(
@@ -1003,6 +1015,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               next.paraId === head.paraId &&
               next.offset === head.offset
             ) {
+              if (!readOnly) setSelection(current.anchor, current.head);
               return;
             }
             setSelection(extend ? current.anchor : next, next);
@@ -1057,6 +1070,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       inputPositionMap,
       isCurrentInput,
       locToDisplayPosition,
+      readOnly,
       resolveDisplayTarget,
       session,
       setSelection,
@@ -1086,7 +1100,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (!session) return false;
       const current = ensureSelection();
       const focused = current ? yrsCellLocFromStory(current.head.story) : null;
-      if (!focused) return false;
+      if (!current || !focused) return false;
       const tableRange = yrsTableSelectionRange(session, focused, 'table');
       if (!tableRange) return false;
 
@@ -1103,7 +1117,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
 
       if (row < 0 || row > lastRow) {
-        if (backward) return true;
+        if (backward) {
+          setSelection(current.anchor, current.head);
+          return true;
+        }
         const nearby = yrsSelectionNearTable(session, {
           story: focused.story,
           tableIndex: focused.tableIndex,
@@ -1512,6 +1529,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   useEffect(() => {
     verticalCaretGoalRef.current.reset();
     pendingResidentFrameEpochRef.current = null;
+    pendingLocalCaretRevealRef.current = null;
   }, [session, story]);
 
   useEffect(() => {
@@ -1577,15 +1595,25 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     lastCaretScrollSelectionRef.current = stickySelection;
     const quiet = quietSelectionRef.current;
     quietSelectionRef.current = null;
+    const selectionIsQuiet = quiet && stickySelection && sameYrsSelection(quiet, stickySelection);
     const selectionChanged =
       (previousStickySelection === undefined ||
         !sameYrsSelection(previousStickySelection, stickySelection)) &&
-      !(quiet && stickySelection && sameYrsSelection(quiet, stickySelection));
+      !selectionIsQuiet;
+    const scroller = findVerticalScrollParentOrRoot(host);
+    const pendingReveal = pendingLocalCaretRevealRef.current;
+    const caretRevealOrigin =
+      pendingReveal &&
+      pendingReveal.scroller === scroller &&
+      pendingReveal.scrollTop === scroller.scrollTop &&
+      !selectionIsQuiet
+        ? 'local'
+        : layoutUpdateOrigin;
+    pendingLocalCaretRevealRef.current = null;
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)
+      shouldScrollCaretIntoView(caretRevealOrigin, selectionChanged, readOnly)
     ) {
-      const scroller = findVerticalScrollParentOrRoot(host);
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
       if (delta !== 0) scroller.scrollTop += delta;
     }
