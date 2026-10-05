@@ -160,8 +160,14 @@ fn resident_typing_keeps_font_identity_for_the_next_pass() {
     let before = pair.shared.stats();
     pair.edit(true);
     let after = pair.shared.stats();
-    assert_eq!(after.resident_measure_calls - before.resident_measure_calls, 1);
-    assert_eq!(after.resident_reused_blocks - before.resident_reused_blocks, 1);
+    assert_eq!(
+        after.resident_measure_calls - before.resident_measure_calls,
+        1
+    );
+    assert_eq!(
+        after.resident_reused_blocks - before.resident_reused_blocks,
+        1
+    );
     assert!(
         pair.shared
             .font_dependency_work
@@ -301,7 +307,14 @@ fn failed_font_pass_then_resident_edit_matches_per_block_oracle() {
         pair.edit(true);
         assert_eq!(pair.shared.font_dependency_work.borrow().identity_skips, 0);
         if trigger == RelayoutTrigger::Interactive {
-            assert!(!pair.shared.font_dependency_work.borrow().reuse_sets.is_empty());
+            assert!(
+                !pair
+                    .shared
+                    .font_dependency_work
+                    .borrow()
+                    .reuse_sets
+                    .is_empty()
+            );
         }
         for reused in &pair.shared.font_dependency_work.borrow().reuse_sets {
             assert!(!reused.contains(&0));

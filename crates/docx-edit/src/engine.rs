@@ -5337,12 +5337,10 @@ impl EngineSession {
             (true, Some(env)) => Some((self.regional_fingerprint(&regions, env), env.clone())),
             _ => None,
         };
-        self.pagination
-            .borrow_mut()
-            .set_font_dependencies(
-                measured_font_dependencies,
-                resident_body.then_some(&measurement.font_chains),
-            );
+        self.pagination.borrow_mut().set_font_dependencies(
+            measured_font_dependencies,
+            resident_body.then_some(&measurement.font_chains),
+        );
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json,
             request_fingerprint,
@@ -5848,12 +5846,10 @@ impl EngineSession {
             )?,
             None => Vec::new(),
         };
-        self.pagination
-            .borrow_mut()
-            .set_font_dependencies(
-                measured_font_dependencies,
-                resident_body.then_some(&measurement.font_chains),
-            );
+        self.pagination.borrow_mut().set_font_dependencies(
+            measured_font_dependencies,
+            resident_body.then_some(&measurement.font_chains),
+        );
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json,
             request_fingerprint,
@@ -7837,10 +7833,8 @@ impl EngineSession {
         // The fast path measures through the region config too, so its
         // retained arena is also eligible for the next pass's reuse walk.
         pagination.measured_with = Some(measurement_fingerprint);
-        pagination.set_font_dependencies(
-            resident.font_dependencies,
-            Some(&measurement.font_chains),
-        );
+        pagination
+            .set_font_dependencies(resident.font_dependencies, Some(&measurement.font_chains));
         pagination.measured_widths = widths;
         let serial = pagination.layout_epoch;
         let layout = pagination
