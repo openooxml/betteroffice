@@ -315,8 +315,9 @@ impl Session {
     pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self, String> {
         let hydration: PeerHydration = serde_json::from_str(hydration)
             .map_err(|error| format!("bad peer hydration: {error}"))?;
-        let workbook = Workbook::open_with_peer_hydration_json(bytes, &hydration.workbook.to_string())
-            .map_err(|error| error.to_string())?;
+        let workbook =
+            Workbook::open_with_peer_hydration_json(bytes, &hydration.workbook.to_string())
+                .map_err(|error| error.to_string())?;
         Ok(Self {
             workbook,
             calculation_context: hydration.calculation_context,
@@ -1180,11 +1181,9 @@ mod tests {
     #[test]
     fn peer_hydration_nests_workbook_state_and_preserves_calculation_context() {
         let bytes = formula_xlsx();
-        let mut worker = Session::open_with_calculation_json(
-            &bytes,
-            r#"{"nowSerial":45000.75,"randSeed":42}"#,
-        )
-        .unwrap();
+        let mut worker =
+            Session::open_with_calculation_json(&bytes, r#"{"nowSerial":45000.75,"randSeed":42}"#)
+                .unwrap();
         let hydration = worker.peer_hydration_json().unwrap();
         let transferred: serde_json::Value = serde_json::from_str(&hydration).unwrap();
         assert!(transferred["workbook"].is_object());
@@ -1194,14 +1193,20 @@ mod tests {
         assert_eq!(peer.workbook.version(), worker.workbook.version());
         assert_eq!(peer.workbook.rand_seed(), worker.workbook.rand_seed());
         assert_eq!(peer.calculation_context, worker.calculation_context);
-        assert_eq!(peer.workbook.save().unwrap(), worker.workbook.save().unwrap());
+        assert_eq!(
+            peer.workbook.save().unwrap(),
+            worker.workbook.save().unwrap()
+        );
         let edit = r#"{"sheet":0,"edits":[{"row":0,"col":0,"input":"=NOW()"},{"row":0,"col":2,"input":"=RANDBETWEEN(1,1000000)"}]}"#;
         assert_eq!(
             peer.edit_cells_json(edit, Some(1.0)).unwrap(),
             worker.edit_cells_json(edit, Some(2.0)).unwrap(),
         );
         assert_eq!(peer.workbook.version(), worker.workbook.version());
-        assert_eq!(peer.workbook.save().unwrap(), worker.workbook.save().unwrap());
+        assert_eq!(
+            peer.workbook.save().unwrap(),
+            worker.workbook.save().unwrap()
+        );
     }
 
     #[test]

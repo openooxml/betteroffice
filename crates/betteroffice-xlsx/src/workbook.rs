@@ -4714,7 +4714,8 @@ mod tests {
         let options = CalculationOptions {
             now_serial: Some(45_000.25),
         };
-        let mut worker = Workbook::open_recalculated_with_seed(&bytes, options, Some(0x5eed)).unwrap();
+        let mut worker =
+            Workbook::open_recalculated_with_seed(&bytes, options, Some(0x5eed)).unwrap();
         let active = SheetId((worker.sheet_count() - 1) as u32);
         assert_ne!(active, worker.active_sheet());
         worker.set_active_sheet(active).unwrap();
@@ -4743,7 +4744,8 @@ mod tests {
         let bytes = source_with_sheet_data(
             r#"<sheetData><row r="1"><c r="A1"><v>2</v></c></row></sheetData>"#,
         );
-        let mut worker = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
+        let mut worker =
+            Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
         worker
             .propose(
                 ProposalRequest {
