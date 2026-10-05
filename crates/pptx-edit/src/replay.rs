@@ -898,11 +898,7 @@ mod tests {
                     &peer,
                     &format!("prefix {end}, operation {index}: {op}"),
                 );
-                assert_ordered_history(
-                    &worker,
-                    &peer,
-                    &format!("prefix {end}, operation {index}"),
-                );
+                assert_ordered_history(&worker, &peer, &format!("prefix {end}, operation {index}"));
             }
             let label = format!(
                 "prefix {end}: {}",
