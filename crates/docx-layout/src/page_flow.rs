@@ -1534,6 +1534,7 @@ mod tests {
                     page_index,
                     page_number,
                     flow,
+                    opening_fragment_geometry: None,
                 });
                 let idx = paginator.get_current();
                 paginator.set_pen_y(idx, paginator.state(idx).content_top + 16.0);
