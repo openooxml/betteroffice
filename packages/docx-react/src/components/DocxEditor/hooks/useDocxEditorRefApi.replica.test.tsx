@@ -186,12 +186,64 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
 }
 
-function expectLoadingMutations(api: DocxEditorRef) {
+function expectLoadingMutations(api: DocxEditorRef, editor: PagedEditorRef) {
+  const session = editor.getYrsSession()!;
+  const started = workerOpenReplica.workerOpenReplicaStarted(session);
+  const request = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
+  const requests = request.mock.calls.length;
+  const ensure = spyOn(workerOpenReplica, 'ensureWorkerOpenReplica');
+  const admissions = ensure.mock.calls.length;
   for (const member of DOCX_REF_REPLICA_LOADING_MUTATIONS) {
     const call = SYNC_REPLICA_CALLS.find(([name]) => name === member);
     if (!call) throw new Error(`Missing loading mutation: ${member}`);
     expect(() => Reflect.apply(api[member] as Function, api, call[1])).toThrow(DocxReplicaNotReadyError);
   }
+  const navigate = spyOn(editor, 'scrollToParaId');
+  expect(api.getDocument()).toBeNull();
+  expect(api.getEditorRef()).toBeNull();
+  expect(api.findInDocument('Page')).toEqual([]);
+  expect(api.scrollToParaId('00000001')).toBe(false);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(workerOpenReplica.workerOpenReplicaPending(session)).toBe(true);
+  expect(workerOpenReplica.workerOpenReplicaStarted(session)).toBe(started);
+  expect(request.mock.calls).toHaveLength(requests);
+  expect(ensure.mock.calls).toHaveLength(admissions);
+}
+
+function expectReadyMutations(api: DocxEditorRef, session: YrsSession, editor: PagedEditorRef) {
+  expect(api.getDocument()).not.toBeNull();
+  expect(api.getEditorRef()).toBe(editor);
+  const first = session.paragraphs('body')[0]!;
+  expect(api.findInDocument(first.text)).toContainEqual(expect.objectContaining({ paraId: first.paraId, match: first.text }));
+  expect(api.scrollToParaId(first.paraId)).toBe(true);
+  expect(editor.scrollToParaId).toHaveBeenCalledWith(first.paraId, undefined);
+  const last = session.paragraphs('body').at(-1)!;
+  const search = 'Replica contract';
+  let paraId!: string;
+  act(() => {
+    const span = session.locateParagraph('body', last.paraId);
+    paraId = session.splitParagraph({ story: 'body', paraId: last.paraId, offset: span.end - span.start }).secondParaId;
+    session.insertText({ story: 'body', paraId, offset: 0 }, search);
+    session.setParagraphAttr(paraId, 'pStyle', 'Heading1');
+  });
+  act(() => {
+    const comment = api.addComment({ paraId, search, text: 'Check', author: 'Ann' });
+    expect(comment).toEqual(expect.any(Number));
+    expect(session.resolveComment(String(comment))).toContainEqual(expect.objectContaining({ story: 'body' }));
+    expect(api.applyFormatting({ paraId, search, marks: { italic: true } })).toBe(true);
+    expect(session.storySegments('body')).toContainEqual(expect.objectContaining({
+      kind: 'text', text: search, attributes: expect.objectContaining({ italic: true }),
+    }));
+    expect(api.setParagraphStyle({ paraId, styleId: 'Normal' })).toBe(true);
+    expect(session.paragraphs('body').find((entry) => entry.paraId === paraId)!.properties.pStyle).toBe('Normal');
+    expect(api.proposeChange({ paraId, search: '', replaceWith: 'Replica ready', author: 'Host' })).toBe(true);
+    expect(session.listRevisions()).toContainEqual(expect.objectContaining({
+      kind: 'insertion', author: 'Host', preview: 'Replica ready',
+    }));
+    const breaks = session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak').length;
+    expect(api.insertBreak({ paraId, type: 'page' })).toBe(true);
+    expect(session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak')).toHaveLength(breaks + 1);
+  });
 }
 
 async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing') {
@@ -331,18 +383,19 @@ test.each(['viewing', 'editing'] as const)('ref save in %s mode leaves the held 
 });
 
 test('synchronous reads return loading answers until the owner opens the editor replica', async () => {
-  const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing');
+  const { api, session, replica, release, opens, fallbackReasons, pagedEditorRef } = await pendingReplica('editing');
   expect(api.getDocument()).toBeNull();
   expect(api.getEditorRef()).toBeNull();
   expect(api.findInDocument('Page')).toEqual([]);
   expect(api.scrollToParaId('00000001')).toBe(false);
-  expectLoadingMutations(api);
+  expectLoadingMutations(api, pagedEditorRef.current!);
   await act(async () => {});
   expect(opens).toEqual([]);
   expect(replica.started).toBe(false);
   expect(replica.pending).toBe(true);
   replica.start();
   await act(async () => { release(); await replica.ready; });
+  expectReadyMutations(api, session, pagedEditorRef.current!);
   expect(api.getDocument()).not.toBeNull();
   expect(api.getEditorRef()?.getYrsSession()).toBe(session);
   const first = session.paragraphs('body')[0]!;
@@ -376,17 +429,18 @@ test('a batch chained from an early read edits the hydrated document', async () 
 });
 
 test('a synchronous write during an in-flight editor handoff throws until readiness', async () => {
-  const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing');
+  const { api, session, replica, release, opens, fallbackReasons, pagedEditorRef } = await pendingReplica('editing');
   const request = spyOn(workerOpenReplica, 'requestWorkerOpenReplica');
   replica.start();
   await act(async () => {});
   act(() => expect(() => api.insertBreak({ paraId: '00000001', type: 'page' })).toThrow(DocxReplicaNotReadyError));
-  expectLoadingMutations(api);
+  expectLoadingMutations(api, pagedEditorRef.current!);
   expect(request).not.toHaveBeenCalled();
   expect(replica.started).toBe(true);
   expect(opens).toEqual([]);
   expect(session.storyIds()).toEqual([]);
   await act(async () => { release(); await replica.ready; });
+  expectReadyMutations(api, session, pagedEditorRef.current!);
   expect(opens).toEqual([false]);
   const readyVersion = session.version();
   act(() => expect(api.insertBreak({ paraId: '00000001', type: 'page' })).toBe(true));
@@ -449,14 +503,15 @@ test('independent APIs do not start a replica open', async () => {
 });
 
 test('getEditorRef returns null until readiness and then immediately inserts text', async () => {
-  const { api, session, replica, release, opens, fallbackReasons } = await pendingReplica('editing', true);
+  const { api, session, replica, release, opens, fallbackReasons, pagedEditorRef } = await pendingReplica('editing', true);
   expect(replica.pending).toBe(true);
   expect(api.getEditorRef()).toBeNull();
-  expectLoadingMutations(api);
+  expectLoadingMutations(api, pagedEditorRef.current!);
   expect(replica.started).toBe(false);
   expect(opens).toEqual([]);
   replica.start();
   await act(async () => { release(); await replica.ready; });
+  expectReadyMutations(api, session, pagedEditorRef.current!);
   await act(async () => {
     api.getEditorRef()!.insertText('Immediate ');
     await api.flushPendingInput();
@@ -757,14 +812,14 @@ test.each(SYNC_REPLICA_CALLS)(
   }
 );
 
-test.each(SYNC_REPLICA_CALLS.filter(([member]) => member !== 'getSelectionInfo'))(
+test.each(SYNC_REPLICA_CALLS)(
   '%s leaves worker proposal hand-over to the replica owner', async (method, args, loading, check) => {
     const { api, opens, replica, release, session, pagedEditorRef, authority, transport, fallbackReasons } =
       await pendingWorkerProposalReplica('editing');
     prepareSyncRead(pagedEditorRef.current!);
     if (loading === DocxReplicaNotReadyError) expect(() => Reflect.apply(api[method], api, args)).toThrow(loading);
     else expect(Reflect.apply(api[method], api, args)).toEqual(loading);
-    expectLoadingMutations(api);
+    expectLoadingMutations(api, pagedEditorRef.current!);
     await act(async () => {});
     expect(opens).toEqual([]);
     expect(fallbackReasons).toEqual([]);
@@ -778,6 +833,7 @@ test.each(SYNC_REPLICA_CALLS.filter(([member]) => member !== 'getSelectionInfo')
     expect(transport.handOver).not.toHaveBeenCalled();
     replica.start();
     await act(async () => { release(); await ready; });
+    expectReadyMutations(api, session, pagedEditorRef.current!);
     expect(transport.handOver).toHaveBeenCalledTimes(1);
     expect(opens).toEqual([false]);
     expect(replica.pending).toBe(false);

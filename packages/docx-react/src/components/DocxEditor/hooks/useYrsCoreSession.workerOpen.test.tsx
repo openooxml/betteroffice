@@ -9,6 +9,7 @@ import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import * as yrsFacade from '@betteroffice/docx/yrs';
 import * as docx from '@betteroffice/docx/docx';
 import type { Document } from '@betteroffice/docx/types/document';
+import { createStyleResolver } from '@betteroffice/docx/styles';
 import { createFontLoadScope } from '@betteroffice/docx/utils';
 import {
   createYrsSession,
@@ -31,7 +32,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
-import { createDisplayListQueries, decodeFrameDelta, type DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
 import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
 import { useLayoutPipeline } from './useLayoutPipeline';
@@ -335,6 +336,7 @@ interface HarnessProps {
   allowHostProposals?: boolean;
   resolvedCommentIds?: ReadonlySet<number>;
   measurementFont?: Uint8Array;
+  styleResolver?: boolean;
   onHostDocument?: (session: YrsSession) => void;
   onLoad?: (api: DocxEditorRef) => void;
   onPresented?: (session: unknown) => void;
@@ -502,6 +504,15 @@ function useHarness(props: HarnessProps) {
       return yrsLocToProjectedDisplayPosition(session, () => projection, loc);
     },
     revealDisplayPosition: (position: number) => { searchReveals.current.push(position); return 'scrolled'; },
+    scrollToParaId: (paraId: string) => {
+      const session = coreRef.current.session!;
+      if (!session.paragraphs('body').some((paragraph) => paragraph.paraId === paraId)) return false;
+      const projection = createYrsPositionProjection(session, 'body');
+      const position = yrsLocToProjectedDisplayPosition(session, () => projection, { story: 'body', paraId, offset: 0 });
+      if (position === null) return false;
+      searchReveals.current.push(position);
+      return true;
+    },
     syncYrsInputState: () => true,
     refreshWorkerLayout: () => workerRelayout.current?.(),
   } as unknown as PagedEditorRef : null, [core.session]);
@@ -530,7 +541,7 @@ function useHarness(props: HarnessProps) {
     setShowCommentsSidebar: () => {},
     contentChangeSubscribersRef: { current: new Set() },
     selectionChangeSubscribersRef: { current: new Set() },
-    getCachedStyleResolver: (() => { throw new Error('unused'); }) as never,
+    getCachedStyleResolver: props.styleResolver ? createStyleResolver : (() => { throw new Error('unused'); }) as never,
     commentIdAllocator: createCommentIdAllocator(),
     commands: UNAVAILABLE_DOCX_COMMANDS,
     modeRef: { current: 'viewing' },
@@ -1446,7 +1457,13 @@ function holdReplicaTimers() {
   };
 }
 
-function expectLoadingMutations(api: DocxEditorRef) {
+function expectLoadingMutations(api: DocxEditorRef, editor: PagedEditorRef, paraId = '00000001') {
+  const session = editor.getYrsSession()!;
+  const started = replicaHelpers.workerOpenReplicaStarted(session);
+  const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+  const requests = request.mock.calls.length;
+  const ensure = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+  const admissions = ensure.mock.calls.length;
   const calls: Partial<Record<keyof DocxEditorRef, unknown[]>> = {
     addComment: [{ paraId: '00000001', search: 'paragraph', text: 'Check', author: 'Ann' }],
     proposeChange: [{ paraId: '00000001', search: 'paragraph', replaceWith: 'text', author: 'Host' }],
@@ -1459,6 +1476,53 @@ function expectLoadingMutations(api: DocxEditorRef) {
     if (!args) throw new Error(`Missing loading mutation: ${member}`);
     expect(() => Reflect.apply(api[member] as Function, api, args)).toThrow(DocxReplicaNotReadyError);
   }
+  const navigate = spyOn(editor, 'scrollToParaId');
+  expect(api.getDocument()).toBeNull();
+  expect(api.getEditorRef()).toBeNull();
+  expect(api.findInDocument('paragraph')).toEqual([]);
+  expect(api.scrollToParaId(paraId)).toBe(false);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
+  expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(started);
+  expect(request.mock.calls).toHaveLength(requests);
+  expect(ensure.mock.calls).toHaveLength(admissions);
+}
+
+function expectReadyMutations(api: DocxEditorRef, session: YrsSession, editor: PagedEditorRef, reveals: readonly number[], paraId = session.paragraphs('body')[0]!.paraId) {
+  expect(api.getDocument()).not.toBeNull();
+  expect(api.getEditorRef()).toBe(editor);
+  const first = session.paragraphs('body')[0]!;
+  expect(api.findInDocument(first.text)).toContainEqual(expect.objectContaining({ paraId: first.paraId, match: first.text }));
+  expect(api.scrollToParaId(paraId)).toBe(true);
+  expect(editor.scrollToParaId).toHaveBeenCalledWith(paraId, undefined);
+  expect(reveals).toContain(editor.yrsLocToDisplayPosition({ story: 'body', paraId, offset: 0 }));
+  const last = session.paragraphs('body').at(-1)!;
+  const search = 'Replica contract';
+  let mutationParaId!: string;
+  act(() => {
+    const span = session.locateParagraph('body', last.paraId);
+    mutationParaId = session.splitParagraph({ story: 'body', paraId: last.paraId, offset: span.end - span.start }).secondParaId;
+    session.insertText({ story: 'body', paraId: mutationParaId, offset: 0 }, search);
+    session.setParagraphAttr(mutationParaId, 'pStyle', 'Heading1');
+  });
+  act(() => {
+    const comment = api.addComment({ paraId: mutationParaId, search, text: 'Check', author: 'Ann' });
+    expect(comment).toEqual(expect.any(Number));
+    expect(session.resolveComment(String(comment))).toContainEqual(expect.objectContaining({ story: 'body' }));
+    expect(api.applyFormatting({ paraId: mutationParaId, search, marks: { bold: true } })).toBe(true);
+    expect(session.storySegments('body')).toContainEqual(expect.objectContaining({
+      kind: 'text', text: search, attributes: expect.objectContaining({ bold: true }),
+    }));
+    expect(api.setParagraphStyle({ paraId: mutationParaId, styleId: 'Normal' })).toBe(true);
+    expect(session.paragraphs('body').find((entry) => entry.paraId === mutationParaId)!.properties.pStyle).toBe('Normal');
+    expect(api.proposeChange({ paraId: mutationParaId, search: '', replaceWith: 'Replica ready', author: 'Host' })).toBe(true);
+    expect(session.listRevisions()).toContainEqual(expect.objectContaining({
+      kind: 'insertion', author: 'Host', preview: 'Replica ready',
+    }));
+    const breaks = session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak').length;
+    expect(api.insertBreak({ paraId: mutationParaId, type: 'page' })).toBe(true);
+    expect(session.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak')).toHaveLength(breaks + 1);
+  });
 }
 
 function trackMainLoads() {
@@ -2546,7 +2610,7 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
   let session!: YrsSession;
   const { result, unmount } = renderHook(useHarness, {
     initialProps: {
-      ...initialProps, workerProposals: true, allowHostProposals: true,
+      ...initialProps, workerProposals: true, allowHostProposals: true, styleResolver: true,
       onHostDocument: (next) => { session = next; },
       onLoad: () => {
         expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(true);
@@ -2562,7 +2626,7 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
     const openingApi = result.current.ref.current!;
     const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
     expect(openingApi.getEditorRef()).toBeNull();
-    expectLoadingMutations(openingApi);
+    expectLoadingMutations(openingApi, result.current.pagedEditorRef.current!);
     expect(result.current.mainOpens).toEqual([]);
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
     expect(request).not.toHaveBeenCalled();
@@ -2572,6 +2636,7 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
     act(() => result.current.presentFrame());
     await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expectReadyMutations(openingApi, session, result.current.pagedEditorRef.current!, result.current.searchReveals);
     expect(openingApi.getEditorRef()?.getYrsSession()).toBe(session);
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
@@ -2650,7 +2715,7 @@ test('a failed worker-recovery main open keeps rendering pinned to the main engi
     const api = result.current.ref.current!;
     const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
     expect(api.getEditorRef()).toBeNull();
-    expectLoadingMutations(api);
+    expectLoadingMutations(api, result.current.pagedEditorRef.current!);
     expect(request).not.toHaveBeenCalled();
     expect(result.current.mainOpens).toEqual([]);
     expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
@@ -4183,7 +4248,7 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
   });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...workerProposalProps, viewer },
+    initialProps: { ...workerProposalProps, viewer, styleResolver: !viewer },
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -4213,7 +4278,7 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
       if (!viewer) {
         const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
         expect(api().getDocument()).toBeNull();
-        expectLoadingMutations(api());
+        expectLoadingMutations(api(), result.current.pagedEditorRef.current!, paragraph.paraId);
         expect(request).not.toHaveBeenCalled();
         expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
         expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
@@ -4242,6 +4307,7 @@ test.each([false, true])('a sync ref call during the first in-flight proposal ke
           await ready;
         }
       });
+      if (!viewer) expectReadyMutations(api(), session, result.current.pagedEditorRef.current!, result.current.searchReveals, paragraph.paraId);
       if (!viewer) expect(api().getDocument()).not.toBeNull();
       expect(result.current.core.replicaReady).toBe(!viewer);
       expect(workerOpenDocumentHeld(session)).toBe(viewer);
@@ -4275,7 +4341,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
   });
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, {
-    initialProps: { ...workerProposalProps, viewer: false },
+    initialProps: { ...workerProposalProps, viewer: false, styleResolver: true },
   });
   try {
     await waitFor(() => expect(result.current.host).not.toBeNull());
@@ -4314,12 +4380,13 @@ test('a failed first proposal leaves the replica fallback available', async () =
       expect(result.current.core.replicaReady).toBe(false);
       const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
       expect(api().getDocument()).toBeNull();
-      expectLoadingMutations(api());
+      expectLoadingMutations(api(), result.current.pagedEditorRef.current!, paragraph.paraId);
       expect(result.current.mainOpens).toEqual([]);
       expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
       expect(request).not.toHaveBeenCalled();
       expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
       act(() => { ensureWorkerOpenReplica(session); });
+      expectReadyMutations(api(), session, result.current.pagedEditorRef.current!, result.current.searchReveals, paragraph.paraId);
       expect(result.current.core.documentFromYrs()).not.toBeNull();
       expect(api().getDocument()).not.toBeNull();
       expect(result.current.mainOpens).toEqual([true]);

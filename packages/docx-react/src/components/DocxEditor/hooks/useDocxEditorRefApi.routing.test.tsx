@@ -1,11 +1,14 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { useRef } from 'react';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import type { Document } from '@betteroffice/docx/types/document';
 import type { DisplayList, DisplayListQueries } from '@betteroffice/docx/layout/render';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
-import { layoutMetaSummary, ResidentWorkerFailureError } from '@betteroffice/docx/yrs';
+import { createYrsSession, layoutMetaSummary, ResidentWorkerFailureError } from '@betteroffice/docx/yrs';
 import type {
   DocxContentControlsResult,
   DocxFindTextRequest,
@@ -38,8 +41,16 @@ import { DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotR
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook } = await import('@testing-library/react');
+const sessions: YrsSession[] = [];
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(
+  import.meta.dir, '../../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm'
+)))));
 beforeEach(resetDeprecatedViewerMembersForTests);
-afterEach(() => { cleanup(); mock.restore(); });
+afterEach(() => {
+  cleanup();
+  mock.restore();
+  for (const session of sessions.splice(0)) session.destroy();
+});
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 const INFO = { paraId: 'p', selectedText: 'hello', paragraphText: 'hello', before: '', after: '' };
@@ -220,7 +231,7 @@ function editorWorkerFor(host: ReturnType<typeof apiFor>) {
   return { ...resident, catchUp, read, result, owner, fail: (error: Error) => { failure = error; } };
 }
 
-function expectLoadingMutations(api: DocxEditorRef) {
+function expectLoadingMutations(api: DocxEditorRef, editor: PagedEditorRef) {
   const calls: Partial<Record<keyof DocxEditorRef, unknown[]>> = {
     addComment: [{ paraId: '00000001', search: 'paragraph', text: 'Check', author: 'Ann' }],
     proposeChange: [{ paraId: '00000001', search: 'paragraph', replaceWith: 'text', author: 'Host' }],
@@ -233,6 +244,55 @@ function expectLoadingMutations(api: DocxEditorRef) {
     if (!args) throw new Error(`Missing loading mutation: ${member}`);
     expect(() => Reflect.apply(api[member] as Function, api, args)).toThrow(DocxReplicaNotReadyError);
   }
+  const session = editor.getYrsSession()!;
+  const navigate = spyOn(editor, 'scrollToParaId');
+  expect(api.getDocument()).toBeNull();
+  expect(api.getEditorRef()).toBeNull();
+  expect(api.findInDocument('hello')).toEqual([]);
+  expect(api.scrollToParaId('p')).toBe(false);
+  expect(navigate).not.toHaveBeenCalled();
+  expect(workerOpenReplica.workerOpenReplicaStarted(session)).toBe(false);
+  expect(workerOpenReplica.workerOpenReplicaPending(session)).toBe(true);
+}
+
+async function expectReadyMutations(host: ReturnType<typeof apiFor>) {
+  const { api, session, editor } = host;
+  const backend = await createYrsSession();
+  sessions.push(backend);
+  const search = 'paragraph';
+  const { paraId } = backend.createStory('body', search, 'Heading1');
+  const paragraphs = session.paragraphs('body');
+  spyOn(session, 'paragraphs').mockImplementation(() => [...paragraphs, ...backend.paragraphs('body')]);
+  spyOn(session, 'locateParagraph').mockImplementation((story, id) => id === paraId
+    ? backend.locateParagraph(story, id)
+    : { start: 0, end: 5 });
+  spyOn(session, 'version').mockImplementation(backend.version);
+  spyOn(session, 'commentTextTarget').mockImplementation(backend.commentTextTarget);
+  spyOn(session, 'formatTextTarget').mockImplementation(backend.formatTextTarget);
+  spyOn(session, 'applyParagraphStyle').mockImplementation(backend.applyParagraphStyle);
+  spyOn(session, 'applyEdits').mockImplementation(backend.applyEdits);
+  spyOn(session, 'insertPageBreak').mockImplementation(backend.insertPageBreak);
+  expect(api.getDocument()).toBe(editor.getDocument());
+  expect(api.getEditorRef()).toBe(editor);
+  expect(api.findInDocument('hello')).toEqual(MATCHES);
+  expect(api.scrollToParaId('p')).toBe(true);
+  expect(editor.scrollToParaId).toHaveBeenCalledWith('p', undefined);
+  act(() => {
+    const comment = api.addComment({ paraId, search, text: 'Check', author: 'Ann' });
+    expect(comment).toEqual(expect.any(Number));
+    expect(backend.resolveComment(String(comment))).toEqual([{ story: 'body', start: 0, end: search.length }]);
+    expect(api.applyFormatting({ paraId, search, marks: { bold: true } })).toBe(true);
+    expect(backend.storySegments('body')).toContainEqual(expect.objectContaining({
+      kind: 'text', text: search, attributes: expect.objectContaining({ bold: true }),
+    }));
+    expect(api.setParagraphStyle({ paraId, styleId: 'Normal' })).toBe(true);
+    expect(session.paragraphs('body').find((entry) => entry.paraId === paraId)!.properties.pStyle).toBe('Normal');
+    expect(api.proposeChange({ paraId, search, replaceWith: 'text', author: 'Host' })).toBe(true);
+    expect(backend.listRevisions()).toContainEqual(expect.objectContaining({ kind: 'insertion', author: 'Host', preview: 'text' }));
+    const breaks = backend.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak').length;
+    expect(api.insertBreak({ paraId, type: 'page' })).toBe(true);
+    expect(backend.storySegments('body').filter((entry) => entry.kind === 'embed' && entry.embedKind === 'pageBreak')).toHaveLength(breaks + 1);
+  });
 }
 
 function expectNoReplica(host: ReturnType<typeof apiFor>) {
@@ -887,7 +947,7 @@ for (const [member, args, use] of [
     }) as unknown as Layout;
     host.pagedEditorRef.current!.displayPositionToYrsLoc = () => ({ story: 'body', paraId: 'p', offset: 0 });
     expect(Reflect.apply(host.api[member], host.api, args)).toEqual(member === 'findInDocument' ? [] : null);
-    expectLoadingMutations(host.api);
+    expectLoadingMutations(host.api, host.pagedEditorRef.current!);
     expect(host.replica!.started).toBe(false);
     expect(host.request).toHaveBeenCalledTimes(1);
     expect(request).not.toHaveBeenCalled();
@@ -897,6 +957,7 @@ for (const [member, args, use] of [
     expect(warning).toHaveBeenCalledTimes(1);
     replica.start();
     await act(async () => { await replica.ready; });
+    await expectReadyMutations(host);
     expect(Reflect.apply(host.api[member], host.api, args)).toEqual(
       member === 'getDocument' ? host.editor.getDocument() : member === 'findInDocument' ? MATCHES : {
         pageNumber: 1, text: '[p] hello', paragraphs: [{ paraId: 'p', text: 'hello' }],

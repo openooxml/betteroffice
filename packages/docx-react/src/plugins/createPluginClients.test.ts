@@ -289,8 +289,28 @@ function pendingPluginReplica(env: Awaited<ReturnType<typeof setup>>) {
   });
   const fallback = mock(() => { throw new Error('unexpected replica fallback'); });
   const replica = workerOpenReplica.deferWorkerOpenReplica(env.session, hydrate, fallback, () => {});
-  restoreWorkers.push(() => replica.cancel());
-  return { replica, hydrate, fallback, release };
+  const start = spyOn(replica, 'start');
+  const ensure = spyOn(replica, 'ensure');
+  const requestReady = spyOn(replica, 'requestReady');
+  restoreWorkers.push(() => {
+    start.mockRestore();
+    ensure.mockRestore();
+    requestReady.mockRestore();
+    replica.cancel();
+  });
+  return { replica, hydrate, fallback, release, start, ensure, requestReady };
+}
+
+async function expectPluginPending(result: Promise<unknown>, pending: ReturnType<typeof pendingPluginReplica>) {
+  let settled = false;
+  void result.then(() => { settled = true; }, () => { settled = true; });
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve();
+  expect(settled).toBe(false);
+  expect(pending.replica.pending).toBe(true);
+  expect(pending.replica.started).toBe(false);
+  expect(pending.start).not.toHaveBeenCalled();
+  expect(pending.ensure).not.toHaveBeenCalled();
+  expect(pending.requestReady).not.toHaveBeenCalled();
 }
 
 describe('plugin edit client', () => {
@@ -621,9 +641,13 @@ describe('plugin read and navigation clients', () => {
     expect(pending.hydrate).not.toHaveBeenCalled();
     expect(pending.fallback).not.toHaveBeenCalled();
     expect(env.events).toEqual([]);
+    await expectPluginPending(scroll, pending);
+    expect(env.session.selection()?.head).not.toEqual(expect.objectContaining(target));
     pending.replica.start();
     pending.release();
     expect(await scroll).toEqual({ ok: true });
+    expect(pending.replica.pending).toBe(false);
+    expect(pending.start).toHaveBeenCalledTimes(1);
     expect(env.events).toEqual(['scroll:42', 'sync:false:*', 'focus']);
     expect(env.session.selection()?.head).toMatchObject({ ...target, offset: 0 });
     expect(pending.hydrate).toHaveBeenCalledTimes(1);
@@ -785,9 +809,17 @@ describe('plugin read and navigation clients', () => {
     expect(pending.replica.started).toBe(false);
     expect(pending.hydrate).not.toHaveBeenCalled();
     expect(pending.fallback).not.toHaveBeenCalled();
+    await expectPluginPending(found, pending);
+    expect(env.events).toEqual([]);
     pending.replica.start();
     pending.release();
     expect(await found).toMatchObject({ ok: true });
+    expect(await found).toEqual(env.session.findText({
+      text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    }));
+    expect(await found).toMatchObject({ matches: [expect.objectContaining({ text: 'Tail' })] });
+    expect(pending.replica.pending).toBe(false);
+    expect(pending.start).toHaveBeenCalledTimes(1);
     expect(worker.replica).not.toHaveBeenCalled();
     expect(pending.hydrate).toHaveBeenCalledTimes(1);
     expect(pending.fallback).not.toHaveBeenCalled();
@@ -913,6 +945,7 @@ describe('plugin read and navigation clients', () => {
     expect(pending.replica.started).toBe(false);
     expect(pending.hydrate).not.toHaveBeenCalled();
     expect(worker.flush).not.toHaveBeenCalled();
+    await expectPluginPending(found, pending);
     env.pagedEditorRef.current = null;
     pending.replica.start();
     pending.release();
@@ -920,6 +953,23 @@ describe('plugin read and navigation clients', () => {
     expect(worker.flush).not.toHaveBeenCalled();
     expect(worker.replica).not.toHaveBeenCalled();
     expect(pending.fallback).not.toHaveBeenCalled();
+    env.pagedEditorRef.current = env.editor;
+    const replacement = pendingPluginReplica(env);
+    const request = { text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted' } as const;
+    const successful = env.clients.read.findText(request);
+    expect(worker.ready).toHaveBeenCalledTimes(2);
+    await expectPluginPending(successful, replacement);
+    expect(env.events).toEqual([]);
+    replacement.replica.start();
+    replacement.release();
+    expect(await successful).toEqual(env.session.findText(request));
+    expect(await successful).toMatchObject({ ok: true, matches: [expect.objectContaining({ text: 'Tail' })] });
+    expect(replacement.replica.pending).toBe(false);
+    expect(replacement.start).toHaveBeenCalledTimes(1);
+    expect(replacement.hydrate).toHaveBeenCalledTimes(1);
+    expect(replacement.fallback).not.toHaveBeenCalled();
+    expect(worker.replica).not.toHaveBeenCalled();
+    expect(env.events).toEqual(['flush']);
   });
 
   test.each(['search', 'focus navigation'] as const)(

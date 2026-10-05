@@ -145,6 +145,7 @@ const PREVIEW_PARAGRAPH_BUDGET = 256;
 const PREVIEW_PAINT_TIMEOUT_MS = 2000;
 /** Bounds the wait for the painted preview to reach the screen; hidden tabs get no frames. */
 const PREVIEW_FRAME_WAIT_MS = 100;
+const REPLICA_FRAME_WAIT_MS = 1000;
 /**
  * How long a preview waits for the full session, from the end of its own
  * paint. A full open that has not produced one by then fails the load; once
@@ -990,12 +991,14 @@ export function useYrsCoreSession(
     ) return;
     const visibilityDocument = globalThis.document;
     const controller = new AbortController();
+    let frameId: number | null = null;
     let idleId: number | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const cleanup = (): void => {
       controller.abort();
       clearTimeout(fallbackTimer);
       if (timer !== null) clearTimeout(timer);
+      if (frameId !== null) cancelAnimationFrame(frameId);
       if (idleId !== null) cancelIdleCallback(idleId);
       visibilityDocument?.removeEventListener('visibilitychange', onVisibilityChange);
     };
@@ -1016,6 +1019,18 @@ export function useYrsCoreSession(
       workerOpen?.pendingCompletion !== session &&
       (!handoffFrom || options?.shownEngine === session)
     ) {
+      if (registeredWorkerProposalAuthority(session)) {
+        timer = setTimeout(startPeer, REPLICA_FRAME_WAIT_MS);
+        if (typeof requestAnimationFrame === 'function') {
+          frameId = requestAnimationFrame(() => {
+            frameId = requestAnimationFrame(startPeer);
+          });
+        } else {
+          clearTimeout(timer);
+          timer = setTimeout(startPeer, 0);
+        }
+        return cleanup;
+      }
       const settled = workerOpenRef.current?.settledDisplayList?.(
         null, null, 'window', controller.signal, () => {
           if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
