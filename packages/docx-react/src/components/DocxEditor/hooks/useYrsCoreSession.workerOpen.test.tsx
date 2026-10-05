@@ -7963,7 +7963,7 @@ async function expectPluginOwnerFallback(
     expect(env.load).toHaveBeenCalledTimes(1);
     expect(result.current.mainOpens).toEqual([false]);
     expect(result.current.core.session).toBe(session);
-    expect([null, session]).toContain(result.current.renderer.layoutCompleteSession);
+    expect<unknown[]>([null, session]).toContain(result.current.renderer.layoutCompleteSession);
     expect(result.current.errors).toEqual([]);
     expectPassiveCall();
     await complete(outcomes.map((outcome) => outcome.value), env);
