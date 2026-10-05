@@ -28,6 +28,8 @@ use crate::patch::{SheetPatch, SourceStyles, StyleMatch};
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
+mod source_coordinates;
+
 /// A saved workbook's parts: generated entries are owned, entries the source
 /// package already held are borrowed from it.
 #[doc(hidden)]
@@ -402,7 +404,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             Some(source) if source.is_worksheet() => {
                 if shared_strings_stable
                     && original.is_some_and(|original| {
-                        sheet_body_matches(sheet, original, axes, &style_match)
+                        package.part_bytes(&source.path).is_some_and(|bytes| {
+                            sheet_body_matches(sheet, original, bytes, axes, &style_match)
+                        })
                     })
                 {
                     continue;
@@ -878,10 +882,11 @@ impl HyperlinkPlan {
 fn sheet_body_matches(
     sheet: &Sheet,
     original: &Sheet,
+    source: &[u8],
     axes: Option<&SheetAxes>,
     styles: &StyleMatch<'_>,
 ) -> bool {
-    if axes.is_some_and(|axes| !axes.is_identity()) {
+    if axes.is_some_and(|axes| !source_coordinates::unchanged(source, axes)) {
         return false;
     }
     sheet.freeze_pane == original.freeze_pane
@@ -890,11 +895,14 @@ fn sheet_body_matches(
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
         && sheet.array_formulas().eq(original.array_formulas())
-        && if axes.is_some_and(SheetAxes::is_identity) {
+        && if let Some(axes) = axes {
             let mut sources = original.iter_cells();
             sheet.iter_cells().all(|(at, cell)| {
                 sources.next().is_some_and(|(source, original)| {
-                    at == source && styles.same_cell(original, cell)
+                    at == source
+                        && axes.rows.current(source.row) == Some(source.row)
+                        && axes.cols.current(source.col) == Some(source.col)
+                        && styles.same_cell(original, cell)
                 })
             }) && sources.next().is_none()
         } else {
@@ -2527,7 +2535,10 @@ fn patched_grid(
         )
         .ok()?;
     let sheet_data = match source.template.child("sheetData") {
-        Some(child) => patch.sheet_data(&child.bytes).ok()?,
+        Some(child) => patch.sheet_data(&child.bytes).ok()?.or_else(|| {
+            let explicit = source_coordinates::explicit_rows(&child.bytes, axes).ok()??;
+            patch.sheet_data(&explicit).ok()?
+        }),
         None => None,
     }
     .or_else(|| {
