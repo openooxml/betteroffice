@@ -203,16 +203,23 @@ describe('workbook calculation context', () => {
       expect(draws.some((draw) => JSON.stringify(draw) !== JSON.stringify(pinned[3]))).toBe(true);
       const cached = values(handle)[0];
       expect(cached).toMatchObject({ kind: 'number' });
-      const result = handle.applyEdits(request(handle, '7'));
-      expect(result.ok).toBe(true);
-      if (!result.ok) throw new Error(result.failure.message);
-      expect(result.applied).toBe(true);
+      expect(handle.applyEdits(request(handle, '7')).ok).toBe(true);
       expect(values(handle)[0]).toEqual(cached);
       const read = handle.readCells({
         ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'Y40:Z40' } }],
       });
       if (!read.ok) throw new Error(read.failure.message);
       expect(read.ranges[0].cells[0].map((cell) => cell.value)).toEqual([
+        { kind: 'number', value: 7 },
+        { kind: 'number', value: 7 },
+      ]);
+      handle.setCalculationContext(CONTEXT);
+      expect(handle.editCell(0, 39, 23, '1').applied).toBe(true);
+      const clocked = handle.readCells({
+        ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'Y40:Z40' } }],
+      });
+      if (!clocked.ok) throw new Error(clocked.failure.message);
+      expect(clocked.ranges[0].cells[0].map((cell) => cell.value)).toEqual([
         { kind: 'number', value: 8 },
         { kind: 'number', value: 7 },
       ]);

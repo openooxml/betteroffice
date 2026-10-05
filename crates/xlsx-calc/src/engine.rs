@@ -58,7 +58,18 @@ pub fn recalc_after_with_seed(
     now_serial: Option<f64>,
     rand_seed: Option<u32>,
 ) -> RecalcResult {
-    let recompute = collect_recompute(graph, dirty_seeds);
+    let Some(full) = graph.begin_recalculation(now_serial) else {
+        return RecalcResult {
+            changed: Vec::new(),
+            cycle_cells: Vec::new(),
+            limited_cells: Vec::new(),
+        };
+    };
+    let recompute = if full {
+        graph.formula_cells().map(|(s, c)| key(s, c)).collect()
+    } else {
+        collect_recompute(graph, dirty_seeds)
+    };
     let context = RecalcContext {
         now_serial,
         rand_seed,
@@ -82,6 +93,16 @@ pub fn rebuild_and_recalc_all_with_seed(
     rand_seed: Option<u32>,
 ) -> (DepGraph, RecalcResult) {
     let mut graph = DepGraph::build(wb);
+    if graph.begin_recalculation(now_serial).is_none() {
+        return (
+            graph,
+            RecalcResult {
+                changed: Vec::new(),
+                cycle_cells: Vec::new(),
+                limited_cells: Vec::new(),
+            },
+        );
+    }
     let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
     let context = RecalcContext {
         now_serial,
@@ -143,13 +164,7 @@ fn run_recalc(
     context: RecalcContext,
 ) -> RecalcResult {
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
-    let mut changed = CalculationWrites::new(context.now_serial.is_none());
-    let (static_seeds, dynamic) = if context.now_serial.is_none() {
-        graph.clockless_seeds()
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let mut seeds: HashSet<Key> = static_seeds.into_iter().map(|(s, c)| key(s, c)).collect();
+    let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
     let mut limited_cells = Vec::new();
     let mut cycle_cells: Vec<(SheetId, CellRef)> = Vec::new();
     let mut pending = recompute;
@@ -158,14 +173,13 @@ fn run_recalc(
         let (order, cycle) = topo_order(graph, &pending);
         let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
         for u in &order {
-            let (value, limited) =
-                eval_node(wb, *u, context, Rc::clone(&budget), graph, &mut seeds);
+            let (value, limited) = eval_node(wb, *u, context, Rc::clone(&budget), graph);
             if limited {
                 limited_cells.push((u.0, cell_of(*u)));
             }
             match value {
                 Some(NodeValue::Scalar(value)) => {
-                    if write_if_changed(wb, *u, value, &mut changed) {
+                    if write_if_changed(wb, *u, value) {
                         changed.push((u.0, cell_of(*u)));
                     }
                 }
@@ -192,10 +206,9 @@ fn run_recalc(
             &budget,
             &mut changed,
             &mut limited_cells,
-            &mut seeds,
         );
         for u in &circular {
-            if write_if_changed(wb, *u, circular_value(wb, *u), &mut changed) {
+            if write_if_changed(wb, *u, circular_value(wb, *u)) {
                 changed.push((u.0, cell_of(*u)));
             }
             cycle_cells.push((u.0, cell_of(*u)));
@@ -209,12 +222,6 @@ fn run_recalc(
         }
     }
 
-    if !seeds.is_empty() {
-        seeds.extend(dynamic.into_iter().map(|(s, c)| key(s, c)));
-        let withheld = withheld_closure(wb, graph, &changed, seeds);
-        changed.restore(wb, &withheld);
-    }
-    let mut changed = changed.cells;
     changed.sort_by(sort_key);
     changed.dedup();
     RecalcResult {
@@ -222,120 +229,6 @@ fn run_recalc(
         cycle_cells,
         limited_cells,
     }
-}
-
-#[derive(Default)]
-struct SavedCalculation {
-    values: HashMap<Key, Option<Cell>>,
-    ranges: HashMap<Key, (Option<CellRange>, Vec<CellRange>)>,
-}
-
-struct CalculationWrites {
-    cells: Vec<(SheetId, CellRef)>,
-    saved: Option<SavedCalculation>,
-}
-
-impl CalculationWrites {
-    fn new(clockless: bool) -> Self {
-        Self {
-            cells: Vec::new(),
-            saved: clockless.then(SavedCalculation::default),
-        }
-    }
-
-    fn push(&mut self, cell: (SheetId, CellRef)) {
-        self.cells.push(cell);
-    }
-
-    fn restore(&mut self, wb: &mut Workbook, withheld: &HashSet<Key>) {
-        let Some(saved) = self.saved.take() else {
-            return;
-        };
-        for (u, value) in saved.values {
-            if withheld.contains(&u)
-                && let Some(sheet) = wb.sheet_mut(u.0)
-            {
-                sheet.set_cell(cell_of(u), value.unwrap_or_default());
-            }
-        }
-        for (u, (previous, _)) in saved.ranges {
-            if withheld.contains(&u)
-                && let Some(sheet) = wb.sheet_mut(u.0)
-            {
-                match previous {
-                    Some(range) => sheet.set_array_formula(cell_of(u), range),
-                    None => sheet.clear_array_formula(cell_of(u)),
-                }
-            }
-        }
-        self.cells
-            .retain(|&(sheet, cell)| !withheld.contains(&key(sheet, cell)));
-    }
-}
-
-fn withheld_closure(
-    wb: &Workbook,
-    graph: &DepGraph,
-    writes: &CalculationWrites,
-    mut withheld: HashSet<Key>,
-) -> HashSet<Key> {
-    let mut points: HashMap<SheetId, BTreeMap<RowId, BTreeMap<ColId, Key>>> = HashMap::new();
-    for (sheet, cell) in graph.formula_cells() {
-        points
-            .entry(sheet)
-            .or_default()
-            .entry(cell.row)
-            .or_default()
-            .insert(cell.col, key(sheet, cell));
-    }
-    let mut ranges = Vec::new();
-    for (index, sheet) in wb.sheets.iter().enumerate() {
-        for (anchor, range) in sheet.array_formulas() {
-            ranges.push((key(SheetId(index as u32), anchor), range));
-        }
-    }
-    if let Some(saved) = &writes.saved {
-        for (&u, (previous, produced)) in &saved.ranges {
-            ranges.extend(previous.iter().chain(produced).map(|range| (u, *range)));
-        }
-    }
-    let mut reverse: HashMap<Key, Vec<Key>> = HashMap::new();
-    for (anchor, range) in ranges {
-        for (row, col) in cells_of(range) {
-            let member = (anchor.0, row, col);
-            points
-                .entry(anchor.0)
-                .or_default()
-                .entry(row)
-                .or_default()
-                .insert(col, member);
-            if member != anchor {
-                reverse.entry(anchor).or_default().push(member);
-            }
-        }
-    }
-    for (sheet, range, owner_sheet, owner_cell) in graph.edges() {
-        let Some(rows) = points.get(&sheet) else {
-            continue;
-        };
-        let dependent = key(owner_sheet, owner_cell);
-        for (_, columns) in rows.range(range.start.row..=range.end.row) {
-            for (_, &precedent) in columns.range(range.start.col..=range.end.col) {
-                reverse.entry(precedent).or_default().push(dependent);
-            }
-        }
-    }
-    let mut pending: Vec<Key> = withheld.iter().copied().collect();
-    while let Some(u) = pending.pop() {
-        if let Some(dependents) = reverse.get(&u) {
-            for &dependent in dependents {
-                if withheld.insert(dependent) {
-                    pending.push(dependent);
-                }
-            }
-        }
-    }
-    withheld
 }
 
 /// formula cells that transitively read any of `seeds`.
@@ -467,16 +360,14 @@ enum NodeValue {
 /// even though no cell reads itself. settle what the reads really allow: a
 /// cell whose evaluation touches nothing still unsettled was never in a
 /// cycle. what is left over is.
-#[allow(clippy::too_many_arguments)]
 fn settle_deferred(
     wb: &mut Workbook,
     cycle: &[Key],
     graph: &DepGraph,
     context: RecalcContext,
     budget: &Rc<EvaluationBudget>,
-    changed: &mut CalculationWrites,
+    changed: &mut Vec<(SheetId, CellRef)>,
     limited_cells: &mut Vec<(SheetId, CellRef)>,
-    seeds: &mut HashSet<Key>,
 ) -> Vec<Key> {
     if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
         return cycle.to_vec();
@@ -493,8 +384,7 @@ fn settle_deferred(
                 watch: &unsettled,
                 touched: Flag::new(false),
             };
-            let (value, limited) =
-                eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph, seeds);
+            let (value, limited) = eval_node_with(&log, wb, *u, context, Rc::clone(budget), graph);
             // a spill rewrites a rectangle, which the ordered pass owns
             if log.touched.get() || matches!(value, Some(NodeValue::Spill(_) | NodeValue::Refused))
             {
@@ -506,7 +396,7 @@ fn settle_deferred(
                 limited_cells.push((u.0, cell_of(*u)));
             }
             if let Some(NodeValue::Scalar(value)) = value
-                && write_if_changed(wb, *u, value, changed)
+                && write_if_changed(wb, *u, value)
             {
                 changed.push((u.0, cell_of(*u)));
             }
@@ -597,14 +487,12 @@ fn eval_node(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
-    seeds: &mut HashSet<Key>,
 ) -> (Option<NodeValue>, bool) {
-    eval_node_with(wb, wb, u, context, budget, graph, seeds)
+    eval_node_with(wb, wb, u, context, budget, graph)
 }
 
 /// evaluate one node, reading cells through `provider` while `wb` supplies the
 /// formula's own shape.
-#[allow(clippy::too_many_arguments)]
 fn eval_node_with(
     provider: &dyn CellProvider,
     wb: &Workbook,
@@ -612,7 +500,6 @@ fn eval_node_with(
     context: RecalcContext,
     budget: Rc<EvaluationBudget>,
     graph: &DepGraph,
-    seeds: &mut HashSet<Key>,
 ) -> (Option<NodeValue>, bool) {
     let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
@@ -629,9 +516,6 @@ fn eval_node_with(
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
-    if ctx.has_missing_clock() {
-        seeds.insert(u);
-    }
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
     if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
@@ -683,12 +567,12 @@ fn circular_value(wb: &Workbook, u: Key) -> CellValue {
 
 /// show an array formula the budget refused: an uncached anchor shows `#NUM!`,
 /// and a cached one, like the rest of its rectangle, keeps what it had.
-fn refuse(wb: &mut Workbook, u: Key, changed: &mut CalculationWrites) {
+fn refuse(wb: &mut Workbook, u: Key, changed: &mut Vec<(SheetId, CellRef)>) {
     let refused = CellValue::Error {
         value: ErrorValue::Num,
     };
     if matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty)
-        && write_if_changed(wb, u, refused, changed)
+        && write_if_changed(wb, u, refused)
     {
         changed.push((u.0, cell_of(u)));
     }
@@ -703,7 +587,7 @@ fn write_spill(
     u: Key,
     spill: Spill,
     budget: &EvaluationBudget,
-    changed: &mut CalculationWrites,
+    changed: &mut Vec<(SheetId, CellRef)>,
 ) -> Option<Vec<(SheetId, CellRef)>> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
@@ -733,20 +617,12 @@ fn write_spill(
     }
     for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
-            if write_if_changed(wb, (u.0, row, col), value, changed) {
+            if write_if_changed(wb, (u.0, row, col), value) {
                 changed.push((u.0, anchor));
             }
             continue;
         }
         write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
-    }
-    if let Some(saved) = &mut changed.saved {
-        saved
-            .ranges
-            .entry(u)
-            .or_insert((previous, Vec::new()))
-            .1
-            .push(range);
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
         sheet.set_array_formula(anchor, range);
@@ -827,13 +703,13 @@ fn write_spilled_cell(
     wb: &mut Workbook,
     u: Key,
     value: CellValue,
-    changed: &mut CalculationWrites,
+    changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
 ) {
     if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
-    if write_if_changed(wb, u, value, changed) {
+    if write_if_changed(wb, u, value) {
         changed.push((u.0, cell_of(u)));
         moved.push((u.0, cell_of(u)));
     }
@@ -846,21 +722,9 @@ fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
 
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
-fn write_if_changed(
-    wb: &mut Workbook,
-    u: Key,
-    value: CellValue,
-    changed: &mut CalculationWrites,
-) -> bool {
+fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
     if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
-    }
-    if let Some(saved) = &mut changed.saved {
-        saved.values.entry(u).or_insert_with(|| {
-            wb.sheet(u.0)
-                .and_then(|sheet| sheet.cell(cell_of(u)))
-                .cloned()
-        });
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
         let at = cell_of(u);
@@ -946,6 +810,29 @@ mod tests {
                 style: None,
             },
         );
+    }
+
+    #[test]
+    fn pending_clockless_gate_clears_after_full_recalculation() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 1.0);
+        put_cached_formula(&mut wb, s, "B1", "TODAY()", num(45_000.0));
+        put_cached_formula(&mut wb, s, "C1", "A1+1", num(99.0));
+        put_cached_formula(&mut wb, s, "D1", "1+1", num(99.0));
+        let mut graph = DepGraph::build(&wb);
+        put_num(&mut wb, s, "A1", 7.0);
+        let skipped = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        assert!(skipped.changed.is_empty());
+        assert_eq!(value(&wb, s, "C1"), num(99.0));
+        assert_eq!(value(&wb, s, "D1"), num(99.0));
+        put_num(&mut wb, s, "Z1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("Z1"))], Some(45_000.0));
+        assert_eq!(value(&wb, s, "C1"), num(8.0));
+        assert_eq!(value(&wb, s, "D1"), num(2.0));
+        put_cached_formula(&mut wb, s, "D1", "1+1", num(99.0));
+        put_num(&mut wb, s, "Z1", 2.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("Z1"))], Some(45_000.0));
+        assert_eq!(value(&wb, s, "D1"), num(99.0));
     }
 
     /// producers mark the interior of a spilled rectangle with an empty
@@ -1273,386 +1160,6 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(4.0));
     }
 
-    #[test]
-    fn clockless_uncached_dependents_keep_their_source_caches() {
-        for cached in [num(45_001.0), CellValue::Empty] {
-            let (mut wb, s) = one_sheet();
-            put_formula(&mut wb, s, "A1", "TODAY()");
-            put_cached_formula(&mut wb, s, "B1", "A1+1", cached.clone());
-            put_cached_formula(&mut wb, s, "C1", "B1+1", num(99.0));
-            put_cached_formula(&mut wb, s, "D1", "SUM(A1:A1)+1", num(45_001.0));
-            put_formula(&mut wb, s, "E1", "ANCHORARRAY(A1)+1");
-            put_cached_formula(&mut wb, s, "F1", "Z1+1", num(99.0));
-            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "B1"), cached);
-            assert_eq!(value(&wb, s, "C1"), num(99.0));
-            assert_eq!(value(&wb, s, "D1"), num(45_001.0));
-            assert_eq!(value(&wb, s, "E1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "F1"), num(99.0));
-            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-            assert!(result.limited_cells.is_empty());
-            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "B1"), cached);
-            assert_eq!(value(&wb, s, "C1"), num(99.0));
-            assert_eq!(value(&wb, s, "D1"), num(45_001.0));
-            assert_eq!(value(&wb, s, "E1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "F1"), num(1.0));
-        }
-    }
-
-    #[test]
-    fn clockless_cached_precedents_keep_all_downstream_caches() {
-        let (mut wb, s) = one_sheet();
-        put_cached_formula(&mut wb, s, "A1", "TODAY()", num(45_000.0));
-        put_cached_formula(&mut wb, s, "B1", "A1+1", num(99.0));
-        put_formula(&mut wb, s, "C1", "B1+1");
-        assert_eq!(value(&wb, s, "A1"), num(45_000.0));
-        assert_eq!(value(&wb, s, "B1"), num(99.0));
-        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "A1"), num(45_000.0));
-        assert_eq!(value(&wb, s, "B1"), num(99.0));
-        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
-        assert!(result.changed.is_empty());
-    }
-
-    #[test]
-    fn clockless_cycles_keep_cached_and_uncached_values() {
-        for cached in [num(45_000.0), CellValue::Empty] {
-            let (mut wb, s) = one_sheet();
-            put_cached_formula(&mut wb, s, "A1", "A1+IFERROR(TODAY(),0)", cached.clone());
-            put_cached_formula(&mut wb, s, "B1", "C1+1", cached.clone());
-            put_cached_formula(&mut wb, s, "C1", "B1+IFERROR(TODAY(),0)", cached.clone());
-            for address in ["A1", "B1", "C1"] {
-                assert_eq!(value(&wb, s, address), cached);
-            }
-            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-            assert!(result.limited_cells.is_empty());
-            assert_eq!(value(&wb, s, "A1"), cached);
-            assert_eq!(value(&wb, s, "C1"), cached);
-            assert_eq!(value(&wb, s, "B1"), cached);
-            assert!(result.cycle_cells.contains(&(s, a1("A1"))));
-        }
-    }
-
-    #[test]
-    fn clockless_circular_array_anchors_keep_cached_and_uncached_values() {
-        for cached in [num(45_000.0), CellValue::Empty] {
-            let (mut wb, s) = one_sheet();
-            put_cached_formula(&mut wb, s, "A1", "A1+IFERROR(TODAY(),0)", cached.clone());
-            wb.sheet_mut(s)
-                .unwrap()
-                .set_array_formula(a1("A1"), CellRange::parse_a1("A1:B1").unwrap());
-            put_num(&mut wb, s, "B1", 45_001.0);
-            assert_eq!(value(&wb, s, "A1"), cached);
-            assert_eq!(value(&wb, s, "B1"), num(45_001.0));
-            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-            assert!(result.changed.is_empty());
-            assert_eq!(value(&wb, s, "A1"), cached);
-            assert_eq!(value(&wb, s, "B1"), num(45_001.0));
-            assert_eq!(
-                wb.sheet(s).unwrap().array_formula(a1("A1")),
-                Some(CellRange::parse_a1("A1:B1").unwrap())
-            );
-        }
-    }
-
-    #[test]
-    fn clockless_large_cycles_keep_clock_caches_and_uncached_dependents() {
-        let (mut wb, s) = one_sheet();
-        for row in 1..=MAX_DEFERRED_CYCLE_CELLS + 1 {
-            let address = format!("A{row}");
-            let cached = if row % 2 == 0 {
-                CellValue::Empty
-            } else {
-                num(45_000.0)
-            };
-            put_cached_formula(
-                &mut wb,
-                s,
-                &address,
-                &format!("{address}+IFERROR(TODAY(),0)"),
-                cached.clone(),
-            );
-            assert_eq!(value(&wb, s, &address), cached);
-        }
-        put_cached_formula(&mut wb, s, "B1", "B1+1", num(99.0));
-        put_formula(&mut wb, s, "C1", "D1+1");
-        put_formula(&mut wb, s, "D1", "D1+IFERROR(TODAY(),0)");
-        put_cached_formula(&mut wb, s, "E1", "C1+1", num(45_002.0));
-        assert_eq!(value(&wb, s, "B1"), num(99.0));
-        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
-        assert_eq!(value(&wb, s, "D1"), CellValue::Empty);
-        assert_eq!(value(&wb, s, "E1"), num(45_002.0));
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert!(result.limited_cells.is_empty());
-        assert_eq!(result.changed, vec![(s, a1("B1"))]);
-        for row in 1..=MAX_DEFERRED_CYCLE_CELLS + 1 {
-            assert_eq!(
-                value(&wb, s, &format!("A{row}")),
-                if row % 2 == 0 {
-                    CellValue::Empty
-                } else {
-                    num(45_000.0)
-                }
-            );
-        }
-        assert_eq!(value(&wb, s, "B1"), num(0.0));
-        assert_eq!(value(&wb, s, "C1"), CellValue::Empty);
-        assert_eq!(value(&wb, s, "D1"), CellValue::Empty);
-        assert_eq!(value(&wb, s, "E1"), num(45_002.0));
-    }
-
-    #[test]
-    fn clockless_deferred_dependents_keep_cached_and_uncached_values() {
-        for cached in [num(45_001.0), CellValue::Empty] {
-            let (mut wb, s) = one_sheet();
-            put_formula(&mut wb, s, "A1", "TODAY()");
-            put_cached_formula(&mut wb, s, "B1", "INDEX(A1:B1,1,1)+1", cached.clone());
-            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "B1"), cached);
-            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-            assert!(result.changed.is_empty());
-            assert!(result.cycle_cells.is_empty());
-            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "B1"), cached);
-        }
-    }
-
-    #[test]
-    fn clockless_name_expansion_keeps_caches_within_the_shared_budget() {
-        let (mut wb, s) = one_sheet();
-        wb.defined_names.push(DefinedName {
-            name: "N_0".into(),
-            formula: "1".into(),
-            local_sheet: None,
-            hidden: false,
-        });
-        for index in 1..=20 {
-            wb.defined_names.push(DefinedName {
-                name: format!("N_{index}"),
-                formula: format!("N_{}+N_{}", index - 1, index - 1),
-                local_sheet: None,
-                hidden: false,
-            });
-        }
-        for row in 1..=10 {
-            let cached = if row % 2 == 0 {
-                CellValue::Empty
-            } else {
-                num(99.0)
-            };
-            put_cached_formula(
-                &mut wb,
-                s,
-                &format!("A{row}"),
-                "IFERROR(TODAY(),0)+N_20",
-                cached.clone(),
-            );
-            assert_eq!(value(&wb, s, &format!("A{row}")), cached);
-        }
-        put_cached_formula(&mut wb, s, "B1", "1+1", num(99.0));
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert!(result.limited_cells.is_empty());
-        assert_eq!(result.changed, vec![(s, a1("B1"))]);
-        for row in 1..=10 {
-            assert_eq!(
-                value(&wb, s, &format!("A{row}")),
-                if row % 2 == 0 {
-                    CellValue::Empty
-                } else {
-                    num(99.0)
-                }
-            );
-        }
-        assert_eq!(value(&wb, s, "B1"), num(2.0));
-    }
-
-    #[test]
-    fn clockless_empty_array_members_withhold_dependents() {
-        for cached in [num(45_003.0), CellValue::Empty] {
-            let (mut wb, s) = one_sheet();
-            put_formula(&mut wb, s, "A1", "SEQUENCE(1,2)+TODAY()");
-            let range = CellRange::parse_a1("A1:B1").unwrap();
-            wb.sheet_mut(s).unwrap().set_array_formula(a1("A1"), range);
-            put_cached_formula(&mut wb, s, "C1", "B1+1", cached.clone());
-            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-            assert!(result.changed.is_empty());
-            assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "B1"), CellValue::Empty);
-            assert_eq!(value(&wb, s, "C1"), cached);
-            assert_eq!(wb.sheet(s).unwrap().array_formula(a1("A1")), Some(range));
-        }
-    }
-
-    #[test]
-    fn clockless_dynamic_readers_keep_caches_in_either_order() {
-        for (reader, source) in [("A1", "Z1"), ("Z1", "A1")] {
-            let (mut wb, s) = one_sheet();
-            put_cached_formula(
-                &mut wb,
-                s,
-                reader,
-                &format!("INDIRECT(\"{source}\")+1"),
-                num(45_001.0),
-            );
-            put_formula(&mut wb, s, source, "TODAY()");
-            put_cached_formula(&mut wb, s, "B2", &format!("{reader}+1"), num(45_002.0));
-            let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-            assert!(result.changed.is_empty());
-            assert_eq!(value(&wb, s, reader), num(45_001.0));
-            assert_eq!(value(&wb, s, source), CellValue::Empty);
-            assert_eq!(value(&wb, s, "B2"), num(45_002.0));
-        }
-    }
-
-    #[test]
-    fn clockless_runtime_seeds_restore_earlier_dynamic_readers() {
-        let (mut wb, s) = one_sheet();
-        put_cached_formula(&mut wb, s, "A1", "INDIRECT(\"Z1\")+1", num(45_001.0));
-        put_cached_formula(&mut wb, s, "B1", "A1+1", num(45_002.0));
-        put_formula(&mut wb, s, "Z1", "DATEVALUE(\"3/15\")");
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert!(result.changed.is_empty());
-        assert_eq!(value(&wb, s, "A1"), num(45_001.0));
-        assert_eq!(value(&wb, s, "B1"), num(45_002.0));
-        assert_eq!(value(&wb, s, "Z1"), CellValue::Empty);
-    }
-
-    #[test]
-    fn clockless_large_cycle_withholds_untaken_static_dependents() {
-        let (mut wb, s) = one_sheet();
-        put_formula(&mut wb, s, "A1", "A1+IFERROR(TODAY(),0)");
-        put_cached_formula(&mut wb, s, "B1", "IF(FALSE,A1,B1+1)", num(99.0));
-        for row in 1..=4_095 {
-            let address = format!("C{row}");
-            put_cached_formula(&mut wb, s, &address, &format!("{address}+1"), num(99.0));
-        }
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-        assert_eq!(value(&wb, s, "B1"), num(99.0));
-        assert_eq!(result.changed.len(), 4_095);
-        assert!(result.limited_cells.is_empty());
-        for row in 1..=4_095 {
-            assert_eq!(value(&wb, s, &format!("C{row}")), num(0.0));
-        }
-    }
-
-    #[test]
-    fn clockless_many_uncached_clock_cycles_complete() {
-        let (mut wb, s) = one_sheet();
-        for row in 1..=20_000 {
-            let address = format!("A{row}");
-            put_formula(
-                &mut wb,
-                s,
-                &address,
-                &format!("{address}+IFERROR(TODAY(),0)"),
-            );
-        }
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert!(result.changed.is_empty());
-        assert!(result.limited_cells.is_empty());
-        assert_eq!(result.cycle_cells.len(), 20_000);
-        for row in 1..=20_000 {
-            assert_eq!(value(&wb, s, &format!("A{row}")), CellValue::Empty);
-        }
-    }
-
-    #[test]
-    fn clockless_unrelated_formulas_and_seedless_indirect_recalculate() {
-        let (mut wb, s) = one_sheet();
-        put_formula(&mut wb, s, "A1", "TODAY()");
-        put_num(&mut wb, s, "B1", 1.0);
-        put_cached_formula(&mut wb, s, "C1", "B1+1", num(2.0));
-        let mut graph = DepGraph::build(&wb);
-        put_num(&mut wb, s, "B1", 7.0);
-        let result = recalc_after(&mut wb, &mut graph, &[(s, a1("B1"))], None);
-        assert_eq!(value(&wb, s, "A1"), CellValue::Empty);
-        assert_eq!(value(&wb, s, "C1"), num(8.0));
-        assert_eq!(result.changed, vec![(s, a1("C1"))]);
-
-        let (mut wb, s) = one_sheet();
-        put_num(&mut wb, s, "Z1", 7.0);
-        put_cached_formula(&mut wb, s, "A1", "INDIRECT(\"Z1\")+1", num(99.0));
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "A1"), num(8.0));
-        assert_eq!(result.changed, vec![(s, a1("A1"))]);
-    }
-
-    #[test]
-    fn clockless_names_and_untaken_clock_calls_are_static_seeds() {
-        let (mut wb, s) = one_sheet();
-        wb.defined_names.extend([
-            DefinedName {
-                name: "ClockDate".into(),
-                formula: "TODAY()".into(),
-                local_sheet: None,
-                hidden: false,
-            },
-            DefinedName {
-                name: "ClockAlias".into(),
-                formula: "ClockDate".into(),
-                local_sheet: None,
-                hidden: false,
-            },
-        ]);
-        put_cached_formula(&mut wb, s, "A1", "IF(FALSE,ClockAlias,1)", num(99.0));
-        put_cached_formula(&mut wb, s, "B1", "IF(FALSE,NOW(),1)", num(98.0));
-        put_cached_formula(&mut wb, s, "C1", "A1+B1", num(97.0));
-        let (_, result) = rebuild_and_recalc_all(&mut wb, None);
-        assert!(result.changed.is_empty());
-        assert_eq!(value(&wb, s, "A1"), num(99.0));
-        assert_eq!(value(&wb, s, "B1"), num(98.0));
-        assert_eq!(value(&wb, s, "C1"), num(97.0));
-        rebuild_and_recalc_all(&mut wb, Some(46_000.25));
-        assert_eq!(value(&wb, s, "A1"), num(1.0));
-        assert_eq!(value(&wb, s, "B1"), num(1.0));
-        assert_eq!(value(&wb, s, "C1"), num(2.0));
-    }
-
-    #[test]
-    fn clockless_dynamic_kinds_withhold_but_plain_names_recalculate() {
-        let (mut wb, s) = one_sheet();
-        wb.defined_names.extend([
-            DefinedName {
-                name: "StaticInput".into(),
-                formula: "Z1".into(),
-                local_sheet: None,
-                hidden: false,
-            },
-            DefinedName {
-                name: "ComputedInput".into(),
-                formula: "Z1+1".into(),
-                local_sheet: None,
-                hidden: false,
-            },
-        ]);
-        put_formula(&mut wb, s, "A1", "TODAY()");
-        put_num(&mut wb, s, "Z1", 7.0);
-        put_cached_formula(&mut wb, s, "B1", "StaticInput+1", num(99.0));
-        for (address, formula) in [
-            ("C1", "ComputedInput"),
-            ("D1", "OFFSET(Z1,0,0)+1"),
-            ("E1", "INDIRECT(\"Z1\")+1"),
-            ("F1", "IFERROR(ANCHORARRAY(Z1),0)"),
-            ("G1", "IFERROR(UnknownReference(),0)"),
-        ] {
-            put_cached_formula(&mut wb, s, address, formula, num(99.0));
-        }
-        put_formula(&mut wb, s, "A3", "SEQUENCE(1,2)");
-        wb.sheet_mut(s)
-            .unwrap()
-            .set_array_formula(a1("A3"), CellRange::parse_a1("A3:B3").unwrap());
-        rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(value(&wb, s, "B1"), num(8.0));
-        for address in ["C1", "D1", "E1", "F1", "G1"] {
-            assert_eq!(value(&wb, s, address), num(99.0));
-        }
-        assert_eq!(value(&wb, s, "A3"), num(1.0));
-        assert_eq!(value(&wb, s, "B3"), num(2.0));
-    }
-
     /// OFFSET reads its anchor's coordinates, not its value, so a cell may
     /// offset from itself: Greptile flagged `A1=SUM(OFFSET(A1,1,0,3,1))`
     /// reporting A1 as cyclic and zeroing a valid result.
@@ -1663,7 +1170,7 @@ mod tests {
             put_num(&mut wb, s, cell, v);
         }
         put_formula(&mut wb, s, "A1", "SUM(OFFSET(A1,1,0,3,1))");
-        let report = rebuild_and_recalc_all(&mut wb, None).1;
+        let report = rebuild_and_recalc_all(&mut wb, Some(45_000.0)).1;
         assert!(report.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "A1"), num(6.0));
     }
@@ -1724,11 +1231,11 @@ mod tests {
             put_num(&mut wb, s, cell, (i + 1) as f64);
         }
         put_formula(&mut wb, s, "B1", "SUM(OFFSET(A1, 1, 0, 3, 1))");
-        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
         assert_eq!(value(&wb, s, "B1"), num(9.0));
 
         put_num(&mut wb, s, "A3", 100.0);
-        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], Some(45_000.0));
         assert_eq!(value(&wb, s, "B1"), num(106.0));
         assert_eq!(changed_a1(&r), vec!["B1"]);
     }
@@ -1741,15 +1248,15 @@ mod tests {
         }
         put_num(&mut wb, s, "D1", 2.0);
         put_formula(&mut wb, s, "B1", "OFFSET(A1, D1, 0)");
-        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
         assert_eq!(value(&wb, s, "B1"), num(3.0));
 
         put_num(&mut wb, s, "A3", 30.0);
-        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], Some(45_000.0));
         assert_eq!(value(&wb, s, "B1"), num(30.0));
 
         put_num(&mut wb, s, "D1", 1.0);
-        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], Some(45_000.0));
         assert_eq!(value(&wb, s, "B1"), num(2.0));
     }
 
@@ -1876,7 +1383,7 @@ mod tests {
         put_formula(&mut wb, s, "B1", "A1");
         put_formula(&mut wb, s, "B2", "INDEX(B1:B3,1)+1");
         put_formula(&mut wb, s, "B3", "INDEX(B1:B3,2)+1");
-        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        let (_, r) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(5.0));
         assert_eq!(value(&wb, s, "B2"), num(6.0));
@@ -1894,7 +1401,7 @@ mod tests {
         put_formula(&mut wb, s, "B3", "INDEX(B1:B3,2)+1");
         put_formula(&mut wb, s, "D1", "D2+1");
         put_formula(&mut wb, s, "D2", "D1+1");
-        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        let (_, r) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
         let mut cyc: Vec<String> = r.cycle_cells.iter().map(|(_, c)| c.to_a1()).collect();
         cyc.sort();
         assert_eq!(cyc, vec!["D1", "D2"]);
@@ -1917,12 +1424,12 @@ mod tests {
                 &format!("INDEX(B1:B8,{})+1", row - 1),
             );
         }
-        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, None);
+        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B8"), num(8.0));
 
         put_num(&mut wb, s, "A1", 10.0);
-        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], Some(45_000.0));
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B8"), num(17.0));
     }
@@ -2157,13 +1664,13 @@ mod tests {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 1.0);
         put_formula(&mut wb, s, "B1", "RANDBETWEEN(1, 1000000)");
-        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, Some(45_000.0));
         assert_eq!(graph.volatile_cells().count(), 1);
 
         let sentinel = num(-1.0);
         set_cached(&mut wb, s, "B1", sentinel.clone());
         put_num(&mut wb, s, "A1", 2.0);
-        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], Some(45_000.0));
         assert_eq!(changed_a1(&r), vec!["B1"]);
         match value(&wb, s, "B1") {
             CellValue::Number { value } => assert!((1.0..=1_000_000.0).contains(&value)),

@@ -1032,6 +1032,9 @@ impl Workbook {
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
         let mut graph = DepGraph::build(&prepared.model);
+        if let Some(previous) = &self.graph {
+            graph.inherit_pending_recalculation(previous);
+        }
         let recalculated = recalc_after_with_seed(
             &mut prepared.model,
             &mut graph,

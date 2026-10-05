@@ -66,8 +66,6 @@ fn take(left: &Cell<u64>, count: u64) -> bool {
     true
 }
 
-type DefinedNameMemo = HashMap<DefinedNameKey, (CellValue, bool, bool)>;
-
 /// evaluation environment: the cell source, the sheet unqualified refs resolve
 /// against, and the cell the formula belongs to.
 pub struct EvalContext<'a> {
@@ -89,9 +87,8 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
-    missing_clock: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<DefinedNameMemo>>,
+    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
     bindings: Rc<RefCell<Vec<Binding>>>,
     lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
@@ -114,7 +111,6 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
-            missing_clock: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             bindings: Rc::new(RefCell::new(Vec::new())),
@@ -138,7 +134,6 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
-            missing_clock: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             bindings: Rc::new(RefCell::new(Vec::new())),
@@ -166,7 +161,6 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
-            missing_clock: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             bindings: Rc::new(RefCell::new(Vec::new())),
@@ -190,7 +184,6 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
-            missing_clock: Rc::clone(&self.missing_clock),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             bindings: Rc::clone(&self.bindings),
@@ -304,19 +297,6 @@ impl<'a> EvalContext<'a> {
     pub(crate) fn record_unsupported_function(&self) {
         self.unsupported_functions
             .set(self.unsupported_functions.get().saturating_add(1));
-    }
-
-    pub(crate) fn record_missing_clock(&self) {
-        self.missing_clock
-            .set(self.missing_clock.get().saturating_add(1));
-    }
-
-    pub(crate) fn has_missing_clock(&self) -> bool {
-        self.missing_clock.get() != 0
-    }
-
-    pub(crate) fn cell_value(&self, sheet: SheetId, cell: CellRef) -> Cow<'a, CellValue> {
-        self.provider.value_cow(sheet, cell)
     }
 
     fn record_budget_error(&self) {
@@ -529,14 +509,9 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Ok(key) => key,
         Err(error) => return err(error),
     };
-    if let Some((cached, gap, missing_clock)) = ctx.defined_name_values.borrow().get(&key)
-        && !(*missing_clock && ctx.now_serial.is_some())
-    {
+    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&key) {
         if *gap {
             ctx.record_unsupported_function();
-        }
-        if *missing_clock {
-            ctx.record_missing_clock();
         }
         return cached.clone();
     }
@@ -545,13 +520,11 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
         Err(error) => return err(error),
     };
     let checkpoint = ctx.unsupported_checkpoint();
-    let clock_checkpoint = ctx.missing_clock.get();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
-    let missing_clock = ctx.missing_clock.get() > clock_checkpoint;
     ctx.defined_name_values
         .borrow_mut()
-        .insert(binding.key, (value.clone(), gap, missing_clock));
+        .insert(binding.key, (value.clone(), gap));
     value
 }
 
@@ -633,7 +606,10 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    kept(ctx, normalize_cow(ctx.cell_value(sid, cell)).into_owned())
+    kept(
+        ctx,
+        normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned(),
+    )
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -996,7 +972,7 @@ impl Area {
         col: usize,
     ) -> Cow<'p, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
-        normalize_cow(ctx.cell_value(self.sheet, cell))
+        normalize_cow(ctx.provider.value_cow(self.sheet, cell))
     }
 
     /// all values in row-major order, borrowed where the provider can lend them.
@@ -1246,193 +1222,6 @@ mod tests {
             local_sheet: None,
             hidden: false,
         }
-    }
-
-    #[test]
-    fn missing_clock_is_recorded_through_nested_evaluation() {
-        let mut workbook = Workbook::default();
-        workbook
-            .sheets
-            .extend([Sheet::new("Sheet1"), Sheet::new("Sheet2")]);
-        workbook
-            .defined_names
-            .push(defined_name("ClockDate", "TODAY()"));
-        workbook.defined_names.push(DefinedName {
-            local_sheet: Some(SheetId(1)),
-            ..defined_name("LocalClock", "NOW()")
-        });
-        for (formula, clockless, clocked) in [
-            ("TODAY()", err(ErrorValue::Value), num(45_000.0)),
-            ("NOW()", err(ErrorValue::Value), num(45_000.75)),
-            ("TODAY()+1", err(ErrorValue::Value), num(45_001.0)),
-            (
-                "TEXT(NOW(),\"yyyy\")",
-                err(ErrorValue::Value),
-                CellValue::Text {
-                    value: "2023".into(),
-                },
-            ),
-            ("IFERROR(TODAY(),0)", num(0.0), num(45_000.0)),
-            (
-                "IFERROR(TODAY()+SEQUENCE(1,2,0),0)",
-                num(0.0),
-                num(45_000.0),
-            ),
-            (
-                "ISERROR(TODAY())",
-                CellValue::Bool { value: true },
-                CellValue::Bool { value: false },
-            ),
-            ("ClockDate+1", err(ErrorValue::Value), num(45_001.0)),
-            ("Sheet2!LocalClock", err(ErrorValue::Value), num(45_000.75)),
-            (
-                "IFERROR(ClockDate,0)+ClockDate",
-                err(ErrorValue::Value),
-                num(90_000.0),
-            ),
-            (
-                "LET(day,TODAY(),day+1)",
-                err(ErrorValue::Value),
-                num(45_001.0),
-            ),
-            ("DATEVALUE(\"3/15\")", err(ErrorValue::Value), num(45_000.0)),
-        ] {
-            let expression = parse_formula(formula).unwrap();
-            let context = EvalContext::new(&workbook, SheetId(0));
-            assert_eq!(evaluate(&expression, &context), clockless, "{formula}");
-            assert!(context.has_missing_clock(), "{formula}");
-            let context = EvalContext::with_now(&workbook, SheetId(0), 45_000.75);
-            assert_eq!(evaluate(&expression, &context), clocked, "{formula}");
-            assert!(!context.has_missing_clock(), "{formula}");
-        }
-    }
-
-    #[test]
-    fn invalid_clock_calls_do_not_record_a_missing_clock() {
-        let workbook = Workbook::default();
-        for formula in ["TODAY(1)", "NOW(1)", "DATEVALUE(\"invalid\")"] {
-            let context = EvalContext::new(&workbook, SheetId(0));
-            assert_eq!(
-                evaluate(&parse_formula(formula).unwrap(), &context),
-                err(ErrorValue::Value),
-                "{formula}"
-            );
-            assert!(!context.has_missing_clock(), "{formula}");
-        }
-    }
-
-    #[test]
-    fn invalid_yearless_dates_do_not_request_the_clock() {
-        let workbook = Workbook::default();
-        for formula in [
-            "DATEVALUE(\"13/1\")",
-            "DATEVALUE(\"0/1\")",
-            "DATEVALUE(\"4/31\")",
-            "DATEVALUE(\"2/30\")",
-            "DATEVALUE(\"3/0\")",
-            "DATEVALUE(\"3/15/invalid\")",
-        ] {
-            for now in [None, Some(45_000.75)] {
-                let mut context = EvalContext::new(&workbook, SheetId(0));
-                context.now_serial = now;
-                assert_eq!(
-                    evaluate(&parse_formula(formula).unwrap(), &context),
-                    err(ErrorValue::Value),
-                    "{formula}"
-                );
-                assert!(!context.has_missing_clock(), "{formula}");
-            }
-        }
-        let context = EvalContext::new(&workbook, SheetId(0));
-        assert_eq!(
-            evaluate(&parse_formula("DATEVALUE(\"2/29\")").unwrap(), &context),
-            err(ErrorValue::Value)
-        );
-        assert!(context.has_missing_clock());
-        let context = EvalContext::with_now(&workbook, SheetId(0), 45_000.75);
-        assert_eq!(
-            evaluate(
-                &parse_formula("DATEVALUE(\"2/29/1900\")").unwrap(),
-                &context
-            ),
-            num(60.0)
-        );
-    }
-
-    #[test]
-    fn clockless_defined_name_memos_replay_the_missing_clock() {
-        let mut workbook = Workbook::default();
-        workbook.sheets.push(Sheet::new("Sheet1"));
-        workbook
-            .defined_names
-            .push(defined_name("ClockDate", "IFERROR(TODAY(),0)"));
-        let cache = ParseCache::default();
-        let mut context =
-            EvalContext::with_budget(&workbook, SheetId(0), Rc::new(EvaluationBudget::new(100)));
-        context.parse_cache = Some(&cache);
-        let expression = parse_formula("ClockDate").unwrap();
-        DEFINED_NAME_EXPANSIONS.with(|count| count.set(0));
-        assert_eq!(evaluate(&expression, &context), num(0.0));
-        assert!(context.has_missing_clock());
-        assert!(!context.has_unhandled_unsupported_function());
-        assert_eq!(
-            context
-                .defined_name_values
-                .borrow()
-                .get(&(SheetId(0), "clockdate".into())),
-            Some(&(num(0.0), false, true))
-        );
-        context.missing_clock.set(0);
-        assert_eq!(evaluate(&expression, &context), num(0.0));
-        assert!(context.has_missing_clock());
-        assert_eq!(DEFINED_NAME_EXPANSIONS.with(std::cell::Cell::get), 1);
-        assert!(!cache.lock().unwrap().is_empty());
-        context.now_serial = Some(45_000.75);
-        assert_eq!(evaluate(&expression, &context), num(45_000.0));
-
-        let mut clocked = EvalContext::with_now(&workbook, SheetId(0), 46_000.25);
-        clocked.parse_cache = Some(&cache);
-        assert_eq!(evaluate(&expression, &clocked), num(46_000.0));
-        assert!(!clocked.has_missing_clock());
-        assert_eq!(
-            clocked
-                .defined_name_values
-                .borrow()
-                .get(&(SheetId(0), "clockdate".into())),
-            Some(&(num(46_000.0), false, false))
-        );
-    }
-
-    #[test]
-    fn clockless_defined_name_expansion_stays_linear() {
-        let mut workbook = Workbook::default();
-        workbook.sheets.push(Sheet::new("Sheet1"));
-        workbook.defined_names.push(defined_name("N_0", "1"));
-        for index in 1..=20 {
-            workbook.defined_names.push(defined_name(
-                &format!("N_{index}"),
-                &format!("N_{}+N_{}", index - 1, index - 1),
-            ));
-        }
-        let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
-        let context = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
-        DEFINED_NAME_EXPANSIONS.with(|count| count.set(0));
-        assert_eq!(
-            evaluate(&parse_formula("IFERROR(TODAY(),0)+N_20").unwrap(), &context),
-            num(1_048_576.0)
-        );
-        assert!(context.has_missing_clock());
-        assert!(!context.exhausted());
-        assert_eq!(DEFINED_NAME_EXPANSIONS.with(std::cell::Cell::get), 21);
-        let memo = context.defined_name_values.borrow();
-        assert_eq!(memo.len(), 21);
-        for index in 0..=20 {
-            assert_eq!(
-                memo.get(&(SheetId(0), format!("n_{index}"))),
-                Some(&(num(2f64.powi(index)), false, false))
-            );
-        }
-        assert_eq!(budget.remaining.get(), MAX_RECALCULATION_CELL_VISITS - 21);
     }
 
     #[test]
@@ -1962,7 +1751,7 @@ mod tests {
             );
         }
         workbook.sheets.push(sheet);
-        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        let (_, result) = crate::rebuild_and_recalc_all(&mut workbook, Some(45_000.0));
         assert_eq!(result.limited_cells.len(), 12);
         for col in 0..12 {
             assert_eq!(
@@ -2162,7 +1951,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        let (mut graph, result) = crate::rebuild_and_recalc_all(&mut workbook, None);
+        let (mut graph, result) = crate::rebuild_and_recalc_all(&mut workbook, Some(45_000.0));
         assert!(
             result.limited_cells.is_empty(),
             "{:?}",
@@ -2192,7 +1981,12 @@ mod tests {
             .sheet_mut(SheetId(0))
             .unwrap()
             .set_cell(first, number(100_001.0));
-        let result = crate::recalc_after(&mut workbook, &mut graph, &[(SheetId(0), first)], None);
+        let result = crate::recalc_after(
+            &mut workbook,
+            &mut graph,
+            &[(SheetId(0), first)],
+            Some(45_000.0),
+        );
         assert!(
             result.limited_cells.is_empty(),
             "{:?}",

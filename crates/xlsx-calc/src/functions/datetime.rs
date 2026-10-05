@@ -256,10 +256,7 @@ pub(crate) fn today(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match ctx.now_serial {
         Some(s) => num(s.floor()),
-        None => {
-            ctx.record_missing_clock();
-            err(ErrorValue::Value)
-        }
+        None => err(ErrorValue::Value),
     }
 }
 
@@ -270,10 +267,7 @@ pub(crate) fn now(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match ctx.now_serial {
         Some(s) => num(s),
-        None => {
-            ctx.record_missing_clock();
-            err(ErrorValue::Value)
-        }
+        None => err(ErrorValue::Value),
     }
 }
 
@@ -506,14 +500,11 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
         [a, b] => two_fields(a, b)?,
         _ => return None,
     };
-    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(2000, m) {
-        return None;
-    }
     let y = match y {
         Some(y) => y,
         None => current_year(ctx)?,
     };
-    if !(1900..=9999).contains(&y) {
+    if !(1900..=9999).contains(&y) || !(1..=12).contains(&m) {
         return None;
     }
     // excel's phantom 1900-02-29 parses even though 1900 was not a leap year
@@ -651,11 +642,7 @@ fn month_name(field: &str) -> Option<i64> {
 }
 
 fn current_year(ctx: &EvalContext<'_>) -> Option<i64> {
-    let Some(now) = ctx.now_serial else {
-        ctx.record_missing_clock();
-        return None;
-    };
-    let serial = now.floor() as i64;
+    let serial = ctx.now_serial?.floor() as i64;
     serial_to_ymd(serial).map(|(y, _, _)| y)
 }
 

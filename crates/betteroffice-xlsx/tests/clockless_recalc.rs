@@ -4,6 +4,7 @@ use betteroffice_xlsx::{
 };
 use serde_json::json;
 use xlsx_model::{DefinedName, ErrorValue};
+use xlsx_ops::Op;
 
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
@@ -61,7 +62,7 @@ fn fixture() -> Vec<u8> {
         .iter_mut()
         .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
         .unwrap()
-        .1 = br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f ca="1">TODAY()</f><v>45000</v></c><c r="B1"><f ca="1">NOW()</f><v>45000.75</v></c><c r="C1"><f ca="1">TODAY()+1</f><v>45001</v></c><c r="D1"><f ca="1">IFERROR(TODAY(),0)</f><v>45000</v></c><c r="E1"><f ca="1">ClockDate</f><v>45000</v></c><c r="F1"><f>A1+1</f><v>45001</v></c><c r="G1"><f ca="1">TODAY()</f></c><c r="H1" t="str"><f ca="1">TEXT(NOW(),"yyyy")</f><v>2023</v></c><c r="I1"><f ca="1">DATEVALUE("3/15")</f><v>45000</v></c></row><row r="3"><c r="A3"><f t="array" ref="A3:B3" ca="1">SEQUENCE(1,2)+TODAY()</f><v>45001</v></c><c r="B3"><v>45002</v></c></row><row r="5"><c r="A5"><f t="array" ref="A5:B5" ca="1">SEQUENCE(1,2)+TODAY()</f></c><c r="B5"><v>45002</v></c></row></sheetData></worksheet>"#.to_vec();
+        .1 = br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f ca="1">TODAY()</f><v>45000</v></c><c r="B1"><f ca="1">NOW()</f><v>45000.75</v></c><c r="C1"><f ca="1">TODAY()+1</f><v>45001</v></c><c r="D1"><f ca="1">IFERROR(TODAY(),0)</f><v>45000</v></c><c r="E1"><f ca="1">ClockDate</f><v>45000</v></c><c r="F1"><f>A1+1</f><v>45001</v></c><c r="G1"><f ca="1">TODAY()</f></c><c r="H1" t="str"><f ca="1">TEXT(NOW(),"yyyy")</f><v>2023</v></c><c r="I1"><f ca="1">DATEVALUE("3/15")</f><v>45000</v></c><c r="J1"><f>Sheet1!A1+1</f><v>2</v></c></row><row r="3"><c r="A3"><f t="array" ref="A3:B3" ca="1">SEQUENCE(1,2)+TODAY()</f><v>45001</v></c><c r="B3"><v>45002</v></c></row><row r="5"><c r="A5"><f t="array" ref="A5:B5" ca="1">SEQUENCE(1,2)+TODAY()</f></c><c r="B5"><v>45002</v></c></row></sheetData></worksheet>"#.to_vec();
     ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
@@ -94,6 +95,7 @@ fn assert_source_caches_with_dependent(workbook: &Workbook, dependent: CellValue
             },
         ),
         ("I1", number(45_000.0)),
+        ("J1", number(2.0)),
         ("A3", number(45_001.0)),
         ("B3", number(45_002.0)),
         ("A5", CellValue::Empty),
@@ -130,11 +132,36 @@ fn assert_preserved_save(workbook: &Workbook, source: &[u8]) {
     assert_source_caches(&Workbook::open(&saved).unwrap());
 }
 
+fn batch_edit(workbook: &mut Workbook, address: &str, input: &str, now: Option<f64>) {
+    batch_edit_on(workbook, "sheet:0", address, input, now);
+}
+
+fn batch_edit_on(
+    workbook: &mut Workbook,
+    sheet: &str,
+    address: &str,
+    input: &str,
+    now: Option<f64>,
+) {
+    let request = json!({
+        "expectVersion": workbook.version(),
+        "steps": [{
+            "op": "setCellInputs",
+            "target": { "sheetId": sheet, "range": { "kind": "a1", "a1": address } },
+            "inputs": [[input]]
+        }],
+        "calculation": { "nowSerial": now }
+    });
+    let result: serde_json::Value =
+        serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap()).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["applied"], true);
+}
+
 #[test]
 fn clockless_edit_preserves_caches_and_sheet_bytes() {
     let bytes = fixture();
     let mut workbook = Workbook::open(&bytes).unwrap();
-    assert_source_caches(&workbook);
     workbook
         .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
         .unwrap();
@@ -148,331 +175,412 @@ fn clockless_edit_preserves_caches_and_sheet_bytes() {
         number(2.0)
     );
     assert_preserved_save(&workbook, &bytes);
+    let before = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let after = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    let original = std::str::from_utf8(part(&before, "xl/worksheets/sheet1.xml")).unwrap();
+    assert_eq!(
+        part(&after, "xl/worksheets/sheet1.xml"),
+        original.replace("<v>1</v>", "<v>2</v>").as_bytes()
+    );
+    for (name, data) in &before {
+        if name != "xl/workbook.xml" && name != "xl/worksheets/sheet1.xml" {
+            assert_eq!(part(&after, name), data, "{name}");
+        }
+    }
 }
 
 #[test]
 fn clockless_batch_preserves_caches_and_sheet_bytes() {
     let bytes = fixture();
-    for calculation in [None, Some(json!({}))] {
-        let mut workbook = Workbook::open(&bytes).unwrap();
-        let mut request = json!({
-            "expectVersion": workbook.version(),
-            "steps": [{
-                "op": "setCellInputs",
-                "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1" } },
-                "inputs": [["2"]]
-            }]
-        });
-        if let Some(calculation) = calculation {
-            request["calculation"] = calculation;
-        }
-        let result: serde_json::Value =
-            serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap())
-                .unwrap();
-        assert_eq!(result["ok"], true);
-        assert_eq!(result["applied"], true);
-        assert_eq!(
-            workbook
-                .sheet(SheetId(0))
-                .unwrap()
-                .cell(cell("A1"))
-                .unwrap()
-                .value,
-            number(2.0)
-        );
-        assert_preserved_save(&workbook, &bytes);
-    }
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    batch_edit(&mut workbook, "A1", "2", None);
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("A1"))
+            .unwrap()
+            .value,
+        number(2.0)
+    );
+    assert_preserved_save(&workbook, &bytes);
 }
 
 #[test]
 fn clockless_full_recalculation_preserves_caches_and_arrays() {
     let bytes = fixture();
     let mut workbook = Workbook::open(&bytes).unwrap();
-    assert!(
-        workbook
-            .recalculate_all(CalculationOptions::default())
-            .changed
-            .is_empty()
-    );
+    let result = workbook.recalculate_all(CalculationOptions::default());
+    assert!(result.changed.is_empty());
+    assert!(result.cycle_cells.is_empty());
+    assert!(result.limited_cells.is_empty());
     assert_preserved_save(&workbook, &bytes);
 }
 
 #[test]
-fn clockless_full_recalculation_updates_stale_scalars_and_preserves_clock_caches() {
-    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
-    let sheet = parts
-        .iter_mut()
-        .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
-        .unwrap();
-    sheet.1 = String::from_utf8(std::mem::take(&mut sheet.1))
-        .unwrap()
-        .replace(r#"<c r="F1"><f>A1+1</f><v>45001</v></c>"#, r#"<c r="F1"><f>A1+1</f><v>99</v></c>"#)
-        .replacen("</row>", r#"<c r="J1"><f>1+1</f><v>99</v></c><c r="K1"><f>G1+1</f><v>45001</v></c><c r="L1"><f>G1+1</f></c><c r="M1"><f>L1+1</f><v>45002</v></c><c r="N1"><f>L1+1</f></c><c r="O1"><f>O1+IFERROR(TODAY(),0)</f><v>45000</v></c><c r="P1"><f>P1+IFERROR(TODAY(),0)</f></c></row>"#, 1)
-        .replace("</sheetData>", r#"<row r="7"><c r="A7"><f t="array" ref="A7:B7">A7+IFERROR(TODAY(),0)</f><v>45000</v></c><c r="B7"><v>45001</v></c></row><row r="9"><c r="A9"><f t="array" ref="A9:B9">A9+IFERROR(TODAY(),0)</f></c><c r="B9"><v>45001</v></c></row></sheetData>"#)
-        .into_bytes();
-    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
-    let mut workbook = Workbook::open(&bytes).unwrap();
-    assert_eq!(value(&workbook, "F1"), number(99.0));
-    assert_eq!(value(&workbook, "J1"), number(99.0));
-    assert_eq!(
-        workbook
-            .recalculate_all(CalculationOptions::default())
-            .changed
-            .iter()
-            .map(|address| (address.sheet, address.cell))
-            .collect::<Vec<_>>(),
-        vec![(SheetId(1), cell("J1"))]
-    );
-    let saved = workbook.save().unwrap();
-    let reopened = Workbook::open(&saved).unwrap();
-    for workbook in [&workbook, &reopened] {
-        assert_source_caches_with_dependent(workbook, number(99.0));
-        for (address, expected) in [
-            ("J1", number(2.0)),
-            ("K1", number(45_001.0)),
-            ("L1", CellValue::Empty),
-            ("M1", number(45_002.0)),
-            ("N1", CellValue::Empty),
-            ("O1", number(45_000.0)),
-            ("P1", CellValue::Empty),
-            ("A7", number(45_000.0)),
-            ("B7", number(45_001.0)),
-            ("A9", CellValue::Empty),
-            ("B9", number(45_001.0)),
-        ] {
-            assert_eq!(value(workbook, address), expected, "{address}");
+fn clockless_plain_formula_recalculates_without_clock_tokens() {
+    for batch in [false, true] {
+        let mut workbook = synthetic(
+            &[
+                ("A1", "1+1", number(45_000.0)),
+                ("B1", "Sheet1!A1+1", number(99.0)),
+            ],
+            &[],
+            Vec::new(),
+        );
+        if batch {
+            batch_edit(&mut workbook, "A1", "7", None);
+        } else {
+            workbook
+                .edit_cell(SheetId(0), cell("A1"), "7", CalculationOptions::default())
+                .unwrap();
         }
-        for (anchor, range) in [("A7", "A7:B7"), ("A9", "A9:B9")] {
-            assert_eq!(
-                workbook
-                    .sheet(SheetId(1))
-                    .unwrap()
-                    .array_formula(cell(anchor)),
-                Some(CellRange::parse_a1(range).unwrap())
-            );
-        }
+        assert_eq!(value(&workbook, "B1"), number(8.0));
+        assert_eq!(
+            value(&Workbook::open(&workbook.save().unwrap()).unwrap(), "B1"),
+            number(8.0)
+        );
     }
-    let parts = ooxml_opc::unzip_parts(&saved).unwrap();
-    assert!(
-        !std::str::from_utf8(part(&parts, "xl/worksheets/sheet2.xml"))
-            .unwrap()
-            .contains("t=\"e\"")
-    );
-    assert!(
-        std::str::from_utf8(part(&parts, "xl/workbook.xml"))
-            .unwrap()
-            .contains("fullCalcOnLoad=\"1\"")
-    );
 }
 
 #[test]
-fn explicit_clock_updates_caches_after_clockless_recalculation() {
-    let bytes = fixture();
-    for batch in [false, true] {
-        let mut workbook = Workbook::open(&bytes).unwrap();
-        workbook
-            .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
-            .unwrap();
-        assert_source_caches(&workbook);
-        if batch {
-            let request = json!({
-                "expectVersion": workbook.version(),
-                "calculation": { "nowSerial": 46_000.25 },
-                "steps": [{
-                    "op": "setCellInputs",
-                    "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "A1" } },
-                    "inputs": [["3"]]
-                }]
-            });
-            let result: serde_json::Value =
-                serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap())
+fn clocked_edit_catches_up_pending_across_edit_paths() {
+    for first_batch in [false, true] {
+        for second_batch in [false, true] {
+            let mut workbook = Workbook::open(&fixture()).unwrap();
+            if first_batch {
+                batch_edit(&mut workbook, "A1", "7", None);
+            } else {
+                workbook
+                    .edit_cell(SheetId(0), cell("A1"), "7", CalculationOptions::default())
                     .unwrap();
-            assert_eq!(result["ok"], true);
-            assert_eq!(result["applied"], true);
-        } else {
+            }
+            assert_source_caches(&workbook);
+            if second_batch {
+                batch_edit(&mut workbook, "B1", "9", Some(46_000.25));
+            } else {
+                workbook
+                    .edit_cell(
+                        SheetId(0),
+                        cell("B1"),
+                        "9",
+                        CalculationOptions {
+                            now_serial: Some(46_000.25),
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(value(&workbook, "J1"), number(8.0));
+            assert_eq!(value(&workbook, "A1"), number(46_000.0));
+            assert_eq!(value(&workbook, "F1"), number(46_001.0));
+            assert_eq!(value(&workbook, "B3"), number(46_002.0));
             workbook
                 .edit_cell(
-                    SheetId(0),
-                    cell("A1"),
-                    "3",
+                    SheetId(1),
+                    cell("J1"),
+                    "=99",
                     CalculationOptions {
                         now_serial: Some(46_000.25),
                     },
                 )
                 .unwrap();
-        }
-        for (address, expected) in [
-            ("A1", number(46_000.0)),
-            ("B1", number(46_000.25)),
-            ("C1", number(46_001.0)),
-            ("D1", number(46_000.0)),
-            ("E1", number(46_000.0)),
-            ("F1", number(46_001.0)),
-            ("G1", number(46_000.0)),
-            (
-                "H1",
-                CellValue::Text {
-                    value: "2025".into(),
-                },
-            ),
-            ("A3", number(46_001.0)),
-            ("B3", number(46_002.0)),
-            ("A5", number(46_001.0)),
-            ("B5", number(46_002.0)),
-        ] {
-            assert_eq!(value(&workbook, address), expected, "{address}");
-        }
-        let saved = workbook.save().unwrap();
-        let reopened = Workbook::open(&saved).unwrap();
-        for address in [
-            "A1", "B1", "C1", "D1", "E1", "F1", "G1", "H1", "A3", "B3", "A5", "B5",
-        ] {
-            assert_eq!(
-                value(&reopened, address),
-                value(&workbook, address),
-                "{address}"
-            );
+            assert_eq!(value(&workbook, "J1"), number(99.0));
         }
     }
 }
 
 #[test]
-fn invalid_clock_calls_commit_value_errors() {
-    let mut parts = ooxml_opc::unzip_parts(&fixture()).unwrap();
-    let sheet = parts
-        .iter_mut()
-        .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
-        .unwrap();
-    sheet.1 = String::from_utf8(std::mem::take(&mut sheet.1))
-        .unwrap()
-        .replacen(r#"<f ca="1">TODAY()</f>"#, r#"<f ca="1">TODAY(1)</f>"#, 1)
-        .replacen(r#"<f ca="1">NOW()</f>"#, r#"<f ca="1">NOW(1)</f>"#, 1)
-        .into_bytes();
-    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
-    let mut workbook = Workbook::open(&bytes).unwrap();
-    assert_eq!(value(&workbook, "A1"), number(45_000.0));
-    assert_eq!(value(&workbook, "B1"), number(45_000.75));
-    workbook
-        .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
-        .unwrap();
-    for address in ["A1", "B1"] {
-        assert_eq!(
-            value(&workbook, address),
-            CellValue::Error {
-                value: ErrorValue::Value,
-            }
+fn clocked_full_recalculation_catches_up_pending() {
+    let mut workbook = Workbook::open(&fixture()).unwrap();
+    batch_edit(&mut workbook, "A1", "7", None);
+    workbook.recalculate_all(CalculationOptions {
+        now_serial: Some(46_000.25),
+    });
+    assert_eq!(value(&workbook, "J1"), number(8.0));
+    assert_eq!(value(&workbook, "F1"), number(46_001.0));
+}
+
+#[test]
+fn defined_name_tokens_gate_even_unused_and_sheet_scoped() {
+    for local_sheet in [None, Some(SheetId(1))] {
+        let mut workbook = synthetic(
+            &[("A1", "Sheet1!A1+1", number(99.0))],
+            &[],
+            vec![DefinedName {
+                name: "UnusedClock".into(),
+                formula: "=NOW()".into(),
+                local_sheet,
+                hidden: false,
+            }],
         );
-    }
-    for (address, input) in [("A7", "=TODAY(1)"), ("B7", "=NOW(1)")] {
+        batch_edit(&mut workbook, "A1", "7", None);
+        assert_eq!(value(&workbook, "A1"), number(99.0));
         workbook
-            .edit_cell(
-                SheetId(1),
-                cell(address),
-                input,
+            .apply_ops(
+                vec![Op::SetDefinedNames {
+                    defined_names: Vec::new(),
+                }],
                 CalculationOptions::default(),
             )
             .unwrap();
-        assert_eq!(
-            value(&workbook, address),
-            CellValue::Error {
-                value: ErrorValue::Value,
-            }
-        );
-    }
-    let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-    for address in ["A1", "B1", "A7", "B7"] {
-        assert_eq!(
-            value(&reopened, address),
-            CellValue::Error {
-                value: ErrorValue::Value,
-            }
-        );
+        assert_eq!(value(&workbook, "A1"), number(8.0));
     }
 }
 
 #[test]
-fn clockless_array_member_dependents_preserve_cached_and_uncached_results() {
-    for cached in [number(45_003.0), CellValue::Empty] {
-        let mut workbook = synthetic(
-            &[
-                ("A1", "SEQUENCE(1,2)+TODAY()", CellValue::Empty),
-                ("C1", "B1+1", cached.clone()),
-            ],
-            &[("A1", "A1:B1")],
-            Vec::new(),
-        );
-        assert!(
-            workbook
-                .recalculate_all(CalculationOptions::default())
-                .changed
-                .is_empty()
-        );
-        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-        for workbook in [&workbook, &reopened] {
-            assert_eq!(value(workbook, "A1"), CellValue::Empty);
-            assert_eq!(value(workbook, "B1"), CellValue::Empty);
-            assert_eq!(value(workbook, "C1"), cached);
-            assert_eq!(
-                workbook
-                    .sheet(SheetId(1))
-                    .unwrap()
-                    .array_formula(cell("A1")),
-                Some(CellRange::parse_a1("A1:B1").unwrap()),
-            );
-        }
-    }
+fn defined_name_replacement_refreshes_clock_presence() {
+    let mut workbook = synthetic(&[("A1", "Sheet1!A1+1", number(99.0))], &[], Vec::new());
+    workbook
+        .apply_ops(
+            vec![Op::SetDefinedNames {
+                defined_names: vec![DefinedName {
+                    name: "Clock".into(),
+                    formula: "TODAY()".into(),
+                    local_sheet: None,
+                    hidden: false,
+                }],
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(value(&workbook, "A1"), number(99.0));
+    batch_edit(&mut workbook, "A1", "7", None);
+    workbook
+        .apply_ops(
+            vec![Op::SetDefinedNames {
+                defined_names: vec![DefinedName {
+                    name: "Clock".into(),
+                    formula: "1".into(),
+                    local_sheet: None,
+                    hidden: false,
+                }],
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(value(&workbook, "A1"), number(8.0));
 }
 
 #[test]
-fn clockless_dynamic_readers_preserve_saved_results_in_both_orders() {
-    for (reader, source) in [("A1", "Z1"), ("Z1", "A1")] {
-        let formula = format!("INDIRECT(\"{source}\")+1");
+fn shared_formula_tokens_gate_the_workbook() {
+    let mut parts =
+        ooxml_opc::unzip_parts(&synthetic(&[], &[], Vec::new()).save().unwrap()).unwrap();
+    parts.iter_mut().find(|(name, _)| name == "xl/worksheets/sheet2.xml").unwrap().1 =
+        br#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:B1">TODAY()</f><v>45000</v></c><c r="B1"><f t="shared" si="0"/><v>45000</v></c><c r="C1"><f>Sheet1!A1+1</f><v>99</v></c></row></sheetData></worksheet>"#.to_vec();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&bytes).unwrap();
+    batch_edit(&mut workbook, "A1", "7", None);
+    assert_eq!(value(&workbook, "A1"), number(45_000.0));
+    assert_eq!(value(&workbook, "B1"), number(45_000.0));
+    assert_eq!(value(&workbook, "C1"), number(99.0));
+    let saved = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        part(&saved, "xl/worksheets/sheet2.xml"),
+        part(&parts, "xl/worksheets/sheet2.xml")
+    );
+    workbook
+        .edit_cell(SheetId(1), cell("A1"), "0", CalculationOptions::default())
+        .unwrap();
+    assert_eq!(value(&workbook, "C1"), number(99.0));
+    workbook
+        .edit_cell(SheetId(1), cell("B1"), "0", CalculationOptions::default())
+        .unwrap();
+    assert_eq!(value(&workbook, "C1"), number(8.0));
+}
+
+#[test]
+fn array_formula_tokens_preserve_all_spill_state() {
+    let mut workbook = synthetic(
+        &[
+            ("A1", "SEQUENCE(1,2)+TODAY()", number(45_001.0)),
+            ("C1", "Sheet1!A1+1", number(99.0)),
+            ("D1", "SEQUENCE(1,2)", number(9.0)),
+        ],
+        &[("A1", "A1:B1"), ("D1", "D1:E1")],
+        Vec::new(),
+    );
+    let before = workbook.save().unwrap();
+    batch_edit(&mut workbook, "A1", "7", None);
+    assert_eq!(value(&workbook, "A1"), number(45_001.0));
+    assert_eq!(value(&workbook, "B1"), CellValue::Empty);
+    assert_eq!(value(&workbook, "C1"), number(99.0));
+    assert_eq!(value(&workbook, "D1"), number(9.0));
+    assert_eq!(value(&workbook, "E1"), CellValue::Empty);
+    let sheet = workbook.sheet(SheetId(1)).unwrap();
+    assert_eq!(
+        sheet.array_formula(cell("A1")),
+        Some(CellRange::parse_a1("A1:B1").unwrap())
+    );
+    assert_eq!(
+        sheet.array_formula(cell("D1")),
+        Some(CellRange::parse_a1("D1:E1").unwrap())
+    );
+    let before = ooxml_opc::unzip_parts(&before).unwrap();
+    let after = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    assert_eq!(
+        part(&after, "xl/worksheets/sheet2.xml"),
+        part(&before, "xl/worksheets/sheet2.xml")
+    );
+}
+
+#[test]
+fn removing_last_formula_token_runs_pending_full_recalculation() {
+    for batch in [false, true] {
         let mut workbook = synthetic(
             &[
-                (reader, &formula, number(45_001.0)),
-                (source, "TODAY()", CellValue::Empty),
+                ("A1", "TODAY()", number(45_000.0)),
+                ("B1", "Sheet1!A1+1", number(99.0)),
             ],
             &[],
             Vec::new(),
         );
-        assert!(
+        if batch {
+            batch_edit(&mut workbook, "A1", "7", None);
+        } else {
             workbook
-                .recalculate_all(CalculationOptions::default())
-                .changed
-                .is_empty()
-        );
-        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-        for workbook in [&workbook, &reopened] {
-            assert_eq!(value(workbook, reader), number(45_001.0));
-            assert_eq!(value(workbook, source), CellValue::Empty);
+                .edit_cell(SheetId(0), cell("A1"), "7", CalculationOptions::default())
+                .unwrap();
         }
+        assert_eq!(value(&workbook, "B1"), number(99.0));
+        if batch {
+            batch_edit_on(&mut workbook, "sheet:1", "A1", "=1+1", None);
+        } else {
+            workbook
+                .edit_cell(
+                    SheetId(1),
+                    cell("A1"),
+                    "=1+1",
+                    CalculationOptions::default(),
+                )
+                .unwrap();
+        }
+        assert_eq!(value(&workbook, "A1"), number(2.0));
+        assert_eq!(value(&workbook, "B1"), number(8.0));
     }
 }
 
 #[test]
-fn yearless_invalid_dates_commit_errors_and_valid_dates_keep_clockless_caches() {
-    for now_serial in [None, Some(45_000.75)] {
+fn clock_token_calls_gate_regardless_of_arity_or_date_text() {
+    for formula in [
+        "TODAY(1)",
+        "NOW(1)",
+        "IF(TRUE,1,TODAY(1))",
+        "DATEVALUE(\"3/15\")",
+        "DATEVALUE(\"3/15/2023\")",
+        "DATEVALUE(\"invalid\")",
+        "_xlfn.NOW()",
+        "now ()",
+    ] {
         let mut workbook = synthetic(
             &[
-                ("A1", "DATEVALUE(\"13/1\")", number(45_000.0)),
-                ("B1", "DATEVALUE(\"3/15\")", number(99.0)),
+                ("A1", formula, number(45_000.0)),
+                ("B1", "Sheet1!A1+1", number(99.0)),
             ],
             &[],
             Vec::new(),
         );
-        workbook.recalculate_all(CalculationOptions { now_serial });
-        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
-        for workbook in [&workbook, &reopened] {
-            assert_eq!(
-                value(workbook, "A1"),
-                CellValue::Error {
-                    value: ErrorValue::Value
-                }
-            );
-            assert_eq!(
-                value(workbook, "B1"),
-                number(if now_serial.is_some() { 45_000.0 } else { 99.0 })
-            );
+        batch_edit(&mut workbook, "A1", "7", None);
+        assert_eq!(value(&workbook, "A1"), number(45_000.0), "{formula}");
+        assert_eq!(value(&workbook, "B1"), number(99.0), "{formula}");
+    }
+}
+
+#[test]
+fn clock_token_text_and_bare_names_do_not_gate() {
+    for formula in ["\"TODAY()\"", "ClocklessName"] {
+        let mut workbook = synthetic(
+            &[
+                ("A1", formula, number(99.0)),
+                ("B1", "Sheet1!A1+1", number(99.0)),
+            ],
+            &[],
+            Vec::new(),
+        );
+        batch_edit(&mut workbook, "A1", "7", None);
+        assert_eq!(value(&workbook, "B1"), number(8.0));
+    }
+}
+
+#[test]
+fn direct_today_evaluation_without_clock_still_returns_value_error() {
+    let model = WorkbookModel::default();
+    assert_eq!(
+        xlsx_calc::evaluate(
+            &xlsx_calc::parse_formula("TODAY()").unwrap(),
+            &xlsx_calc::EvalContext::new(&model, SheetId(0))
+        ),
+        CellValue::Error {
+            value: ErrorValue::Value
         }
+    );
+}
+
+#[test]
+fn formula_replacement_updates_clock_presence() {
+    let mut workbook = synthetic(
+        &[
+            ("A1", "1+1", number(45_000.0)),
+            ("B1", "Sheet1!A1+1", number(99.0)),
+        ],
+        &[],
+        Vec::new(),
+    );
+    workbook
+        .edit_cell(
+            SheetId(1),
+            cell("A1"),
+            "=TODAY()",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook
+            .sheet(SheetId(1))
+            .unwrap()
+            .cell(cell("A1"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("TODAY()")
+    );
+    assert_eq!(value(&workbook, "B1"), number(99.0));
+    workbook
+        .edit_cell(
+            SheetId(1),
+            cell("A1"),
+            "=NOW()",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    batch_edit(&mut workbook, "A1", "7", None);
+    assert_eq!(value(&workbook, "B1"), number(99.0));
+    workbook
+        .edit_cell(SheetId(1), cell("A1"), "0", CalculationOptions::default())
+        .unwrap();
+    assert_eq!(value(&workbook, "B1"), number(8.0));
+}
+
+#[test]
+fn date_coercion_functions_gate_the_workbook() {
+    for formula in [
+        "YEAR(\"3/15\")",
+        "MONTH(\"3/15\")",
+        "DAYS(\"3/15\",1)",
+        "ABS(\"3/15\")",
+        "INDEX(A2:A3,\"3/15\")",
+        "OFFSET(A2,\"3/15\",0)",
+        "RANDBETWEEN(1,\"3/15\")",
+    ] {
+        let mut workbook = synthetic(
+            &[
+                ("A1", formula, number(45_000.0)),
+                ("B1", "Sheet1!A1+1", number(99.0)),
+            ],
+            &[],
+            Vec::new(),
+        );
+        batch_edit(&mut workbook, "A1", "7", None);
+        assert_eq!(value(&workbook, "A1"), number(45_000.0), "{formula}");
+        assert_eq!(value(&workbook, "B1"), number(99.0), "{formula}");
     }
 }
