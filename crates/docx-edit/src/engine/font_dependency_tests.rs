@@ -133,6 +133,184 @@ fn edit_stream(pair: &Pair, trigger: RelayoutTrigger) {
     }
 }
 
+fn font_chain_pair(font: u32) -> Pair {
+    let bytes = lowering_pages::with_body(&format!(
+        "{}{}",
+        lowering_pages::p(
+            "00000001",
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Requested" w:hAnsi="Requested"/></w:rPr><w:t>Requested text</w:t></w:r>"#,
+        ),
+        lowering_pages::p(
+            "00000002",
+            r#"<w:r><w:rPr><w:rFonts w:ascii="Stable" w:hAnsi="Stable"/></w:rPr><w:t>Stable text</w:t></w:r>"#,
+        ),
+    ));
+    let mut pair = Pair::new(&bytes, font);
+    pair.request["notes"]["contents"] = json!([]);
+    pair
+}
+
+#[test]
+fn resident_typing_keeps_font_identity_for_the_next_pass() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let pair = font_chain_pair(font);
+    pair.layout(RelayoutTrigger::Interactive);
+    let before = pair.shared.stats();
+    pair.edit(true);
+    let after = pair.shared.stats();
+    assert_eq!(after.resident_measure_calls - before.resident_measure_calls, 1);
+    assert_eq!(after.resident_reused_blocks - before.resident_reused_blocks, 1);
+    assert!(
+        pair.shared
+            .font_dependency_work
+            .borrow()
+            .reuse_sets
+            .is_empty()
+    );
+    let chains: BTreeMap<String, Vec<u32>> =
+        serde_json::from_value(pair.request["measurement"]["fontChains"].clone()).unwrap();
+    for engine in [&pair.shared, &pair.oracle] {
+        assert_eq!(
+            engine.pagination.borrow().measured_font_chains.as_ref(),
+            Some(&chains),
+        );
+    }
+    pair.layout(RelayoutTrigger::Interactive);
+    pair.assert_identity_saving();
+}
+
+#[test]
+fn reentrant_font_layout_matches_per_block_oracle() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let other = docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap();
+    let pair = font_chain_pair(font);
+    pair.layout(RelayoutTrigger::Interactive);
+    let mut nested_request = pair.request.clone();
+    nested_request["measurement"]["fontChains"]["requested|0|0"] = json!([other]);
+    let nested_chains: BTreeMap<String, Vec<u32>> =
+        serde_json::from_value(nested_request["measurement"]["fontChains"].clone()).unwrap();
+    pair.reset_work();
+    let frame = |engine: &EngineSession| {
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", pair.at, pair.at),
+                Some("x"),
+                true,
+            )
+            .unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let mut ticks = 0_u32;
+        let mut nested = false;
+        let (frame, profile) = engine
+            .apply_and_layout_profiled("body", epoch, &mut || {
+                ticks += 1;
+                if ticks == 2 {
+                    engine
+                        .layout_regions_for_trigger(
+                            &nested_request.to_string(),
+                            None,
+                            RelayoutTrigger::Interactive,
+                        )
+                        .unwrap();
+                    nested = true;
+                }
+                f64::from(ticks)
+            })
+            .unwrap();
+        assert!(nested);
+        assert_eq!(profile.lower_ms, 1.0);
+        assert_eq!(profile.measure_ms, 0.0);
+        let pagination = engine.pagination.borrow();
+        assert_eq!(
+            pagination.measured_font_chains.as_ref(),
+            Some(&nested_chains),
+        );
+        assert!(
+            pagination
+                .measured_font_dependencies
+                .iter()
+                .all(|dependencies| dependencies.matches(FontChains::BTree(&nested_chains)))
+        );
+        frame
+    };
+    assert_eq!(frame(&pair.shared), frame(&pair.oracle));
+    pair.compare();
+    pair.layout(RelayoutTrigger::Interactive);
+    let work = pair.shared.font_dependency_work.borrow();
+    assert_eq!(work.identity_skips, 0);
+    assert!(work.validations > 0);
+    assert!(!work.reuse_sets[0].contains(&0));
+    assert!(work.reuse_sets[0].contains(&1));
+    drop(work);
+    pair.layout(RelayoutTrigger::Interactive);
+    pair.assert_identity_saving();
+}
+
+#[test]
+fn failed_font_pass_then_resident_edit_matches_per_block_oracle() {
+    for trigger in [RelayoutTrigger::Interactive, RelayoutTrigger::Bulk] {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let other = docx_layout::register_measure_font_bytes(lowering_pages::OTHER_FONT).unwrap();
+        let mut pair = font_chain_pair(font);
+        pair.layout(trigger);
+        pair.at = pair
+            .shared
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_at(1)
+            .unwrap()
+            .node_start;
+        let original_chains: BTreeMap<String, Vec<u32>> =
+            serde_json::from_value(pair.request["measurement"]["fontChains"].clone()).unwrap();
+        let mut failed_request = pair.request.clone();
+        failed_request["measurement"]["fontChains"]["requested|0|0"] = json!([other]);
+        failed_request["regions"]["sections"][0]["headerFooterRefs"] =
+            json!({"headerDefault": "missing-font-dependency-test"});
+        let failed_chains: BTreeMap<String, Vec<u32>> =
+            serde_json::from_value(failed_request["measurement"]["fontChains"].clone()).unwrap();
+        pair.reset_work();
+        for engine in [&pair.shared, &pair.oracle] {
+            let mut prepared = engine
+                .prepare_region_layout(&failed_request.to_string(), None, trigger)
+                .unwrap();
+            assert!(prepared.measure(usize::MAX).unwrap());
+            {
+                let pagination = engine.pagination.borrow();
+                assert!(pagination.measured_font_chains.is_none());
+                assert!(
+                    pagination.measured_font_dependencies[0]
+                        .matches(FontChains::BTree(&failed_chains))
+                );
+                assert!(
+                    !pagination.measured_font_dependencies[0]
+                        .matches(FontChains::BTree(&original_chains))
+                );
+            }
+            assert_eq!(engine.font_dependency_work.borrow().reuse_sets.len(), 1);
+            let error = engine.finish_region_layout(prepared).err().unwrap();
+            assert!(error.contains("hf:missing-font-dependency-test"), "{error}");
+            assert!(engine.pagination.borrow().measured_font_chains.is_none());
+        }
+        pair.edit(true);
+        assert_eq!(pair.shared.font_dependency_work.borrow().identity_skips, 0);
+        if trigger == RelayoutTrigger::Interactive {
+            assert!(!pair.shared.font_dependency_work.borrow().reuse_sets.is_empty());
+        }
+        for reused in &pair.shared.font_dependency_work.borrow().reuse_sets {
+            assert!(!reused.contains(&0));
+        }
+        pair.layout(RelayoutTrigger::Interactive);
+        pair.assert_identity_saving();
+    }
+}
+
 #[test]
 fn shared_font_dependencies_match_per_block_oracle_on_synthetic_edits() {
     let fonts = docx_layout::MeasureFonts::default();
@@ -227,7 +405,13 @@ fn font_changes(
     pair.layout(trigger);
     assert_eq!(pair.shared.font_dependency_work.borrow().identity_skips, 0);
     assert_eq!(pair.shared.font_dependency_work.borrow().validations, 0);
-    assert!(pair.shared.font_dependency_work.borrow().reuse_sets.is_empty());
+    assert!(
+        pair.shared
+            .font_dependency_work
+            .borrow()
+            .reuse_sets
+            .is_empty()
+    );
     pair.layout(trigger);
     pair.assert_identity_saving();
 }
@@ -263,7 +447,10 @@ fn unchanged_font_identity_does_not_validate_unknown_records() {
     pair.layout(RelayoutTrigger::Interactive);
     for engine in [&pair.shared, &pair.oracle] {
         let mut pagination = engine.pagination.borrow_mut();
-        pagination.measured_font_dependencies[0] = FontChainDependencies::unknown();
+        let mut dependencies = pagination.measured_font_dependencies.clone();
+        dependencies[0] = FontChainDependencies::unknown();
+        let chains = pagination.measured_font_chains.clone();
+        pagination.set_font_dependencies(dependencies, chains.as_ref());
     }
     pair.layout(RelayoutTrigger::Interactive);
     pair.assert_identity_saving();
@@ -295,7 +482,13 @@ fn appended_referenced_fonts_keep_the_availability_guard() {
         );
         pair.layout(trigger);
         assert_eq!(pair.shared.font_dependency_work.borrow().identity_skips, 0);
-        assert!(pair.shared.font_dependency_work.borrow().reuse_sets.is_empty());
+        assert!(
+            pair.shared
+                .font_dependency_work
+                .borrow()
+                .reuse_sets
+                .is_empty()
+        );
         pair.layout(trigger);
         pair.assert_identity_saving();
         pair.edit(true);

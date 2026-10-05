@@ -173,9 +173,7 @@ impl FontChainDependencies {
         self.unknown |= other.unknown;
         let chains = Arc::make_mut(&mut self.chains);
         for (key, ids) in other.chains.iter() {
-            chains
-                .entry(key.clone())
-                .or_insert_with(|| ids.clone());
+            chains.entry(key.clone()).or_insert_with(|| ids.clone());
         }
     }
 
@@ -788,7 +786,13 @@ mod tests {
         replaced.insert("requested|0|0".to_owned(), vec![2]);
         let mut removed = captured.clone();
         removed.remove("requested|0|0");
-        for map in [captured.clone(), appended, replaced, removed, BTreeMap::new()] {
+        for map in [
+            captured.clone(),
+            appended,
+            replaced,
+            removed,
+            BTreeMap::new(),
+        ] {
             let expected: Vec<_> = records
                 .iter()
                 .enumerate()
