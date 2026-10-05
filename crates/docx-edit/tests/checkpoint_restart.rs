@@ -51,7 +51,16 @@ fn split_document(preceding: u32, lines: usize, height: u32, widow: bool) -> Vec
 
 fn prime(bytes: &[u8], font: u32, slices: &[(usize, usize, usize)]) -> (EngineSession, Value) {
     let engine = EngineSession::new(75301);
-    seed_from_docx(engine.doc(), bytes).unwrap();
+    engine.layout_document_with_regions_retained("{}").unwrap();
+    let seed = docx_edit::EditingDoc::new(75300);
+    seed_from_docx(&seed, bytes).unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&seed.encode_state_as_update_v1())
+        .unwrap();
+    engine
+        .doc()
+        .set_note_separator_state(seed.note_separator_state().unwrap());
     let mut request = fixture::region_request(&engine, bytes, font);
     request["regions"]["sections"] = json!([{
         "sectionId": "main",
@@ -139,14 +148,19 @@ fn an_edit_after_a_split_paragraph_resumes_and_matches_fresh() {
                 _ => offset += 1,
             }
         }
+        let edit = docx_edit::EditingDoc::new(75303);
+        edit.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        edit.insert_text(
+            &EditCtx::local("", ""),
+            Position::new("body", at.unwrap()),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
         engine
             .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new("body", at.unwrap()),
-                "x",
-                FormatPolicy::Inherit,
-            )
+            .apply_host_update_v1(&edit.encode_state_as_update_v1())
             .unwrap();
         assert_resumed_matches_fresh(&engine, &request);
     }

@@ -26,7 +26,7 @@ fn owned_parts<S: AsRef<[u8]>>(parts: &[(String, S)]) -> Vec<(String, Vec<u8>)> 
         .collect()
 }
 
-fn parse_workbook_with_package(
+pub(super) fn parse_workbook_with_package(
     parts: &[(String, impl AsRef<[u8]>)],
 ) -> Result<crate::ParsedWorkbook, ParseError> {
     crate::parse_workbook_with_owned_package(owned_parts(parts))
@@ -38,7 +38,11 @@ fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, Pars
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
-fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String, Vec<u8>)> {
+pub(super) fn package(
+    worksheet_body: &str,
+    shared: &[&str],
+    date1904: bool,
+) -> Vec<(String, Vec<u8>)> {
     let pr = if date1904 {
         r#"<workbookPr date1904="1"/>"#
     } else {

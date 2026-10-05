@@ -57,6 +57,7 @@ use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, 
 use crate::batch::outcome_json;
 use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
 use crate::content_controls::{ContentControlQuery, ContentControlsOptions};
+use crate::engine::RelayoutTrigger;
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
@@ -1499,6 +1500,7 @@ impl EditSession {
         self.docx_source.replace(Some(source));
         self.docx_digest.replace(Some(digest));
         self.engine.set_partial_document(false);
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         self.engine.doc().rotate_version(js_entropy());
         Ok(json)
     }
@@ -1530,6 +1532,7 @@ impl EditSession {
         let fonts = crate::seed::seed_preview_envelope(self.engine.doc(), envelope, media)?;
         self.awaiting_comment_baseline.set(false);
         self.engine.set_partial_document(true);
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         self.engine.doc().rotate_version(js_entropy());
         serde_json::to_string(&DocxHostWire {
             envelope: host_envelope,
@@ -2385,6 +2388,7 @@ impl EditSession {
     /// Hydrates from a yrs v1 update. The first load after an unseeded open retains prior
     /// comment writes and marks loaded fields differing from seed placeholders as authored.
     pub fn load(&self, update: &[u8]) -> Result<(), JsValue> {
+        let session_id = self.engine.doc().session_id();
         let written = self.awaiting_comment_baseline.get().then(|| {
             self.engine
                 .doc()
@@ -2393,6 +2397,9 @@ impl EditSession {
                 .unwrap_or_default()
         });
         self.engine.doc().apply_update_v1(update).map_err(js_err)?;
+        if self.engine.doc().session_id() != session_id {
+            self.engine.set_relayout_trigger(RelayoutTrigger::Open);
+        }
         if let Some(written) = written {
             self.engine.doc().rebase_comment_writes(written);
             self.awaiting_comment_baseline.set(false);
@@ -2414,6 +2421,7 @@ impl EditSession {
     /// Starts a new opening of the document; see [`EditingDoc::begin_opening`].
     pub fn begin_opening(&self, generation: Option<String>) {
         self.engine.doc().begin_opening(generation.as_deref());
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
     }
 
     /// Unions seeded opaque sequence names into document state.
@@ -2647,6 +2655,7 @@ impl EditSession {
         if !self.engine.doc().has_opening() {
             self.engine.doc().begin_opening(None);
         }
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
         serde_json::to_string(&Value::Object(receipt)).map_err(js_err)
     }
 
@@ -4119,7 +4128,9 @@ impl EditSession {
         self.engine
             .doc()
             .apply_raw_story_batches(vec![(story.to_owned(), ops)], &ctx)
-            .map_err(js_err)
+            .map_err(js_err)?;
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
+        Ok(())
     }
 
     // -- version-checked host edits --
@@ -4317,6 +4328,7 @@ impl EditSession {
         .map_err(js_err)?;
         let json = outcome.to_json(&options.limits).map_err(js_err)?;
         if let CompareOutcome::Applied(applied) = outcome {
+            self.engine.set_relayout_trigger(RelayoutTrigger::Open);
             self.docx_source.replace(Some(PackageBytes::from(original)));
             self.docx_digest.replace(None);
             self.compared.replace(Some((applied, options.limits)));

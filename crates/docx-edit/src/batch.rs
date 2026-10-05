@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -74,6 +74,21 @@ impl fmt::Display for DocumentVersion {
 
 pub(crate) fn version_token(nonce: u64, epoch: u64) -> DocumentVersion {
     DocumentVersion(format!("{nonce:016x}-{epoch}"))
+}
+
+pub(crate) struct HostEditGuard<'a>(&'a AtomicU32);
+
+impl<'a> HostEditGuard<'a> {
+    pub(crate) fn new(depth: &'a AtomicU32) -> Self {
+        depth.fetch_add(1, Ordering::Relaxed);
+        Self(depth)
+    }
+}
+
+impl Drop for HostEditGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 static NONCE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -2880,6 +2895,7 @@ impl EditingDoc {
         history: &UndoSession,
         staging_limit: usize,
     ) -> EditResult<Result<EditApplication, EditRefusal>> {
+        let _host_edit = HostEditGuard::new(&self.host_edit_depth);
         if !history.belongs_to(self) {
             return Err(EditError::InvalidUpdate(
                 "the undo history belongs to another document".to_owned(),
