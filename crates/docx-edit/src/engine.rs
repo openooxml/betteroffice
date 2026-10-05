@@ -69,6 +69,7 @@ struct LoweredStory {
     serialized_blocks: Option<String>,
     local: crate::bridge::local::LocalLowering,
     preview: Option<Rc<crate::bridge::preview::PreviewUnits>>,
+    preview_edit: Option<crate::bridge::preview::TextEdit>,
 }
 
 #[derive(Debug, Default)]
@@ -1406,6 +1407,8 @@ pub struct EngineSession {
     partial_document: Cell<bool>,
     /// Resident text edits re-lower only their paragraph when eligible.
     local_lowering: Cell<bool>,
+    #[cfg(test)]
+    preview_refresh: Cell<bool>,
 }
 
 struct RelayoutTriggerReset<'a>(&'a EngineSession);
@@ -3528,6 +3531,8 @@ impl EngineSession {
             font_fingerprints: RefCell::new(HashMap::new()),
             partial_document: Cell::new(false),
             local_lowering: Cell::new(false),
+            #[cfg(test)]
+            preview_refresh: Cell::new(true),
         }
     }
 
@@ -3694,6 +3699,10 @@ impl EngineSession {
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
         let before = self.doc_epoch();
+        let preview_length = self.doc.story_len(&range.story)?;
+        let preview_plain = text.is_some_and(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
+            || (text.is_none()
+                && self.doc.segment_index(&range.story)?.is_text_range(range.start, range.end));
         let index_epoch = (self.local_lowering.get()
             && (text.is_none() || range.start == range.end))
             .then(|| self.doc.committed_epoch());
@@ -3770,6 +3779,21 @@ impl EngineSession {
             && self.local_lowering.get()
             && (text.is_none() || range.start == range.end);
         if let Some(lowered) = render.stories.get_mut(&range.story) {
+            let inserted = text.map_or(0, |text| text.encode_utf16().count() as u32);
+            lowered.preview_edit = (preview_plain
+                && lowered.doc_epoch == before
+                && self.doc_epoch() == before.wrapping_add(1)
+                && receipt.new_para_ids.is_empty()
+                && receipt.revision_ids.is_empty()
+                && range.end.checked_sub(range.start)
+                    .and_then(|removed| preview_length.checked_sub(removed))
+                    .and_then(|length| length.checked_add(inserted))
+                    == self.doc.story_len(&range.story).ok())
+                .then(|| crate::bridge::preview::TextEdit {
+                    range: range.start..range.end,
+                    inserted,
+                    epochs: (before, self.doc_epoch()),
+                });
             lowered.local.edit = receipt
                 .range
                 .as_ref()
@@ -3944,8 +3968,24 @@ impl EngineSession {
         let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
-        let (blocks, map, revealable_blocks, preview) =
-            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?;
+        let refreshed = self.render.borrow().stories.get(story).and_then(|lowered| {
+            #[cfg(test)]
+            if !self.preview_refresh.get() {
+                return None;
+            }
+            let edit = lowered.preview_edit.as_ref()?;
+            (edit.epochs == (lowered.doc_epoch, epoch)
+                && lowered.env == *env
+                && lowered.media == self.doc.media_sources()
+                && lowered.local.matches_source(&self.doc))
+                .then(|| crate::bridge::preview::refresh(lowered.preview.as_ref()?, edit))
+                .flatten()
+        });
+        let (blocks, map, revealable_blocks, preview) = if let Some(units) = refreshed {
+            crate::bridge::preview::lower_refreshed(&self.doc, story, env, &mut local, units)?
+        } else {
+            crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
+        };
         let mut render = self.render.borrow_mut();
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
@@ -3960,6 +4000,7 @@ impl EngineSession {
                 serialized_blocks: None,
                 local,
                 preview: preview.map(Rc::new),
+                preview_edit: None,
             },
         );
         Ok(())
@@ -8903,6 +8944,8 @@ mod tests {
 
     #[cfg(test)]
     mod interactive_layout_regression_tests;
+
+    mod preview_refresh_tests;
 
     fn table_wrap_section(content_width: f64, columns: serde_json::Value) -> serde_json::Value {
         json!({
