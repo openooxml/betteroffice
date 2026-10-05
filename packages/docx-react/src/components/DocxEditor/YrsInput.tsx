@@ -201,11 +201,15 @@ type HeldInput = (
   | { kind: 'tab'; shift: boolean }
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
-  | { kind: 'delete-selection' }
+  | { kind: 'delete-selection'; cut?: CutCopy }
   | { kind: 'select-all' }
   | { kind: 'copy'; apply: (session: YrsSession) => void | Promise<void>; onDropped: () => void }
   | { kind: 'undo-boundary' }
 ) & { inputTime?: number };
+
+interface CutCopy {
+  written: boolean;
+}
 
 function isOpeningHeldInput(entry: HeldInput): boolean {
   return entry.kind === 'text' || entry.kind === 'composition' || entry.kind === 'split' ||
@@ -1256,9 +1260,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
   const deleteSelection = useCallback(
-    (queued = false): void => {
-      if (holdOperation({ kind: 'delete-selection' })) return;
+    (queued = false, cut?: CutCopy): void => {
+      if (holdOperation({ kind: 'delete-selection', cut })) return;
       const apply = (): void => {
+        if (cut && !cut.written) return;
         if (!readOnly && replicaReadyRef?.current !== false && deleteSelected()) {
           advanceInteractionEpoch();
           finishMutation();
@@ -1364,7 +1369,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     else if (entry.kind === 'tab') handlers.handleTab(entry.shift, true);
     else if (entry.kind === 'split') handlers.splitParagraph();
     else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
-    else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
+    else if (entry.kind === 'delete-selection') handlers.deleteSelection(true, entry.cut);
     else if (entry.kind === 'select-all') handlers.selectAll();
     else if (entry.kind === 'copy') handlers.enqueueInputOperation(
       () => handlers.session ? entry.apply(handlers.session) : undefined,
@@ -1515,11 +1520,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [session]);
 
   // A copy asked before the edit peer loads writes the selection it then has.
-  const copyAfterReplica = useCallback((cut = false): boolean => {
+  const copyAfterReplica = useCallback((cut = false): CutCopy | null => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
     if (!session || (!(cut && holdInput) && replicaReadyRef?.current !== false) || !clipboard) {
-      return false;
+      return null;
     }
+    const result: CutCopy = { written: false };
     const copied = session;
     let written: Promise<void>;
     const text = new Promise<Blob>((resolve, reject) => {
@@ -1535,15 +1541,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
     });
     void text.catch(() => {});
-    if (typeof ClipboardItem === 'function' && clipboard.write) {
-      written = clipboard.write([new ClipboardItem({ 'text/plain': text })]).catch(() => {});
-    } else {
-      written = text
-        .then((blob) => blob.text())
-        .then((value) => clipboard.writeText(value))
-        .catch(() => {});
-    }
-    return true;
+    const write = typeof ClipboardItem === 'function' && clipboard.write
+      ? clipboard.write([new ClipboardItem({ 'text/plain': text })])
+      : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
+    written = write.then(() => { result.written = true; }, () => {});
+    return result;
   }, [enqueueInputOperation, holdInput, holdOperation, replicaReadyRef, session]);
 
   const handleKeyDown = useCallback(
@@ -1705,8 +1707,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (readOnly || (!holdInput && replicaReadyRef?.current !== false)) return;
       event.preventDefault();
-      copyAfterReplica(true);
-      deleteSelection(true);
+      const copied = copyAfterReplica(true);
+      if (copied) deleteSelection(true, copied);
     },
     [copyAfterReplica, deleteSelection, holdInput, readOnly, replicaReadyRef]
   );
