@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, MAX_PLOT_DATA_SCAN, PlotChart, PlotOp, PlotRect, PlotSeries, PlotSink, PlotTextAlign,
-    chart_aria_label, plot_chart_into,
+    ChartSpace, MAX_PLOT_DATA_SCAN, PlotChart, PlotOp, PlotRect, PlotSeries, PlotSink,
+    PlotTextAlign, chart_aria_label, plot_chart_into,
 };
 use xlsx_model::chart::{AnchorCell, ChartAnchor, SheetChart};
 use xlsx_model::styles::Stylesheet;
@@ -1487,9 +1487,7 @@ mod tests {
             .filter_map(|command| match command {
                 DrawCmd::FillRect {
                     x, y, w, h, color, ..
-                } if color.as_ref() == "#123456" => {
-                    Some((x + w / 2.0, y + h / 2.0))
-                }
+                } if color.as_ref() == "#123456" => Some((x + w / 2.0, y + h / 2.0)),
                 _ => None,
             })
             .collect()
@@ -1688,7 +1686,8 @@ mod tests {
     #[test]
     fn scatter_primary_pair_does_not_admit_non_scatter_secondary_axes() {
         for family in [
-            "column", "bar", "line", "area", "radar", "stock", "surface", "pie", "doughnut", "ofPie",
+            "column", "bar", "line", "area", "radar", "stock", "surface", "pie", "doughnut",
+            "ofPie",
         ] {
             let mut space = scatter_space();
             space.chart_type = family.into();
