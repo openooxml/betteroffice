@@ -35,6 +35,11 @@ const CHART: u8 = 18;
 const CHART_REF: u8 = 19;
 const ARRAY: u8 = 20;
 
+#[cfg(test)]
+thread_local! {
+    static ANCHOR_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) struct ModelSnapshotEncoder {
     ordinal: u64,
     started: bool,
@@ -385,6 +390,10 @@ impl MetadataCursor {
                 ARRAY => {
                     let (at, range) = sheet
                         .array_formulas_after(self.array_key)
+                        .inspect(|_| {
+                            #[cfg(test)]
+                            ANCHOR_VISITS.set(ANCHOR_VISITS.get() + 1);
+                        })
                         .next()
                         .ok_or_else(|| SnapshotError::new("snapshot array cursor is stale"))?;
                     write_ref(w, &at);
@@ -1602,9 +1611,11 @@ mod tests {
             sheet_phase: ARRAY,
             ..MetadataCursor::default()
         };
+        ANCHOR_VISITS.set(0);
         for (at, range) in sheet.array_formulas() {
             let mut actual = Writer::new();
             assert!(cursor.write_sheet(&mut actual, &sheet).unwrap());
+            assert_eq!(ANCHOR_VISITS.get(), cursor.index);
             let mut expected = Writer::new();
             expected.u8(ARRAY);
             write_ref(&mut expected, &at);
@@ -1612,6 +1623,7 @@ mod tests {
             assert_eq!(actual.into_bytes(), expected.into_bytes());
         }
         assert!(!cursor.write_sheet(&mut Writer::new(), &sheet).unwrap());
+        assert_eq!(ANCHOR_VISITS.get(), 50_000);
     }
 
     fn sample_model() -> Workbook {

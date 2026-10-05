@@ -990,8 +990,6 @@ impl AuthorityHydrator {
             .map_err(|failure| {
                 if failure == SplitError::OversizedStruct {
                     SnapshotError::new("Yrs snapshot record exceeds advance byte budget")
-                } else if failure == SplitError::OversizedDeletion {
-                    SnapshotError::new("Yrs snapshot deletion exceeds advance record budget")
                 } else {
                     SnapshotError::new(format!("invalid Yrs snapshot: {}", failure.reason()))
                 }
@@ -1018,7 +1016,12 @@ impl AuthorityHydrator {
                 ));
             }
             #[cfg(test)]
-            crate::snapshot::step::record(part.records, part.bytes.len());
+            {
+                crate::snapshot::step::record(part.records, part.bytes.len());
+                if part.bytes[0] == 0 {
+                    crate::snapshot::step::delete(part.records);
+                }
+            }
             if !cursor
                 .is_complete(payload)
                 .map_err(|_| SnapshotError::new("invalid Yrs snapshot tail"))?
@@ -1290,6 +1293,20 @@ mod tests {
         let a = source();
         let mut base = (*a.base).clone();
         base.col_styles = vec![Vec::new()];
+        let mut hostile = Writer::new();
+        hostile.u8(0);
+        base.bootstrap_client_id.write(&mut hostile);
+        base.date_system.write(&mut hostile);
+        base.fingerprint.write(&mut hostile);
+        base.styles.theme.write(&mut hostile);
+        for (section, count) in base_counts(&base).into_iter().enumerate() {
+            hostile.var_usize(if section == 4 { 50_000_000 } else { count });
+        }
+        builder.push(&hostile.into_bytes()).unwrap();
+        assert_eq!(builder.base.as_ref().unwrap().col_styles.capacity(), 0);
+        assert!(builder.base.as_ref().unwrap().col_styles.is_empty());
+        assert!(!builder.is_complete());
+        builder = BaseBuilder::default();
         let mut manifest = Writer::new();
         manifest.u8(0);
         write_manifest(&base, &mut manifest);
@@ -1439,12 +1456,16 @@ mod tests {
     }
 
     #[test]
-    fn advance_refuses_delete_range_larger_than_record_budget() {
+    fn advance_refuses_delete_range_without_admitted_clocks() {
         let a = source();
         let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
         let encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
         let header = header(&a, &encoder, budget);
         let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        let before = hydrator
+            .doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         let mut payload = Writer::new();
         payload.raw(&[0, 1]);
         payload.var_u64(99);
@@ -1457,9 +1478,16 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             failure.to_string(),
-            "Yrs snapshot deletion exceeds advance record budget"
+            "invalid Yrs snapshot: missing_dependency"
         );
         assert_eq!(crate::snapshot::step::current().records, 0);
+        assert_eq!(
+            hydrator
+                .doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
+            before,
+        );
         assert!(!has_pending(&hydrator.doc));
     }
 

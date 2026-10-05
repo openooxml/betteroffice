@@ -373,6 +373,47 @@ fn assert_step_budget(budget: SnapshotBudget) -> crate::snapshot::step::StepWork
     work
 }
 
+fn completed_builder_with_step_budget(
+    chunks: &[Vec<u8>],
+    budget: SnapshotBudget,
+) -> (WorkbookSnapshotBuilder, usize) {
+    let mut builder = WorkbookSnapshotBuilder::new();
+    let mut deleted = 0;
+    for chunk in chunks {
+        builder.push(chunk).unwrap();
+        assert_step_budget(budget);
+        deleted += crate::snapshot::step::deleted_clocks();
+        builder.advance(budget).unwrap();
+        assert_step_budget(budget);
+        deleted += crate::snapshot::step::deleted_clocks();
+    }
+    for _ in 0..200_000 {
+        let ready = builder.advance(budget).unwrap().is_ready();
+        assert_step_budget(budget);
+        deleted += crate::snapshot::step::deleted_clocks();
+        if ready {
+            return (builder, deleted);
+        }
+    }
+    panic!("snapshot hydration did not complete");
+}
+
+fn deleted_clock_total(workbook: &Workbook) -> usize {
+    use yrs::updates::decoder::Decode;
+
+    let update = yrs::Update::decode_v1(&workbook.encode_state_as_update_v1()).unwrap();
+    update
+        .delete_set()
+        .iter()
+        .map(|(_, ranges)| {
+            ranges
+                .iter()
+                .map(|range| (range.end - range.start) as usize)
+                .sum::<usize>()
+        })
+        .sum()
+}
+
 fn decoded_snapshot(chunks: &[Vec<u8>]) -> Vec<(ChunkKind, u64, Vec<u8>)> {
     let mut records = Vec::new();
     let mut logical = Vec::new();
@@ -493,24 +534,12 @@ fn snapshot_in_flight_encoder_refuses_restored_retained_permission() {
 fn snapshot_large_deletion_history_respects_step_budget_and_worker_identity() {
     let worker = worker(&source(false, false));
     worker.authority.snapshot_deletion_history_for_test(20_000);
+    let deleted_total = deleted_clock_total(&worker);
+    assert!(deleted_total >= 20_000);
     for budget in [budgets()[0], budgets()[1]] {
         let chunks = encode(&worker, budget);
-        let mut builder = WorkbookSnapshotBuilder::new();
-        for chunk in &chunks {
-            builder.push(chunk).unwrap();
-            assert_step_budget(budget);
-            builder.advance(budget).unwrap();
-            assert_step_budget(budget);
-        }
-        let mut ready = false;
-        for _ in 0..200_000 {
-            ready = builder.advance(budget).unwrap().is_ready();
-            assert_step_budget(budget);
-            if ready {
-                break;
-            }
-        }
-        assert!(ready);
+        let (builder, deleted) = completed_builder_with_step_budget(&chunks, budget);
+        assert_eq!(deleted, deleted_total);
         let (peer, received_context) = builder.finish().unwrap().into_parts();
         assert_eq!(received_context, Some(context()));
         assert_current_identity(&worker, &peer);
@@ -520,6 +549,129 @@ fn snapshot_large_deletion_history_respects_step_budget_and_worker_identity() {
         );
         assert_eq!(worker.save().unwrap(), peer.save().unwrap());
     }
+}
+
+#[test]
+fn snapshot_deletion_parts_accept_a_smaller_receiver_record_budget() {
+    let worker = worker(&source(false, false));
+    worker.authority.snapshot_deletion_history_for_test(21);
+    let deleted_total = deleted_clock_total(&worker);
+    assert!(deleted_total >= 21);
+    let encode_budget = SnapshotBudget::new(7, 16_384).unwrap();
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let chunks = encode(&worker, encode_budget);
+    let mut largest_deletion = 0;
+    for (kind, _, payload) in decoded_snapshot(&chunks) {
+        if kind == ChunkKind::Yrs {
+            let mut cursor = crate::snapshot::yrs_split::UpdateCursor::default();
+            while let Some(part) = cursor.next(&payload, usize::MAX, usize::MAX).unwrap() {
+                if part.bytes[0] == 0 {
+                    largest_deletion = largest_deletion.max(part.records);
+                }
+            }
+        }
+    }
+    assert_eq!(largest_deletion, 7);
+    let (builder, deleted) = completed_builder_with_step_budget(&chunks, budget);
+    assert_eq!(deleted, deleted_total);
+    let (peer, received_context) = builder.finish().unwrap().into_parts();
+    assert_eq!(received_context, Some(context()));
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.encode_state_as_update_v1(),
+        peer.encode_state_as_update_v1(),
+    );
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
+#[test]
+fn snapshot_json_object_embed_and_format_values_match_worker() {
+    use yrs::{Any, Text, WriteTxn};
+
+    let worker = worker(&source(false, false));
+    {
+        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let text = txn.get_or_insert_text("snapshot-json");
+        let value = Any::Map(Arc::new(HashMap::from([("a".to_owned(), Any::from(0))])));
+        text.insert_embed(&mut txn, 0, value.clone());
+        text.format(
+            &mut txn,
+            0,
+            1,
+            HashMap::from([("format".to_owned(), value)]),
+        );
+    }
+    for budget in [budgets()[0], budgets()[1]] {
+        let encode_budget = SnapshotBudget::new(7, 16_384).unwrap();
+        let chunks = encode(&worker, encode_budget);
+        let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+        let (peer, received_context) = builder.finish().unwrap().into_parts();
+        assert_eq!(received_context, Some(context()));
+        assert_current_identity(&worker, &peer);
+        assert_eq!(
+            worker.encode_state_as_update_v1(),
+            peer.encode_state_as_update_v1(),
+        );
+    }
+}
+
+#[test]
+fn snapshot_gc_reclaims_deleted_nested_map_children_before_hydration() {
+    use yrs::{Map, MapPrelim, ReadTxn, WriteTxn};
+
+    let mut worker = Workbook::from_model_collaborative(
+        WorkbookModel {
+            sheets: vec![crate::Sheet::new("Data")],
+            ..WorkbookModel::default()
+        },
+        37,
+    )
+    .unwrap();
+    assert!(worker.is_collaborative());
+    let (client, start, end) = {
+        let mut txn = worker.authority.snapshot_transaction_for_test();
+        assert!(!txn.doc().skip_gc());
+        let client = txn.doc().client_id();
+        let root = txn.get_or_insert_map("snapshot-gc");
+        let nested = root.insert(&mut txn, "nested", MapPrelim::default());
+        let start = txn.state_vector().get(&client);
+        for index in 0..10_000 {
+            nested.insert(&mut txn, index.to_string(), index);
+        }
+        (client.get(), start, txn.state_vector().get(&client))
+    };
+    assert_eq!(end - start, 10_000);
+    {
+        let mut txn = worker.authority.snapshot_transaction_for_test();
+        let root = txn.get_or_insert_map("snapshot-gc");
+        root.insert(&mut txn, "nested", 0);
+    }
+    worker.mode = WorkbookMode::Standalone;
+    let deleted_total = deleted_clock_total(&worker);
+    assert!(deleted_total >= 10_001);
+    let encode_budget = SnapshotBudget::new(7, 16_384).unwrap();
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let chunks = encode(&worker, encode_budget);
+    let mut deleted_struct_clocks = 0;
+    for (kind, _, payload) in decoded_snapshot(&chunks) {
+        if kind == ChunkKind::Yrs {
+            deleted_struct_clocks += crate::snapshot::yrs_split::deleted_struct_clocks_for_test(
+                &payload, client, start, end,
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(deleted_struct_clocks, 10_000);
+    let (builder, deleted) = completed_builder_with_step_budget(&chunks, budget);
+    assert_eq!(deleted, deleted_total);
+    let (peer, received_context) = builder.finish().unwrap().into_parts();
+    assert_eq!(received_context, Some(context()));
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.encode_state_as_update_v1(),
+        peer.encode_state_as_update_v1(),
+    );
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
 
 #[test]
@@ -989,6 +1141,146 @@ fn snapshot_single_large_sheet_and_source_steps_respect_budget() {
 #[ignore]
 fn snapshot_single_million_cell_sheet_and_source_steps_respect_budget() {
     single_large_sheet_snapshot(50_000);
+}
+
+#[test]
+#[ignore]
+fn snapshot_single_million_cell_sheet_cleared_history_steps_respect_budget() {
+    assert!(
+        !cfg!(debug_assertions),
+        "run this measurement in release mode",
+    );
+    let rows = 50_000;
+    let mut sheet = xlsx_model::Sheet::new("Large");
+    for row in 0..rows {
+        for col in 0..20 {
+            sheet.set_cell(
+                CellRef::new(row, col),
+                Cell {
+                    value: CellValue::Number {
+                        value: f64::from(row * 20 + col),
+                    },
+                    formula: None,
+                    style: None,
+                },
+            );
+        }
+    }
+    let mut small = xlsx_model::Sheet::new("Small");
+    small.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            formula: Some("Large!A1+7".to_owned()),
+            style: None,
+        },
+    );
+    let mut worker = Workbook::from_model_collaborative(
+        WorkbookModel {
+            sheets: vec![sheet, small],
+            ..WorkbookModel::default()
+        },
+        37,
+    )
+    .unwrap();
+    assert!(worker.is_collaborative());
+    assert_eq!(worker.model().sheets[0].iter_cells().count(), 1_000_000);
+    let edits: Vec<_> = (0..rows)
+        .flat_map(|row| {
+            (0..20).map(move |col| crate::CellInput {
+                cell: CellRef::new(row, col),
+                input: String::new(),
+            })
+        })
+        .collect();
+    assert!(
+        worker
+            .edit_cells(SheetId(0), &edits, context())
+            .unwrap()
+            .applied
+    );
+    drop(edits);
+    assert_eq!(
+        worker.cell(SheetId(0), CellRef::new(0, 0)).unwrap().input,
+        "",
+    );
+    assert_eq!(
+        worker.cell(SheetId(0), CellRef::new(rows - 1, 19)).unwrap().input,
+        "",
+    );
+    assert!(
+        worker.model().sheets[0]
+            .iter_cells()
+            .all(|(_, cell)| cell.value == CellValue::Empty && cell.formula.is_none())
+    );
+    worker.authority.snapshot_checkpoint_for_test();
+    worker.mode = WorkbookMode::Standalone;
+    worker.edited_since_open = false;
+    assert!(!worker.can_undo());
+    assert!(!worker.can_redo());
+    let budget = SnapshotBudget::new(256, 16 * 1024).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&worker, Some(context()), budget).unwrap();
+    let mut builder = WorkbookSnapshotBuilder::new();
+    let mut max_push = std::time::Duration::ZERO;
+    let mut max_advance = std::time::Duration::ZERO;
+    let mut max_records = 0;
+    let mut max_bytes = 0;
+    let mut push_steps = 0;
+    let mut advance_steps = 0;
+    let mut deleted = 0;
+    while let Some(chunk) = encoder.next(&worker).unwrap() {
+        assert!(chunk.len() <= budget.max_bytes());
+        let start = std::time::Instant::now();
+        builder.push(&chunk).unwrap();
+        max_push = max_push.max(start.elapsed());
+        let work = assert_step_budget(budget);
+        max_records = max_records.max(work.records);
+        max_bytes = max_bytes.max(work.bytes);
+        push_steps += 1;
+        let start = std::time::Instant::now();
+        builder.advance(budget).unwrap();
+        max_advance = max_advance.max(start.elapsed());
+        let work = assert_step_budget(budget);
+        max_records = max_records.max(work.records);
+        max_bytes = max_bytes.max(work.bytes);
+        deleted += crate::snapshot::step::deleted_clocks();
+        advance_steps += 1;
+    }
+    loop {
+        let start = std::time::Instant::now();
+        let ready = builder.advance(budget).unwrap().is_ready();
+        max_advance = max_advance.max(start.elapsed());
+        let work = assert_step_budget(budget);
+        max_records = max_records.max(work.records);
+        max_bytes = max_bytes.max(work.bytes);
+        deleted += crate::snapshot::step::deleted_clocks();
+        advance_steps += 1;
+        if ready {
+            break;
+        }
+        assert!(advance_steps < rows as usize * 40 + 10_000);
+    }
+    eprintln!(
+        "50000 x 20 cleared: max push={max_push:?}, max advance={max_advance:?}, \
+         max records={max_records}/{}, max bytes={max_bytes}/{}",
+        budget.max_records(),
+        budget.max_bytes(),
+    );
+    eprintln!(
+        "50000 x 20 cleared: total steps={}, push steps={push_steps}, advance steps={advance_steps}",
+        push_steps + advance_steps,
+    );
+    assert!(deleted >= 1_000_000);
+    assert!(max_records <= budget.max_records());
+    assert!(max_bytes <= budget.max_bytes());
+    let (peer, received_context) = builder.finish().unwrap().into_parts();
+    assert_eq!(received_context, Some(context()));
+    assert_current_identity(&worker, &peer);
+    assert_eq!(
+        worker.encode_state_as_update_v1(),
+        peer.encode_state_as_update_v1(),
+    );
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
 
 #[test]

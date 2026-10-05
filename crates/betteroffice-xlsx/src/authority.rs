@@ -634,6 +634,22 @@ impl WorkbookAuthority {
         self.doc.transact_mut()
     }
 
+    #[cfg(test)]
+    #[doc(hidden)]
+    pub(crate) fn snapshot_checkpoint_for_test(&mut self) {
+        let mut undo = build_undo_manager(
+            &self.doc,
+            std::mem::take(&mut self.undo_stack),
+            std::mem::take(&mut self.redo_stack),
+        )
+        .unwrap();
+        undo.clear_all();
+        drop(undo);
+        self.doc.transact_mut_with(HYDRATE_ORIGIN).gc(None);
+        self.clear_history();
+        assert_eq!(self.next_sheet_id, 0);
+    }
+
     pub(crate) fn state_vector_entries(&self) -> usize {
         self.doc.transact().state_vector().len()
     }

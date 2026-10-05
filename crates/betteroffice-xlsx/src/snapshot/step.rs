@@ -9,10 +9,22 @@ pub(crate) struct StepWork {
 
 thread_local! {
     static WORK: Cell<StepWork> = Cell::new(StepWork::default());
+    static DELETED_CLOCKS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn reset() {
     WORK.set(StepWork::default());
+    DELETED_CLOCKS.set(0);
+}
+
+#[doc(hidden)]
+pub(crate) fn delete(clocks: usize) {
+    DELETED_CLOCKS.set(DELETED_CLOCKS.get() + clocks);
+}
+
+#[doc(hidden)]
+pub(crate) fn deleted_clocks() -> usize {
+    DELETED_CLOCKS.get()
 }
 
 pub(crate) fn record(records: usize, bytes: usize) {
