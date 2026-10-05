@@ -1522,7 +1522,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // A copy asked before the edit peer loads writes the selection it then has.
   const copyAfterReplica = useCallback((cut = false): CutCopy | null => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
-    if (!session || (!(cut && holdInput) && replicaReadyRef?.current !== false) || !clipboard) {
+    const held = holdInput && !readOnly && (cut || heldInputRef.current.entries.length > 0);
+    if (!session || (!held && replicaReadyRef?.current !== false) || !clipboard) {
       return null;
     }
     const result: CutCopy = { written: false };
@@ -1536,7 +1537,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (cut) return written;
       };
       const onDropped = () => reject(new Error('Newer input replaced the copy'));
-      if (!cut || !holdOperation({ kind: 'copy', apply, onDropped })) {
+      if (!held || !holdOperation({ kind: 'copy', apply, onDropped })) {
         enqueueInputOperation(() => apply(copied), 'selection', onDropped, undefined, false);
       }
     });
@@ -1546,7 +1547,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       : text.then((blob) => blob.text()).then((value) => clipboard.writeText(value));
     written = write.then(() => { result.written = true; }, () => {});
     return result;
-  }, [enqueueInputOperation, holdInput, holdOperation, replicaReadyRef, session]);
+  }, [enqueueInputOperation, holdInput, holdOperation, readOnly, replicaReadyRef, session]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
