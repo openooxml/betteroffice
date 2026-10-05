@@ -10,6 +10,10 @@ mod types;
 mod workbook;
 
 pub use error::Error;
+pub use snapshot::{
+    HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,
+    WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
+};
 pub use structured::{
     DEFAULT_EXPORT_MAX_BYTES, DEFAULT_EXPORT_MAX_CELLS, DEFAULT_MARKDOWN_MAX_CELLS,
     DEFAULT_MARKDOWN_MAX_COLUMNS, DEFAULT_MARKDOWN_MAX_ROWS, MAX_EXPORT_BYTES, MAX_EXPORT_CELLS,

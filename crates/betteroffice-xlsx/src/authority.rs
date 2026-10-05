@@ -606,6 +606,34 @@ impl WorkbookAuthority {
         self.doc.client_id().get()
     }
 
+    pub(crate) fn snapshot_projection_valid(&self) -> crate::snapshot::SnapshotResult<bool> {
+        let _transaction = self.doc.try_transact().map_err(|_| {
+            crate::snapshot::SnapshotError::new("snapshot authority has an active transaction")
+        })?;
+        if !self.history.undo.is_empty()
+            || !self.history.redo.is_empty()
+            || !self.undo_stack.is_empty()
+            || !self.redo_stack.is_empty()
+            || self.next_sheet_id != 0
+            || has_pending(&self.doc)
+        {
+            return Err(crate::snapshot::SnapshotError::new(
+                "snapshot authority is not at the initial boundary",
+            ));
+        }
+        self.base.styles.snapshot_field_counts();
+        Ok(self.projection_valid.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
+        self.projection_valid.store(valid, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_transaction_for_test(&self) -> TransactionMut<'_> {
+        self.doc.transact_mut()
+    }
+
     pub(crate) fn state_vector_entries(&self) -> usize {
         self.doc.transact().state_vector().len()
     }

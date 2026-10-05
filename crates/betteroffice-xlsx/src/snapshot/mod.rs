@@ -6,6 +6,10 @@ pub(crate) mod preserved;
 pub(crate) mod wire;
 pub(crate) mod yrs_split;
 
+pub use crate::workbook::snapshot_assembly::{
+    HydratedWorkbook, WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
+};
+
 use std::fmt;
 
 pub type SnapshotResult<T> = std::result::Result<T, SnapshotError>;

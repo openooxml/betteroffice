@@ -2,6 +2,8 @@ pub(crate) mod batch;
 #[cfg(test)]
 mod edit_tests;
 mod staging;
+#[path = "snapshot/assembly.rs"]
+pub(crate) mod snapshot_assembly;
 pub(crate) mod target;
 
 use std::borrow::Cow;
@@ -576,6 +578,16 @@ impl Workbook {
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    fn require_snapshot_standalone(&self) -> crate::snapshot::SnapshotResult<()> {
+        if matches!(self.mode, WorkbookMode::Standalone) {
+            Ok(())
+        } else {
+            Err(crate::snapshot::SnapshotError::new(
+                "collaborative workbooks cannot be snapshotted",
+            ))
+        }
     }
 
     pub fn client_id(&self) -> u64 {
