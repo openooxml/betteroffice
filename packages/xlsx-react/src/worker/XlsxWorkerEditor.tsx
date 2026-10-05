@@ -202,7 +202,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       onError: (error) => owner?.fail(error),
       onRefusal(error, draft) {
         if (owner?.retiring) { owner.reportRefusal(error); return; }
-        setRefusal(error instanceof Error ? error.message : String(error));
+        const message = error instanceof Error ? error.message : String(error);
+        if (owner?.recovering) flushSync(() => setRefusal(message));
+        else setRefusal(message);
         if (draft) {
           input.setDraft(draft);
           if (draft.source === 'cell') setEditing(draft);
@@ -372,11 +374,11 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const index = previewJournal.indexOf(op);
         if (index >= 0) previewJournal.splice(index, 1);
       }
-      if (!changed || run?.retiring || run?.failure) return;
+      if (!changed || !run || run.retiring || run.failure) return;
       const pending = [...previewOps.entries()].reverse()[0];
       if (pending) {
         const [sheet, row, col] = pending[0].split(':').map(Number);
-        const draft: InputDraft = { generation: run!.generation, sheet, row, col,
+        const draft: InputDraft = { generation: run.generation, sheet, row, col,
           value: acceptedCells.get(pending[0]) ?? '', source: 'cell' };
         draftOperations.set(draft, pending[1]);
         await preview(draft);
@@ -790,8 +792,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (owner.peer.cell(draft.sheet, draft.row, draft.col).input !== draft.value) {
         markApplied.check();
         const op = draftOperations.get(draft);
-        const operations = operationPeer.current && workbookEditPeerOperations(operationPeer.current);
-        const result = op && operations ? (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
+        const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer);
+        const result = op ? (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult :
           owner.editPeer.editCell(draft.sheet, draft.row, draft.col, draft.value);
         markApplied();
         apply(result, op);

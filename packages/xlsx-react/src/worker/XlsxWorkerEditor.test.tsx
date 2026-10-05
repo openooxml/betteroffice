@@ -1976,6 +1976,40 @@ for (const [input, normalized] of [['001', '1'], ['true', 'TRUE'], ['false', 'FA
   }
 }
 
+for (const route of ['cell', 'formula'] as const) {
+  it(`reuses the volatile draft operation as soon as hydration resolves (${route})`, async () => {
+    const host = harness(true);
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    const input = '=RANDBETWEEN(1,1000000)';
+    if (route === 'cell') reviewEdit(view, input);
+    else {
+      fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: input } });
+      fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 'Enter' });
+    }
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+    expect(api.hydrated).toBe(false);
+    const op = host.preview.mock.calls[0][2][0];
+    expect(op).toMatchObject({ method: 'editCell', args: [0, 0, 0, input] });
+    expect(op.calculation).toBeTruthy();
+    if (!op.calculation) throw new Error('Missing preview calculation context');
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    expect(host.replay.mock.calls[0][0].op).toEqual(op);
+    expect(host.replay.mock.calls[0][0].calculation).toEqual(op.calculation);
+    expect(host.peerMethods.setCalculationContext).toHaveBeenCalledWith(op.calculation);
+    expect(host.cells.get('0:0:0')).toBe(input);
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  });
+}
+
 it('reuses the complete volatile host operation and calculation context for preview and replay', async () => {
   const host = harness(true);
   const hydration = deferred<WorkbookHandle>();
@@ -1988,6 +2022,7 @@ it('reuses the complete volatile host operation and calculation context for prev
   expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
   const op = host.preview.mock.calls[0][2][0];
   expect(op.calculation).toBeTruthy();
+  if (!op.calculation) throw new Error('Missing preview calculation context');
   await act(async () => hydration.resolve(host.peer));
   await advance();
   await pending;
@@ -2004,10 +2039,11 @@ for (const step of ['patchStyle', 'setFormulas'] as const) {
     let api!: XlsxWorkerEditorApi;
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={(value) => { api = value; }} />);
     await opened();
-    const request = reviewBatch('styled');
-    const target = request.steps[0].target;
-    request.steps.push(step === 'patchStyle' ? { op: 'patchStyle', target, patch: { fontSize: 24 } } :
-      { op: 'setFormulas', target, formulas: [['24']] });
+    const initial = reviewBatch('styled');
+    const target = initial.steps[0].target;
+    const request: XlsxEditRequest = { ...initial, steps: [...initial.steps,
+      step === 'patchStyle' ? { op: 'patchStyle', target, patch: { fontSize: 24 } } :
+        { op: 'setFormulas', target, formulas: [['24']] }] };
     const pending = api.applyEdits(request);
     await advance();
     expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
