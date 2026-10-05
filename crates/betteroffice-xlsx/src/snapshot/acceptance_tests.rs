@@ -284,14 +284,17 @@ fn canonical_base(workbook: &Workbook) -> Vec<Vec<u8>> {
     chunks
 }
 
-fn canonical_preserved(workbook: &Workbook) -> Vec<Vec<u8>> {
+fn canonical_preserved(workbook: &Workbook) -> Result<Vec<Vec<u8>>, String> {
     let budget = SnapshotBudget::new(1, usize::MAX).unwrap();
     let mut encoder = PreservedSnapshotEncoder::new();
     let mut chunks = Vec::new();
-    while let Some(chunk) = encoder.next(&workbook.preserved, budget).unwrap() {
+    while let Some(chunk) = encoder
+        .next(&workbook.preserved, budget)
+        .map_err(|error| error.to_string())?
+    {
         chunks.push(chunk);
     }
-    chunks
+    Ok(chunks)
 }
 
 fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
@@ -300,7 +303,22 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
         canonical_model(peer.model())
     );
     assert_eq!(canonical_base(worker), canonical_base(peer));
-    assert_eq!(canonical_preserved(worker), canonical_preserved(peer));
+    let reindexed = worker.preserved.axes.iter().flatten().any(|axes| {
+        !axes.rows.is_identity() || !axes.cols.is_identity()
+    });
+    if reindexed {
+        for workbook in [worker, peer] {
+            assert_eq!(
+                canonical_preserved(workbook).unwrap_err(),
+                "snapshot preservation axes are not identity"
+            );
+        }
+    } else {
+        assert_eq!(
+            canonical_preserved(worker).unwrap(),
+            canonical_preserved(peer).unwrap()
+        );
+    }
     assert_eq!(worker.preserved.origins, peer.preserved.origins);
     assert_eq!(
         worker.preserved.shared_string_cells,
