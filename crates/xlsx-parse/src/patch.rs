@@ -505,9 +505,7 @@ impl SheetPatch<'_> {
         }
         match formula.group {
             Some(group) => !dirty.groups.contains(&group),
-            None => {
-                formula.reference.is_none() || !dirty.masters.contains(&(cell.at.row, cell.at.col))
-            }
+            None => !dirty.masters.contains(&(cell.at.row, cell.at.col)),
         }
     }
 
@@ -575,7 +573,7 @@ impl SheetPatch<'_> {
     }
 
     fn dirty_formulas(&self, rows: &[SourceRow]) -> DirtyFormulas {
-        let changed = self.changed_source_cells();
+        let mut changed = self.changed_source_cells();
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
@@ -583,6 +581,16 @@ impl SheetPatch<'_> {
                 continue;
             };
             let key = (cell.at.row, cell.at.col);
+            if self
+                .original
+                .array_formula(cell.at)
+                .and_then(|range| self.remap_range(range))
+                != self
+                    .mapped(cell.at)
+                    .and_then(|mapped| self.sheet.array_formula(mapped))
+            {
+                changed.insert(key);
+            }
             match formula.group {
                 Some(group) => {
                     let entry = groups.entry(group).or_insert((false, None));
@@ -594,9 +602,7 @@ impl SheetPatch<'_> {
                     }
                 }
                 None => {
-                    if let Some(reference) = formula.reference {
-                        masters.push((key, reference));
-                    }
+                    masters.push((key, formula.reference));
                 }
             }
         }
@@ -611,17 +617,10 @@ impl SheetPatch<'_> {
             masters: masters
                 .into_iter()
                 .filter(|(key, reference)| {
-                    let at = CellRef::new(key.0, key.1);
                     changed.contains(key)
-                        || !self.moves_uniformly(*reference)
-                        || range_changed(*reference, &changed)
-                        || self
-                            .original
-                            .array_formula(at)
-                            .and_then(|range| self.remap_range(range))
-                            != self
-                                .mapped(at)
-                                .and_then(|mapped| self.sheet.array_formula(mapped))
+                        || reference.is_some_and(|reference| {
+                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                        })
                 })
                 .map(|(key, _)| key)
                 .collect(),

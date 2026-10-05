@@ -39,7 +39,7 @@ fn parsed() -> ParsedWorkbook {
     parsed_sheet(SHEET)
 }
 
-fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
+pub(super) fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
     let mut parts = package(sheet, &[], false);
     parts.push(("xl/styles.xml".to_owned(), STYLES.as_bytes().to_vec()));
     parse_workbook_with_package(&parts).unwrap()
@@ -47,7 +47,7 @@ fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
 
 /// The model as an open projects it: cells on cellXfs[2] move to the first
 /// equivalent entry.
-fn projected(parsed: &ParsedWorkbook) -> Workbook {
+pub(super) fn projected(parsed: &ParsedWorkbook) -> Workbook {
     let mut workbook = parsed.workbook.clone();
     let sheet = &mut workbook.sheets[0];
     let moved = sheet
@@ -89,6 +89,17 @@ fn save(parsed: &ParsedWorkbook, workbook: &Workbook, axes: Option<SheetAxes>) -
         .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
         .unwrap();
     String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+fn reopen(xml: &str) -> Workbook {
+    let mut parts = package("", &[], false);
+    parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1 = xml.as_bytes().to_vec();
+    parts.push(("xl/styles.xml".to_owned(), STYLES.as_bytes().to_vec()));
+    parse_workbook_with_package(&parts).unwrap().workbook
 }
 
 /// Each `<c>` element's markup keyed by its `r` attribute.
@@ -222,6 +233,102 @@ fn moved_cells_do_not_borrow_equivalent_indices_from_the_same_position() {
 
     assert_ne!(saved, format!("<worksheet>{source}</worksheet>"));
     assert_eq!(cells(&saved)["A1"], r#"<c r="A1" s="1"><v>1</v></c>"#);
+}
+
+#[test]
+fn ordinary_formula_promotion_keeps_the_array_rectangle() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="A1" s="2"><f>1</f><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="A2" s="2"><v>1</v></c></row></sheetData>"#,
+    );
+    let parsed = parsed_sheet(source);
+    let mut workbook = projected(&parsed);
+    let at = CellRef::new(0, 0);
+    let range = CellRange::new(at, CellRef::new(1, 0));
+    workbook.sheets[0].set_array_formula(at, range);
+
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+
+    assert_eq!(
+        cells(&saved)["A1"],
+        r#"<c r="A1" s="2"><f t="array" ref="A1:A2">1</f><v>1</v></c>"#
+    );
+    let reopened = reopen(&saved);
+    assert_eq!(reopened.sheets[0].array_formula(at), Some(range));
+    assert_eq!(
+        reopened.sheets[0].cell(at).unwrap(),
+        parsed.workbook.sheets[0].cell(at).unwrap()
+    );
+}
+
+#[test]
+fn shared_formula_promotion_rewrites_the_whole_group() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="B1"><v>1</v></c>"#,
+        r#"<c r="C1" s="2"><f t="shared" ref="C1:C3" si="0">B1*2</f><v>2</v></c></row>"#,
+        r#"<row r="2"><c r="B2"><v>2</v></c><c r="C2" s="2"><f t="shared" si="0"/><v>4</v></c></row>"#,
+        r#"<row r="3"><c r="B3"><v>3</v></c><c r="C3" s="2"><f t="shared" si="0"/><v>6</v></c></row></sheetData>"#,
+    );
+    for address in ["C1", "C2"] {
+        let parsed = parsed_sheet(source);
+        let mut workbook = projected(&parsed);
+        let at = CellRef::parse_a1(address).unwrap();
+        let range = CellRange::new(at, CellRef::new(at.row + 1, at.col));
+        workbook.sheets[0].set_array_formula(at, range);
+
+        let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+
+        assert!(
+            cells(&saved)[address].contains(&format!(r#"<f t="array" ref="{}">"#, range.to_a1()))
+        );
+        assert!(!saved.contains(r#"t="shared""#));
+        assert!(!saved.contains(r#"si=""#));
+        let reopened = reopen(&saved);
+        assert_eq!(reopened.sheets[0].array_formula(at), Some(range));
+        for address in ["C1", "C2", "C3"] {
+            let at = CellRef::parse_a1(address).unwrap();
+            assert_eq!(
+                reopened.sheets[0].cell(at).unwrap(),
+                parsed.workbook.sheets[0].cell(at).unwrap(),
+                "{address}"
+            );
+        }
+    }
+}
+
+#[test]
+fn equal_cells_with_nonidentity_axes_keep_surviving_row_attributes() {
+    let source = concat!(
+        r#"<sheetData><row r="1" outlineLevel="1"><c r="A1" s="2"><v>1</v></c></row>"#,
+        r#"<row r="2" outlineLevel="2"><c r="A2" s="2"><v>1</v></c></row></sheetData>"#,
+    );
+    let parsed = parsed_sheet(source);
+    let mut workbook = parsed.workbook.clone();
+    let inserted = workbook.sheets[0]
+        .cell(CellRef::new(0, 0))
+        .cloned()
+        .unwrap();
+    workbook.sheets[0].remap_cells(|at| (at.row > 0).then(|| CellRef::new(at.row - 1, at.col)));
+    workbook.sheets[0].set_cell(CellRef::new(1, 0), inserted);
+    let mut axes = SheetAxes::default();
+    axes.rows.delete(0, 1);
+    axes.rows.insert(1, 1);
+    assert!(!axes.is_identity());
+    assert_eq!(workbook, parsed.workbook);
+
+    let saved = save(&parsed, &workbook, Some(axes));
+
+    assert_eq!(
+        saved,
+        concat!(
+            r#"<worksheet><sheetData><row r="1" outlineLevel="2"><c r="A1" s="2"><v>1</v></c></row>"#,
+            r#"<row r="2"><c r="A2" s="2"><v>1</v></c></row></sheetData></worksheet>"#,
+        )
+    );
+    assert_eq!(
+        save(&parsed, &workbook, None),
+        format!("<worksheet>{source}</worksheet>")
+    );
 }
 
 #[test]

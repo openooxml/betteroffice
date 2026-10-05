@@ -199,10 +199,24 @@ fn unrelated_edit_keeps_equivalent_style_indices_and_other_parts() {
         let source = package(variant);
         let before = parts(&source);
         let mut workbook = Workbook::open(&source).unwrap();
+        let source_format = workbook
+            .model()
+            .styles
+            .resolved_format(workbook.model().sheets[0].cell(cell("A1")).unwrap().style);
         workbook
             .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
             .unwrap();
-        let after = parts(&workbook.save().unwrap());
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .model()
+                .styles
+                .resolved_format(reopened.model().sheets[0].cell(cell("A1")).unwrap().style),
+            source_format,
+            "{name}"
+        );
 
         for path in ["xl/styles.xml", "xl/worksheets/sheet2.xml"] {
             assert_eq!(after[path], before[path], "{name}: {path}");
@@ -236,6 +250,11 @@ fn genuine_style_change_writes_the_new_index() {
         let source = package(variant);
         let before = parts(&source);
         let mut workbook = Workbook::open(&source).unwrap();
+        let source_format = workbook
+            .model()
+            .styles
+            .resolved_format(workbook.model().sheets[0].cell(cell("D1")).unwrap().style);
+        let source_xfs = workbook.model().styles.cell_xfs.len();
         let format = workbook
             .capture_format(SheetId(0), CellRange::new(cell("D1"), cell("D1")))
             .unwrap();
@@ -250,7 +269,24 @@ fn genuine_style_change_writes_the_new_index() {
         workbook
             .edit_cell(SheetId(0), cell("B2"), "7", CalculationOptions::default())
             .unwrap();
-        let after = parts(&workbook.save().unwrap());
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let reopened = Workbook::open(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .model()
+                .styles
+                .resolved_format(reopened.model().sheets[0].cell(cell("B1")).unwrap().style),
+            source_format,
+            "{name}"
+        );
+        for index in 0..source_xfs {
+            assert_eq!(
+                cell_xf(&text(&after, "xl/styles.xml"), index),
+                cell_xf(&text(&before, "xl/styles.xml"), index),
+                "{name}: cellXfs[{index}]"
+            );
+        }
 
         assert_eq!(
             after["xl/worksheets/sheet2.xml"], before["xl/worksheets/sheet2.xml"],
