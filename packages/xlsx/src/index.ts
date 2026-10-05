@@ -7,6 +7,7 @@
 
 /** @experimental */
 export { openWorkbookSession } from './session/client';
+export { WorkbookPeerHydrationError } from './session/peerHydrationError';
 /** @experimental */
 export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
 /** @internal */

@@ -4,6 +4,7 @@ import {
 } from '../wasm/loader';
 import type { WorkbookSession } from './client';
 import { workbookEditPeerInternals } from './editPeerInternals';
+import { WorkbookPeerHydrationError } from './peerHydrationError';
 import {
   applyWorkbookReplayOp,
   validateWorkbookReplayEnvelope,
@@ -57,6 +58,10 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   if (!internal) throw new TypeError('Workbook session does not support edit replay');
   if (internal.editPeerAttached) throw new Error('Workbook session already has an attached edit peer');
   if (internal.initialVersion !== undefined && peer.version() !== internal.initialVersion) {
+    if (internal.attachPeer) {
+      throw new WorkbookPeerHydrationError('version-mismatch',
+        'Workbook peer version differs from retained worker hydration');
+    }
     adoptWorkbookPeerVersion(peer, internal.initialVersion);
   }
   const replay = internal.replay;
@@ -68,6 +73,8 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   let recovered = false;
   let disposed = false;
   let tail = Promise.resolve();
+  const attachment = internal.attachPeer?.(peer.version());
+  if (attachment) tail = attachment.catch((cause: unknown) => { fail(cause); });
   let offFailure = () => {};
   let rejectFailure!: (cause: WorkbookEditPeerFailedError) => void;
   const failed = new Promise<never>((_, reject) => { rejectFailure = reject; });
@@ -107,7 +114,8 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   }
 
   function enqueue(envelope: WorkbookReplayEnvelope): void {
-    tail = Promise.all([tail, replay(envelope)]).then(([, reply]) => {
+    const sent = attachment ? attachment.then(() => replay(envelope)) : replay(envelope);
+    tail = Promise.all([tail, sent]).then(([, reply]) => {
       if (reply.sequence !== envelope.sequence) {
         throw new Error(`Workbook replay acknowledgement mismatch at sequence ${envelope.sequence} (${envelope.op.method})`);
       }
@@ -223,13 +231,18 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   synchronizeFailure();
 
   async function flush(): Promise<void> {
-    assertReady();
-    if (pending.length || dispatching) {
-      await new Promise<void>((resolve) => { drainWaiters.push(resolve); });
+    do {
       assertReady();
-    }
-    await Promise.race([tail, failed]);
-    assertReady();
+      if (pending.length || dispatching) {
+        await new Promise<void>((resolve) => { drainWaiters.push(resolve); });
+        assertReady();
+      }
+      const watermark = sentSequence;
+      await Promise.race([tail, failed]);
+      assertReady();
+      if (!pending.length && !dispatching && sentSequence === watermark &&
+        acknowledgedSequence >= watermark) return;
+    } while (true);
   }
 
   const edits: WorkbookEditPeer = {

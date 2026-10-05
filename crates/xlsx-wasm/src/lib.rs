@@ -53,6 +53,7 @@ struct PendingUpdateEvents {
 
 #[wasm_bindgen]
 impl XlsxDocument {
+    #[doc(hidden)]
     #[wasm_bindgen(js_name = adoptPeerVersion)]
     pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), JsValue> {
         self.session
@@ -60,6 +61,7 @@ impl XlsxDocument {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    #[doc(hidden)]
     #[wasm_bindgen(js_name = peerHydrationJson)]
     pub fn peer_hydration_json(&self) -> Result<String, JsValue> {
         self.session
@@ -67,6 +69,7 @@ impl XlsxDocument {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    #[doc(hidden)]
     #[wasm_bindgen(js_name = openWithPeerHydrationJson)]
     pub fn open_with_peer_hydration_json(
         bytes: &[u8],

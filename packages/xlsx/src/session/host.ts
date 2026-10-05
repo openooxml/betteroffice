@@ -1,7 +1,7 @@
 import { createSessionHost, type SessionHost } from '../../../../shared/office-session/host';
 import { transferable } from '../../../../shared/office-session/protocol';
 import type { SessionTransport } from '../../../../shared/office-session/transport';
-import { SessionFailure, type MethodHandlers } from '../../../../shared/office-session/types';
+import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
   initWasm, openWorkbook, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
@@ -20,6 +20,7 @@ import {
   WORKBOOK_INTERNAL_SESSION_POLICIES,
   type WorkbookInternalSessionMethods,
 } from './replay';
+import { WorkbookPeerHydrationError } from './peerHydrationError';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string };
@@ -44,6 +45,8 @@ export function createWorkbookSessionHost(
   let epoch = 0;
   let sequence = 0;
   let revision = 0;
+  let retainedHydration = false;
+  let peerAttached = false;
   const encoder = new TextEncoder();
 
   function workbook(): WorkbookHandle {
@@ -66,8 +69,19 @@ export function createWorkbookSessionHost(
   }
 
   const internalHandlers: MethodHandlers<WorkbookInternalSessionMethods, null> = {
+    attachPeer(_, peerVersion, peerSequence) {
+      if (peerVersion !== workbook().version() || peerSequence !== sequence) {
+        throw new WorkbookPeerHydrationError('version-mismatch',
+          'Workbook worker state differs from retained peer hydration');
+      }
+      peerAttached = true;
+    },
     replay(_, envelope) {
       validateWorkbookReplayEnvelope(envelope);
+      if (retainedHydration && !peerAttached) {
+        throw new WorkbookPeerHydrationError('mutation-before-attachment',
+          'Workbook replay requires an attached edit peer');
+      }
       const opened = workbook();
       if (envelope.sequence !== sequence + 1) {
         const error = new Error(`Expected workbook replay sequence ${sequence + 1}, got ${envelope.sequence}`);
@@ -113,6 +127,7 @@ export function createWorkbookSessionHost(
       if (disposed) throw new Error('Workbook session is disposed');
       if (handle) throw new Error('Workbook session is already open');
       const retainPeerHydration = 'retainPeerHydration' in input && input.retainPeerHydration === true;
+      retainedHydration = retainPeerHydration;
       let wasm = input.wasm;
       if (retainPeerHydration && wasm instanceof ArrayBuffer) wasm = await WebAssembly.compile(wasm);
       await (options.initWasm ?? initWasm)(wasm);
@@ -131,7 +146,9 @@ export function createWorkbookSessionHost(
         if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
           transport.post({
             protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
-            hydration: workbookPeerHydration(opened),
+            hydration: JSON.stringify({
+              ...JSON.parse(workbookPeerHydration(opened)), version: opened.version(), sequence,
+            }),
           });
         }
         const info = opened.sheetInfo();
@@ -209,6 +226,20 @@ export function createWorkbookSessionHost(
       dispose();
     },
   };
+
+  for (const method of Object.keys(handlers) as (keyof WorkbookSessionMethods)[]) {
+    const configured = WORKBOOK_SESSION_POLICIES[method];
+    const handler = handlers[method] as (...args: unknown[]) => unknown;
+    Object.defineProperty(handlers, method, { enumerable: true, value: (...args: unknown[]) => {
+      const policy = typeof configured === 'function'
+        ? (configured as (...args: unknown[]) => MethodPolicy)(...args.slice(1)) : configured;
+      if (retainedHydration && policy.mutates) {
+        throw new WorkbookPeerHydrationError('mutation-before-attachment',
+          `Cannot call ${method} outside workbook edit-peer replay in retained hydration mode`);
+      }
+      return handler(...args);
+    } });
+  }
 
   const host = createSessionHost<Methods, Events, null>(transport, {
     handlers: { ...handlers, ...internalHandlers },

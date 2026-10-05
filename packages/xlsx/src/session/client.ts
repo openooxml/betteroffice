@@ -24,6 +24,7 @@ import {
   type WorkbookInternalSessionMethods,
   type WorkbookReplayEnvelope,
 } from './replay';
+import { WorkbookPeerHydrationError } from './peerHydrationError';
 
 type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } & {
   peerOpened: { version: string };
@@ -37,6 +38,8 @@ interface WorkbookPeerSource {
   options: OpenWorkbookOptions;
   module?: WebAssembly.Module;
   hydration?: string;
+  version?: string;
+  sequence?: number;
   disposed: boolean;
   pending?: Promise<WorkbookHandle>;
 }
@@ -112,10 +115,12 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
 }
 
 async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookHandle> {
-  if (!source.module) throw new Error('Workbook peer hydration requires a worker-compiled module');
+  if (!source.module) throw new WorkbookPeerHydrationError('missing-module',
+    'Workbook peer hydration requires a worker-compiled module');
   await initWasm(source.module);
   if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-  if (source.hydration === undefined) throw new Error('Workbook worker did not retain peer calculation state');
+  if (source.hydration === undefined) throw new WorkbookPeerHydrationError('missing-hydration',
+    'Workbook worker did not retain peer calculation state');
   return openWorkbookPeer(source.bytes, source.options, source.hydration);
 }
 
@@ -162,6 +167,9 @@ export async function createWorkbookSession(
   let transfer: Transferable[];
   let client: SessionClient<Methods, Events>;
   let peerSource: WorkbookPeerSource | undefined;
+  let rejectHydration!: (error: WorkbookPeerHydrationError) => void;
+  const hydrationFailure = new Promise<never>((_, reject) => { rejectHydration = reject; });
+  void hydrationFailure.catch(() => {});
   try {
     ({ document, input, transfer } = prepareOpen(bytes, options));
     if (options.retainPeerHydration) {
@@ -179,8 +187,28 @@ export async function createWorkbookSession(
       onWasmModule: (url, module, hydration) => {
         if (url !== wasmAssetUrl().href) return;
         if (peerSource) {
+          if (hydration === undefined) {
+            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
+              'Workbook worker did not retain peer calculation state'));
+            return;
+          }
+          let captured: { version?: string; sequence?: number };
+          try { captured = JSON.parse(hydration); } catch {
+            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
+              'Workbook worker supplied invalid peer hydration'));
+            return;
+          }
+          if (!captured || typeof captured.version !== 'string' ||
+            typeof captured.sequence !== 'number' || !Number.isSafeInteger(captured.sequence) ||
+            captured.sequence < 0) {
+            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
+              'Workbook worker hydration is missing its committed version or sequence'));
+            return;
+          }
           peerSource.module = module;
           peerSource.hydration = hydration;
+          peerSource.version = captured.version;
+          peerSource.sequence = captured.sequence;
         }
         if (options.wasm === undefined && !options.worker && !wasmModules.has(url)) {
           wasmModules.set(url, module);
@@ -205,10 +233,17 @@ export async function createWorkbookSession(
   try {
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
-    state = await client.callWithTransfer('open', [document, input], transfer);
+    state = await Promise.race([
+      client.callWithTransfer('open', [document, input], transfer), hydrationFailure,
+    ]);
     if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
     if (peerSource && !peerSource.module) {
-      throw new Error('Workbook worker did not retain a compiled module for peer hydration');
+      throw new WorkbookPeerHydrationError('missing-module',
+        'Workbook worker did not retain a compiled module for peer hydration');
+    }
+    if (peerSource && peerSource.hydration === undefined) {
+      throw new WorkbookPeerHydrationError('missing-hydration',
+        'Workbook worker did not retain peer calculation state');
     }
   } catch (error) {
     await client.dispose();
@@ -218,11 +253,15 @@ export async function createWorkbookSession(
   const calls = { ...client.call };
   for (const method of Object.keys(WORKBOOK_SESSION_METHODS) as (keyof WorkbookSessionMethods)[]) {
     Object.defineProperty(calls, method, { value: (...args: unknown[]) => {
-      if (workbookSessionInternals.get(session)?.editPeerAttached) {
+      if (peerSource || workbookSessionInternals.get(session)?.editPeerAttached) {
         const configured = WORKBOOK_SESSION_POLICIES[method];
         const policy = typeof configured === 'function'
           ? (configured as (...args: unknown[]) => MethodPolicy)(...args) : configured;
         if (policy.mutates) {
+          if (peerSource) {
+            return Promise.reject(new WorkbookPeerHydrationError('mutation-before-attachment',
+              `Cannot call ${method} outside workbook edit-peer replay in retained hydration mode`));
+          }
           return Promise.reject(new Error(`Cannot call ${method} while a workbook edit peer is attached`));
         }
       }
@@ -263,7 +302,20 @@ export async function createWorkbookSession(
     }
     return reply;
   };
-  workbookSessionInternals.set(session, { replay, initialVersion, editPeerAttached: false });
+  const source = peerSource;
+  const attachPeer = source ? async (peerVersion: string) => {
+    try {
+      await client.call.attachPeer(peerVersion, source.sequence!);
+    } catch (error) {
+      if (error instanceof Error && error.name === 'WorkbookPeerHydrationError') {
+        throw new WorkbookPeerHydrationError('version-mismatch', error.message);
+      }
+      throw error;
+    }
+  } : undefined;
+  workbookSessionInternals.set(session, {
+    replay, initialVersion: peerSource?.version ?? initialVersion, attachPeer, editPeerAttached: false,
+  });
   if (peerSource) peerSources.set(session, peerSource);
   return session;
 }

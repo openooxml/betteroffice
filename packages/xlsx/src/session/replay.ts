@@ -40,18 +40,21 @@ export interface WorkbookReplayReply {
 }
 
 export type WorkbookInternalSessionMethods = {
+  attachPeer(version: string, sequence: number): void;
   replay(envelope: WorkbookReplayEnvelope): WorkbookReplayReply;
 };
 
-export const WORKBOOK_INTERNAL_SESSION_METHODS = { replay: true } as const;
+export const WORKBOOK_INTERNAL_SESSION_METHODS = { attachPeer: true, replay: true } as const;
 
 export const WORKBOOK_INTERNAL_SESSION_POLICIES: MethodPolicies<WorkbookInternalSessionMethods> = {
+  attachPeer: { lane: 'input', reorderable: false },
   replay: { lane: 'input', mutates: true, userInput: true, reorderable: false },
 };
 
 export const workbookSessionInternals = new WeakMap<WorkbookSession, {
   replay(envelope: WorkbookReplayEnvelope): Promise<WorkbookReplayReply>;
   initialVersion?: string;
+  attachPeer?(version: string): Promise<void>;
   editPeerAttached: boolean;
 }>();
 

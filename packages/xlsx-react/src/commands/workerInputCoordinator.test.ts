@@ -766,6 +766,78 @@ describe('worker input coordinator', () => {
     expect(coordinator.pending).toBe(false);
   });
 
+  test('waits for input queued after coordinator flush starts through the final worker acknowledgement', async () => {
+    const { fixture, wasmBytes } = await loadWorkbookSessionFixtures();
+    const acknowledgement = [deferred<void>(), deferred<void>()];
+    const entered = [deferred<void>(), deferred<void>()];
+    const hydrating = deferred<void>();
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'replay') {
+          const sequence = (message.args[0] as { sequence: number }).sequence;
+          entered[sequence - 1].resolve();
+          void acknowledgement[sequence - 1].promise.then(() => listener(message));
+        } else listener(message);
+      }),
+    }), { wasm: wasmBytes.buffer, retainPeerHydration: true });
+    const { coordinator, draft, ready, state, writes } = harness();
+    let peer: WorkbookHandle | undefined;
+    let edits: WorkbookEditPeer | undefined;
+    state.onHydration = async () => {
+      await hydrating.promise;
+      peer = await hydratePeer(session);
+      edits = createWorkbookEditPeer({ session, peer });
+      ready();
+    };
+    state.onWrite = (input) => {
+      if (!edits) throw new Error('Missing hydrated edit peer');
+      expect(edits.editCell(input.sheet, input.row, input.col, input.value).applied).toBe(true);
+    };
+    state.onFlushEdits = () => {
+      if (!edits) throw new Error('Missing hydrated edit peer');
+      return edits.flush();
+    };
+    const flush = coordinator.flush();
+    let flushed = false;
+    void flush.then(() => { flushed = true; }).catch(() => {});
+    const first = draft('queued after flush starts');
+    const commit = coordinator.submitAsync(first);
+    hydrating.resolve();
+    try {
+      await commit;
+      await entered[0].promise;
+      await session.call.version();
+      if (!peer || !edits) throw new Error('Missing hydrated edit peer');
+      expect(flushed).toBe(false);
+      expect(edits.sentSequence).toBe(1);
+      expect(edits.acknowledgedSequence).toBe(0);
+      const second = draft('queued during acknowledgement', 1);
+      await coordinator.submitAsync(second);
+      await entered[1].promise;
+      acknowledgement[0].resolve();
+      await session.call.version();
+      expect(flushed).toBe(false);
+      expect(edits.sentSequence).toBe(2);
+      expect(edits.acknowledgedSequence).toBe(1);
+      acknowledgement[1].resolve();
+      await flush;
+      expect(flushed).toBe(true);
+      expect(edits.acknowledgedSequence).toBe(edits.sentSequence);
+      expect(edits.acknowledgedSequence).toBe(2);
+      expect(writes).toEqual([first, second]);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(peer.save()).toEqual(await session.save());
+      expect(coordinator.unapplied).toEqual([]);
+      expect(coordinator.pending).toBe(false);
+    } finally {
+      for (const held of acknowledgement) held.resolve();
+      edits?.dispose();
+      peer?.dispose();
+      await session.dispose();
+    }
+  });
+
   test('flushes hydration-queued input through peer application and worker acknowledgement', async () => {
     const { fixture, wasmBytes } = await loadWorkbookSessionFixtures();
     const calculation = { nowSerial: 46_000.5, randSeed: 123456789 };

@@ -626,18 +626,29 @@ export function createWorkerInputCoordinator(
     },
     requestHydration,
     flush() {
+      current();
+      const lease = cycle;
       const flushed = runAfterPendingInput(async (_, markApplied) => {
         markApplied();
         await hooks.flushEdits();
       }, { kind: 'host' });
       void flushed.catch(() => {});
       return Promise.all([requestHydration('flush'), flushed]).then(async () => {
-        await pump();
-        current();
-        if (failure) throw failure.error;
-        if (entries.some((entry) => !entry.applied)) {
-          throw new XlsxCommandAdmissionError('input-failed');
-        }
+        let watermark: number;
+        do {
+          await wait(pump(), lease);
+          current();
+          if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
+          if (failure) throw failure.error;
+          if (entries.some((entry) => !entry.applied)) {
+            throw new XlsxCommandAdmissionError('input-failed');
+          }
+          watermark = nextId;
+          await wait(hooks.flushEdits(), lease);
+          current();
+          if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
+          if (failure) throw failure.error;
+        } while (nextId !== watermark || entries.length > 0);
       });
     },
     fail,
