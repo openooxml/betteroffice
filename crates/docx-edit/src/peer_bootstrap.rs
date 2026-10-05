@@ -899,6 +899,59 @@ mod tests {
         assert_eq!(peer.paragraph_identities(), worker.paragraph_identities());
     }
 
+    fn continuation_table_package() -> PackageBytes {
+        let cell = |properties: &str, text: &str| {
+            format!(
+                "<w:tc><w:tcPr>{properties}</w:tcPr><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>"
+            )
+        };
+        let table = |rows: &str| {
+            format!(
+                "<w:tbl><w:tblGrid><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/></w:tblGrid>{rows}</w:tbl>"
+            )
+        };
+        let mut rows = String::new();
+        for (properties, text) in [
+            ("<w:vMerge w:val=\"continue\"/>", "Orphan"),
+            ("<w:vMerge w:val=\"restart\"/>", "Restart"),
+            (
+                "<w:gridSpan w:val=\"2\"/><w:vMerge w:val=\"continue\"/>",
+                "Mismatched",
+            ),
+        ] {
+            rows.push_str(&format!(
+                "<w:tr>{}{}</w:tr>",
+                cell(properties, text),
+                cell("", "Right"),
+            ));
+        }
+        let mut parts = fixture::principal_parts();
+        let body = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        body.1 = format!(
+            "<w:document {}><w:body>{}<w:sectPr/></w:body></w:document>",
+            fixture::NS,
+            table(&rows),
+        )
+        .into_bytes();
+        let comments = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/comments.xml")
+            .unwrap();
+        comments.1 = format!(
+            "<w:comments {}><w:comment w:id=\"1\">{}</w:comment></w:comments>",
+            fixture::NS,
+            table(&format!(
+                "<w:tr>{}</w:tr>",
+                cell("<w:vMerge w:val=\"continue\"/>", "Comment orphan"),
+            )),
+        )
+        .into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap().into()
+    }
+
     #[test]
     fn peer_metadata_table_row_count_fits_export_positions_and_spans() {
         use crate::structured::source::TableLayout;
@@ -937,11 +990,6 @@ mod tests {
             ("leading-gap", "invalid table cell column"),
             ("grid-extent", "invalid table grid extent"),
             ("empty-row-extent", "invalid table grid extent"),
-            ("first-row-continuation", "invalid table merge continuation"),
-            ("no-restart", "invalid table merge continuation"),
-            ("different-span", "invalid table merge continuation"),
-            ("different-column", "invalid table merge continuation"),
-            ("interrupted-merge", "invalid table merge continuation"),
         ] {
             let mut bad = wire.clone();
             let layout = &mut bad["source"]["read"]["provenance"]["tables"][table_index][1];
@@ -972,30 +1020,114 @@ mod tests {
                     layout["rows"][0]["cells"] = json!([]);
                     layout["rows"][0]["grid_before"] = json!(6);
                 }
-                "first-row-continuation" => {
-                    layout["rows"][0]["cells"][0]["merge"] = json!("Continue")
-                }
-                "no-restart" => layout["rows"][1]["cells"][0]["merge"] = json!("Continue"),
-                "different-span" => {
-                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
-                    layout["rows"][1]["cells"][0]["merge"] = json!("Continue");
-                    layout["rows"][1]["cells"][0]["span"] = json!(2);
-                    layout["rows"][1]["cells"][1]["column"] = json!(3);
-                }
-                "different-column" => {
-                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
-                    layout["rows"][1]["cells"][0]["merge"] = json!("Continue");
-                    layout["rows"][1]["grid_before"] = json!(0);
-                    layout["rows"][1]["cells"][0]["column"] = json!(0);
-                    layout["rows"][1]["cells"][1]["column"] = json!(1);
-                }
-                "interrupted-merge" => {
-                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
-                    layout["rows"][2]["cells"][0]["merge"] = json!("Continue");
-                }
                 _ => unreachable!(),
             }
             assert_invalid_metadata_is_atomic(&worker, &source, &metadata, &bad, expected);
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_unmatched_continuation_metadata_decodes_and_exports() {
+        let source = table_package(false, false);
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let (json, blobs) = sections(&metadata).unwrap();
+        let wire: Value = serde_json::from_slice(json).unwrap();
+        let tables = wire["source"]["read"]["provenance"]["tables"]
+            .as_array()
+            .unwrap();
+        let table_index = tables
+            .iter()
+            .position(|entry| entry[0] == "body:t0")
+            .unwrap();
+        for (case, row_index) in [
+            ("first-row-continuation", 0),
+            ("no-restart", 1),
+            ("different-span", 1),
+            ("different-column", 1),
+            ("interrupted-merge", 2),
+            ("orphan-continuation", 0),
+        ] {
+            let mut accepted = wire.clone();
+            if case == "orphan-continuation" {
+                accepted["source"]["read"]["comments"][0]["body"] = json!([{
+                    "type": "table", "columnWidths": [900, 900],
+                    "rows": [{ "cells": [
+                        { "formatting": { "vMerge": "continue" }, "content": [] },
+                        { "content": [] }
+                    ] }]
+                }]);
+            } else {
+                let layout =
+                    &mut accepted["source"]["read"]["provenance"]["tables"][table_index][1];
+                match case {
+                    "first-row-continuation" => {
+                        layout["rows"][0]["cells"][0]["merge"] = json!("Continue")
+                    }
+                    "no-restart" => layout["rows"][1]["cells"][0]["merge"] = json!("Continue"),
+                    "different-span" => {
+                        layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                        layout["rows"][1]["cells"][0]["merge"] = json!("Continue");
+                        layout["rows"][1]["cells"][0]["span"] = json!(2);
+                        layout["rows"][1]["cells"][1]["column"] = json!(3);
+                    }
+                    "different-column" => {
+                        layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                        layout["rows"][1]["cells"][0]["merge"] = json!("Continue");
+                        layout["rows"][1]["grid_before"] = json!(0);
+                        layout["rows"][1]["cells"][0]["column"] = json!(0);
+                        layout["rows"][1]["cells"][1]["column"] = json!(1);
+                    }
+                    "interrupted-merge" => {
+                        layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                        layout["rows"][2]["cells"][0]["merge"] = json!("Continue");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let accepted = frame(&serde_json::to_vec(&accepted).unwrap(), blobs).unwrap();
+            assert!(decode(&accepted, source.clone(), &digest).is_ok(), "{case}");
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &accepted, Some(source.clone()))
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            peer.apply_update_v1(&state).unwrap();
+            for view in [
+                crate::structured::RevisionView::Accepted,
+                crate::structured::RevisionView::Original,
+                crate::structured::RevisionView::Markup,
+            ] {
+                let mut options = crate::structured::ExportOptions::new(view);
+                if case == "orphan-continuation" {
+                    options.stories = Some(vec![crate::structured::StorySelection::Comments]);
+                }
+                let actual = peer
+                    .export_structured(&options)
+                    .unwrap_or_else(|error| panic!("{case}: {error:?}"))
+                    .content;
+                let crate::structured::BlockKind::Table { table } =
+                    &actual.stories[0].blocks[0].content
+                else {
+                    panic!("{case}: expected table");
+                };
+                let cell = &table.rows[row_index].cells[0];
+                assert_eq!(cell.row_span, 1, "{case}");
+                assert_eq!(
+                    cell.vertical_merge,
+                    crate::structured::VerticalMerge::None,
+                    "{case}"
+                );
+                assert_eq!(cell.merge_origin, None, "{case}");
+                assert!(
+                    actual.diagnostics.iter().any(|diagnostic| {
+                        diagnostic.code == crate::structured::DiagnosticCode::UnsupportedContent
+                    }),
+                    "{case}"
+                );
+            }
         }
     }
 
@@ -1059,6 +1191,108 @@ mod tests {
                         Some(crate::structured::CellPosition { row: 0, column: 1 })
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_source_unmatched_continuations_export_like_source_open() {
+        let source = continuation_table_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let read = worker.source_metadata().unwrap();
+        let layout = &read.read().provenance.tables["body:t0"];
+        assert_eq!(layout.rows.len(), 3);
+        assert!(matches!(
+            layout.rows[0].cells[0].merge,
+            crate::structured::source::SourceMerge::Continue
+        ));
+        assert!(matches!(
+            layout.rows[1].cells[0].merge,
+            crate::structured::source::SourceMerge::Restart
+        ));
+        assert!(matches!(
+            layout.rows[2].cells[0].merge,
+            crate::structured::source::SourceMerge::Continue
+        ));
+        assert_eq!(layout.rows[1].cells[0].span, 1);
+        assert_eq!(layout.rows[2].cells[0].span, 2);
+        assert!(!read.read().seeded_comments.contains("1"));
+        let comment = read
+            .read()
+            .comments
+            .iter()
+            .find(|comment| comment.id == "1")
+            .unwrap();
+        assert_eq!(
+            comment.body[0]["rows"][0]["cells"][0]["formatting"]["vMerge"],
+            json!("continue")
+        );
+        let state = worker.encode_state_as_update_v1();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (envelope, parts, media) =
+            seed::parse_docx_package_with_media(source.clone(), digest.clone()).unwrap();
+        let (mut expected_source, index, _) =
+            seed::replica_source(envelope, parts, source.clone(), digest).unwrap();
+        let baseline = EditingDoc::new(19);
+        expected_source.watch_comments(&baseline);
+        baseline.install_source(expected_source, 17);
+        baseline.retain_source(SourcePackage::Ready(Arc::new(index)));
+        baseline.install_media(media);
+        baseline.apply_update_v1(&state).unwrap();
+        let peer = EditingDoc::new(19);
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
+        for view in [
+            crate::structured::RevisionView::Accepted,
+            crate::structured::RevisionView::Original,
+            crate::structured::RevisionView::Markup,
+        ] {
+            for comments in [false, true] {
+                let mut options = crate::structured::ExportOptions::new(view);
+                if comments {
+                    options.stories = Some(vec![crate::structured::StorySelection::Comments]);
+                }
+                let actual = peer.export_structured(&options).unwrap().content;
+                assert_eq!(
+                    actual,
+                    baseline.export_structured(&options).unwrap().content
+                );
+                let crate::structured::BlockKind::Table { table } =
+                    &actual.stories[0].blocks[0].content
+                else {
+                    panic!("expected continuation table");
+                };
+                assert_eq!(table.rows.len(), if comments { 1 } else { 3 });
+                let unmatched_rows: &[usize] = if comments { &[0] } else { &[0, 2] };
+                for &row_index in unmatched_rows {
+                    let cell = &table.rows[row_index].cells[0];
+                    assert_eq!(cell.row_span, 1);
+                    assert_eq!(cell.vertical_merge, crate::structured::VerticalMerge::None);
+                    assert_eq!(cell.merge_origin, None);
+                }
+                if !comments {
+                    assert_eq!(table.rows[2].cells[0].grid_span, 2);
+                    assert_eq!(table.rows[1].cells[0].row_span, 1);
+                    assert_eq!(
+                        table.rows[1].cells[0].vertical_merge,
+                        crate::structured::VerticalMerge::Restart
+                    );
+                }
+                assert_eq!(
+                    actual
+                        .diagnostics
+                        .iter()
+                        .filter(|diagnostic| {
+                            diagnostic.code == crate::structured::DiagnosticCode::UnsupportedContent
+                                && diagnostic.message.contains("continues a vertical merge")
+                        })
+                        .count(),
+                    if comments { 1 } else { 2 },
+                );
             }
         }
     }
@@ -1148,7 +1382,6 @@ mod tests {
             ("omission-overflow", "source table column overflow"),
             ("leading-count", "invalid source table grid count"),
             ("trailing-count", "invalid source table grid count"),
-            ("orphan-continuation", "invalid table merge continuation"),
             ("nested-table", "invalid source table grid count"),
             ("separator-table", "invalid source table grid count"),
         ] {
@@ -1177,9 +1410,6 @@ mod tests {
                 }
                 "leading-count" => table["rows"][0]["formatting"] = json!({"gridBefore": 1e300}),
                 "trailing-count" => table["rows"][0]["formatting"] = json!({"gridAfter": 1e300}),
-                "orphan-continuation" => {
-                    table["rows"][0]["cells"][0]["formatting"] = json!({"vMerge": "continue"})
-                }
                 _ => unreachable!(),
             }
             let mut bad = wire.clone();

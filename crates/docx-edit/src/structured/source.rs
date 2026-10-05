@@ -183,10 +183,8 @@ impl TableLayout {
 
     pub(crate) fn validate_peer_metadata(&self) -> Result<(), String> {
         Self::validate_peer_row_count(self.rows.len())?;
-        let mut open = BTreeMap::new();
         for row in &self.rows {
             let mut column = row.grid_before;
-            let mut next = BTreeMap::new();
             for cell in &row.cells {
                 if cell.span == 0 {
                     return Err("invalid table cell span".to_owned());
@@ -197,18 +195,6 @@ impl TableLayout {
                 column = column
                     .checked_add(cell.span)
                     .ok_or("table cell column overflow")?;
-                match cell.merge {
-                    SourceMerge::Continue => {
-                        if open.get(&cell.column) != Some(&cell.span) {
-                            return Err("invalid table merge continuation".to_owned());
-                        }
-                        next.insert(cell.column, cell.span);
-                    }
-                    SourceMerge::Restart => {
-                        next.insert(cell.column, cell.span);
-                    }
-                    SourceMerge::None => {}
-                }
             }
             let end = column
                 .checked_add(row.grid_after)
@@ -216,7 +202,6 @@ impl TableLayout {
             if end > self.grid_columns {
                 return Err("invalid table grid extent".to_owned());
             }
-            open = next;
         }
         Ok(())
     }
