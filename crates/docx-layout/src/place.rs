@@ -1577,7 +1577,13 @@ fn layout_paragraph(
         }
     }
 
-    Ok(opening_page_index.unwrap_or_else(|| paginator.state(paginator.get_current()).page_index))
+    Ok(match opening_page_index {
+        Some(page_index) => page_index,
+        None => {
+            let current = paginator.get_current();
+            paginator.state(current).page_index
+        }
+    })
 }
 
 /// Places inline images in flow and anchored images over the page.
