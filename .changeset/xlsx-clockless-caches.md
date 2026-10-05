@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Recalculation without a `nowSerial` clock keeps the saved results of cells that use `TODAY()`, `NOW()` or a year-less `DATEVALUE()` and recalculates every other cell. Passing `nowSerial` recalculates them normally.
+Recalculation without a `nowSerial` clock no longer overwrites the saved results of `TODAY()`, `NOW()` and year-less `DATEVALUE()` formulas with `#VALUE!`. Passing `nowSerial` recalculates them normally.
