@@ -974,6 +974,11 @@ describe('workbook worker editor', () => {
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('new');
     expect(host.preview).not.toHaveBeenCalled();
     expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'worker:initial')).toBe(true);
+    const nextFrame = host.sessionMethods.frame.getMockImplementation()!;
+    host.sessionMethods.frame.mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      return nextFrame(...args);
+    });
     const count = painted.length;
     await act(async () => pending.resolve(stale));
     expect(painted).toHaveLength(count);
@@ -1903,7 +1908,8 @@ for (const route of ['cell', 'formula', 'host'] as const) {
     const operations = workbookEditPeerInternals.get(host.attached!)!;
     const applying = spyOn(operations, 'applyQueuedOp');
     const clock = spyOn(Date, 'now').mockReturnValue(1_750_000_000_000);
-    restorers.push(() => applying.mockRestore(), () => clock.mockRestore());
+    const setting = spyOn(host.peer, 'setCalculationContext');
+    const entropy = spyOn(globalThis.crypto, 'getRandomValues');
     const requestFrame = host.sessionMethods.frame.getMockImplementation()!;
     const adoption = deferred<void>();
     host.sessionMethods.frame.mockImplementation(async (viewport, options) => {
@@ -1912,42 +1918,62 @@ for (const route of ['cell', 'formula', 'host'] as const) {
     });
     const input = '=NOW()+RAND()';
     let pending: Promise<EditResult | null> | undefined;
-    if (route === 'cell') reviewEdit(view, input);
-    else if (route === 'formula') {
-      fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: input } });
-      fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 'Enter' });
-    } else act(() => { pending = api.editCellAsync(0, 0, 0, input); });
-    await act(async () => {});
-    expect(host.preview).not.toHaveBeenCalled();
-    expect(applying).toHaveBeenCalledTimes(1);
-    const op = applying.mock.calls[0][0];
-    expect(op).toMatchObject({ method: 'editCell', args: [0, 0, 0, input], calculation: {
-      nowSerial: 1_750_000_000_000 / 86400000 + 25569, randSeed: expect.any(Number),
-    } });
-    expect(Number.isInteger(op.calculation?.randSeed)).toBe(true);
-    const calculation = structuredClone(op.calculation);
-    expect(host.replay).toHaveBeenCalledTimes(1);
-    expect(host.replay.mock.calls[0][0]).toEqual({ sequence: 1, op, calculation: op.calculation });
-    expect(host.peerMethods.setCalculationContext.mock.calls).toEqual([[op.calculation]]);
-    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, input]]);
-    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(input);
-    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
-    expect(host.peerMethods.save).not.toHaveBeenCalled();
-    expect(host.session.save).not.toHaveBeenCalled();
-    clock.mockReturnValue(1_760_000_000_000);
-    await advance();
-    await pending;
-    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(input);
-    expect(host.replay).toHaveBeenCalledTimes(1);
-    await act(async () => adoption.resolve());
-    await advance();
-    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
-    expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
-    expect(host.preview).not.toHaveBeenCalled();
-    expect(applying.mock.calls[0][0]).toBe(op);
-    expect(op.calculation).toEqual(calculation);
-    expect(host.replay.mock.calls[0][0].calculation).toEqual(calculation);
-    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    try {
+      if (route === 'cell') reviewEdit(view, input);
+      else if (route === 'formula') {
+        fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: input } });
+        fireEvent.keyDown(view.getByTestId('xlsx-formula-input'), { key: 'Enter' });
+      } else act(() => { pending = api.editCellAsync(0, 0, 0, input); });
+      await act(async () => {});
+      expect(host.preview).not.toHaveBeenCalled();
+      expect(applying).toHaveBeenCalledTimes(1);
+      const op = applying.mock.calls[0][0];
+      expect(op).toMatchObject({ method: 'editCell', args: [0, 0, 0, input], calculation: {
+        nowSerial: 1_750_000_000_000 / 86400000 + 25569, randSeed: expect.any(Number),
+      } });
+      expect(Number.isInteger(op.calculation?.randSeed)).toBe(true);
+      if (!op.calculation) throw new Error('Missing operation calculation context');
+      expect(op.calculation.randSeed).toBeGreaterThanOrEqual(0);
+      expect(op.calculation.randSeed).toBeLessThanOrEqual(0xffff_ffff);
+      expect(entropy).toHaveBeenCalledTimes(1);
+      const words = entropy.mock.calls[0][0];
+      if (!(words instanceof Uint32Array)) throw new Error('Missing u32 calculation seed');
+      expect(op.calculation.randSeed).toBe(words[0]);
+      const calculation = structuredClone(op.calculation);
+      expect(host.replay).toHaveBeenCalledTimes(1);
+      expect(host.replay.mock.calls[0][0]).toEqual({ sequence: 1, op, calculation });
+      expect(setting.mock.calls).toEqual([[op.calculation]]);
+      expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, input]]);
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(input);
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+      expect(host.peerMethods.save).not.toHaveBeenCalled();
+      expect(host.session.save).not.toHaveBeenCalled();
+      clock.mockReturnValue(1_760_000_000_000);
+      await advance();
+      await pending;
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(input);
+      expect(host.replay).toHaveBeenCalledTimes(1);
+      await act(async () => adoption.resolve());
+      await advance();
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
+      expect(host.preview).not.toHaveBeenCalled();
+      expect(applying.mock.calls[0][0]).toBe(op);
+      expect(op.calculation).toEqual(calculation);
+      expect(host.replay.mock.calls[0][0].calculation).toEqual(calculation);
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    } finally {
+      try {
+        await act(async () => adoption.resolve());
+        await advance();
+        await pending;
+      } finally {
+        entropy.mockRestore();
+        setting.mockRestore();
+        clock.mockRestore();
+        applying.mockRestore();
+      }
+    }
   });
 }
 
@@ -1961,21 +1987,26 @@ it('retires an unchanged ready draft without preview, mutation or replay', async
     await adoption.promise;
     return frame(viewport, options);
   });
-  reviewEdit(view, 'initial');
-  await act(async () => {});
-  expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
-  expect(host.preview).not.toHaveBeenCalled();
-  expect(host.peerMethods.editCell).not.toHaveBeenCalled();
-  expect(host.peerMethods.setCalculationContext).not.toHaveBeenCalled();
-  expect(host.replay).not.toHaveBeenCalled();
-  await advance();
-  expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
-  await act(async () => adoption.resolve());
-  await advance();
-  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
-  expect(host.cells.get('0:0:0')).toBe('initial');
-  expect(host.attached!.sentSequence).toBe(0);
-  expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  try {
+    reviewEdit(view, 'initial');
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
+    expect(host.preview).not.toHaveBeenCalled();
+    expect(host.peerMethods.editCell).not.toHaveBeenCalled();
+    expect(host.peerMethods.setCalculationContext).not.toHaveBeenCalled();
+    expect(host.replay).not.toHaveBeenCalled();
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
+    await act(async () => adoption.resolve());
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.attached!.sentSequence).toBe(0);
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => adoption.resolve());
+    await advance();
+  }
 });
 
 it('discards a refused ready draft and keeps the preceding draft until its worker frame', async () => {
@@ -1990,28 +2021,208 @@ it('discards a refused ready draft and keeps the preceding draft until its worke
     await adoption.promise;
     return frame(viewport, options);
   });
-  reviewEdit(view, 'accepted');
-  await act(async () => {});
-  host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid cell input'); });
-  reviewEdit(view, 'refused');
-  await act(async () => {});
-  expect(host.preview).not.toHaveBeenCalled();
-  expect(host.replay).toHaveBeenCalledTimes(1);
-  expect(host.replay.mock.calls[0][0].op).toMatchObject({ method: 'editCell', args: [0, 0, 0, 'accepted'] });
-  expect(host.attached!.sentSequence).toBe(1);
-  expect(api.failure).toBeNull();
-  expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Invalid cell input');
-  expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('refused');
-  expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
-  expect(host.cells.get('0:0:0')).toBe('accepted');
-  expect(host.cells.get('0:1:0')).toBeUndefined();
-  await advance();
-  expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
-  await act(async () => adoption.resolve());
-  await advance();
-  expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
-  expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('refused');
-  expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  try {
+    reviewEdit(view, 'accepted');
+    await act(async () => {});
+    host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid cell input'); });
+    reviewEdit(view, 'refused');
+    await act(async () => {});
+    expect(host.preview).not.toHaveBeenCalled();
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    expect(host.replay.mock.calls[0][0].op).toMatchObject({ method: 'editCell', args: [0, 0, 0, 'accepted'] });
+    expect(host.attached!.sentSequence).toBe(1);
+    expect(api.failure).toBeNull();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Invalid cell input');
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('refused');
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
+    expect(host.cells.get('0:0:0')).toBe('accepted');
+    expect(host.cells.get('0:1:0')).toBeUndefined();
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
+    await act(async () => adoption.resolve());
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('refused');
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => adoption.resolve());
+    await advance();
+  }
+});
+
+for (const successor of ['valid', 'refused'] as const) {
+  it(`repairs superseded ready refusals while writes are blocked (${successor})`, async () => {
+    const host = harness(true);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    const writes = deferred<void>();
+    const adoption = deferred<void>();
+    const flush = spyOn(host.attached!, 'flush').mockReturnValue(writes.promise);
+    const frame = host.sessionMethods.frame.getMockImplementation()!;
+    host.sessionMethods.frame.mockImplementation(async (...args) => {
+      await adoption.promise;
+      return frame(...args);
+    });
+    let blocked: Promise<void> | undefined;
+    try {
+      act(() => { blocked = api.flush(); });
+      await act(async () => {});
+      expect(flush).toHaveBeenCalledTimes(1);
+      host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid formula'); });
+      if (successor === 'refused') {
+        host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid formula'); });
+      }
+      reviewEdit(view, '=refused()');
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+      reviewEdit(view, successor === 'valid' ? 'valid' : '=refusedAgain()');
+      await act(async () => {});
+      expect(host.peerMethods.editCell).not.toHaveBeenCalled();
+      expect(host.preview).not.toHaveBeenCalled();
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(successor === 'valid' ? 'valid' : '=refusedAgain()');
+      await act(async () => writes.resolve());
+      await advance();
+      await blocked;
+      expect(api.failure).toBeNull();
+      expect(host.peerMethods.editCell).toHaveBeenCalledTimes(2);
+      if (successor === 'valid') {
+        expect(host.replay).toHaveBeenCalledTimes(1);
+        expect(host.replay.mock.calls[0][0].op).toMatchObject({ method: 'editCell', args: [0, 0, 0, 'valid'] });
+        expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('valid');
+      } else {
+        expect(host.replay).not.toHaveBeenCalled();
+        expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+        fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+        expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
+        fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+        await advance();
+        expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
+        expect(host.peerMethods.editCell).toHaveBeenCalledTimes(2);
+        expect(host.replay).not.toHaveBeenCalled();
+      }
+      const value = successor === 'valid' ? 'valid' : 'initial';
+      expect(host.cells.get('0:0:0')).toBe(value);
+      expect(JSON.parse(new TextDecoder().decode(host.peer.save()))).toEqual([['0:0:0', value]]);
+      await act(async () => adoption.resolve());
+      await advance();
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence'))
+        .toBe(successor === 'valid' ? '1' : '0');
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    } finally {
+      try {
+        await act(async () => { writes.resolve(); adoption.resolve(); });
+        await advance();
+        await blocked;
+      } finally { flush.mockRestore(); }
+    }
+  });
+}
+
+it('clears a cold speculative bitmap before a ready write and retains its draft until adoption', async () => {
+  const host = harness(true);
+  const hydration = deferred<WorkbookHandle>();
+  host.hydrate.mockReturnValue(hydration.promise);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  const write = host.peerMethods.editCell.getMockImplementation()!;
+  const writing = spyOn(host.peer, 'editCell');
+  try {
+    reviewEdit(view, 'cold');
+    await advance();
+    const canvas = view.getByTestId('xlsx-commit-preview') as HTMLCanvasElement;
+    expect(canvas.width).toBe(800);
+    expect(canvas.dataset.previewReady).toBe('true');
+    expect(painted.some((list) => list.commands.some((command) => command.op === 'text' && command.text === 'preview:cold'))).toBe(true);
+    expect(host.preview).toHaveBeenCalledTimes(1);
+    expect(writing).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(api.hydrated).toBe(true);
+    expect(host.cells.get('0:0:0')).toBe('cold');
+    writing.mockImplementation((sheet, row, col, input) => {
+      expect(view.getByTestId('xlsx-commit-preview')).toBe(canvas);
+      expect(canvas.width).toBe(0);
+      expect(canvas.dataset.previewReady).toBe('false');
+      expect(canvas.textContent).toBe('ready');
+      return write(sheet, row, col, input);
+    });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    reviewEdit(view, 'ready');
+    await act(async () => {});
+    expect(writing).toHaveBeenCalledTimes(2);
+    expect(host.replay).toHaveBeenCalledTimes(2);
+    expect(host.preview).toHaveBeenCalledTimes(1);
+    expect(host.cells.get('0:0:0')).toBe('ready');
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview')).toBe(canvas);
+    expect(canvas.width).toBe(0);
+    await act(async () => adoption.resolve());
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('2');
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  } finally {
+    try {
+      await act(async () => { hydration.resolve(host.peer); adoption.resolve(); });
+      await advance();
+    } finally { writing.mockRestore(); }
+  }
+});
+
+it('restores an untouched ready predecessor and retires it after a same-cell refusal', async () => {
+  const host = harness(true);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  try {
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('initial');
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
+    expect(host.replay).not.toHaveBeenCalled();
+    expect(host.peerMethods.editCell).not.toHaveBeenCalled();
+    host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid formula'); });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    reviewEdit(view, '=refused()');
+    await advance();
+    expect(api.failure).toBeNull();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Invalid formula');
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('=refused()');
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('initial');
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.peerMethods.editCell).toHaveBeenCalledTimes(1);
+    expect(host.replay).not.toHaveBeenCalled();
+    expect(host.attached!.sentSequence).toBe(0);
+    await act(async () => adoption.resolve());
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('=refused()');
+    expect(host.preview).not.toHaveBeenCalled();
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+  } finally {
+    await act(async () => adoption.resolve());
+    await advance();
+  }
 });
 
 it('keeps the preview until worker adoption and never paints a peer frame', async () => {

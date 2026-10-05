@@ -177,6 +177,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
   const draftOperations = useMemo(() => new WeakMap<InputDraft, WorkbookReplayOp>(), [run]);
+  const previewPredecessors = useMemo(() => new Map<WorkbookReplayOp, {
+    operation?: WorkbookReplayOp; input?: string; index: number;
+  }>(), [run]);
   const draftDiscards = useMemo(() => new WeakMap<InputDraft, () => void>(), [run]);
   const operationPeer = useMemo(() => ({ current: run?.editPeer ?? null }), [run]);
   if (run?.editPeer && !run.recovering) operationPeer.current = run.editPeer;
@@ -258,14 +261,16 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const preceding = previewOps.get(key);
       const precedingInput = acceptedCells.get(key);
       acceptedCells.set(key, draft.value);
-      let op = draftOperations.get(draft);
-      if (!op) {
-        op = { method: 'editCell', args: [draft.sheet, draft.row, draft.col, draft.value], calculation: {
+      const op: WorkbookReplayOp = draftOperations.get(draft) ?? {
+        method: 'editCell', args: [draft.sheet, draft.row, draft.col, draft.value], calculation: {
           nowSerial: Date.now() / 86400000 + 25569,
-          randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0],
-        } };
-        draftOperations.set(draft, op);
-      }
+          randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
+        },
+      };
+      draftOperations.set(draft, op);
+      if (preceding !== op) previewPredecessors.set(op, {
+        operation: preceding, input: precedingInput, index: preceding ? previewJournal.indexOf(preceding) : -1,
+      });
       if ((draft as WorkerCellDraft).unchanged) unchangedPreviews.add(op);
       if (preceding && preceding !== op && unchangedPreviews.has(preceding)) {
         const index = previewJournal.indexOf(preceding);
@@ -275,29 +280,53 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       if (!previewJournal.includes(op)) previewJournal.push(op);
       previewState.sequence = Infinity;
       const revision = ++previewState.revision;
-      if (run.ready) {
-        if (discardOnFailure) draftDiscards.set(draft, () => {
-          if (previewOps.get(key) !== op) return;
-          if (preceding) previewOps.set(key, preceding);
-          else previewOps.delete(key);
-          if (precedingInput !== undefined) acceptedCells.set(key, precedingInput);
-          else acceptedCells.delete(key);
-          const index = previewJournal.indexOf(op);
-          if (index >= 0) previewJournal.splice(index, 1);
-          if (!previewOps.size && revision === previewState.revision && !run.retiring) {
-            setPreviewDraft(null);
-            previewState.request = null;
-          } else if (previewJournal.every((pending) => completedPreviews.has(pending))) {
-            const pending = [...previewOps.keys()].reverse()[0];
-            if (pending) {
-              const [sheet, row, col] = pending.split(':').map(Number);
-              setPreviewDraft({ ...draft, sheet, row, col, value: acceptedCells.get(pending) ?? '' });
-            }
-            previewState.sequence = run.editPeer?.sentSequence ?? Infinity;
-            sourceRef.current?.schedule();
+      const discard = () => {
+        const previous = previewPredecessors.get(op);
+        const index = previewJournal.indexOf(op);
+        if (index >= 0) previewJournal.splice(index, 1);
+        for (const predecessor of previewPredecessors.values()) {
+          if (predecessor.operation === op) {
+            predecessor.operation = previous?.operation;
+            predecessor.input = previous?.input;
+            predecessor.index = previous?.index ?? -1;
           }
-        });
-        if (!unpreviewedOps.size) flushSync(() => setPreviewDraft(draft));
+        }
+        previewPredecessors.delete(op);
+        const current = previewOps.get(key) === op;
+        if (current) {
+          if (previous?.operation) {
+            previewOps.set(key, previous.operation);
+            if (!previewJournal.includes(previous.operation)) {
+              previewJournal.splice(Math.max(0, previous.index), 0, previous.operation);
+            }
+          } else previewOps.delete(key);
+          if (previous?.input !== undefined) acceptedCells.set(key, previous.input);
+          else acceptedCells.delete(key);
+        }
+        if (!previewOps.size && revision === previewState.revision && !run.retiring) {
+          setPreviewDraft(null);
+          previewState.request = null;
+        } else if (current && !run.retiring) {
+          const pending = [...previewOps.keys()].reverse()[0];
+          if (pending) {
+            const [sheet, row, col] = pending.split(':').map(Number);
+            setPreviewDraft({ ...draft, sheet, row, col, value: acceptedCells.get(pending) ?? '' });
+          }
+        }
+        const complete = !unpreviewedOps.size && previewJournal.every((pending) => completedPreviews.has(pending));
+        previewState.sequence = complete ? Math.max(0, ...previewJournal.map((pending) => completedPreviews.get(pending)!)) : Infinity;
+        if (complete) sourceRef.current?.schedule();
+      };
+      if (discardOnFailure) draftDiscards.set(draft, discard);
+      if (run.ready) {
+        if (!unpreviewedOps.size) {
+          flushSync(() => setPreviewDraft(draft));
+          const canvas = previewCanvasRef.current;
+          if (canvas) {
+            canvas.width = 0;
+            canvas.dataset.previewReady = 'false';
+          }
+        }
         return;
       }
       const request = capture();
@@ -311,21 +340,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
             previewJournal.filter((pending) => !completedPreviews.has(pending)));
         }
         catch (error) {
-          if (discardOnFailure && previewOps.get(key) === op) {
-            if (preceding) previewOps.set(key, preceding);
-            else previewOps.delete(key);
-            if (precedingInput !== undefined) acceptedCells.set(key, precedingInput);
-            else acceptedCells.delete(key);
-            const index = previewJournal.indexOf(op);
-            if (index >= 0) previewJournal.splice(index, 1);
-          }
-          if (!previewOps.size && revision === previewState.revision && !run.retiring) {
-            setPreviewDraft(null);
-            previewState.request = null;
-          } else if (discardOnFailure && previewJournal.every((pending) => completedPreviews.has(pending))) {
-            previewState.sequence = run.editPeer?.sentSequence ?? Infinity;
-            sourceRef.current?.schedule();
-          }
+          if (discardOnFailure) discard();
           throw error;
         }
         if (run.retiring || run.recovering || run.failure || !run.current || revision !== previewState.revision) return;
@@ -346,7 +361,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }
     await boundary();
-  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, draftDiscards, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
+  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, draftDiscards, previewPredecessors, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
   const previewEdits = useCallback(async (sheet: number, edits: readonly CellInputEdit[], operation?: WorkbookReplayOp) => {
     if (operation?.method === 'applyEdits' && operation.args[0].steps.some((step) => step.op !== 'setCellInputs')) {
@@ -358,8 +373,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }
     if (operation) operation.calculation ??= {
       nowSerial: Date.now() / 86400000 + 25569,
-      randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0],
+      randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
     };
+    const pendingDraft = previewJournal.some((pending) => pending !== operation);
     const preceding = new Map(previewOps);
     const precedingCells = new Map(acceptedCells);
     const recorded = new Map<string, WorkbookReplayOp>();
@@ -428,12 +444,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         recorded.set(key, previewOps.get(key)!);
       }
       await prepared;
+      if (pendingDraft && run?.ready) await boundary();
     } catch (error) {
       await restore();
       throw error;
     }
     return restore;
-  }, [run, preview, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
+  }, [run, preview, boundary, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
   const refreshProposals = useCallback(() => {
     const owner = runRef.current;
@@ -666,6 +683,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           setPreviewDraft(null);
           previewOps.clear();
           previewJournal.length = 0;
+          previewPredecessors.clear();
           acceptedCells.clear();
           previewState.request = null;
         }

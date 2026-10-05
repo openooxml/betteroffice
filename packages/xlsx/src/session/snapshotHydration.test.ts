@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { isClientMessage, isHostMessage, type SessionTransport } from '../../../../shared/office-session';
 import * as workbookWasm from '../wasm/loader';
-import type { WorkbookCalculationContext, WorkbookHandle, XlsxReadRequest } from '../wasm/loader';
+import type { WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
+import type { XlsxReadRequest } from '../edits';
 import { hydratePeer, openWorkbookSession, type WorkbookSession } from './client';
 import { workbookPeerSources } from './clientInternals';
 import { createWorkbookEditPeer, type WorkbookEditPeer } from './editPeer';
@@ -152,6 +153,7 @@ test('snapshot-hydrated peer equals source hydration and replays cell and sheet 
     };
     let precedingCalculation = calculation;
     const apply = async (op: WorkbookReplayOp, refused = false) => {
+      if (!op.calculation) throw new Error('Missing operation calculation context');
       const before = edits!.sentSequence;
       const calls = replaying.mock.calls.length;
       source.setCalculationContext(op.calculation!);

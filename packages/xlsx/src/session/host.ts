@@ -237,7 +237,7 @@ export function createWorkbookSessionHost(
       if (disposed) throw new Error('Workbook session is disposed');
       const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
         nowSerial: Date.now() / 86_400_000 + 25_569,
-        randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0],
+        randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
       } : undefined);
       const opened = openWorkbook(new Uint8Array(bytes), {
         collaborative: input.collaborative,
