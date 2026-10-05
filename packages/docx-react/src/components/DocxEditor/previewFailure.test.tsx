@@ -553,6 +553,7 @@ test('a stale worker open failure keeps the replacement preview accepting input'
         }
       }
     });
+    expect(() => session.yrsBlocksForStory('body')).not.toThrow();
     await act(async () => ref.current!.flushPendingInput());
     expect(session.paragraphs('body')[0]!.text.split(queuedText)).toHaveLength(2);
     expect(errors).toEqual([]);

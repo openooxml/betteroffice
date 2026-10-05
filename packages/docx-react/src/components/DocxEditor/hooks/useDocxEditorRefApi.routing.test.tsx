@@ -273,7 +273,7 @@ async function expectReadyMutations(host: ReturnType<typeof apiFor>) {
   spyOn(session, 'applyEdits').mockImplementation(backend.applyEdits);
   spyOn(session, 'insertPageBreak').mockImplementation(backend.insertPageBreak);
   expect(api.getDocument()).toBe(editor.getDocument());
-  expect(api.getEditorRef()).toBe(editor);
+  expect(api.getEditorRef()).toBe(editor as unknown as PagedEditorRef);
   expect(api.findInDocument('hello')).toEqual(MATCHES);
   expect(api.scrollToParaId('p')).toBe(true);
   expect(editor.scrollToParaId).toHaveBeenCalledWith('p', undefined);
