@@ -15,7 +15,7 @@ pub(super) fn unchanged(source: &[u8], axes: &SheetAxes) -> bool {
 }
 
 fn fixed(axis: &AxisMap, range: Range<u32>) -> bool {
-    range.is_empty() || axis.current_ranges(range.clone()) == [range]
+    range.is_empty() || axis.current_ranges_bounded(range.clone()) == [range]
 }
 
 fn references(value: &str, axes: &SheetAxes) -> bool {
@@ -29,15 +29,14 @@ fn references(value: &str, axes: &SheetAxes) -> bool {
         })
 }
 
-fn row_index(element: &BytesStart<'_>) -> Result<Option<u32>, ParseError> {
+fn row_index(element: &BytesStart<'_>, current: Option<u32>) -> Result<Option<u32>, ParseError> {
     Ok(match attr(element, b"r")? {
         Some(value) => value
-            .trim()
             .parse::<u32>()
             .ok()
             .filter(|index| (1..=MAX_ROWS).contains(index))
             .map(|index| index - 1),
-        None => Some(0),
+        None => Some(current.map_or(0, |row| row + 1)),
     })
 }
 
@@ -57,10 +56,10 @@ fn text_coordinates(name: &[u8], value: &str, axes: &SheetAxes) -> bool {
 
 fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
     let mut reader = Reader::from_reader(source);
+    reader.config_mut().expand_empty_elements = true;
     let mut parents: Vec<Vec<u8>> = Vec::new();
-    let mut row = 0;
+    let mut row = None;
     let mut col = 0;
-    let mut previous_row: Option<u32> = None;
     let mut positioned_text: Option<(Vec<u8>, String)> = None;
     loop {
         let event = reader.read_event().map_err(xml_err)?;
@@ -75,29 +74,24 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                 let source_row = name == b"row" && parent == Some(b"sheetData".as_slice());
                 let source_cell = name == b"c" && parent == Some(b"row".as_slice());
                 if source_row {
-                    let Some(index) = row_index(element)? else {
+                    let Some(index) = row_index(element, row)? else {
                         return Ok(false);
                     };
-                    row = if attr(element, b"r")?.is_none() {
-                        previous_row.map_or(0, |previous| previous + 1)
-                    } else {
-                        index
-                    };
-                    previous_row = Some(row);
+                    row = Some(index);
                     col = 0;
-                    if axes.rows.current(row) != Some(row) {
+                    if axes.rows.current(index) != Some(index) {
                         return Ok(false);
                     }
                 }
                 if source_cell {
                     let at = match attr(element, b"r")? {
                         Some(value) => CellRef::parse_a1(&value).ok(),
-                        None => Some(CellRef::new(row, col)),
+                        None => Some(CellRef::new(row.unwrap_or(0), col)),
                     };
                     let Some(at) = at else {
                         return Ok(false);
                     };
-                    col = at.col + 1;
+                    col = at.col;
                     if axes.rows.current(at.row) != Some(at.row)
                         || axes.cols.current(at.col) != Some(at.col)
                     {
@@ -114,7 +108,7 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                         return Ok(false);
                     }
                 }
-                if name == b"brk" {
+                if name == b"brk" && matches!(parent, Some(b"rowBreaks" | b"colBreaks")) {
                     let axis = match parent {
                         Some(b"rowBreaks") => &axes.cols,
                         Some(b"colBreaks") => &axes.rows,
@@ -144,12 +138,28 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                     }
                     let key = attribute.name.rsplit(':').next().unwrap_or_default();
                     let value = attribute.value.as_str();
-                    let stable = match key {
-                        "r" if source_row || source_cell => true,
-                        "r" | "ref" | "sqref" | "activeCell" | "topLeftCell" | "r1" | "r2" => {
-                            references(value, axes)
-                        }
-                        "spans" if source_row => value.split_whitespace().all(|span| {
+                    let stable = match (name, key) {
+                        (b"row" | b"c", "r") if source_row || source_cell => true,
+                        (b"row", "r") => row_index(element, None)?
+                            .is_some_and(|index| axes.rows.current(index) == Some(index)),
+                        (b"c", "r") => references(value, axes),
+                        (
+                            b"dimension" | b"mergeCell" | b"hyperlink" | b"autoFilter"
+                            | b"sortState" | b"sortCondition" | b"f",
+                            "ref",
+                        )
+                        | (b"f", "r1" | "r2")
+                        | (b"selection", "activeCell" | "sqref")
+                        | (b"pane" | b"sheetView", "topLeftCell")
+                        | (
+                            b"dataValidation"
+                            | b"conditionalFormatting"
+                            | b"protectedRange"
+                            | b"ignoredError",
+                            "sqref",
+                        )
+                        | (b"cellWatch" | b"inputCells", "r") => references(value, axes),
+                        (b"row", "spans") if source_row => value.split_whitespace().all(|span| {
                             let Some((min, max)) = span.split_once(':') else {
                                 return false;
                             };
@@ -162,7 +172,7 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                                 && max <= MAX_COLS
                                 && fixed(&axes.cols, min - 1..max)
                         }),
-                        "xSplit" | "ySplit" if name == b"pane" => {
+                        (b"pane", "xSplit" | "ySplit") => {
                             let frozen = attr(element, b"state")?
                                 .is_some_and(|state| state == "frozen" || state == "frozenSplit");
                             !frozen
@@ -180,11 +190,9 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                                             || fixed(axis, 0..(end as u32 + 1).min(limit)))
                                 })
                         }
-                        "row" | "col" | "column" => value.parse::<u32>().is_ok_and(|index| {
-                            let axis = if key == "row" { &axes.rows } else { &axes.cols };
-                            axis.current(index) == Some(index)
-                        }),
-                        "id" | "min" | "max" if name == b"brk" => {
+                        (b"brk", "id" | "min" | "max")
+                            if matches!(parent, Some(b"rowBreaks" | b"colBreaks")) =>
+                        {
                             let axis = match (parent, key) {
                                 (Some(b"rowBreaks"), "id")
                                 | (Some(b"colBreaks"), "min" | "max") => &axes.rows,
@@ -196,21 +204,17 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                                 .parse::<u32>()
                                 .is_ok_and(|index| axis.current(index) == Some(index))
                         }
-                        _ => {
-                            let mut values = value.split_whitespace().peekable();
-                            values.peek().is_none()
-                                || !values.all(|value| CellRange::parse_a1(value).is_ok())
-                                || references(value, axes)
-                        }
+                        _ => true,
                     };
                     if !stable {
                         return Ok(false);
                     }
                 }
                 if matches!(event, Event::Start(_)) {
-                    if name == b"sqref"
-                        || (name == b"row" && !source_row)
-                        || (name == b"col" && parent != Some(b"cols".as_slice()))
+                    if parents.iter().any(|parent| parent == b"extLst")
+                        && (matches!(name, b"sqref" | b"ref")
+                            || (matches!(name, b"row" | b"col")
+                                && matches!(parent, Some(b"anchor" | b"from" | b"to"))))
                     {
                         positioned_text = Some((name.to_vec(), String::new()));
                     }
@@ -235,11 +239,19 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                     value.push_str(&resolve_entity(&reference.decode().map_err(xml_err)?)?);
                 }
             }
-            Event::End(_) => {
+            Event::End(element) => {
                 if let Some((name, value)) = positioned_text.take()
                     && !text_coordinates(&name, &value, axes)
                 {
                     return Ok(false);
+                }
+                match (
+                    element.local_name().as_ref(),
+                    parents.iter().rev().nth(1).map(Vec::as_slice),
+                ) {
+                    (b"row", Some(b"sheetData")) => row = None,
+                    (b"c", Some(b"row")) => col += 1,
+                    _ => {}
                 }
                 parents.pop();
             }
@@ -269,9 +281,13 @@ pub(super) fn explicit_rows(
                 if depth == 1 && element.local_name().as_ref() == b"row" =>
             {
                 if attr(element, b"r")?.is_none() {
+                    let Some(index) = row_index(element, None)? else {
+                        return Ok(None);
+                    };
+                    let index = (index + 1).to_string();
                     out.get_mut().extend_from_slice(&source[cursor..before]);
                     let mut element = element.clone();
-                    element.push_attribute(("r", "1"));
+                    element.push_attribute(("r", index.as_str()));
                     out.write_event(if matches!(event, Event::Empty(_)) {
                         Event::Empty(element)
                     } else {
@@ -369,7 +385,7 @@ mod tests {
             (r#"<f t="dataTable" r1="B2" r2="E5"/>"#, true),
             (r#"<extLst><ext><sqref>B2:E5</sqref></ext></extLst>"#, true),
             (
-                r#"<extLst><ext><marker position="E5"/></ext></extLst>"#,
+                r#"<extLst><ext><marker position="E5"/><ref>E5</ref></ext></extLst>"#,
                 false,
             ),
             (
@@ -442,6 +458,95 @@ mod tests {
             r#"<cols><col min="2"/></cols>"#,
         ] {
             assert!(!unchanged(source.as_bytes(), &axes), "{source}");
+        }
+    }
+
+    #[test]
+    fn unknown_attributes_and_extension_content_allow_borrowing() {
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(3, 1);
+        axes.cols.insert(3, 1);
+        for source in [
+            r#"<sheetPr><tabColor rgb="FF112233"/></sheetPr><sheetData><row outlineLevel="1"><c><v>1</v></c></row></sheetData>"#,
+            r#"<sheetData><row custom="E5"><c custom="E5"><v>1</v></c></row></sheetData>"#,
+            r#"<extLst><ext><marker position="E5" r="E5" ref="E5" sqref="E5" activeCell="E5" topLeftCell="E5" r1="E5" r2="E5" row="4" col="4" column="4"/><label>E5</label><value>4</value></ext></extLst>"#,
+            r#"<extLst><ext><marker><row>4</row><col>4</col><column>4</column></marker><brk id="4" min="4" max="4"/></ext></extLst>"#,
+        ] {
+            assert!(unchanged(source.as_bytes(), &axes), "{source}");
+        }
+    }
+
+    #[test]
+    fn named_coordinate_attributes_and_extension_text_refuse_moved_axes() {
+        for source in [
+            r#"<dimension ref="B2:E5"/>"#,
+            r#"<sheetView topLeftCell="E5"/>"#,
+            r#"<conditionalFormatting sqref="B2:E5"/>"#,
+            r#"<sortState ref="B2:E5"><sortCondition ref="E5"/></sortState>"#,
+            r#"<protectedRange sqref="B2:E5"/>"#,
+            r#"<ignoredError sqref="B2:E5"/>"#,
+            r#"<cellWatch r="E5"/>"#,
+            r#"<inputCells r="E5"/>"#,
+            r#"<extLst xmlns:x="urn:generic"><ext><x:ref><![CDATA[B2:E5]]></x:ref></ext></extLst>"#,
+            r#"<dataValidation xmlns:x="urn:generic" x:sqref="B2:E5"/>"#,
+        ] {
+            let mut axes = SheetAxes::default();
+            axes.rows.insert(100, 1);
+            axes.cols.insert(100, 1);
+            assert!(unchanged(source.as_bytes(), &axes), "{source}");
+            axes.rows.insert(3, 1);
+            assert!(!unchanged(source.as_bytes(), &axes), "{source}");
+        }
+    }
+
+    #[test]
+    fn implicit_rows_and_cells_follow_reader_cursors() {
+        for source in [
+            r#"<sheetData><row/><row outlineLevel="1"/></sheetData>"#,
+            r#"<sheetData><row r="5"/><row outlineLevel="1"/></sheetData>"#,
+            r#"<sheetData><row r="5"><c r="C5"/><c/><c r="A5"/><c/></row><row><c/></row></sheetData>"#,
+        ] {
+            let mut axes = SheetAxes::default();
+            axes.rows.insert(5, 1);
+            axes.cols.insert(4, 1);
+            assert!(unchanged(source.as_bytes(), &axes), "{source}");
+            axes.rows.delete(0, 1);
+            axes.rows.insert(0, 1);
+            assert!(!unchanged(source.as_bytes(), &axes), "{source}");
+        }
+        let source = br#"<sheetData><row r="5"><c r="C5"/><c/></row></sheetData>"#;
+        let mut axes = SheetAxes::default();
+        axes.cols.insert(3, 1);
+        assert!(!unchanged(source, &axes));
+    }
+
+    #[test]
+    fn explicit_rows_use_reader_row_zero_fallback() {
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(100, 1);
+        for (source, expected) in [
+            (
+                r#"<sheetData><row/><row outlineLevel="1"/></sheetData>"#,
+                r#"<sheetData><row r="1"/><row outlineLevel="1" r="1"/></sheetData>"#,
+            ),
+            (
+                r#"<sheetData><row r="5"/><row outlineLevel="1"/></sheetData>"#,
+                r#"<sheetData><row r="5"/><row outlineLevel="1" r="1"/></sheetData>"#,
+            ),
+            (
+                r#"<sheetData><row r="5"></row><row><c/><c/></row></sheetData>"#,
+                r#"<sheetData><row r="5"></row><row r="1"><c/><c/></row></sheetData>"#,
+            ),
+        ] {
+            let explicit = explicit_rows(source.as_bytes(), &axes).unwrap().unwrap();
+            assert_eq!(explicit, expected.as_bytes());
+            assert!(unchanged(source.as_bytes(), &axes));
+            assert!(unchanged(&explicit, &axes));
+            let mut moved = axes.clone();
+            moved.rows.delete(0, 1);
+            moved.rows.insert(0, 1);
+            assert!(!unchanged(source.as_bytes(), &moved));
+            assert!(!unchanged(&explicit, &moved));
         }
     }
 }
