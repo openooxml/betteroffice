@@ -12,7 +12,7 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use xlsx_calc::graph::DepGraph;
-use xlsx_calc::{RecalcResult, parse_formula};
+use xlsx_calc::{RecalcResult, parse_formula, recalc_after_with_seed};
 use xlsx_model::{CellRange, CellRef, CellValue, Sheet, SheetId};
 use xlsx_ops::{CellState, NumberFormatMutation, Op, OpError, StylePatch, StyleProperty};
 use xlsx_render::display_text;
@@ -21,8 +21,7 @@ use super::staging::CommitHistory;
 use super::target::{CellTarget, FindRequest, RangeTarget, ReadRequest, Resolved, cell_target};
 use super::{
     StagedApply, Workbook, authority_error, calculation_result, cell_states_semantically_equal,
-    current_cell_state, edit_cell_state, recalculate_model, validate_cell_state,
-    validate_model_sheets, validate_op,
+    current_cell_state, edit_cell_state, validate_cell_state, validate_model_sheets, validate_op,
 };
 use crate::authority::{SyncOrigin, cell_format_fits};
 use crate::{CalculationOptions, Error, Result};
@@ -1033,13 +1032,9 @@ impl Workbook {
             .flat_map(|(planned, cells)| cells.iter().map(|cell| (planned.resolved.sheet, *cell)))
             .collect::<Vec<_>>();
         let mut graph = DepGraph::build(&prepared.model);
-        if let Some(previous) = &self.graph {
-            graph.inherit_pending_recalculation(previous);
-        }
-        let (graph, recalculated) = recalculate_model(
-            prepared.calculation_state.as_ref(),
+        let recalculated = recalc_after_with_seed(
             &mut prepared.model,
-            Some(graph),
+            &mut graph,
             &seeds,
             request.calculation.now_serial,
             self.rand_seed,

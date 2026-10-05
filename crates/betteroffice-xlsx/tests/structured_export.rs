@@ -1020,9 +1020,7 @@ fn live_export_reads_committed_state_read_only() {
                     style: None,
                 },
             }],
-            CalculationOptions {
-                now_serial: Some(45_000.5),
-            },
+            CalculationOptions::default(),
         )
         .unwrap();
     let edited = workbook

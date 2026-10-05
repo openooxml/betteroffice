@@ -25,7 +25,6 @@ pub(super) struct PreparedCommit {
     /// What the workbook holds once adopted: the staged model standalone, the authority's
     /// projection of it in collaboration.
     pub(super) model: WorkbookModel,
-    pub(super) calculation_state: Option<WorkbookModel>,
     inverse: Vec<Op>,
     authority: StagedLocalUpdate,
     history: CommitHistory,
@@ -56,7 +55,7 @@ impl Workbook {
             None => self.authority.stage_local_ops_v1(&ops, origin, styles),
         }
         .map_err(authority_error)?;
-        let (model, calculation_state) = match &self.mode {
+        let model = match &self.mode {
             WorkbookMode::Collaborative { structure } => {
                 if &authority.structure != structure {
                     return Err(crate::Error::CollaborativeStructureChanged);
@@ -67,16 +66,15 @@ impl Workbook {
                     authority.state_vector_entries,
                 )?;
                 let mut model = std::mem::take(&mut authority.model);
-                retain_formula_caches(&self.model, &mut model, false);
+                retain_formula_caches(&self.model, &mut model);
                 retain_array_formulas(&self.model, &mut model);
-                (model, Some(staged.model))
+                model
             }
-            WorkbookMode::Standalone => (staged.model, None),
+            WorkbookMode::Standalone => staged.model,
         };
         Ok(PreparedCommit {
             ops,
             model,
-            calculation_state,
             inverse: staged.inverse,
             authority,
             history,
@@ -90,7 +88,6 @@ impl Workbook {
         let PreparedCommit {
             ops,
             model,
-            calculation_state: _,
             inverse,
             authority,
             history,

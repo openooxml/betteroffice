@@ -61,9 +61,6 @@ pub struct DepGraph {
     /// parsed formula text -> ast, shared with recalc eval so each formula
     /// parses once across graph construction and every subsequent recalc.
     asts: ParseCache,
-    clock_formulas: HashSet<NodeKey>,
-    clock_names: usize,
-    pending_recalculation: bool,
 }
 
 /// one formula node: its parsed ast and the cells/ranges it reads.
@@ -84,9 +81,7 @@ impl DepGraph {
             .collect();
         let defined_names = wb.defined_names.clone();
         let mut defined_name_indices = HashMap::with_capacity(defined_names.len());
-        let mut clock_names = 0;
         for (index, defined) in defined_names.iter().enumerate() {
-            clock_names += usize::from(contains_clock_token(&defined.formula));
             defined_name_indices
                 .entry((defined.local_sheet, defined.name.to_ascii_lowercase()))
                 .or_insert(index);
@@ -107,9 +102,6 @@ impl DepGraph {
             spills: HashMap::new(),
             spills_by_sheet: HashMap::new(),
             asts: ParseCache::default(),
-            clock_formulas: HashSet::new(),
-            clock_names,
-            pending_recalculation: false,
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(i as u32);
@@ -170,32 +162,12 @@ impl DepGraph {
 
     /// coarse invalidation for a sheet insert: ids shift, so rebuild wholesale.
     pub fn add_sheet(&mut self, wb: &Workbook) {
-        let mut graph = Self::build(wb);
-        graph.inherit_pending_recalculation(self);
-        *self = graph;
+        *self = Self::build(wb);
     }
 
     /// coarse invalidation for a sheet removal: ids shift, so rebuild wholesale.
     pub fn remove_sheet(&mut self, wb: &Workbook) {
-        let mut graph = Self::build(wb);
-        graph.inherit_pending_recalculation(self);
-        *self = graph;
-    }
-
-    pub fn inherit_pending_recalculation(&mut self, previous: &Self) {
-        self.pending_recalculation |= previous.pending_recalculation;
-    }
-
-    pub fn is_recalculation_pending(&self) -> bool {
-        self.pending_recalculation
-    }
-
-    pub(crate) fn begin_recalculation(&mut self, now_serial: Option<f64>) -> Option<bool> {
-        if now_serial.is_none() && (!self.clock_formulas.is_empty() || self.clock_names != 0) {
-            self.pending_recalculation = true;
-            return None;
-        }
-        Some(std::mem::take(&mut self.pending_recalculation))
+        *self = Self::build(wb);
     }
 
     /// every stored edge as `(range's sheet, range, dependent cell)`.
@@ -260,9 +232,6 @@ impl DepGraph {
 
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        if contains_clock_token(src) {
-            self.clock_formulas.insert(key);
-        }
         let Some(expr) = parse_cached(&self.asts, src) else {
             return;
         };
@@ -278,7 +247,6 @@ impl DepGraph {
 
     /// drop a node's edges from every index it appears in.
     fn uninstall(&mut self, key: NodeKey) {
-        self.clock_formulas.remove(&key);
         if let Some(entry) = self.deps.remove(&key) {
             for (sid, _) in &entry.edges {
                 if let Some(list) = self.by_sheet.get_mut(sid) {
@@ -450,21 +418,6 @@ impl DepGraph {
     }
 }
 
-fn contains_clock_token(src: &str) -> bool {
-    use crate::lexer::{TokKind, lex};
-
-    let Ok(tokens) = lex(src.strip_prefix('=').unwrap_or(src)) else {
-        return true;
-    };
-    tokens.windows(2).any(|pair| {
-        let TokKind::Ident(name) = &pair[0].kind else {
-            return false;
-        };
-        matches!(pair[1].kind, TokKind::LParen)
-            && crate::functions::resolve(name).is_some_and(crate::functions::Func::reads_clock)
-    })
-}
-
 fn push_table_uses<'a>(expr: &'a Expr, uses: &mut Vec<(&'a str, &'a TableSpec)>) {
     let mut expressions = vec![expr];
     while let Some(expression) = expressions.pop() {
@@ -611,47 +564,6 @@ mod tests {
             .collect();
         out.sort();
         out
-    }
-
-    #[test]
-    fn clock_token_presence_tracks_formula_replacements_and_removals() {
-        let mut graph = DepGraph::build(&wb2());
-        let sheet = SheetId(0);
-        assert_eq!(graph.begin_recalculation(None), Some(false));
-        graph.set_formula(sheet, a1("A1"), Some("TODAY(1)"));
-        graph.set_formula(sheet, a1("B1"), Some("DATEVALUE(\"invalid\")"));
-        assert_eq!(graph.clock_formulas.len(), 2);
-        assert_eq!(graph.begin_recalculation(None), None);
-        graph.set_formula(sheet, a1("A1"), Some("NOW()"));
-        assert_eq!(graph.clock_formulas.len(), 2);
-        graph.set_formula(sheet, a1("A1"), None);
-        assert_eq!(graph.begin_recalculation(None), None);
-        graph.set_formula(sheet, a1("B1"), Some("1+1"));
-        assert_eq!(graph.begin_recalculation(None), Some(true));
-        assert_eq!(graph.begin_recalculation(None), Some(false));
-        graph.set_formula(sheet, a1("A1"), Some("TODAY("));
-        assert_eq!(graph.begin_recalculation(None), None);
-        graph.set_formula(sheet, a1("A1"), None);
-        assert_eq!(graph.begin_recalculation(None), Some(true));
-    }
-
-    #[test]
-    fn clockless_pending_survives_graph_rebuilds() {
-        let mut wb = wb2();
-        wb.sheet_mut(SheetId(0))
-            .unwrap()
-            .set_cell(a1("A1"), formula_cell("TODAY()"));
-        let mut graph = DepGraph::build(&wb);
-        assert_eq!(graph.begin_recalculation(None), None);
-        let mut rebuilt = DepGraph::build(&wb);
-        rebuilt.inherit_pending_recalculation(&graph);
-        assert_eq!(rebuilt.begin_recalculation(Some(45_000.0)), Some(true));
-        assert_eq!(rebuilt.begin_recalculation(Some(45_000.0)), Some(false));
-        graph.add_sheet(&wb);
-        assert_eq!(graph.begin_recalculation(Some(45_000.0)), Some(true));
-        assert_eq!(graph.begin_recalculation(None), None);
-        graph.remove_sheet(&wb);
-        assert_eq!(graph.begin_recalculation(Some(45_000.0)), Some(true));
     }
 
     #[test]

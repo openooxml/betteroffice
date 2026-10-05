@@ -414,10 +414,6 @@ pub fn resolve(name: &str) -> Option<Func> {
 }
 
 impl Func {
-    pub(crate) fn reads_clock(self) -> bool {
-        matches!(self, Self::Today | Self::Now | Self::DateValue)
-    }
-
     /// invoke the implementation with unevaluated arguments.
     pub fn call(self, args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         match self {
