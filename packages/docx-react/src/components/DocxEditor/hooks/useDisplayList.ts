@@ -114,7 +114,7 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
   syncUpdate: ResidentEngineWorkerClient['syncUpdate'];
-  integrateProposalUpdate(update: Uint8Array, stories: readonly string[]): void;
+  integrateProposalUpdate(update: Uint8Array, stories: readonly string[]): readonly string[] | void;
   canSave(): boolean;
   save(
     request: Parameters<ResidentEngineWorkerClient['save']>[0],
@@ -1834,6 +1834,7 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.syncUpdate(update, stateVector)),
           integrateProposalUpdate: (update, stories) => {
             const version = hostEngine.version();
+            const since = hostEngine.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
             suppressWorkerInvalidationRef.current += 1;
             try {
               hostEngine.applyHostUpdate(update, stories.length > 0 ? stories : undefined);
@@ -1845,6 +1846,7 @@ export function useRustDisplayList(
               setLayoutCompleteSession(null);
               queryEpochGate.invalidate();
             }
+            return [...new Set([...stories, ...hostEngine.storiesChangedSince(since).stories])];
           },
           canSave: () => {
             const owner = workerRef.current;
@@ -1916,10 +1918,6 @@ export function useRustDisplayList(
               throw outcome === 'failed'
                 ? workerFailureRef.current.get(hostEngine) ?? cause
                 : new SupersededPreviewError();
-            }
-            const owner = workerRef.current;
-            if (!owner || !isCurrentWorker(hostEngine, owner)) {
-              throw new SupersededPreviewError();
             }
             if (!dropWorker(hostEngine)) throw workerFailureRef.current.get(hostEngine);
             needsLayout = true;

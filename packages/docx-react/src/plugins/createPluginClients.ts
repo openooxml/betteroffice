@@ -213,10 +213,6 @@ export function createPluginClients(
           throw error;
         }
       }
-      if (session && workerProposalAuthority(session)) {
-        const refused = await replicaReady(session);
-        if (refused) return refused;
-      }
       return whenFlushed((session) => session.findText(request));
     },
     validateEdits: (request) =>
@@ -384,7 +380,7 @@ export function createPluginClients(
       if (invocation.signal.aborted || invocation.lifetimeSignal.aborted) abort();
       try {
         const current = access.pagedEditorRef.current?.getYrsSession();
-        const authority = current ? workerProposalAuthority(current) : null;
+        const authority = current ? workerProposalAuthority(current, true) : null;
         const first = current && authority
           ? {
               session: current,

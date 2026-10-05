@@ -187,7 +187,7 @@ export function deferWorkerOpenReplica(
       if (handoff && lifecycle?.catchUp && !caughtUp) {
         void lifecycle.catchUp(() => {
           finishing = false;
-          finish(() => {}, true, true, reason, true);
+          finish(() => {}, true, force, reason, true);
         }).catch((error: unknown) => { replica.fail(error); });
         return;
       }
@@ -257,10 +257,10 @@ export function deferWorkerOpenReplica(
       serializing = lifecycle?.serializeHydration !== undefined;
       const serialized = lifecycle?.serializeHydration?.(
         async () => { await hydrateInTasks(await hydrate(), true); },
-        () => { serializing = false; finish(() => {}, true, true, 'failure', true); }
+        () => { serializing = false; finish(() => {}, true, false, 'failure', true); }
       );
       if (serialized) {
-        void serialized.catch((error: unknown) => { serializing = false; replica.fail(error); });
+        void serialized.catch(() => { serializing = false; finish(fallback); });
         return;
       }
       serializing = false;

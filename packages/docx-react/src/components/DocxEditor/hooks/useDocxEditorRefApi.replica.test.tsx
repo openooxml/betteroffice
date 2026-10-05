@@ -151,7 +151,7 @@ function apiFor(
   return { api, events, pagedEditorRef, openingRef };
 }
 
-async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, waitForLayout = false) {
+async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, waitForLayout = false, serialized = false) {
   const worker = await createYrsSession();
   const session = await createYrsSession();
   sessions.push(worker, session);
@@ -165,7 +165,7 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   const replica = deferWorkerOpenReplica(
     session,
     async () => {
-      const handover = await snapshotWorkerProposalPeer(session);
+      const handover = serialized ? { state: worker.encodeState() } : await snapshotWorkerProposalPeer(session);
       await held;
       return () => {
         opens.push(false);
@@ -182,6 +182,10 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
     {
       current: () => true, cancel: () => {}, waitForLayout,
       catchUp: (complete) => registeredWorkerProposalAuthority(session)?.catchUp(complete) ?? Promise.resolve(complete()),
+      ...(serialized ? {
+        serializeHydration: (load: () => Promise<void>, complete: () => void) =>
+          registeredWorkerProposalAuthority(session)?.hydratePeer(load, complete) ?? null,
+      } : {}),
     }
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
@@ -249,7 +253,7 @@ function expectReadyMutations(api: DocxEditorRef, session: YrsSession, editor: P
 }
 
 async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing') {
-  const pending = await pendingReplica(mode, false);
+  const pending = await pendingReplica(mode, false, false, mode === 'editing');
   const { session, worker } = pending;
   let previewVersion = 0;
   const reply = (): ResidentProposalReply => {
@@ -272,15 +276,16 @@ async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing') {
       return reply();
     }),
     documentRead: async () => { throw new Error('unexpected worker read'); },
-    syncUpdate: async (_update: Uint8Array, vector: Uint8Array) => ({
+    syncUpdate: mock(async (_update: Uint8Array, vector: Uint8Array) => ({
       version: worker.version(), stateVector: worker.encodeStateVector(), repair: worker.encodeStateAsUpdate(vector),
-    }),
+    })),
     integrateProposalUpdate: (update: Uint8Array) => session.applyHostUpdate(update),
     handOver: mock(async () => ({
       state: worker.encodeState(), version: worker.version(), proposals: reply().mirror.proposals,
     })),
   };
   const authority = registerWorkerProposalAuthority(session, transport, {
+    editorPeer: mode === 'editing',
     relayout: () => {},
     current: () => true,
     laidOut: async () => {},
@@ -861,10 +866,16 @@ test.each(SYNC_REPLICA_CALLS)(
     replica.start();
     await act(async () => { release(); await ready; });
     expectReadyMutations(api, session, pagedEditorRef.current!);
-    expect(transport.handOver).toHaveBeenCalledTimes(1);
+    expect(transport.handOver).not.toHaveBeenCalled();
+    expect(transport.syncUpdate).toHaveBeenCalledTimes(1);
     expect(opens).toEqual([false]);
     expect(replica.pending).toBe(false);
-    expect(authority.holdsWorkerState()).toBe(false);
+    expect(authority.holdsWorkerState()).toBe(true);
+    const rounds = transport.proposal.mock.calls.length;
+    expect(await api.proposeChanges({ expectVersion: session.version(), proposals: [] })).toMatchObject({ ok: true });
+    expect((await api.getProposals()).previewVersion).toBe(2);
+    expect(transport.proposal).toHaveBeenCalledTimes(rounds + 2);
+    expect(session.getProposals().proposals).toEqual([]);
     session.setSelection(
       { story: 'body', paraId: '00000001', offset: 0 },
       { story: 'body', paraId: '00000001', offset: 8 }

@@ -367,7 +367,11 @@ export function wrapSession(
   };
 
   let workerDocumentVersion: string | null = null;
-  const proposals = createProposalRegistry({
+  const proposalListeners = new Set<Parameters<YrsSession['onProposalChange']>[0]>();
+  const notifyProposals = (): void => {
+    for (const listener of proposalListeners) listener(facade.getProposals());
+  };
+  const createRegistry = () => createProposalRegistry({
     version: () => session.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
@@ -394,6 +398,9 @@ export function wrapSession(
         }
       : {}),
   });
+  let proposals = createRegistry();
+  proposals.subscribe(notifyProposals);
+  let peerProposals: ReturnType<typeof createRegistry> | null = null;
 
   const facade: YrsSession = {
     clientId,
@@ -683,8 +690,9 @@ export function wrapSession(
       mutate(() => session.apply_local_update(update));
     },
     applyHostUpdate: (update, stories) => {
-      markDirty(stories ?? 'all');
+      const since = stories === undefined ? facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision : undefined;
       mutate(() => session.apply_host_update(update));
+      markDirty(stories ?? facade.storiesChangedSince(since!).stories);
     },
     onUpdate: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
@@ -1318,12 +1326,32 @@ export function wrapSession(
     getProposals: () => proposals.snapshot(),
     mirrorWorkerDocument: (mirror, mirrorProposals = true) => {
       workerDocumentVersion = mirror?.version ?? null;
-      if (mirrorProposals) proposals.mirror(mirror);
+      if (!mirrorProposals) {
+        if (peerProposals) {
+          proposals.destroy();
+          proposals = peerProposals;
+          peerProposals = null;
+          notifyProposals();
+        }
+        return;
+      }
+      if (mirror && !peerProposals) {
+        peerProposals = proposals;
+        proposals = createRegistry();
+        proposals.subscribe(notifyProposals);
+      }
+      proposals.mirror(mirror);
+      if (!mirror && peerProposals) {
+        peerProposals.destroy();
+        peerProposals = null;
+      }
     },
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
-      return proposals.subscribe(listener);
+      if (typeof listener !== 'function') throw new TypeError('proposal listener must be a function');
+      proposalListeners.add(listener);
+      return () => { proposalListeners.delete(listener); };
     },
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
@@ -1366,6 +1394,8 @@ export function wrapSession(
       resetMedia();
       listeners.clear();
       proposals.destroy();
+      peerProposals?.destroy();
+      proposalListeners.clear();
       pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();

@@ -20,7 +20,6 @@ import {
   workerOpenDocumentHeld,
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
-import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { workerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave';
 import { isWorkerViewer } from '../internals/workerViewer';
 import type { DocxEditorProps } from '../../DocxEditor';
@@ -69,8 +68,7 @@ async function saveWithWorker(
     return saver.save(comments, peer);
   };
   try {
-    const authority = registeredWorkerProposalAuthority(session);
-    const buffer = await (authority ? authority.save(task) : task());
+    const buffer = await task();
     assertCurrent();
     return buffer;
   } catch (error) {

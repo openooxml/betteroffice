@@ -143,6 +143,7 @@ export interface WorkerProposalAuthority {
 
 type PeerSnapshot = { state: Uint8Array; version: string };
 type RegisteredAuthority = WorkerProposalAuthority & {
+  readsInWorker(): boolean;
   peerSnapshot(): Promise<PeerSnapshot>;
   fail(error: unknown): void;
   failure(): unknown;
@@ -159,6 +160,7 @@ export function registerWorkerProposalAuthority(
     Partial<Pick<WorkerOpenedDocument, 'syncUpdate' | 'integrateProposalUpdate' | 'stateRevision'>>,
   hooks: {
     editorPeer?: boolean;
+    passiveEditor?: boolean;
     relayout(): void;
     current(): boolean;
     /** Settles once the worker has laid the document out; proposal requests wait for it. */
@@ -181,6 +183,7 @@ export function registerWorkerProposalAuthority(
   let failure: { error: unknown } | null = null;
   const pendingCalls = new Set<(error: unknown) => void>();
   let initialized = false;
+  let layoutRevision = 0;
   let mirror: ResidentProposalReply['mirror'] | null = null;
   let geometry: ProposalGeometryMirror | null = null;
   let holdsState = false;
@@ -207,8 +210,11 @@ export function registerWorkerProposalAuthority(
     if (failure) rejectFailed(failure.error);
     return Promise.race([pending, failed]).finally(() => { pendingCalls.delete(rejectFailed); });
   };
-  const enqueue = <T>(call: () => Promise<T>): Promise<T> => {
+  const enqueue = <T>(call: () => Promise<T>, allowFailedPeer = false): Promise<T> => {
     const result = tail.then(() => {
+      if (allowFailedPeer && failure && editorPeer() && peerReady() && !holdsState && mutating === 0 && hooks.current()) {
+        return call();
+      }
       assertCurrent();
       return interruptible(call());
     });
@@ -230,20 +236,38 @@ export function registerWorkerProposalAuthority(
         return main();
       }));
     }
-    return round(call, main);
+    const ready = authority.initialize();
+    void ready.catch(() => {});
+    let execution: Promise<T> | null = null;
+    const execute = (workerAdmitted: boolean): Promise<T> => execution ??= enqueue(async () => {
+      if (!workerAdmitted || retirementReason) return main();
+      assertCurrent();
+      return call();
+    });
+    if (initialized) return execute(true);
+    const workerRead = ready.then(() => execute(true));
+    const loaded = awaitWorkerOpenReplica(session);
+    return loaded ? Promise.race([workerRead, loaded.then(() => execute(false))]) : workerRead;
   };
   const round = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {
     const ready = authority.initialize();
     void ready.catch(() => {});
-    return enqueue(async () => {
-      if (retirementReason) return main();
+    const admittedRevision = layoutRevision;
+    const execute = (revision: number): Promise<T> => enqueue<{ value: T } | { readmit: true }>(async () => {
+      if (retirementReason) return { value: await main() };
       await ready;
       assertCurrent();
-      if (retirementReason) return main();
+      if (retirementReason) return { value: await main() };
+      if (!initialized && revision !== layoutRevision) return { readmit: true };
       if (!initialized) await initializeNow();
-      if (retirementReason) return main();
-      return call();
+      if (retirementReason) return { value: await main() };
+      return { value: await call() };
+    }).then((result) => {
+      if ('value' in result) return result.value;
+      const nextRevision = layoutRevision;
+      return Promise.race([hooks.laidOut(), stopped, retired]).then(() => execute(nextRevision));
     });
+    return initialized ? execute(admittedRevision) : ready.then(() => execute(admittedRevision));
   };
   const workerSnapshot = (): DocxProposalSnapshot | null => retirementReason ? session.getProposals() : mirror ? {
     version: peerReady() ? session.version() : mirror.version,
@@ -264,9 +288,10 @@ export function registerWorkerProposalAuthority(
   };
   const integrate = (diff: Uint8Array, stories: readonly string[]): void => {
     if (!worker.integrateProposalUpdate) throw new Error('The worker proposal peer integration is unavailable');
-    worker.integrateProposalUpdate(diff, stories);
-    hooks.projectionChanged?.(stories);
-    hooks.peerUpdated?.(stories);
+    const integrated = worker.integrateProposalUpdate(diff, stories);
+    const changed: readonly string[] = Array.isArray(integrated) ? integrated : stories;
+    hooks.projectionChanged?.(changed);
+    hooks.peerUpdated?.(changed);
   };
   const recordCorrespondence = (workerVersion: string, unchanged: boolean, vector: Uint8Array): void => {
     const peerVector = session.encodeStateVector();
@@ -285,13 +310,13 @@ export function registerWorkerProposalAuthority(
     if (pending && !peerReady()) session.mirrorWorkerDocument(
       { ...previous, version: previous.version + '~' }, !editorPeer()
     );
-    let postedVersion = session.version();
+    let postedVersion = editorPeer() ? session.version() : undefined;
     let reply: ResidentProposalReply;
     mutating += 1;
     try {
       reply = await (prepare ? worker.proposal(op, () => {
         const operation = prepare();
-        postedVersion = session.version();
+        if (editorPeer()) postedVersion = session.version();
         return operation;
       }) : worker.proposal(op));
     } catch (error) {
@@ -352,7 +377,6 @@ export function registerWorkerProposalAuthority(
   }, main);
   const initializeNow = async (): Promise<void> => {
     if (retirementReason) return;
-    await Promise.race([hooks.laidOut(), stopped, retired]);
     assertCurrent();
     if (initialized || retirementReason) return;
     const reply = await Promise.race([worker.proposal({ kind: 'snapshot' }), retired.then(() => null)]).catch((error: unknown) => {
@@ -374,7 +398,7 @@ export function registerWorkerProposalAuthority(
     const reply = await worker.syncUpdate(new Uint8Array(), session.encodeStateVector());
     assertCurrent();
     const unchanged = session.version() === version;
-    if (reply.repair) integrate(reply.repair, session.storyIds());
+    if (reply.repair) integrate(reply.repair, []);
     peerHydrated = true;
     adoptWorkerOpenHandoverVersion(session, reply.version);
     session.mirrorWorkerDocument(null, false);
@@ -395,6 +419,7 @@ export function registerWorkerProposalAuthority(
     complete?.();
   };
   const authority: RegisteredAuthority = {
+    readsInWorker: () => !hooks.passiveEditor || workerOpenDocumentHeld(session) || holdsState || mutating > 0,
     get initialized() { return initialized; },
     snapshot: workerSnapshot,
     revisionPreview: preview,
@@ -410,6 +435,7 @@ export function registerWorkerProposalAuthority(
       if (retirementReason) return false;
       if (holdsState || mutating > 0) throw new Error('The resident worker holds proposals the main thread cannot rebuild');
       retirementReason = reason;
+      failure = null;
       correspondence = null;
       mirror = null;
       geometry = null;
@@ -432,6 +458,7 @@ export function registerWorkerProposalAuthority(
     restart() {
       if (retirementReason || !initialized || holdsState || failure || !hooks.current()) return;
       initialized = false;
+      layoutRevision += 1;
       initializing = null;
       hooks.relayout();
       notify();
@@ -447,12 +474,12 @@ export function registerWorkerProposalAuthority(
         if (reply.mirror.version !== previous) hooks.relayout();
       }
       return result;
-    }),
+    }, true),
     initialize() {
       if (failure) return Promise.reject(failure.error);
       if (retirementReason) return Promise.resolve();
       if (initializing) return initializing;
-      initializing = enqueue(initializeNow);
+      initializing = Promise.race([hooks.laidOut(), stopped, retired]).then(() => enqueue(initializeNow));
       return initializing;
     },
     geometry: () => geometry,
@@ -560,10 +587,10 @@ export function registerWorkerProposalAuthority(
   return authority;
 }
 
-export function workerProposalAuthority(session: YrsSession): WorkerProposalAuthority | null {
+export function workerProposalAuthority(session: YrsSession, includeHydrating = false): WorkerProposalAuthority | null {
   const authority = authorities.get(session);
-  return authority && !authority.retirementReason() && (workerOpenReplicaPending(session) &&
-    (!workerOpenReplicaStarted(session) || authority.holdsWorkerState()))
+  return authority && !authority.retirementReason() && authority.readsInWorker() && workerOpenReplicaPending(session) &&
+    (!workerOpenReplicaStarted(session) || authority.holdsWorkerState() || (includeHydrating && authority.initialized))
     ? authority
     : null;
 }

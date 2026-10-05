@@ -147,10 +147,10 @@ async function editor(holdHydration = false) {
   const ready = requestWorkerOpenReplica(peer)!;
   if (holdHydration) await loaded.promise;
   else await act(async () => { await ready; });
-  const proposal = (id: string, content = 'Worker '): DocxProposalInput => ({
+  const proposal = (id: string, content = 'Worker ', at: 'start' | 'end' = 'start'): DocxProposalInput => ({
     id, paragraph: {
       kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001',
-    }, suggest: SUGGEST, op: 'insertText', at: 'start', text: content,
+    }, suggest: SUGGEST, op: 'insertText', at, text: content,
   });
   const type = (content = 'Typed ') => {
     peer.insertText({ story: 'body', paraId: '00000001', offset: 0 }, content);
@@ -261,7 +261,9 @@ test('a hydration round stays in the worker and readiness follows the authority 
   expect(h.events).toEqual(['snapshot', 'load', 'catchUp', 'ready']);
   expect(text(h.peer)).toBe(h.workerText());
   expect(h.authority.workerCoversPeer(h.peer.version())).toBe(true);
-  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('after', 'After ')] }));
+  expect(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('after', 'After ')] }))
+    .toMatchObject({ ok: false, failure: { code: 'tracked-revision-conflict' } });
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('after', 'After ', 'end')] }));
   expect(text(h.peer)).toContain('After ');
   expect(text(h.peer)).toBe(h.workerText());
 });
@@ -269,7 +271,9 @@ test('a hydration round stays in the worker and readiness follows the authority 
 test('same proposal ids stay independent and both decisions enter the preview by revision id', async () => {
   const h = await editor();
   const local = snapshot(h.peer.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same', 'Local ')] }));
-  const remote = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same')] }));
+  expect(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same')] }))
+    .toMatchObject({ ok: false, failure: { code: 'tracked-revision-conflict' } });
+  const remote = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('same', 'Worker ', 'end')] }));
   expect(h.peer.getProposals().proposals).toEqual(local.proposals);
   expect((await h.api.getProposals()).proposals).toEqual(remote.proposals);
   const localIds = local.proposals.flatMap(({ revisionIds }) => revisionIds);

@@ -660,16 +660,20 @@ export function useYrsCoreSession(
             const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: (comments, peer) => saveInOrder(async (stories) => {
-                if (stale()) throw new Error('The document changed while saving');
-                if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
-                const currentHost = documentRef.current ?? host?.document;
-                return worker.save({
-                  comments,
-                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
-                  ...(peer ? { stories } : {}),
-                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
-              }),
+              save: (comments, peer) => {
+                const task = () => saveInOrder(async (stories) => {
+                  if (stale()) throw new Error('The document changed while saving');
+                  if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
+                  const currentHost = documentRef.current ?? host?.document;
+                  return worker.save({
+                    comments,
+                    ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                    ...(peer ? { stories } : {}),
+                  }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+                });
+                const authority = registeredWorkerProposalAuthority(next);
+                return authority ? authority.save(task) : task();
+              },
             });
             let revisionsQueried = false;
             const queryRevisions = (): void => {
@@ -692,6 +696,7 @@ export function useYrsCoreSession(
                   });
               const authority = registerWorkerProposalAuthority(next, worker, {
                 editorPeer: true,
+                passiveEditor: !workerOpenRef.current?.workerProposals,
                 relayout: () => {
                   if (!authority.initialized) {
                     laidOut = new Promise<void>((resolve) => {
@@ -812,7 +817,8 @@ export function useYrsCoreSession(
                   if (
                     stale() || sessionRef.current !== next ||
                     !pending.pending || pending.started || prefetchedState ||
-                    registeredWorkerProposalAuthority(next)
+                    workerOpenRef.current?.workerProposals ||
+                    registeredWorkerProposalAuthority(next)?.holdsWorkerState()
                   ) return;
                   const revision = worker.stateRevision?.();
                   if (!revision) return;
@@ -969,8 +975,7 @@ export function useYrsCoreSession(
       !session ||
       session !== sessionRef.current ||
       !hasOwnWorkerFrame ||
-      (!workerOpenDocumentHeld(session) &&
-        (!pendingReplicaRef.current?.pending || !startReplicaRef.current)) ||
+      (!workerOpenDocumentHeld(session) && !startReplicaRef.current) ||
       previewing ||
       (handoffFrom && options?.shownEngine !== session)
     ) return;
@@ -1067,7 +1072,7 @@ export function useYrsCoreSession(
           if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
         }
       ) ?? Promise.resolve();
-      const authority = registeredWorkerProposalAuthority(session) !== null;
+      const authority = workerOpenRef.current?.workerProposals === true;
       if (authority) {
         timer = setTimeout(startPeer, REPLICA_FRAME_WAIT_MS);
         if (typeof requestAnimationFrame === 'function') {

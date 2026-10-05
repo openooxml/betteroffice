@@ -81,7 +81,7 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { awaitWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './DocxEditor/internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority } from './DocxEditor/internals/workerProposalAuthority';
 import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
 import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
@@ -1872,7 +1872,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const pluginHostSession =
     yrsCore.session &&
     !opening &&
-    (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
+    (yrsCore.replicaReady || (workerOpenDocumentHeld(yrsCore.session) && yrsCore.workerProposalsReady)) &&
     yrsCore.sessionGeneration === yrsSeedGeneration &&
     history.state &&
     !state.isLoading &&

@@ -945,6 +945,7 @@ test('registered editor export reconciles worker repairs without echoing updates
   const frames = holdFrames();
   const { result, unmount } = renderHook(useHarness, { initialProps: { ...initialProps } });
   let applyLocal: ReturnType<typeof spyOn<YrsSession, 'applyLocalUpdate'>> | undefined;
+  let applyHost: ReturnType<typeof spyOn<YrsSession, 'applyHostUpdate'>> | undefined;
   let peerExport: ReturnType<typeof spyOn<YrsSession, 'exportStructuredWithPagesFor'>> | undefined;
   try {
     await frames.waitFor(() => expect(result.current.host).not.toBeNull());
@@ -955,6 +956,7 @@ test('registered editor export reconciles worker repairs without echoing updates
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000, 'window'), 3000);
     const session = result.current.core.session!;
     applyLocal = spyOn(session, 'applyLocalUpdate');
+    applyHost = spyOn(session, 'applyHostUpdate');
     peerExport = spyOn(session, 'exportStructuredWithPagesFor');
     workers[0]!.sessions[0]!.applyRawOps('body', [{ op: 'insert', index: 0, text: 'Worker repair ' }]);
     const before = posted.filter(({ type }) => type === 'applyUpdate').length;
@@ -965,7 +967,8 @@ test('registered editor export reconciles worker repairs without echoing updates
     expect(exported.content.layout.documentVersion).toBe(session.version());
     expect(JSON.stringify(exported.content.structured)).toContain('Worker repair ');
     expect(session.paragraphs('body')[0]!.text).toStartWith('Worker repair ');
-    expect(applyLocal).toHaveBeenCalled();
+    expect(applyHost).toHaveBeenCalled();
+    expect(applyLocal).not.toHaveBeenCalled();
     expect(posted.filter(({ type }) => type === 'applyUpdate')).toHaveLength(before);
     expect(posted.slice(beforeExport).some(({ type }) => type === 'syncUpdate')).toBe(true);
     expect(posted.slice(beforeExport).some(({ type }) => type === 'sync')).toBe(true);
@@ -973,6 +976,7 @@ test('registered editor export reconciles worker repairs without echoing updates
   } finally {
     unmount();
     applyLocal?.mockRestore();
+    applyHost?.mockRestore();
     peerExport?.mockRestore();
     frames.restore();
     globalThis.Worker = originalWorker;
@@ -2676,7 +2680,8 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
     expect(openingApi.getEditorRef()?.getYrsSession()).toBe(session);
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
-    expect(mirror).toHaveBeenCalledWith(null);
+    expect(mirror).toHaveBeenCalledWith(null, false);
+    expect(session.getProposals().proposals).toEqual([]);
     expect(session.workerDocumentMirrored()).toBe(false);
     expect(terminate).not.toHaveBeenCalled();
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
@@ -2716,7 +2721,8 @@ test('eager hydration keeps worker rendering and proposal updates', async () => 
       result.current.pipeline.scheduleLayout('remote', true);
     });
     await frames.untilCommitted(result.current.renderer.settledDisplayList(null, 3000));
-    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+    expect((await api.getProposals()).proposals[0]!.state).toBe('accepted');
+    expect(session.getProposals().proposals).toEqual([]);
     expect(posted.filter((request) => request.type === 'sync').length).toBeGreaterThan(syncs);
     const accepted = posted.filter((request) => request.type === 'sync').at(-1)!;
     if (accepted.type !== 'sync') throw new Error('Missing proposal sync');
@@ -4614,7 +4620,8 @@ test('a failed first proposal leaves the replica fallback available', async () =
       expect(session.workerDocumentMirrored()).toBe(false);
       expect(workerProposalAuthority(session)).toBeNull();
       expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-      await expect(api().getProposals()).rejects.toThrow('Superseded by a newer layout, document load or worker owner');
+      expect((await api().getProposals()).proposals).toEqual([]);
+      expect(registeredWorkerProposalAuthority(session)!.retirementReason()).toBe('source-fallback');
       expect(result.current.errors).toEqual([]);
     } finally {
       terminate.mockRestore();
@@ -4878,8 +4885,9 @@ test('a hand-over queued behind a recovery snapshot that fails still hydrates th
     const [initialized, answered] = outcome as [unknown, unknown];
     expect(initialized).toBeInstanceOf(Error);
     expect((initialized as Error).message).toBe('snapshot failed');
-    expect(answered).toBeInstanceOf(Error);
-    expect((answered as Error).message).toBe('snapshot failed');
+    expect(answered).toMatchObject({ proposals: [] });
+    expect(posted.filter((request) => request.type === 'proposal' && request.operation.kind === 'snapshot').length)
+      .toBeGreaterThan(2);
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     const current = await api().getProposals();
     const target = await bodyParagraph();
@@ -4908,6 +4916,9 @@ test('editor ref rounds stay in the worker when the viewer proposal flag is disa
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
+  act(() => result.current.pipeline.runLayoutPipeline());
+  await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+  act(() => result.current.presentFrame());
   const initial = await result.current.ref.current!.getProposals();
   const peerPropose = spyOn(session, 'proposeChanges');
   let settled = false;
@@ -4994,14 +5005,15 @@ test('a failed empty hand-over releases the mirror before using the main replica
   await act(async () => { await result.current.ref.current!.getProposals(); });
   expect(session.workerDocumentMirrored()).toBe(true);
   act(() => rerender({ ...workerProposalProps, viewer: false }));
-  await act(async () => { await expect(requestWorkerOpenReplica(session)!).rejects.toThrow('open failed'); });
-  expect(result.current.mainOpens).toEqual([]);
-  expect(session.workerDocumentMirrored()).toBe(true);
-  expect(result.current.core.replicaReady).toBe(false);
-  await expect(result.current.ref.current!.setProposalStates({
+  await act(async () => { await requestWorkerOpenReplica(session); });
+  expect(result.current.mainOpens).toEqual([true]);
+  expect(session.workerDocumentMirrored()).toBe(false);
+  expect(result.current.core.replicaReady).toBe(true);
+  expect(registeredWorkerProposalAuthority(session)!.retirementReason()).toBe('source-fallback');
+  expect(await result.current.ref.current!.setProposalStates({
     expectVersion: session.version(), expectPreviewVersion: session.getProposals().previewVersion,
     changes: [],
-  })).rejects.toThrow('Superseded by a newer layout, document load or worker owner');
+  })).toMatchObject({ ok: true });
 });
 
 async function openingEditor(workerPreview = true, viewer = false, options: {
