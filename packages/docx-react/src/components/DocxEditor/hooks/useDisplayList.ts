@@ -106,6 +106,7 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeState(prefetch?: boolean): Promise<Uint8Array>;
   encodeVersionedState?(prefetch?: boolean): ReturnType<ResidentEngineWorkerClient['encodeVersionedState']>;
   stateRevision?(): { owner: ResidentEngineWorkerClient; sequence: number } | null;
+  whenBootstrapSent?(): ReturnType<ResidentEngineWorkerClient['whenBootstrapSent']>;
   revisionCount(): Promise<number>;
   proposal(
     op: Parameters<ResidentEngineWorkerClient['proposal']>[0],
@@ -1818,6 +1819,8 @@ export function useRustDisplayList(
               ? { owner: owner.client, sequence: owner.client.stateSequence() }
               : null;
           },
+          whenBootstrapSent: () =>
+            requestOpenedWorker(hostEngine, (owner) => owner.client.whenBootstrapSent()),
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op, prepare) =>
             requestOpenedWorker(hostEngine, async (owner) => {

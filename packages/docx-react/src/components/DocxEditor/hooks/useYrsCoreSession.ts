@@ -710,8 +710,8 @@ export function useYrsCoreSession(
                 current: () => !stale(),
                 laidOut: () => {
                   const owner = worker.stateRevision?.()?.owner;
-                  return owner && owner !== openedProposalOwner
-                    ? Promise.race([laidOut, owner.whenBootstrapSent()])
+                  return owner !== openedProposalOwner && worker.whenBootstrapSent
+                    ? Promise.race([laidOut, worker.whenBootstrapSent()])
                     : laidOut;
                 },
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
