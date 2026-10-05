@@ -4755,6 +4755,48 @@ fn table_layout(table: &Value, story_id: &str, table_index: usize) -> TableLayou
     TableLayout { grid_columns, rows }
 }
 
+pub(crate) fn validate_peer_blocks(blocks: &[Value]) -> Result<(), String> {
+    let count = |value: Option<&Value>, default: u32, minimum: u32| {
+        let value = number(value).unwrap_or(f64::from(default));
+        if value.fract() != 0.0 || !(f64::from(minimum)..=f64::from(u32::MAX)).contains(&value) {
+            return Err("invalid source table grid count".to_owned());
+        }
+        Ok(value as u32)
+    };
+    let mut pending: Vec<&Value> = blocks.iter().collect();
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Object(object) => {
+                if string(object.get("type")) == Some("table") {
+                    let rows = array(object.get("rows"));
+                    TableLayout::validate_peer_row_count(rows.len())?;
+                    for row in rows {
+                        let formatting = field(Some(row), "formatting");
+                        let before = count(field(formatting, "gridBefore"), 0, 0)?;
+                        let after = count(field(formatting, "gridAfter"), 0, 0)?;
+                        let mut column = before;
+                        for cell in array(field(Some(row), "cells")) {
+                            let span =
+                                count(field(field(Some(cell), "formatting"), "gridSpan"), 1, 1)?;
+                            column = column
+                                .checked_add(span)
+                                .ok_or("source table column overflow")?;
+                        }
+                        column
+                            .checked_add(after)
+                            .ok_or("source table column overflow")?;
+                    }
+                    table_layout(value, "peer", 0).validate_peer_metadata()?;
+                }
+                pending.extend(object.values());
+            }
+            Value::Array(values) => pending.extend(values),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Records the revision identity of every move below `value`.
 fn record_moves(value: &Value, moves: &mut HashSet<String>) {
     match value {

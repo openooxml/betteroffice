@@ -399,7 +399,7 @@ fn empty_package_bytes() -> PackageBytes {
 
 impl SourceIndex {
     pub(crate) fn attach_peer_source(&mut self, bytes: PackageBytes) -> Result<(), String> {
-        for part in &self.parts {
+        for (part_index, part) in self.parts.iter().enumerate() {
             if !part.uri.starts_with('/') || part.uri.len() == 1 {
                 return Err("invalid source part URI".to_owned());
             }
@@ -411,14 +411,25 @@ impl SourceIndex {
                 }
             }
             for (ordinal, views) in &part.backed {
-                if *ordinal as usize >= part.occurrences.len()
-                    || views.iter().any(|key| !self.seeded.contains_key(key))
-                {
+                if *ordinal as usize >= part.occurrences.len() || views.is_empty() {
                     return Err("invalid source paragraph views".to_owned());
+                }
+                let mut roots = HashSet::new();
+                for key in views {
+                    let seed = self
+                        .seeded
+                        .get(key)
+                        .ok_or("invalid source paragraph view")?;
+                    if seed.part != Some(part_index)
+                        || seed.ordinal != Some(*ordinal)
+                        || !roots.insert(&seed.root)
+                    {
+                        return Err("inconsistent source paragraph view".to_owned());
+                    }
                 }
             }
         }
-        for seed in self.seeded.values() {
+        for (key, seed) in &self.seeded {
             if let Some(part) = seed.part {
                 let part = self.parts.get(part).ok_or("invalid seeded part")?;
                 if seed
@@ -426,6 +437,14 @@ impl SourceIndex {
                     .is_some_and(|ordinal| ordinal as usize >= part.occurrences.len())
                 {
                     return Err("invalid seeded paragraph ordinal".to_owned());
+                }
+                if let Some(ordinal) = seed.ordinal
+                    && !part
+                        .backed
+                        .get(&ordinal)
+                        .is_some_and(|views| views.contains(key))
+                {
+                    return Err("seeded paragraph missing its source view".to_owned());
                 }
             } else if seed.ordinal.is_some() {
                 return Err("seeded paragraph ordinal without a part".to_owned());

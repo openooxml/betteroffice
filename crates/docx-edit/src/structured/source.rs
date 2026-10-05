@@ -175,6 +175,53 @@ pub(crate) struct TableLayout {
     pub rows: Vec<RowLayout>,
 }
 
+impl TableLayout {
+    pub(crate) fn validate_peer_row_count(rows: usize) -> Result<(), String> {
+        u32::try_from(rows).map_err(|_| "too many table rows".to_owned())?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_peer_metadata(&self) -> Result<(), String> {
+        Self::validate_peer_row_count(self.rows.len())?;
+        let mut open = BTreeMap::new();
+        for row in &self.rows {
+            let mut column = row.grid_before;
+            let mut next = BTreeMap::new();
+            for cell in &row.cells {
+                if cell.span == 0 {
+                    return Err("invalid table cell span".to_owned());
+                }
+                if cell.column != column {
+                    return Err("invalid table cell column".to_owned());
+                }
+                column = column
+                    .checked_add(cell.span)
+                    .ok_or("table cell column overflow")?;
+                match cell.merge {
+                    SourceMerge::Continue => {
+                        if open.get(&cell.column) != Some(&cell.span) {
+                            return Err("invalid table merge continuation".to_owned());
+                        }
+                        next.insert(cell.column, cell.span);
+                    }
+                    SourceMerge::Restart => {
+                        next.insert(cell.column, cell.span);
+                    }
+                    SourceMerge::None => {}
+                }
+            }
+            let end = column
+                .checked_add(row.grid_after)
+                .ok_or("table row column overflow")?;
+            if end > self.grid_columns {
+                return Err("invalid table grid extent".to_owned());
+            }
+            open = next;
+        }
+        Ok(())
+    }
+}
+
 /// The identity of a tracked insertion (`inserted`) or deletion, for matching a stream stamp to
 /// the move it came from.
 pub(crate) fn move_key(inserted: bool, id: &str, author: &str, date: &str) -> String {
@@ -576,6 +623,37 @@ fn targets(
 
 impl ReadSource {
     pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
+        for layout in self.provenance.tables.values() {
+            layout.validate_peer_metadata()?;
+        }
+        for comment in &self.comments {
+            crate::seed::validate_peer_blocks(&comment.body)?;
+        }
+        for paragraphs in self.note_separator_paragraphs.values() {
+            crate::seed::validate_peer_blocks(paragraphs)?;
+        }
+        if self.unrepresented_anchors.len() > self.unrepresented_controls {
+            return Err("invalid unrepresented control count".to_owned());
+        }
+        if self.control_safety.is_none() {
+            self.unlocated_controls
+                .checked_add(
+                    self.provenance
+                        .raw_sources
+                        .iter()
+                        .filter(|source| may_hold_controls(&source.xml))
+                        .count(),
+                )
+                .and_then(|count| {
+                    count.checked_add(
+                        self.comments
+                            .iter()
+                            .filter(|comment| comment.body.iter().any(holds_control))
+                            .count(),
+                    )
+                })
+                .ok_or("unlocated control count overflow")?;
+        }
         self.story_index.clear();
         for (index, story) in self.stories.iter().enumerate() {
             self.story_index
@@ -590,8 +668,14 @@ impl ReadSource {
             }
         }
         for (index, control) in self.source_controls.iter().enumerate() {
-            if control.parent.is_some_and(|parent| parent >= index) {
-                return Err("invalid source control parent".to_owned());
+            if let Some(parent) = control.parent {
+                if parent >= index {
+                    return Err("invalid source control parent".to_owned());
+                }
+                let parent = &self.source_controls[parent];
+                if parent.story != control.story || parent.raw_block != control.raw_block {
+                    return Err("source control parent belongs to another container".to_owned());
+                }
             }
         }
         Ok(())

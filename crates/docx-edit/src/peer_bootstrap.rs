@@ -815,6 +815,503 @@ mod tests {
         }
     }
 
+    fn table_package(horizontal: bool, vertical: bool) -> PackageBytes {
+        let cell = |properties: &str, content: &str| {
+            format!("<w:tc><w:tcPr>{properties}</w:tcPr>{content}</w:tc>")
+        };
+        let paragraph = |text: &str| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let nested = concat!(
+            "<w:tbl><w:tblGrid><w:gridCol w:w=\"900\"/></w:tblGrid><w:tr><w:tc>",
+            "<w:p><w:r><w:t>Nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+        );
+        let mut rows = String::new();
+        for row in 0..3 {
+            let span = if horizontal {
+                "<w:gridSpan w:val=\"2\"/>"
+            } else {
+                ""
+            };
+            let merge = if vertical {
+                if row == 0 {
+                    "<w:vMerge w:val=\"restart\"/>"
+                } else {
+                    "<w:vMerge/>"
+                }
+            } else {
+                ""
+            };
+            let properties = format!("{span}{merge}");
+            let content = if vertical && row > 0 {
+                "<w:p/>".to_owned()
+            } else if row == 0 {
+                format!("{}{nested}", paragraph("Left"))
+            } else {
+                paragraph("Left")
+            };
+            rows.push_str(&format!(
+                "<w:tr><w:trPr><w:gridBefore w:val=\"1\"/><w:gridAfter w:val=\"1\"/></w:trPr>{}{}</w:tr>",
+                cell(&properties, &content), cell("", &paragraph("Right")),
+            ));
+        }
+        let mut parts = fixture::principal_parts();
+        let body = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        body.1 = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl><w:tblGrid><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/></w:tblGrid>{rows}</w:tbl><w:sectPr/></w:body></w:document>"
+        ).into_bytes();
+        ooxml_opc::rezip_parts(&parts).unwrap().into()
+    }
+
+    fn assert_invalid_metadata_is_atomic(
+        worker: &EditingDoc,
+        source: &PackageBytes,
+        metadata: &[u8],
+        bad: &Value,
+        expected: &str,
+    ) {
+        let (_, blobs) = sections(metadata).unwrap();
+        let bad = frame(&serde_json::to_vec(bad).unwrap(), blobs).unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let peer = EditingDoc::new(19);
+        let before = peer.encode_state_as_update_v1();
+        let version = peer.version();
+        let error = peer
+            .prepare_peer_bootstrap(&state, &bad, Some(source.clone()))
+            .err()
+            .unwrap();
+        assert_eq!(
+            error,
+            PeerMetadataError::InvalidMetadata(expected.to_owned())
+        );
+        assert_eq!(peer.encode_state_as_update_v1(), before);
+        assert_eq!(peer.version(), version);
+        assert!(peer.source_metadata().is_none());
+        assert!(peer.source.lock().unwrap().is_none());
+        assert!(peer.media.lock().unwrap().is_none());
+        assert!(peer.media_sources().is_empty());
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, metadata, Some(source.clone()))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
+        assert_eq!(peer.paragraph_identities(), worker.paragraph_identities());
+    }
+
+    #[test]
+    fn peer_metadata_table_row_count_fits_export_positions_and_spans() {
+        use crate::structured::source::TableLayout;
+
+        assert!(TableLayout::validate_peer_row_count(u32::MAX as usize).is_ok());
+        if let Ok(rows) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(
+                TableLayout::validate_peer_row_count(rows),
+                Err("too many table rows".to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_rejects_invalid_table_layouts_atomically() {
+        let source = table_package(false, false);
+        let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (json, _) = sections(&metadata).unwrap();
+        let wire: Value = serde_json::from_slice(json).unwrap();
+        let tables = wire["source"]["read"]["provenance"]["tables"]
+            .as_array()
+            .unwrap();
+        let table_index = tables
+            .iter()
+            .position(|entry| entry[0] == "body:t0")
+            .unwrap();
+        for (case, expected) in [
+            ("same-row-origin", "invalid table cell column"),
+            ("zero-span", "invalid table cell span"),
+            ("column-overflow", "table cell column overflow"),
+            ("trailing-overflow", "table row column overflow"),
+            ("overlap", "invalid table cell column"),
+            ("unordered", "invalid table cell column"),
+            ("gap", "invalid table cell column"),
+            ("leading-gap", "invalid table cell column"),
+            ("grid-extent", "invalid table grid extent"),
+            ("empty-row-extent", "invalid table grid extent"),
+            ("first-row-continuation", "invalid table merge continuation"),
+            ("no-restart", "invalid table merge continuation"),
+            ("different-span", "invalid table merge continuation"),
+            ("different-column", "invalid table merge continuation"),
+            ("interrupted-merge", "invalid table merge continuation"),
+        ] {
+            let mut bad = wire.clone();
+            let layout = &mut bad["source"]["read"]["provenance"]["tables"][table_index][1];
+            match case {
+                "same-row-origin" => {
+                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                    layout["rows"][0]["cells"][1]["merge"] = json!("Continue");
+                    layout["rows"][0]["cells"][1]["column"] =
+                        layout["rows"][0]["cells"][0]["column"].clone();
+                    layout["rows"][0]["cells"][1]["span"] =
+                        layout["rows"][0]["cells"][0]["span"].clone();
+                }
+                "zero-span" => layout["rows"][0]["cells"][0]["span"] = json!(0),
+                "column-overflow" => {
+                    layout["rows"][0]["grid_before"] = json!(u32::MAX);
+                    layout["rows"][0]["cells"][0]["column"] = json!(u32::MAX);
+                }
+                "trailing-overflow" => layout["rows"][0]["grid_after"] = json!(u32::MAX),
+                "overlap" => layout["rows"][0]["cells"][0]["span"] = json!(2),
+                "unordered" => layout["rows"][0]["cells"]
+                    .as_array_mut()
+                    .unwrap()
+                    .swap(0, 1),
+                "gap" => layout["rows"][0]["cells"][1]["column"] = json!(3),
+                "leading-gap" => layout["rows"][0]["grid_before"] = json!(0),
+                "grid-extent" => layout["grid_columns"] = json!(3),
+                "empty-row-extent" => {
+                    layout["rows"][0]["cells"] = json!([]);
+                    layout["rows"][0]["grid_before"] = json!(6);
+                }
+                "first-row-continuation" => {
+                    layout["rows"][0]["cells"][0]["merge"] = json!("Continue")
+                }
+                "no-restart" => layout["rows"][1]["cells"][0]["merge"] = json!("Continue"),
+                "different-span" => {
+                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                    layout["rows"][1]["cells"][0]["merge"] = json!("Continue");
+                    layout["rows"][1]["cells"][0]["span"] = json!(2);
+                    layout["rows"][1]["cells"][1]["column"] = json!(3);
+                }
+                "different-column" => {
+                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                    layout["rows"][1]["cells"][0]["merge"] = json!("Continue");
+                    layout["rows"][1]["grid_before"] = json!(0);
+                    layout["rows"][1]["cells"][0]["column"] = json!(0);
+                    layout["rows"][1]["cells"][1]["column"] = json!(1);
+                }
+                "interrupted-merge" => {
+                    layout["rows"][0]["cells"][0]["merge"] = json!("Restart");
+                    layout["rows"][2]["cells"][0]["merge"] = json!("Continue");
+                }
+                _ => unreachable!(),
+            }
+            assert_invalid_metadata_is_atomic(&worker, &source, &metadata, &bad, expected);
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_merged_and_nested_tables_export_like_source_open() {
+        for (horizontal, vertical) in [(false, false), (true, false), (false, true), (true, true)] {
+            let source = table_package(horizontal, vertical);
+            let digest = seed::package_digest(&source);
+            let worker = worker(&source, &digest, 7).unwrap();
+            let state = worker.encode_state_as_update_v1();
+            let metadata = worker.encode_peer_metadata().unwrap();
+            let (envelope, parts, media) =
+                seed::parse_docx_package_with_media(source.clone(), digest.clone()).unwrap();
+            let (mut expected_source, index, _) =
+                seed::replica_source(envelope, parts, source.clone(), digest).unwrap();
+            let baseline = EditingDoc::new(19);
+            expected_source.watch_comments(&baseline);
+            baseline.install_source(expected_source, 17);
+            baseline.retain_source(SourcePackage::Ready(Arc::new(index)));
+            baseline.install_media(media);
+            baseline.apply_update_v1(&state).unwrap();
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &metadata, Some(source))
+                .unwrap();
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            peer.apply_update_v1(&state).unwrap();
+            let read = peer.source_metadata().unwrap();
+            let layout = &read.read().provenance.tables["body:t0"];
+            assert_eq!(layout.rows.len(), 3);
+            assert_eq!(layout.rows[0].cells[0].span, if horizontal { 2 } else { 1 });
+            assert!(read.read().provenance.tables.len() >= 2);
+            for view in [
+                crate::structured::RevisionView::Accepted,
+                crate::structured::RevisionView::Original,
+                crate::structured::RevisionView::Markup,
+            ] {
+                let options = crate::structured::ExportOptions::new(view);
+                let actual = peer.export_structured(&options).unwrap().content;
+                assert_eq!(
+                    actual,
+                    baseline.export_structured(&options).unwrap().content
+                );
+                let crate::structured::BlockKind::Table { table } =
+                    &actual.stories[0].blocks[0].content
+                else {
+                    panic!("expected table");
+                };
+                assert_eq!(
+                    table.rows[0].cells[0].row_span,
+                    if vertical { 3 } else { 1 }
+                );
+                assert_eq!(
+                    table.rows[0].cells[0].grid_span,
+                    if horizontal { 2 } else { 1 }
+                );
+                if vertical {
+                    assert_eq!(table.rows[1].cells[0].row_span, 0);
+                    assert_eq!(
+                        table.rows[2].cells[0].merge_origin,
+                        Some(crate::structured::CellPosition { row: 0, column: 1 })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_rejects_invalid_control_metadata_atomically() {
+        let source = synthetic_package();
+        let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (json, _) = sections(&metadata).unwrap();
+        let wire: Value = serde_json::from_slice(json).unwrap();
+        let anchor = serde_json::to_value(crate::structured::Anchor::Control {
+            story: "body".to_owned(),
+            control_id: "source-control".to_owned(),
+        })
+        .unwrap();
+        for (case, expected) in [
+            ("anchor-count", "invalid unrepresented control count"),
+            ("raw-count-overflow", "unlocated control count overflow"),
+            ("comment-count-overflow", "unlocated control count overflow"),
+            (
+                "parent-story",
+                "source control parent belongs to another container",
+            ),
+            (
+                "parent-block",
+                "source control parent belongs to another container",
+            ),
+        ] {
+            let mut bad = wire.clone();
+            let read = &mut bad["source"]["read"];
+            match case {
+                "anchor-count" => {
+                    read["unrepresented_controls"] = json!(1);
+                    read["unrepresented_anchors"] = json!([anchor.clone(), anchor.clone()]);
+                }
+                "raw-count-overflow" => {
+                    read["control_safety"] = Value::Null;
+                    read["unlocated_controls"] = json!(usize::MAX);
+                    read["provenance"]["raw_sources"] = json!([{
+                        "story": "body", "index": 0, "steps": [], "xml": "<w:sdtContent/>"
+                    }]);
+                }
+                "comment-count-overflow" => {
+                    read["control_safety"] = Value::Null;
+                    read["unlocated_controls"] = json!(usize::MAX);
+                    read["provenance"]["raw_sources"] = json!([]);
+                    read["comments"] = json!([{
+                        "id": "1", "author": null, "date": null, "parent_id": null,
+                        "done": false, "body": [{ "type": "blockSdt" }]
+                    }]);
+                }
+                "parent-story" | "parent-block" => {
+                    let parent = json!({
+                        "story": "body", "raw_block": 0, "anchor": anchor.clone(),
+                        "parent": null, "block": true,
+                        "properties": { "sdtType": "plainText", "lock": "contentLocked" }
+                    });
+                    let mut child = parent.clone();
+                    child["parent"] = json!(0);
+                    if case == "parent-story" {
+                        child["story"] = json!("hf:rId1");
+                    } else {
+                        child["raw_block"] = json!(1);
+                    }
+                    read["source_controls"] = json!([parent, child]);
+                }
+                _ => unreachable!(),
+            }
+            assert_invalid_metadata_is_atomic(&worker, &source, &metadata, &bad, expected);
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_rejects_unsafe_retained_tables_atomically() {
+        let source = synthetic_package();
+        let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (json, _) = sections(&metadata).unwrap();
+        let wire: Value = serde_json::from_slice(json).unwrap();
+        for (case, expected) in [
+            ("zero-span", "invalid source table grid count"),
+            ("negative-span", "invalid source table grid count"),
+            ("fractional-span", "invalid source table grid count"),
+            ("oversized-span", "invalid source table grid count"),
+            ("width-overflow", "source table column overflow"),
+            ("omission-overflow", "source table column overflow"),
+            ("leading-count", "invalid source table grid count"),
+            ("trailing-count", "invalid source table grid count"),
+            ("orphan-continuation", "invalid table merge continuation"),
+            ("nested-table", "invalid source table grid count"),
+            ("separator-table", "invalid source table grid count"),
+        ] {
+            let mut table = json!({
+                "type": "table", "columnWidths": [900, 900],
+                "rows": [{ "cells": [{ "content": [] }, { "content": [] }] }]
+            });
+            match case {
+                "zero-span" => table["rows"][0]["cells"][0]["formatting"] = json!({"gridSpan": 0}),
+                "negative-span" => {
+                    table["rows"][0]["cells"][0]["formatting"] = json!({"gridSpan": -1})
+                }
+                "fractional-span" => {
+                    table["rows"][0]["cells"][0]["formatting"] = json!({"gridSpan": 1.5})
+                }
+                "oversized-span" | "nested-table" | "separator-table" => {
+                    table["rows"][0]["cells"][0]["formatting"] = json!({"gridSpan": 1e300});
+                }
+                "width-overflow" => {
+                    table["rows"][0]["cells"][0]["formatting"] = json!({"gridSpan": u32::MAX});
+                }
+                "omission-overflow" => {
+                    table["rows"][0]["cells"] = json!([]);
+                    table["rows"][0]["formatting"] =
+                        json!({"gridBefore": u32::MAX, "gridAfter": 1});
+                }
+                "leading-count" => table["rows"][0]["formatting"] = json!({"gridBefore": 1e300}),
+                "trailing-count" => table["rows"][0]["formatting"] = json!({"gridAfter": 1e300}),
+                "orphan-continuation" => {
+                    table["rows"][0]["cells"][0]["formatting"] = json!({"vMerge": "continue"})
+                }
+                _ => unreachable!(),
+            }
+            let mut bad = wire.clone();
+            if case == "separator-table" {
+                bad["source"]["read"]["note_separator_paragraphs"] = json!([["footnote", [table]]]);
+            } else {
+                let body = if case == "nested-table" {
+                    json!([{ "type": "blockSdt", "content": [table] }])
+                } else {
+                    json!([table])
+                };
+                bad["source"]["read"]["comments"] = json!([{
+                    "id": "peer-table", "author": null, "date": null, "parent_id": null,
+                    "done": false, "body": body
+                }]);
+            }
+            assert_invalid_metadata_is_atomic(&worker, &source, &metadata, &bad, expected);
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_source_comment_tables_export_like_source_open() {
+        let mut parts = fixture::principal_parts();
+        let comments = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/comments.xml")
+            .unwrap();
+        comments.1 = format!(
+            "<w:comments {}><w:comment w:id=\"1\"><w:tbl><w:tblGrid><w:gridCol w:w=\"900\"/><w:gridCol w:w=\"900\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/><w:vMerge w:val=\"restart\"/></w:tcPr><w:p><w:r><w:t>Comment cell</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:gridSpan w:val=\"2\"/><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr></w:tbl></w:comment></w:comments>",
+            fixture::NS
+        ).into_bytes();
+        let source: PackageBytes = ooxml_opc::rezip_parts(&parts).unwrap().into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let (envelope, parts, media) =
+            seed::parse_docx_package_with_media(source.clone(), digest.clone()).unwrap();
+        let (mut expected_source, index, _) =
+            seed::replica_source(envelope, parts, source.clone(), digest).unwrap();
+        let baseline = EditingDoc::new(19);
+        expected_source.watch_comments(&baseline);
+        baseline.install_source(expected_source, 17);
+        baseline.retain_source(SourcePackage::Ready(Arc::new(index)));
+        baseline.install_media(media);
+        baseline.apply_update_v1(&state).unwrap();
+        let peer = EditingDoc::new(19);
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
+        let mut options =
+            crate::structured::ExportOptions::new(crate::structured::RevisionView::Accepted);
+        options.stories = Some(vec![crate::structured::StorySelection::Comments]);
+        let actual = peer.export_structured(&options).unwrap().content;
+        assert_eq!(
+            actual,
+            baseline.export_structured(&options).unwrap().content
+        );
+        let crate::structured::BlockKind::Table { table } = &actual.stories[0].blocks[0].content
+        else {
+            panic!("expected comment table");
+        };
+        assert_eq!(table.rows[0].cells[0].grid_span, 2);
+        assert_eq!(table.rows[0].cells[0].row_span, 2);
+    }
+
+    #[test]
+    fn peer_bootstrap_rejects_inconsistent_identity_views_atomically() {
+        let source = table_package(false, false);
+        let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (json, _) = sections(&metadata).unwrap();
+        let wire: Value = serde_json::from_slice(json).unwrap();
+        let parts = wire["index"]["parts"].as_array().unwrap();
+        let part_index = parts
+            .iter()
+            .position(|part| part["uri"] == "/word/document.xml")
+            .unwrap();
+        let views = parts[part_index]["backed"].as_array().unwrap();
+        assert!(views.len() >= 2);
+        let key = views[0][1][0].as_str().unwrap();
+        let seeded = wire["index"]["seeded"].as_array().unwrap();
+        let seed_index = seeded.iter().position(|entry| entry[0] == key).unwrap();
+        for (case, expected) in [
+            ("empty-views", "invalid source paragraph views"),
+            ("duplicate-view", "inconsistent source paragraph view"),
+            ("duplicate-root", "inconsistent source paragraph view"),
+            ("different-part", "inconsistent source paragraph view"),
+            ("different-ordinal", "inconsistent source paragraph view"),
+            (
+                "missing-reciprocal-view",
+                "seeded paragraph missing its source view",
+            ),
+        ] {
+            let mut bad = wire.clone();
+            match case {
+                "empty-views" => bad["index"]["parts"][part_index]["backed"][0][1] = json!([]),
+                "duplicate-view" => {
+                    bad["index"]["parts"][part_index]["backed"][0][1] = json!([key, key]);
+                }
+                "duplicate-root" => {
+                    let mut duplicate = seeded[seed_index].clone();
+                    duplicate[0] = json!("duplicate-view-key");
+                    bad["index"]["seeded"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate);
+                    bad["index"]["parts"][part_index]["backed"][0][1] =
+                        json!([key, "duplicate-view-key"]);
+                }
+                "different-part" => {
+                    let other = (part_index + 1) % parts.len();
+                    assert_ne!(other, part_index);
+                    bad["index"]["seeded"][seed_index][1]["part"] = json!(other);
+                }
+                "different-ordinal" => {
+                    bad["index"]["seeded"][seed_index][1]["ordinal"] = views[1][0].clone();
+                }
+                "missing-reciprocal-view" => {
+                    bad["index"]["parts"][part_index]["backed"]
+                        .as_array_mut()
+                        .unwrap()
+                        .remove(0);
+                }
+                _ => unreachable!(),
+            }
+            assert_invalid_metadata_is_atomic(&worker, &source, &metadata, &bad, expected);
+        }
+    }
+
     #[test]
     fn peer_bootstrap_requires_matching_source_and_decodable_state() {
         let source = synthetic_package();

@@ -821,6 +821,33 @@ test.each(['bootstrap-rejection', 'unsupported-version', 'shape-mismatch'] as co
   },
 );
 
+test('invalid table metadata falls back on the same session and state with one warning', async () => {
+  const peer = await peerHydrationHarness(true);
+  try {
+    peer.bootstrap.mockImplementation(() => {
+      throw new PeerMetadataError('invalid-metadata', 'invalid table cell column');
+    });
+    const { pending } = await peer.start();
+    expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+    expect(peer.open).toHaveBeenCalledWith(peer.source, false);
+    expect(peer.load).not.toHaveBeenCalled();
+    await peer.finish(pending);
+    expect(peer.load).toHaveBeenCalledTimes(1);
+    expect(peer.load.mock.calls[0]![0]).toBe(peer.snapshot.state);
+    expect(peer.result.current.core.session).toBe(peer.session);
+    expect(peer.open.mock.calls.map((call) => call[1])).toEqual([false]);
+    expect(peer.fallback).not.toHaveBeenCalled();
+    expect(peer.warn).toHaveBeenCalledTimes(1);
+    expect(peer.warn.mock.calls[0]![0]).toContain('invalid-metadata: invalid table cell column');
+    expect(peer.warn.mock.calls[0]![0]).toContain('expected tag v1/');
+    expect(peer.warn.mock.calls[0]![0]).toContain('received tag v1/');
+    expect(peer.result.current.errors).toEqual([]);
+    expect(peer.result.current.core.replicaReady).toBe(true);
+  } finally {
+    peer.close();
+  }
+});
+
 test.each(['replace', 'unmount'] as const)('a document %s during metadata bootstrap discards hydration', async (action) => {
   const peer = await peerHydrationHarness(true);
   try {
