@@ -8716,6 +8716,63 @@ test.each([false, true])('a queued cut writes the selected text before deletion 
   }
 });
 
+test.each([false, true])('a queued cut whose clipboard write fails keeps the selection with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const clipboard = openingClipboard(async () => {
+    throw new Error('denied');
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    await opened.sent('encodeState');
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(remove).not.toHaveBeenCalled();
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    remove.mockRestore();
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true])('a cut without the Clipboard API queues no deletion with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined });
+  const restore = registerRestore(() => {
+    if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    fireEvent.cut(textarea);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(remove).not.toHaveBeenCalled();
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    remove.mockRestore();
+    opened.close();
+    restore();
+  }
+});
+
 test.each([false, true])('pointer moves, mouse selection, wheel and scroll do not start the opening peer with heldInput=%s', async (held) => {
   const opened = await editorWithoutLayoutCompleteSignal(held);
   try {
