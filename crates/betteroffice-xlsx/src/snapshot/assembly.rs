@@ -63,6 +63,7 @@ impl Lineage {
             preserved_redo,
             edited_since_open,
             recalculated_since_open,
+            calculations_since_open,
             moved_references_since_open,
             active_sheet,
             undo,
@@ -91,6 +92,9 @@ impl Lineage {
             || !proposals.list().is_empty()
         {
             return Err(error("snapshot requires an initial workbook"));
+        }
+        if *calculations_since_open != u64::from(*recalculated_since_open) {
+            return Err(error("snapshot requires an initial calculation count"));
         }
         let mut proposal_counter = proposals.clone();
         if proposal_counter.next_id() != "p1" {
@@ -1887,6 +1891,7 @@ impl WorkbookSnapshotBuilder {
             preserved_redo: Vec::new(),
             edited_since_open,
             recalculated_since_open,
+            calculations_since_open: u64::from(recalculated_since_open),
             moved_references_since_open,
             active_sheet,
             undo: UndoStack::new(),
