@@ -139,7 +139,7 @@ export type ResidentEngineWorkerRequest =
   | {
       id: number;
       type: 'bootstrap';
-      snapshot: YrsResidentWorkerSnapshot & { peerProposals?: DocxProposalRegistryState };
+      snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
       layoutExtras?: string;

@@ -1347,6 +1347,18 @@ export function wrapSession(
         proposals = createRegistry();
         proposals.subscribe(notifyProposals);
       }
+      if (!mirror && peerProposals) {
+        const local = peerProposals.exportState();
+        const worker = proposals.exportState();
+        const ids = new Set(worker.entries.map(({ record }) => record.id));
+        if (local.entries.some(({ record }) => ids.has(record.id))) {
+          throw new Error('Worker and peer proposal ids conflict during hand-over');
+        }
+        proposals.mirror({ version: session.version(), proposals: {
+          previewVersion: worker.previewVersion + local.previewVersion,
+          entries: [...worker.entries, ...local.entries],
+        } });
+      }
       proposals.mirror(mirror);
       if (!mirror && peerProposals) {
         peerProposals.destroy();

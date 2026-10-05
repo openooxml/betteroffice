@@ -150,7 +150,6 @@ export interface WorkerProposalAuthority {
 
 type PeerSnapshot = { state: Uint8Array; version: string };
 type RegisteredAuthority = WorkerProposalAuthority & {
-  registryState(): ResidentProposalReply['mirror']['proposals'] | null;
   readsInWorker(): boolean;
   peerSnapshot(): Promise<PeerSnapshot>;
   fail(error: unknown): void;
@@ -375,6 +374,7 @@ export function registerWorkerProposalAuthority(
       mutating -= 1;
     }
     assertCurrent();
+    if (retirementReason) throw new Error('The document worker is unavailable');
     if (
       (!editorPeer() && op.kind === 'setStates' && reply.result?.ok === true) ||
       reply.changedStories.length > 0 ||
@@ -435,7 +435,7 @@ export function registerWorkerProposalAuthority(
     const revision = layoutRevision;
     const reply = await Promise.race([worker.proposal({ kind: 'snapshot' }), retired.then(() => null)]).catch((error: unknown) => {
       if (retirementReason) return null;
-      if (revision === layoutRevision && mirror === null) initializationFailure = { error };
+      if (revision === layoutRevision) initializationFailure = { error };
       throw error;
     });
     assertCurrent();
@@ -478,7 +478,6 @@ export function registerWorkerProposalAuthority(
     releaseHydration();
   };
   const authority: RegisteredAuthority = {
-    registryState: () => mirror?.proposals ?? null,
     readsInWorker: () => !hooks.passiveEditor || workerOpenDocumentHeld(session) || holdsState || mutating > 0,
     get initialized() { return initialized; },
     snapshot: workerSnapshot,
@@ -493,7 +492,15 @@ export function registerWorkerProposalAuthority(
     retirementReason: () => retirementReason,
     retire(reason) {
       if (retirementReason) return false;
-      if (holdsState || mutating > 0) throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      if (holdsState) throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      if (mirror) {
+        session.mirrorWorkerDocument({ version: session.version(), proposals: mirror.proposals });
+        session.mirrorWorkerDocument(null);
+      }
+      if (mutating > 0) {
+        const error = new Error('The document worker is unavailable');
+        for (const reject of pendingCalls) reject(error);
+      }
       retirementReason = reason;
       failure = null;
       correspondence = null;
@@ -548,7 +555,7 @@ export function registerWorkerProposalAuthority(
       return initializing;
     },
     geometry: () => geometry,
-    holdsWorkerState: () => holdsState || mutating > 0,
+    holdsWorkerState: () => !retirementReason && (holdsState || mutating > 0),
     holdsCommittedWorkerState: () => holdsState,
     failure: () => failure?.error,
     fail: (error) => {
@@ -567,9 +574,7 @@ export function registerWorkerProposalAuthority(
       !retirementReason && correspondence && request.expectVersion === correspondence.worker &&
       session.version() === correspondence.peer
         ? { ...request, expectVersion: correspondence.peer }
-        : !retirementReason && hooks.passiveEditor && mirror === null
-          ? workerOpenRequest(session, request)
-          : request,
+        : request,
     getProposals: (main, admission) => round(async () => {
       if (peerReady() && editorPeer()) {
         const reply = await worker.proposal({ kind: 'snapshot' });
@@ -688,7 +693,7 @@ export function handedOverRequest<T extends { expectVersion: string }>(
   request: T
 ): T {
   const authority = authorities.get(session);
-  return authority ? authority.handedOverRequest(request) : workerOpenRequest(session, request);
+  return workerOpenRequest(session, authority?.handedOverRequest(request) ?? request);
 }
 
 export function snapshotWorkerProposalPeer(session: YrsSession): Promise<PeerSnapshot> | null {
@@ -697,8 +702,4 @@ export function snapshotWorkerProposalPeer(session: YrsSession): Promise<PeerSna
 
 export function failWorkerProposalAuthority(session: YrsSession, error: unknown): void {
   authorities.get(session)?.fail(error);
-}
-
-export function workerProposalRegistryState(session: YrsSession): ResidentProposalReply['mirror']['proposals'] | null {
-  return authorities.get(session)?.registryState() ?? null;
 }

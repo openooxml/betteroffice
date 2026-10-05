@@ -849,21 +849,6 @@ test('editor hydration preserves initialization waiting for the first layout', a
   expect(h.worker.proposal).toHaveBeenCalledTimes(1);
 });
 
-test('a failed recovery snapshot allows the queued read to retry initialization', async () => {
-  const h = harness();
-  await h.authority.initialize();
-  h.authority.restart();
-  const error = new Error('recovery snapshot failed');
-  h.worker.proposal.mockRejectedValueOnce(error);
-  const first = h.authority.getProposals(unusedMain).catch((failure: unknown) => failure);
-  const queued = h.authority.getProposals(unusedMain);
-  expect(await first).toBe(error);
-  expect(await queued).toMatchObject({ proposals: [] });
-  await h.authority.initialize();
-  expect(h.worker.proposal).toHaveBeenCalledTimes(3);
-  expect(h.authority.initialized).toBe(true);
-});
-
 test('a passive replica maps its loaded token before proposal initialization', async () => {
   const h = harness(() => new Promise<void>(() => {}), true, true, true);
   const replica = deferWorkerOpenReplica(h.session, async () => () => { h.mainVersion('main-2'); },
@@ -1300,28 +1285,6 @@ test('save stays behind a round admitted during a held initialization snapshot',
   expect(await round).toMatchObject({ ok: true });
   expect(await saving).toBe('saved');
   expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
-});
-
-test('replacement initialization keeps an admitted round ahead of a later save', async () => {
-  let layout = deferred<void>();
-  const waiting = deferred<void>();
-  const h = harness(() => { waiting.resolve(); return layout.promise; });
-  const initialSnapshot = deferred<ResidentProposalReply>();
-  const posted = deferred<void>();
-  h.worker.proposal.mockImplementationOnce(async () => { h.events.push('snapshot'); posted.resolve(); return initialSnapshot.promise; });
-  const round = h.authority.propose(request, unusedMain);
-  await waiting.promise;
-  layout.resolve();
-  await posted.promise;
-  layout = deferred<void>();
-  h.authority.restart();
-  const saving = h.authority.save(async () => { h.events.push('save'); return 'saved'; });
-  initialSnapshot.resolve(reply());
-  layout.resolve();
-  expect(await round).toMatchObject({ ok: true });
-  expect(await saving).toBe('saved');
-  expect(h.events.at(-2)).toBe('save');
-  expect(h.events.indexOf('propose')).toBeLessThan(h.events.indexOf('save'));
 });
 
 test('an unchanged empty state round does not latch worker state', async () => {

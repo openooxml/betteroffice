@@ -424,15 +424,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.snapshot,
       request.provisionalPages,
       request.layoutExtras !== undefined,
-      request.opened !== true || request.snapshot.peerProposals !== undefined,
+      request.opened !== true,
       request.layoutReply,
       request.headersFootersEpoch
     );
-    if (request.snapshot.peerProposals) {
-      const registry = proposals ??= createProposalRegistry(session.proposalEngine);
-      registry.mirror({ version: session.proposalEngine.version(), proposals: request.snapshot.peerProposals });
-      registry.mirror(null);
-    }
     if (previewFinalPages !== null || provisionalFinalPages !== null) {
       setFrameDisplayWindow(session, request.displayWindow, request.retainBuiltPages);
     }

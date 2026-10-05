@@ -429,25 +429,48 @@ test('a round reply arriving after typing invalidates geometry until a caught-up
   expect(text(h.peer)).toContain('Worker ');
 });
 
-test('a ready replacement requested by layout first restores peer content and the worker registry', async () => {
+test('a worker crash after a completed round hands over once and keeps edits and proposals', async () => {
   const h = await editor();
   h.type();
-  const expected = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('replacement')] }));
-  const before = h.peer.readParagraphs({ view: 'accepted' });
+  let existing!: ReturnType<typeof snapshot>;
   await act(async () => {
-    h.worker.onerror?.({ message: 'layout-first replacement' } as ErrorEvent);
-    expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).not.toBeNull();
+    existing = snapshot(h.peer.proposeChanges({
+      expectVersion: h.peer.version(), proposals: [h.proposal('peer-existing', 'Existing ')],
+    }));
   });
-  const replacement = workers.at(-1)!;
-  expect(replacement).not.toBe(h.worker);
-  expect(replacement.requests).toContain('open');
-  expect(replacement.requests.indexOf('open')).toBeLessThan(replacement.requests.indexOf('bootstrap'));
-  expect(await h.api.getProposals()).toMatchObject({ proposals: expected.proposals });
-  expect(h.peer.readParagraphs({ view: 'accepted' })).toEqual(before);
-  expect(h.peer.getProposals().proposals).toEqual([]);
-  expect(h.renderer.result.current.error).toBeNull();
+  const expected = snapshot(await h.api.proposeChanges({
+    expectVersion: h.peer.version(), proposals: [h.proposal('retained')],
+  }));
+  const before = text(h.peer);
+  const report = spyOn(console, 'error').mockImplementation(() => {});
+  const local = spyOn(h.peer, 'proposeChanges');
+  const requests = h.worker.requests.filter((type) => type === 'proposal').length;
+  await act(async () => {
+    h.worker.onerror?.({ message: 'completed round worker crashed' } as ErrorEvent);
+    expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).toBeNull();
+  });
+  expect(h.authority.retirementReason()).toBe('source-fallback');
+  expect(report).toHaveBeenCalledTimes(1);
+  expect(workers).toHaveLength(1);
+  expect(text(h.peer)).toBe(before);
+  const retained = [...expected.proposals, ...existing.proposals];
+  expect(await h.api.getProposals()).toMatchObject({ proposals: retained });
+  expect(h.peer.getProposals().proposals).toEqual(retained);
+  snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('local', 'Peer ')] }));
+  expect(local).toHaveBeenCalledTimes(1);
+  expect(text(h.peer)).toContain('Typed ');
+  expect(text(h.peer)).toContain('Worker ');
+  expect(text(h.peer)).toContain('Peer ');
+  expect(text(h.peer)).toContain('Existing ');
+  await act(async () => {
+    expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).toBeNull();
+  });
+  expect(h.authority.retire('source-fallback')).toBe(false);
+  expect(report).toHaveBeenCalledTimes(1);
+  expect(workers).toHaveLength(1);
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(requests);
+  expect((await h.api.getProposals()).proposals.map(({ id }) => id)).toEqual(['retained', 'peer-existing', 'local']);
 });
-
 
 test('a permanent hydrated worker layout drop retires proposal rounds to the peer', async () => {
   const h = await editor();

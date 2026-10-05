@@ -46,10 +46,9 @@ import { useHistory } from '../../../hooks/useHistory';
 import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
-import { SupersededPreviewError } from '../internals/supersededPreview';
 import { useViewerSession } from '../internals/viewerSession';
 import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf, stampSourceVersion } from '../internals/layoutProvenance';
-import { registerWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
+import { workerOpenSave } from '../internals/workerOpenSave';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
@@ -7507,58 +7506,6 @@ test('a forced host pass before the hydration snapshot resumes only the current 
   } finally { unmount(); visibility.restore(); tasks.restore(); frames.restore(); }
 });
 
-test.each([false, true])('a public save stays behind a round while the replacement worker open is held with peer fallback=%s', async (peerFallback) => {
-  const { workers, posted, sent } = installWorker({ holdRetryOpen: true });
-  const props = {
-    ...workerProposalProps, viewer: false, readOnly: false, styleResolver: true,
-    source: await longFixture(2),
-  };
-  const { result, rerender, unmount } = await openWorkerProposals(props);
-  const errors: Error[] = [];
-  let unregisterSave: (() => void) | undefined;
-  const io = renderHook(() => useFileIO({
-    pagedEditorRef: result.current.pagedEditorRef, viewerSession: false,
-    resolveImage: () => null, comments: [], documentName: undefined,
-    onSave: undefined, onOpen: undefined, onPrint: undefined, onDocumentNameChange: undefined,
-    downloadOnSave: false, onError: (error) => errors.push(error),
-    loadBuffer: async () => {}, focusActiveEditor: () => {},
-  }));
-  try {
-    act(() => rerender({ ...props, handleSave: async () => {
-      const buffer = await io.result.current.handleSave();
-      if (!buffer) throw new Error('Save failed');
-      return buffer;
-    } }));
-    const session = result.current.core.session!;
-    await act(async () => { await requestWorkerOpenReplica(session); });
-    const api = result.current.ref.current!;
-    const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
-    const lastOpen = posted.filter((request) => request.type === 'open').at(-1)!.id;
-    act(() => workers[0]!.onerror?.({ message: 'save replacement crash' } as ErrorEvent));
-    if (peerFallback) unregisterSave = registerWorkerOpenSave(session, {
-      available: () => false,
-      save: async () => { throw new Error('unexpected worker save'); },
-    });
-    const round = api.proposeChanges({ expectVersion: session.version(), proposals: [{
-      id: 'before-save', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-      op: 'insertText', at: 'start', text: 'Saved round ',
-    }] });
-    expect(workerOpenSave(session)!.available()).toBe(false);
-    let settled = false;
-    const saving = api.save().then((buffer) => { settled = true; return buffer; });
-    await sent('open', lastOpen);
-    await act(async () => {});
-    expect(settled).toBe(false);
-    await act(async () => workers[1]!.release());
-    expect(await round).toMatchObject({ ok: true });
-    const buffer = await saving;
-    expect(buffer).toBeInstanceOf(ArrayBuffer);
-    const zip = await JSZip.loadAsync(buffer!);
-    expect(await zip.file('word/document.xml')!.async('string')).toContain('Saved round ');
-    expect(errors).toEqual([]);
-  } finally { unregisterSave?.(); io.unmount(); unmount(); }
-});
-
 test.each([false, true])('a loadState error after yielding preserves replica fallback with failure=%s', async (fails) => {
   const { workers, posted } = installWorker({ holdState: true });
   const frames = holdFrames(true);
@@ -9378,135 +9325,4 @@ test('a stale layout-complete signal cannot start the replacement session peer',
     visibility.restore();
     frames.restore();
   }
-});
-
-
-test.each(['proposal', 'empty-state'] as const)(
-  'a ready peer replaces a crashed worker after a completed %s round', async (kind) => {
-    const { workers } = installWorker();
-    const { result, unmount } = await openWorkerProposals({
-      ...workerProposalProps, viewer: false, readOnly: false, styleResolver: true,
-      source: await longFixture(2),
-    });
-    try {
-      const session = result.current.core.session!;
-      await act(async () => { await requestWorkerOpenReplica(session); });
-      const api = () => result.current.ref.current!;
-      const paragraph = (await api().getParagraphIdentities()).paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
-      const current = await api().getProposals();
-      await act(async () => {
-        const round = kind === 'proposal'
-          ? await api().proposeChanges({ expectVersion: session.version(), proposals: [{
-              id: 'retained', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-              op: 'insertText', at: 'start', text: 'Retained ',
-            }] })
-          : await api().setProposalStates({ expectVersion: session.version(), expectPreviewVersion: current.previewVersion, changes: [] });
-        expect(round.ok).toBe(true);
-      });
-      if (kind === 'proposal') {
-        const proposed = await api().getProposals();
-        await act(async () => {
-          expect(await api().setProposalStates({ expectVersion: session.version(),
-            expectPreviewVersion: proposed.previewVersion, changes: [{ id: 'retained', state: 'accepted' }] }))
-            .toMatchObject({ ok: true });
-        });
-      }
-      const expected = await api().getProposals();
-      const content = session.readParagraphs({ view: 'accepted' });
-      let queued!: Promise<unknown>;
-      await act(async () => {
-        workers[0]!.onerror?.({ message: 'completed round worker crashed' } as ErrorEvent);
-        queued = api().getProposals();
-        result.current.pagedEditorRef.current!.relayout();
-        expect(await queued).toMatchObject({ proposals: expected.proposals, previewVersion: expected.previewVersion });
-      });
-      expect(workers).toHaveLength(2);
-      expect(session.readParagraphs({ view: 'accepted' })).toEqual(content);
-      expect(session.getProposals().proposals).toEqual([]);
-      expect(result.current.renderer.error ?? null).toBeNull();
-      expect(result.current.errors).toEqual([]);
-    } finally { unmount(); }
-  }
-);
-
-test('a ready peer edit survives a crash of its first proposal with another round queued', async () => {
-  const { workers } = installWorker({ crashProposalOnce: true });
-  const { result, unmount } = await openWorkerProposals({
-    ...workerProposalProps, viewer: false, readOnly: false, styleResolver: true,
-    source: await longFixture(2),
-  });
-  try {
-    const session = result.current.core.session!;
-    await act(async () => { await requestWorkerOpenReplica(session); });
-    const api = () => result.current.ref.current!;
-    const paragraph = (await api().getParagraphIdentities()).paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
-    act(() => { session.insertText({ story: paragraph.story, paraId: paragraph.paraId, offset: 0 }, 'Earlier edit '); });
-    const version = session.version();
-    let first!: Promise<unknown>;
-    let queued!: Promise<unknown>;
-    await act(async () => {
-      first = api().proposeChanges({ expectVersion: version, proposals: [{
-        id: 'crashed', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-        op: 'insertText', at: 'end', text: 'Failed ',
-      }] }).catch((error: unknown) => error);
-      queued = api().proposeChanges({ expectVersion: version, proposals: [{
-        id: 'after-edit', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-        op: 'replaceText', search: 'Earlier edit', replaceWith: 'Preserved edit',
-      }] });
-      expect(await first).toBeInstanceOf(Error);
-      expect(await queued).toMatchObject({ ok: true });
-    });
-    expect(workers).toHaveLength(2);
-    const read = session.readParagraphs({ view: 'accepted' });
-    expect(read.ok).toBe(true);
-    if (!read.ok) throw new Error(read.failure.message);
-    expect(read.paragraphs.some(({ text }) => text.startsWith('Preserved edit '))).toBe(true);
-    expect((await api().getProposals()).proposals.map(({ id }) => id)).toEqual(['after-edit']);
-    expect(result.current.errors).toEqual([]);
-  } finally { unmount(); }
-});
-
-
-test('a hydrated layout failure with worker registry metadata replaces rather than discards it', async () => {
-  const { workers } = installWorker();
-  const { result, unmount } = await openWorkerProposals({
-    ...workerProposalProps, viewer: false, readOnly: false, styleResolver: true,
-    source: await longFixture(2),
-  });
-  try {
-    const session = result.current.core.session!;
-    await act(async () => { await requestWorkerOpenReplica(session); });
-    const api = () => result.current.ref.current!;
-    const paragraph = (await api().getParagraphIdentities()).paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
-    await act(async () => {
-      expect(await api().proposeChanges({ expectVersion: session.version(), proposals: [{
-        id: 'kept', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-        op: 'insertText', at: 'start', text: 'Kept ',
-      }] })).toMatchObject({ ok: true });
-      await api().whenLayoutComplete();
-    });
-    const expected = await api().getProposals();
-    const worker = workers[0]!;
-    const send = worker.postMessage.bind(worker);
-    let failed = false;
-    spyOn(worker, 'postMessage').mockImplementation((message, transfer) => {
-      if (!failed && message.type === 'sync') {
-        failed = true;
-        queueMicrotask(() => worker.onmessage?.({
-          data: { id: message.id, ok: false, error: 'non-terminal layout failure' },
-        } as MessageEvent));
-      } else send(message, transfer);
-    });
-    await act(async () => {
-      const request = result.current.pipeline.getLayoutRequest()!;
-      const pass = result.current.renderer.layoutInWorker(session, request);
-      await expect(Promise.resolve(pass)).rejects.toBeInstanceOf(SupersededPreviewError);
-      expect(await api().getProposals()).toMatchObject({ proposals: expected.proposals });
-    });
-    expect(failed).toBe(true);
-    expect(workers).toHaveLength(2);
-    expect(registeredWorkerProposalAuthority(session)!.retirementReason()).toBeNull();
-    expect(session.getProposals().proposals).toEqual([]);
-    expect(result.current.errors).toEqual([]);
-  } finally { unmount(); }
 });
