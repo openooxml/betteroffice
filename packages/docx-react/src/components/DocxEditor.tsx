@@ -59,7 +59,6 @@ import {
   isPresented,
   onPresented,
   onReplayFailed,
-  presentedWorkerVersion,
   workerFrameVersionOf,
 } from './DocxEditor/internals/layoutProvenance';
 import { SupersededPreviewError } from './DocxEditor/internals/supersededPreview';
@@ -82,12 +81,12 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { requestWorkerOpenReplica, workerOpenReplicaPending } from './DocxEditor/internals/workerOpenReplica';
+import { requestWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority } from './DocxEditor/internals/workerProposalAuthority';
 import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
 import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
 import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
-import { useViewerSession, viewerReadsWorker } from './DocxEditor/internals/viewerSession';
+import { useViewerSession } from './DocxEditor/internals/viewerSession';
 import type { ViewerSelectionChange } from './DocxEditor/internals/viewerSelectionController';
 import { pagePressNeedsReplica } from './DocxEditor/internals/replicaTriggers';
 import { useImageActions } from './DocxEditor/hooks/useImageActions';
@@ -1055,6 +1054,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   };
   // 'viewing' mode acts as read-only
   const modeReadOnly = readOnlyProp || editingMode === 'viewing';
+  const workerViewer = Boolean(experimentalWorkerOpen) && !mediaTokens && modeReadOnly && !collaboration;
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
   const writeModeRef = useRef<EditorMode>(editingMode);
   writeModeRef.current = modeReadOnly ? 'viewing' : editingMode;
@@ -1073,7 +1073,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const legacyProjectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // History hook for undo/redo - start with null document
-  const history = useDocumentHistory<Document | null>(initialDocument || null, {
+  const history = useDocumentHistory<Document | null>(workerViewer ? null : initialDocument || null, {
     maxEntries: 100,
     groupingInterval: 500,
   });
@@ -1203,6 +1203,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
+    workerViewer,
     externalContent: false,
     history,
     pagedEditorRef,
@@ -1240,7 +1241,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // A read-only worker-open document keeps host proposals in the worker until the replica loads.
   const workerProposals = modeReadOnly && !collaboration;
   // A viewer session holds no document here: selection, copy and point reads go to the worker.
-  const viewerSession = useViewerSession(Boolean(experimentalWorkerOpen), workerProposals, yrsSeedGeneration);
+  const viewerSession = useViewerSession(Boolean(experimentalWorkerOpen) && !mediaTokens, workerProposals, yrsSeedGeneration);
   viewerSessionRef.current = viewerSession;
   // Hit testing answers from the first painted page once the query engine has loaded.
   useEffect(() => {
@@ -1273,10 +1274,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             openInWorker: canvasRenderer.openInWorker,
             openPreviewInWorker: canvasRenderer.openPreviewInWorker,
             workerProposals,
+            viewer: viewerSession,
             refreshWorkerLayout: () => pagedEditorRef.current?.refreshWorkerLayout(),
             renderedFrame: canvasRenderer.status === 'ready' ? canvasRenderer.displayList : null,
             pendingCompletion: canvasRenderer.pendingCompletion,
-            hydrateOnDemand: workerProposals,
             onWorkerContentChange: () => workerContentChangeRef.current(),
             onWorkerRevisions: () => workerRevisionsRef.current(),
           }
@@ -1284,8 +1285,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       mediaTokens,
     }
   );
-  // A viewer whose document fell back to this thread reads the copy it holds here.
-  const viewerReads = viewerSession && viewerReadsWorker(canvasRenderer.queries, yrsCore.session);
+  const viewerReads = viewerSession;
   viewerOutlineRef.current = viewerReads;
   // Until the full session's pages are shown, the editor takes no input and its
   // API and commands see a document that is still loading.
@@ -1623,7 +1623,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // A worker-held change reaches document listeners once the replica holds it; without them,
   // nothing needs the replica.
   workerContentChangeRef.current = () => {
-    if (isWorkerViewer(pagedEditorRef.current)) {
+    if (viewerSession || isWorkerViewer(pagedEditorRef.current)) {
       if (onChange) warnDeprecatedViewerMember('onChange', 'does not fire in viewer sessions', 'onDocumentChange');
       return;
     }
@@ -1874,12 +1874,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     mode: editingMode,
     readOnly,
     commands: commandController,
-    viewerSelection: viewerSession && !(
-      canvasRenderer.queries &&
-      presentedWorkerVersion(canvasRenderer.queries) === null &&
-      yrsCore.session &&
-      !workerOpenReplicaPending(yrsCore.session)
-    ),
+    viewerSelection: viewerSession,
     session:
       yrsCore.session &&
       !opening &&
@@ -2031,6 +2026,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     allowHostProposalsRef,
     workerMemory: canvasRenderer.workerMemory,
     settledDisplayList: canvasRenderer.settledDisplayList,
+    readWorkerDocument: viewerSession ? canvasRenderer.readWorkerDocument : undefined,
     awaitingDocument,
     hostSearch: hostSearch.api,
   });
@@ -2289,15 +2285,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   const requestReplica = yrsCore.requestReplica;
   const replicaPending = Boolean(
-    experimentalWorkerOpen && yrsCore.hydrateOnDemand && yrsCore.session && !yrsCore.replicaReady
+    experimentalWorkerOpen && yrsCore.session && !yrsCore.replicaReady
   );
-  const replicaWanted =
-    (!(experimentalWorkerOpen && workerProposals) &&
-      ((plugins?.length ?? 0) > 0 || Boolean(onRenderedDomContextReady))) ||
-    (!viewerReads && (showCommentsSidebar || sidebarOpen || showOutline));
-  useEffect(() => {
-    if (replicaPending && replicaWanted) requestReplica();
-  }, [replicaPending, replicaWanted, requestReplica, yrsCore.session]);
   // An outline opened before the replica loaded reads its headings once it has.
   const replicaReady = yrsCore.replicaReady;
   useEffect(() => {

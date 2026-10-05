@@ -9,7 +9,7 @@ import type {
 import { proposalProjectionStories } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import type { EditorMode } from './internals/editing-modes';
-import { awaitWorkerOpenReplica } from './internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './internals/workerOpenReplica';
 import { workerProposalAuthority } from './internals/workerProposalAuthority';
 
 export type EditorFlush =
@@ -40,7 +40,9 @@ export async function flushEditorInput(
     if (pagedEditorRef.current?.getYrsSession() !== session) {
       throw new Error('The document changed while flushing input');
     }
-    const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
+    const ready = experimentalWorkerOpen && !workerOpenDocumentHeld(session) && editor.isWorkerViewer?.() !== true
+      ? awaitWorkerOpenReplica(session)
+      : undefined;
     if (ready) {
       await ready;
       if (pagedEditorRef.current?.getYrsSession() !== session) {
@@ -192,6 +194,10 @@ export async function applyProposalCall(
   });
   const session = pagedEditorRef.current?.getYrsSession();
   if (!session) throw new Error('The editor input is unavailable');
+  if (workerOpenDocumentHeld(session)) {
+    if (!allowed()) return denied(session);
+    throw new Error('Viewer proposals must use the worker proposal authority');
+  }
   const ready = experimentalWorkerOpen ? awaitWorkerOpenReplica(session) : undefined;
   if (ready) {
     await ready;

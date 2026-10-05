@@ -2365,6 +2365,12 @@ pub struct Page {
     pub parity_filler: Option<bool>,
 }
 
+impl Page {
+    pub fn has_float_bands(&self) -> bool {
+        !self.float_bands.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HeaderFooterLayout {
     pub height: f64,

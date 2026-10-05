@@ -1,17 +1,17 @@
 use super::*;
 use crate::authority::{fast_set_cell_count, with_full_materialization};
 
-fn r(a1: &str) -> CellRef {
+pub(super) fn r(a1: &str) -> CellRef {
     CellRef::parse_a1(a1).unwrap()
 }
 
-fn options() -> CalculationOptions {
+pub(super) fn options() -> CalculationOptions {
     CalculationOptions {
         now_serial: Some(45_000.25),
     }
 }
 
-fn workbook_bytes() -> Vec<u8> {
+pub(super) fn workbook_bytes() -> Vec<u8> {
     let parts = [
         (
             "[Content_Types].xml",
@@ -233,7 +233,11 @@ fn workbook_bytes() -> Vec<u8> {
     ooxml_opc::rezip_parts_borrowed(&parts).unwrap()
 }
 
-fn open_identical(bytes: &[u8], collaborative: bool, rand_seed: Option<u32>) -> Workbook {
+pub(super) fn open_identical(
+    bytes: &[u8],
+    collaborative: bool,
+    rand_seed: Option<u32>,
+) -> Workbook {
     let mut workbook = Workbook::open_internal(bytes, true, Some(73)).unwrap();
     if !collaborative {
         workbook.mode = WorkbookMode::Standalone;
@@ -516,10 +520,10 @@ fn rand_seeded_lockstep_matches_full_materialization() {
     pair.assert_equal(true);
 }
 
-struct Random(u32);
+pub(super) struct Random(pub(super) u32);
 
 impl Random {
-    fn next(&mut self, bound: u32) -> u32 {
+    pub(super) fn next(&mut self, bound: u32) -> u32 {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 17;
         self.0 ^= self.0 << 5;

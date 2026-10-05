@@ -1,117 +1,127 @@
 import { expect, mock, test } from 'bun:test';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import {
+  adoptWorkerOpenHandoverVersion,
+  adoptWorkerOpenMirrorVersion,
   awaitWorkerOpenReplica,
   deferWorkerOpenReplica,
   ensureWorkerOpenReplica,
-  requestOnDemandWorkerOpenReplica,
+  failWorkerOpenReplica,
+  holdWorkerOpenDocument,
+  releaseWorkerOpenDocument,
   requestWorkerOpenReplica,
-  workerOpenReplicaOnDemand,
+  workerOpenDocumentHeld,
+  WorkerOpenDocumentHeldError,
   workerOpenReplicaPending,
+  workerOpenReplicaStarted,
+  workerOpenSourceVersion,
 } from './workerOpenReplica';
 
 const fakeSession = () => ({ version: () => 'v1' }) as unknown as YrsSession;
 
-test('passive readiness waits for the owner without requesting hydration', async () => {
-  const session = fakeSession();
-  const request = mock(() => {});
-  const hydrate = mock(async () => () => {});
-  const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, { active: () => true, request });
-  const ready = awaitWorkerOpenReplica(session, { passive: true });
-  expect(ready).toBe(replica.ready);
-  expect(request).not.toHaveBeenCalled();
-  expect(hydrate).not.toHaveBeenCalled();
-  replica.start();
-  await ready;
-  expect(hydrate).toHaveBeenCalledTimes(1);
-  expect(request).not.toHaveBeenCalled();
-});
-
-test('awaiting an on-demand replica asks its owner to start it and resolves when ready', async () => {
-  const session = fakeSession();
-  const load = mock(() => {});
-  const hydrate = mock(async () => load);
-  const onReady = mock(() => {});
-  const request = mock(() => {});
-  const replica = deferWorkerOpenReplica(session, hydrate, () => {}, onReady, {
-    active: () => true,
-    request,
-  });
-  const first = awaitWorkerOpenReplica(session);
-  expect(first).toBe(replica.ready);
-  expect(awaitWorkerOpenReplica(session)).toBe(first);
-  expect(request).toHaveBeenCalledTimes(2);
-  expect(hydrate).not.toHaveBeenCalled();
-  replica.start();
-  replica.start();
-  await first;
-  expect(request).toHaveBeenCalledTimes(2);
-  expect(hydrate).toHaveBeenCalledTimes(1);
-  expect(load).toHaveBeenCalledTimes(1);
-  expect(onReady).toHaveBeenCalledTimes(1);
-  expect(workerOpenReplicaPending(session)).toBe(false);
-  await awaitWorkerOpenReplica(session);
-  expect(hydrate).toHaveBeenCalledTimes(1);
-  expect(request).toHaveBeenCalledTimes(2);
-});
-
-test.each([false, undefined])('awaiting a replica does not ask for it with onDemand=%s', async (onDemand) => {
+test('awaiting a deferred editor replica leaves starting to its owner', async () => {
   const session = fakeSession();
   const hydrate = mock(async () => () => {});
-  const request = mock(() => {});
-  const replica = deferWorkerOpenReplica(
-    session,
-    hydrate,
-    () => {},
-    () => {},
-    onDemand === undefined ? undefined : { active: () => onDemand, request }
-  );
+  const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {});
   expect(awaitWorkerOpenReplica(session)).toBe(replica.ready);
-  requestOnDemandWorkerOpenReplica(session);
   await Promise.resolve();
   expect(hydrate).not.toHaveBeenCalled();
-  expect(request).not.toHaveBeenCalled();
   expect(workerOpenReplicaPending(session)).toBe(true);
   replica.cancel();
 });
 
-test('an explicit on-demand request asks the owner only while the replica is pending', async () => {
+test('a held document is pending and unstarted without loading its replica', () => {
   const session = fakeSession();
-  const request = mock(() => {});
-  const replica = deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {}, {
-    active: () => true,
-    request,
-  });
-  requestOnDemandWorkerOpenReplica(session);
-  expect(request).toHaveBeenCalledTimes(1);
-  await requestWorkerOpenReplica(session);
-  requestOnDemandWorkerOpenReplica(session);
-  expect(request).toHaveBeenCalledTimes(1);
-  expect(replica.pending).toBe(false);
+  const release = mock(() => deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {}));
+  expect(workerOpenDocumentHeld(session)).toBe(false);
+  holdWorkerOpenDocument(session, release);
+  expect(workerOpenDocumentHeld(session)).toBe(true);
+  expect(workerOpenReplicaPending(session)).toBe(true);
+  expect(workerOpenReplicaStarted(session)).toBe(false);
+  expect(release).not.toHaveBeenCalled();
 });
 
-test('on-demand status follows the current option only while the replica is pending', async () => {
+test('requesting and awaiting a held document reject without releasing it', async () => {
   const session = fakeSession();
-  expect(workerOpenReplicaOnDemand(session)).toBe(false);
-  let onDemand = false;
-  deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {}, {
-    active: () => onDemand,
-    request: () => {},
-  });
-  expect(workerOpenReplicaOnDemand(session)).toBe(false);
-  onDemand = true;
-  expect(workerOpenReplicaOnDemand(session)).toBe(true);
-  onDemand = false;
-  expect(workerOpenReplicaOnDemand(session)).toBe(false);
-  onDemand = true;
-  await requestWorkerOpenReplica(session);
-  expect(workerOpenReplicaOnDemand(session)).toBe(false);
+  const release = mock(() => deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {}));
+  holdWorkerOpenDocument(session, release);
+  await expect(requestWorkerOpenReplica(session)!).rejects.toBeInstanceOf(WorkerOpenDocumentHeldError);
+  await expect(awaitWorkerOpenReplica(session)!).rejects.toBeInstanceOf(WorkerOpenDocumentHeldError);
+  expect(workerOpenDocumentHeld(session)).toBe(true);
+  expect(workerOpenReplicaPending(session)).toBe(true);
+  expect(workerOpenReplicaStarted(session)).toBe(false);
+  expect(release).not.toHaveBeenCalled();
 });
 
-test('a pending replica without an on-demand option is not on demand', () => {
+test('ensuring a held document throws the access error without releasing it', () => {
   const session = fakeSession();
+  const release = mock(() => deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {}));
+  holdWorkerOpenDocument(session, release);
+  expect(() => ensureWorkerOpenReplica(session)).toThrow(WorkerOpenDocumentHeldError);
+  let error: unknown;
+  try {
+    ensureWorkerOpenReplica(session, 'getDocument');
+  } catch (cause) {
+    error = cause;
+  }
+  expect(error).toBeInstanceOf(Error);
+  expect(error).toBeInstanceOf(WorkerOpenDocumentHeldError);
+  expect((error as WorkerOpenDocumentHeldError).name).toBe('WorkerOpenDocumentHeldError');
+  expect((error as WorkerOpenDocumentHeldError).access).toBe('getDocument');
+  expect(workerOpenReplicaPending(session)).toBe(true);
+  expect(release).not.toHaveBeenCalled();
+});
+
+test('a failed hold still never loads here and cannot be released', async () => {
+  const session = fakeSession();
+  const release = mock(() => deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {}));
+  const failure = new Error('Worker failed');
+  holdWorkerOpenDocument(session, release);
+  failWorkerOpenReplica(session, failure);
+  expect(workerOpenDocumentHeld(session)).toBe(true);
+  expect(workerOpenReplicaPending(session)).toBe(false);
+  expect(workerOpenReplicaStarted(session)).toBe(false);
+  expect(releaseWorkerOpenDocument(session)).toBeUndefined();
+  await expect(awaitWorkerOpenReplica(session)!).rejects.toBe(failure);
+  await expect(requestWorkerOpenReplica(session)!).rejects.toBe(failure);
+  expect(release).not.toHaveBeenCalled();
+});
+
+test('releasing a held document registers one unstarted editor replica with its versions', async () => {
+  let version = 'initial';
+  const session = { version: () => version } as unknown as YrsSession;
+  const hydrate = mock(async () => () => { version = 'loaded'; });
+  const onReady = mock(() => {});
+  const release = mock(() => deferWorkerOpenReplica(session, hydrate, () => {}, onReady));
+  holdWorkerOpenDocument(session, release);
+  adoptWorkerOpenMirrorVersion(session, 'mirror');
+  adoptWorkerOpenHandoverVersion(session, 'handover');
+  expect(workerOpenSourceVersion(session, 'initial')).toBe('mirror');
+  version = 'before-release';
+  const replica = releaseWorkerOpenDocument(session)!;
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(replica.initialVersion).toBe('initial');
+  expect(replica.mirrorVersion).toBe('mirror');
+  expect(replica.handoverVersion).toBe('handover');
+  expect(replica.started).toBe(false);
+  expect(workerOpenDocumentHeld(session)).toBe(false);
+  expect(workerOpenReplicaPending(session)).toBe(true);
+  expect(workerOpenReplicaStarted(session)).toBe(false);
+  expect(workerOpenSourceVersion(session, 'initial')).toBe('mirror');
+  expect(releaseWorkerOpenDocument(session)).toBeUndefined();
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(hydrate).not.toHaveBeenCalled();
+  await requestWorkerOpenReplica(session);
+  expect(hydrate).toHaveBeenCalledTimes(1);
+  expect(onReady).toHaveBeenCalledTimes(1);
+  expect(workerOpenSourceVersion(session, 'handover')).toBe('loaded');
+});
+
+test('releasing a session without a hold returns nothing', () => {
+  const session = fakeSession();
+  expect(releaseWorkerOpenDocument(session)).toBeUndefined();
   const replica = deferWorkerOpenReplica(session, async () => () => {}, () => {}, () => {});
-  expect(workerOpenReplicaOnDemand(session)).toBe(false);
+  expect(releaseWorkerOpenDocument(session)).toBeUndefined();
   replica.cancel();
 });
 

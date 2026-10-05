@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use super::*;
 
 #[derive(Debug, Default)]
@@ -176,9 +178,13 @@ impl LocalLowering {
         raw.checked_sub(self.seeds.get(paragraph)?.raw_start)
     }
 
+    pub(crate) fn edit_slot(&self, edit: &TextEdit) -> Option<usize> {
+        Some(self.seeds.get(&edit.paragraph)?.slot)
+    }
+
     pub(crate) fn patch<T: ReadTxn>(
         &mut self,
-        blocks: &mut [LayoutBlock],
+        blocks: &mut [Rc<LayoutBlock>],
         map: &mut LoweringMap,
         txn: &T,
         env: &RenderEnv,
@@ -224,7 +230,7 @@ impl LocalLowering {
             (&mut replacement, source),
             Vec::new(),
         );
-        let LayoutBlock::Paragraph(old) = blocks.get(slot)? else {
+        let LayoutBlock::Paragraph(old) = blocks.get(slot)?.as_ref() else {
             return None;
         };
         if old
@@ -235,9 +241,9 @@ impl LocalLowering {
             paragraph.attrs = old.attrs.clone();
         }
         seed.segments = segments;
-        blocks[slot] = LayoutBlock::Paragraph(paragraph);
+        blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
         for block in &mut blocks[slot + 1..] {
-            shift_block(block, delta);
+            shift_block(Rc::make_mut(block), delta);
         }
         for pm in map
             .paragraph_blocks

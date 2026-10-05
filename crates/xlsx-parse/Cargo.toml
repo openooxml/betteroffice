@@ -16,6 +16,7 @@ name = "xlsx_parse"
 
 [features]
 test-counters = []
+test-oracle = []
 
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["chart"] }

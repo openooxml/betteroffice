@@ -4,8 +4,10 @@ mod fixture;
 
 use std::collections::BTreeMap;
 
+use docx_edit::frame_delta::{FRAME_HEADER_LEN, PAGE_OP_LEN};
 use docx_edit::{
     EditCtx, EngineSession, FormatPolicy, ParaAttrDelta, ParaSelector, Position, StoryRange,
+    UndoSession,
 };
 use serde_json::{Value, json};
 
@@ -18,6 +20,44 @@ fn display(engine: &EngineSession) -> Value {
     engine
         .with_display_list(|list| serde_json::to_value(list).unwrap())
         .unwrap()
+}
+
+fn bulk_laid_out(bytes: &[u8], client_id: u64) -> (EngineSession, String) {
+    docx_layout::clear_measure_fonts();
+    let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
+    let seed = docx_edit::EditingDoc::new(client_id + 1);
+    docx_edit::seed_from_docx(&seed, bytes).unwrap();
+    let engine = EngineSession::new(client_id);
+    engine.layout_document_with_regions_retained("{}").unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&seed.encode_state_as_update_v1())
+        .unwrap();
+    engine
+        .doc()
+        .set_note_separator_state(seed.note_separator_state().unwrap());
+    let request = fixture::region_request(&engine, bytes, font).to_string();
+    engine
+        .layout_document_with_regions_retained_json(&request)
+        .unwrap();
+    (engine, request)
+}
+
+fn bulk_edit(engine: &EngineSession, step: Value) {
+    let request = serde_json::from_value(json!({
+        "expectVersion": engine.doc().version(),
+        "history": "none",
+        "steps": [step],
+    }))
+    .unwrap();
+    assert!(
+        engine
+            .doc()
+            .apply_edits(&request, &UndoSession::new())
+            .unwrap()
+            .unwrap()
+            .applied
+    );
 }
 
 /// Lays out and displays `engine`'s document in a fresh session with `request`.
@@ -33,6 +73,92 @@ fn fresh(engine: &EngineSession, request: &str, client_id: u64) -> (String, Valu
     let layout = fresh.layout_document_with_regions_json(request).unwrap();
     fresh.build_display_list_frame(&extras(request), 0).unwrap();
     (layout, display(&fresh))
+}
+
+#[test]
+fn synthetic_note_sections_typing_and_preview_toggles_match_cold_bytes() {
+    let body: String = (0..16)
+        .map(|index| {
+            let mut content = if index == 7 {
+                r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="7200" w:h="5760"/><w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/></w:sectPr></w:pPr>"#.to_owned()
+            } else {
+                String::new()
+            };
+            content += &fixture::r(&format!("Editable paragraph {index}"));
+            if index == 2 {
+                content += r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#;
+            }
+            if index == 5 {
+                content += r#"<w:ins w:id="10" w:author="BetterOffice" w:date="2026-10-01T00:00:00Z"><w:r><w:t> pending</w:t></w:r></w:ins>"#;
+            }
+            fixture::p(&format!("{:08X}", 0x7100_0000 + index), &content)
+        })
+        .collect();
+    let bytes = fixture::with_body_and_note(
+        &small_page(&body),
+        &fixture::p("71000100", &fixture::r("A synthetic footnote")),
+    );
+    let (engine, request) = fixture::laid_out(&bytes, 9380);
+    let mut request: Value = serde_json::from_str(&request).unwrap();
+    assert!(request["regions"]["sections"].as_array().unwrap().len() >= 2);
+    engine
+        .build_display_list_frame(&extras(&request.to_string()), 0)
+        .unwrap();
+    let assert_cold = |request: &Value| {
+        let (cold, cold_display) = fresh(&engine, &request.to_string(), 9381);
+        let cold: Value = serde_json::from_str(&cold).unwrap();
+        let retained: Value =
+            serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
+        let inputs: Value =
+            serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
+        for (actual, expected) in [
+            (&retained["layout"], &cold["layout"]),
+            (&inputs["measured"], &cold["measured"]),
+            (&inputs["options"], &cold["options"]),
+        ] {
+            assert_eq!(
+                serde_json::to_vec(actual).unwrap(),
+                serde_json::to_vec(expected).unwrap()
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&display(&engine)).unwrap(),
+            serde_json::to_vec(&cold_display).unwrap()
+        );
+    };
+    assert_cold(&request);
+    for decision in ["accepted", "rejected"] {
+        for text in [Some("x"), Some("y"), None] {
+            match text {
+                Some(text) => engine
+                    .doc()
+                    .insert_text(
+                        &EditCtx::local("", ""),
+                        Position::new("body", 3),
+                        text,
+                        FormatPolicy::Inherit,
+                    )
+                    .map(|_| ()),
+                None => engine
+                    .doc()
+                    .delete_range(&EditCtx::local("", ""), StoryRange::new("body", 3, 4))
+                    .map(|_| ()),
+            }
+            .unwrap();
+            let epoch = engine.stats().frame_epoch;
+            engine.apply_and_layout("body", epoch).unwrap();
+            assert_cold(&request);
+        }
+        request["renderEnv"]["revisionPreview"] = json!({"10": decision});
+        engine
+            .layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        let epoch = engine.stats().frame_epoch;
+        engine
+            .build_display_list_frame(&extras(&request.to_string()), epoch)
+            .unwrap();
+        assert_cold(&request);
+    }
 }
 
 #[test]
@@ -175,6 +301,273 @@ fn a_body_edit_moves_note_backlinks_on_later_pages_as_a_fresh_layout_would() {
         .unwrap();
     assert!(engine.stats().incremental_display_builds > 0);
     assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9306));
+}
+
+#[test]
+fn multiple_layouts_before_a_display_build_preserve_body_and_note_damage() {
+    let body: String = (1..=10)
+        .map(|page| {
+            let mut content = if page == 1 {
+                String::new()
+            } else {
+                "<w:pPr><w:pageBreakBefore/></w:pPr>".to_owned()
+            };
+            content += &fixture::r(&format!("Page {page}"));
+            if page == 4 {
+                content += r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#;
+            }
+            fixture::p(&format!("{:08X}", 0x7000_0000 + page), &content)
+        })
+        .collect();
+    let bytes = fixture::with_body_and_note(
+        &small_page(&body),
+        &fixture::p("70000100", &fixture::r("Note")),
+    );
+    let (engine, request) = bulk_laid_out(&bytes, 9321);
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    let initial = display(&engine);
+    assert_eq!(initial["pages"].as_array().unwrap().len(), 10);
+    let anchor = initial["pages"][3]["noteAreas"][0]["notes"][0]["anchorDocStart"]
+        .as_i64()
+        .unwrap();
+    let before = engine.stats();
+
+    bulk_edit(
+        &engine,
+        json!({
+            "op": "insertText", "at": "end", "text": "x",
+            "target": {"kind": "paragraph", "story": "body", "paraId": "70000002"},
+        }),
+    );
+    let early = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&early), 10);
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + 1
+    );
+
+    bulk_edit(
+        &engine,
+        json!({
+            "op": "insertText", "at": "end", "text": "y",
+            "target": {"kind": "paragraph", "story": "body", "paraId": "70000008"},
+        }),
+    );
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&layout), 10);
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + 2
+    );
+    engine
+        .build_display_list_frame(&extras(&request), before.frame_epoch)
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds + 1
+    );
+    let actual = display(&engine);
+    let (expected_layout, expected) = fresh(&engine, &request, 9322);
+    assert_eq!(layout, expected_layout);
+    assert_eq!(
+        expected["pages"][3]["noteAreas"][0]["notes"][0]["anchorDocStart"],
+        anchor + 1
+    );
+    assert_eq!(
+        actual["pages"][3]["noteAreas"],
+        expected["pages"][3]["noteAreas"]
+    );
+    assert_eq!(actual["pages"][1], expected["pages"][1]);
+    assert_eq!(
+        serde_json::to_vec(&actual).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+}
+
+#[test]
+fn an_intermediate_page_build_before_undo_preserves_display_positions() {
+    let body: String = (1..=7)
+        .map(|page| {
+            let mut content = if page == 1 {
+                String::new()
+            } else {
+                "<w:pPr><w:pageBreakBefore/></w:pPr>".to_owned()
+            };
+            content += &fixture::r(&format!("Page {page}"));
+            if page == 4 {
+                content += r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#;
+            }
+            fixture::p(&format!("{:08X}", 0x7100_0000 + page), &content)
+        })
+        .collect();
+    let bytes = fixture::with_body_and_note(
+        &small_page(&body),
+        &fixture::p("71000100", &fixture::r("Note")),
+    );
+    let (engine, request) = bulk_laid_out(&bytes, 9323);
+    engine.set_display_window(Some(0..6));
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    let initial = display(&engine);
+    assert_eq!(initial["pages"].as_array().unwrap().len(), 7);
+    assert_eq!(initial["pages"][6]["unbuilt"], true);
+    let edits = docx_edit::EditingDoc::new(9328);
+    edits
+        .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+        .unwrap();
+    let undo = UndoSession::new();
+    undo.track(&edits);
+    let before = engine.stats();
+
+    edits
+        .insert_text(
+            &EditCtx::local("", ""),
+            edits.paragraph_mark_position("71000002").unwrap(),
+            "x",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+    engine
+        .doc()
+        .apply_host_update_v1(&edits.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(
+        pages(&engine.layout_document_with_regions_json(&request).unwrap()),
+        7
+    );
+    engine
+        .build_display_pages_frame(&[6], before.frame_epoch)
+        .unwrap();
+    let intermediate = display(&engine);
+    assert_ne!(intermediate["pages"][6]["unbuilt"], true);
+
+    assert!(undo.undo());
+    engine
+        .doc()
+        .apply_host_update_v1(&edits.encode_state_as_update_v1())
+        .unwrap();
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&layout), 7);
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(engine.stats().pagination_calls, before.pagination_calls + 2);
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + 2
+    );
+    let frame = engine
+        .build_display_list_frame(&extras(&request), engine.stats().frame_epoch)
+        .unwrap();
+    let operations = u32::from_le_bytes(frame[52..56].try_into().unwrap()) as usize;
+    assert!((0..operations).any(|operation| {
+        let index = FRAME_HEADER_LEN + operation * PAGE_OP_LEN + 4;
+        u32::from_le_bytes(frame[index..index + 4].try_into().unwrap()) == 6
+    }));
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds + 1
+    );
+    let actual = display(&engine);
+    let (expected_layout, expected) = fresh(&engine, &request, 9324);
+    assert_eq!(layout, expected_layout);
+    assert_ne!(intermediate["pages"][6], expected["pages"][6]);
+    assert_eq!(
+        serde_json::to_vec(&actual).unwrap(),
+        serde_json::to_vec(&expected).unwrap()
+    );
+}
+
+#[test]
+fn accumulated_display_damage_is_bounded_without_changing_single_layout_builds() {
+    let page_count = 258;
+    let body: String = (1..=page_count)
+        .map(|page| {
+            let content = format!(
+                "{}{}",
+                if page == 1 {
+                    ""
+                } else {
+                    "<w:pPr><w:pageBreakBefore/></w:pPr>"
+                },
+                fixture::r(&format!("Page {page} A"))
+            );
+            fixture::p(&format!("{:08X}", 0x7200_0000 + page), &content)
+        })
+        .collect();
+    let (engine, request) = bulk_laid_out(&fixture::with_body(&small_page(&body)), 9325);
+    engine
+        .build_display_list_frame(&extras(&request), 0)
+        .unwrap();
+    assert_eq!(
+        display(&engine)["pages"].as_array().unwrap().len(),
+        page_count
+    );
+    let replace = |page, text| {
+        let para_id = format!("{:08X}", 0x7200_0000 + page);
+        let offset = format!("Page {page} ").len();
+        bulk_edit(
+            &engine,
+            json!({
+                "op": "replaceText", "text": text,
+                "target": {
+                    "kind": "range", "story": "body", "view": "accepted",
+                    "start": {"paraId": para_id, "offset": offset},
+                    "end": {"paraId": para_id, "offset": offset + 1},
+                },
+            }),
+        );
+    };
+    let before = engine.stats();
+    for page in 1..=page_count {
+        replace(page, "B");
+    }
+    let layout = engine.layout_document_with_regions_json(&request).unwrap();
+    assert_eq!(pages(&layout), page_count);
+    engine
+        .build_display_list_frame(&extras(&request), before.frame_epoch)
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds + 1
+    );
+    assert_eq!(
+        engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
+        page_count as u64
+    );
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9326));
+
+    let before = engine.stats();
+    let mut layout = String::new();
+    for page in 1..=page_count {
+        replace(page, "C");
+        layout = engine.layout_document_with_regions_json(&request).unwrap();
+        assert_eq!(pages(&layout), page_count);
+    }
+    assert_eq!(engine.stats().display_builds, before.display_builds);
+    assert_eq!(
+        engine.stats().pagination_calls,
+        before.pagination_calls + page_count as u64
+    );
+    assert_eq!(
+        engine.stats().incremental_pagination_calls,
+        before.incremental_pagination_calls + page_count as u64
+    );
+    engine
+        .build_display_list_frame(&extras(&request), before.frame_epoch)
+        .unwrap();
+    assert_eq!(
+        engine.stats().incremental_display_builds,
+        before.incremental_display_builds
+    );
+    assert_eq!(
+        engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
+        page_count as u64
+    );
+    assert_eq!((layout, display(&engine)), fresh(&engine, &request, 9327));
 }
 
 #[test]
