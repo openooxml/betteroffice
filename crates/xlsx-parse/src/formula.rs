@@ -1,6 +1,7 @@
 //! Expand shared formulas while preserving their authored text and anchors.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use quick_xml::events::BytesStart;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
@@ -253,6 +254,112 @@ fn address_part(source: &str) -> (&str, &str) {
         Some(index) => source.split_at(index + 1),
         None => ("", source),
     }
+}
+
+pub(crate) enum Reference {
+    Cells(CellRange),
+    Rows(Range<u32>),
+    Columns(Range<u32>),
+}
+
+pub(crate) fn sheet_name(source: &str) -> String {
+    source
+        .strip_prefix('\'')
+        .and_then(|name| name.strip_suffix('\''))
+        .map_or_else(|| source.to_owned(), |name| name.replace("''", "'"))
+}
+
+pub(crate) fn references_match(
+    source: &str,
+    mut matches: impl FnMut(Option<&str>, Option<Reference>) -> bool,
+) -> bool {
+    let mut index = 0;
+    while index < source.len() {
+        let start = index;
+        let character = source[index..].chars().next().expect("within source");
+        if character == '"' {
+            index = skip_quoted(source, index, b'"');
+            continue;
+        }
+        if character == '#'
+            && let Some(error) = [
+                "#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#NUM!", "#N/A", "#NULL!", "#SPILL!",
+                "#CALC!",
+            ]
+            .into_iter()
+            .find(|error| source[index..].starts_with(*error))
+        {
+            index += error.len();
+            continue;
+        }
+        if separator(character) {
+            index += character.len_utf8();
+            continue;
+        }
+        index = operand_end(source, index);
+        if source[start..index].ends_with(['e', 'E'])
+            && source[start..index - 1].parse::<f64>().is_ok()
+            && source[index..].starts_with(['+', '-'])
+        {
+            index = operand_end(source, index + 1);
+        }
+        let operand = &source[start..index];
+        let colons = punctuation(operand, b':');
+        let (prefix, address) = address_part(operand);
+        let function = source[index..].trim_start().starts_with('(');
+        if !operand.contains(['[', ']'])
+            && prefix.is_empty()
+            && colons.is_empty()
+            && (function
+                || (operand.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+                    && operand.parse::<f64>().is_ok())
+                || operand.eq_ignore_ascii_case("TRUE")
+                || operand.eq_ignore_ascii_case("FALSE"))
+        {
+            continue;
+        }
+        let reference = if operand.contains(['[', ']']) || colons.len() > 1 {
+            None
+        } else if let Some(&colon) = colons.first() {
+            let (first_prefix, first) = address_part(operand[..colon].trim());
+            let (last_prefix, last) = address_part(operand[colon + 1..].trim());
+            if !last_prefix.is_empty()
+                && (first_prefix.is_empty()
+                    || !sheet_name(first_prefix.strip_suffix('!').unwrap_or(first_prefix))
+                        .eq_ignore_ascii_case(&sheet_name(
+                            last_prefix.strip_suffix('!').unwrap_or(last_prefix),
+                        )))
+            {
+                None
+            } else if let (Some(first), Some(last)) = (column(first), column(last)) {
+                Some((
+                    first_prefix,
+                    Reference::Columns(first.col.min(last.col)..first.col.max(last.col) + 1),
+                ))
+            } else if let (Some(first), Some(last)) = (row(first), row(last)) {
+                Some((
+                    first_prefix,
+                    Reference::Rows(first.row.min(last.row)..first.row.max(last.row) + 1),
+                ))
+            } else {
+                CellRange::parse_a1(&format!("{first}:{last}").to_ascii_uppercase())
+                    .ok()
+                    .map(|range| (first_prefix, Reference::Cells(range)))
+            }
+        } else {
+            CellRef::parse_a1(&address.to_ascii_uppercase())
+                .ok()
+                .map(|cell| (prefix, Reference::Cells(CellRange::new(cell, cell))))
+        };
+        let stable = match reference {
+            Some((prefix, reference)) => matches(prefix.strip_suffix('!'), Some(reference)),
+            None => matches(None, None),
+        };
+        if !stable {
+            return false;
+        }
+    }
+    true
 }
 
 fn column(source: &str) -> Option<CellRef> {

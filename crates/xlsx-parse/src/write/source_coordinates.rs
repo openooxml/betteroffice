@@ -6,12 +6,19 @@ use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{CellRange, CellRef};
 
 use crate::axis::{AxisMap, SheetAxes};
+use crate::formula::{Reference, references_match, sheet_name};
 use crate::package::attributes;
 use crate::xml::{attr, resolve_entity, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
-pub(super) fn unchanged(source: &[u8], axes: &SheetAxes) -> bool {
-    axes.is_identity() || inspect(source, axes).unwrap_or(false)
+pub(super) fn unchanged(
+    source: &[u8],
+    axes: Option<&SheetAxes>,
+    sheet_axes: &[(&str, Option<&SheetAxes>)],
+    axes_changed: bool,
+) -> bool {
+    (axes.is_none_or(SheetAxes::is_identity) && !axes_changed)
+        || inspect(source, axes, sheet_axes).unwrap_or(false)
 }
 
 fn fixed(axis: &AxisMap, range: Range<u32>) -> bool {
@@ -40,6 +47,38 @@ fn row_index(element: &BytesStart<'_>, current: Option<u32>) -> Result<Option<u3
     })
 }
 
+fn formula(
+    value: &str,
+    axes: Option<&SheetAxes>,
+    sheet_axes: &[(&str, Option<&SheetAxes>)],
+) -> bool {
+    references_match(value, |sheet, reference| {
+        let axes = match sheet {
+            None => axes,
+            Some(name) => {
+                let name = sheet_name(name);
+                let mut candidates = sheet_axes
+                    .iter()
+                    .filter(|(sheet, _)| sheet.eq_ignore_ascii_case(&name));
+                let axes = candidates.next().and_then(|(_, axes)| *axes);
+                if candidates.next().is_some() {
+                    return false;
+                }
+                axes
+            }
+        };
+        match (axes, reference) {
+            (Some(axes), Some(Reference::Cells(range))) => {
+                fixed(&axes.rows, range.start.row..range.end.row + 1)
+                    && fixed(&axes.cols, range.start.col..range.end.col + 1)
+            }
+            (Some(axes), Some(Reference::Rows(range))) => fixed(&axes.rows, range),
+            (Some(axes), Some(Reference::Columns(range))) => fixed(&axes.cols, range),
+            _ => false,
+        }
+    })
+}
+
 fn text_coordinates(name: &[u8], value: &str, axes: &SheetAxes) -> bool {
     match name {
         b"row" => value
@@ -54,7 +93,14 @@ fn text_coordinates(name: &[u8], value: &str, axes: &SheetAxes) -> bool {
     }
 }
 
-fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
+fn inspect(
+    source: &[u8],
+    axes: Option<&SheetAxes>,
+    sheet_axes: &[(&str, Option<&SheetAxes>)],
+) -> Result<bool, ParseError> {
+    let formula_axes = axes;
+    let identity = SheetAxes::default();
+    let axes = axes.unwrap_or(&identity);
     let mut reader = Reader::from_reader(source);
     reader.config_mut().expand_empty_elements = true;
     let mut parents: Vec<Vec<u8>> = Vec::new();
@@ -212,7 +258,7 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                 }
                 if matches!(event, Event::Start(_)) {
                     if parents.iter().any(|parent| parent == b"extLst")
-                        && (matches!(name, b"sqref" | b"ref")
+                        && (matches!(name, b"sqref" | b"ref" | b"f")
                             || (matches!(name, b"row" | b"col")
                                 && matches!(parent, Some(b"anchor" | b"from" | b"to"))))
                     {
@@ -240,10 +286,15 @@ fn inspect(source: &[u8], axes: &SheetAxes) -> Result<bool, ParseError> {
                 }
             }
             Event::End(element) => {
-                if let Some((name, value)) = positioned_text.take()
-                    && !text_coordinates(&name, &value, axes)
-                {
-                    return Ok(false);
+                if let Some((name, value)) = positioned_text.take() {
+                    let stable = if name == b"f" {
+                        formula(&value, formula_axes, sheet_axes)
+                    } else {
+                        text_coordinates(&name, &value, axes)
+                    };
+                    if !stable {
+                        return Ok(false);
+                    }
                 }
                 match (
                     element.local_name().as_ref(),
@@ -323,6 +374,138 @@ pub(super) fn explicit_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unchanged(source: &[u8], axes: &SheetAxes) -> bool {
+        super::unchanged(source, Some(axes), &[], !axes.is_identity())
+    }
+
+    fn extension_formula(value: &str) -> Vec<u8> {
+        format!(
+            "<extLst xmlns:x=\"urn:generic\"><ext><x:f><![CDATA[{value}]]></x:f></ext></extLst>"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn extension_formulas_follow_named_sheet_axes() {
+        let mut current = SheetAxes::default();
+        current.rows.insert(3, 1);
+        let mut other = SheetAxes::default();
+        other.cols.insert(3, 1);
+        let identity = SheetAxes::default();
+        let sheets = [
+            ("Sheet1", Some(&current)),
+            ("Sheet2", Some(&other)),
+            ("Sheet 3's", Some(&identity)),
+        ];
+        for (value, stable) in [
+            ("E5:E6", false),
+            ("$E$5:$E$6", false),
+            ("SUM(E1:E2)", true),
+            ("Sheet1!E5:E6", false),
+            ("'Sheet1'!$E$1:$E$2", true),
+            ("sheet2!$E$1:$E$2", false),
+            ("Sheet2!A5:B6", true),
+            ("'Sheet 3''s'!$E$5:$E$6", true),
+            ("$1:$2", true),
+            ("$4:$5", false),
+            ("$D:$E", true),
+            ("Sheet2!$D:$E", false),
+            ("Sheet2!$1:$5", true),
+            ("Sheet2!$A : $B", true),
+            ("Sheet2!A1:Sheet2!B2", true),
+            ("'Sheet2'!A1:sheet2!B2", true),
+            ("SUM(Sheet2!A1:B2,E5:E6)", false),
+        ] {
+            assert_eq!(
+                super::unchanged(&extension_formula(value), Some(&current), &sheets, true),
+                stable,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_formula_unknown_references_require_identity_axes() {
+        let identity = SheetAxes::default();
+        let mut moved = SheetAxes::default();
+        moved.rows.insert(3, 1);
+        for value in [
+            "Sheet2!A1",
+            "'Missing Sheet'!A1",
+            "Table1[Column1]",
+            "[1]Sheet1!A1",
+            "'[Book.xlsx]Sheet1'!A1",
+            "Rate",
+            "SUM(Rate,A1)",
+            "NaN",
+            "Sheet1:Sheet2!A1",
+        ] {
+            let source = extension_formula(value);
+            assert!(
+                super::unchanged(&source, Some(&identity), &[], false),
+                "{value}"
+            );
+            assert!(
+                !super::unchanged(
+                    &source,
+                    Some(&identity),
+                    &[("Sheet1", Some(&moved)), ("Sheet2", None)],
+                    true,
+                ),
+                "{value}"
+            );
+        }
+        let source = extension_formula("A1");
+        assert!(!super::unchanged(
+            &source,
+            None,
+            &[("Sheet1", Some(&moved))],
+            true
+        ));
+    }
+
+    #[test]
+    fn extension_formula_range_interiors_must_keep_their_indices() {
+        for rows in [false, true] {
+            let mut axes = SheetAxes::default();
+            let axis = if rows { &mut axes.rows } else { &mut axes.cols };
+            axis.delete(2, 1);
+            axis.insert(2, 1);
+            assert_eq!(axis.current(0), Some(0));
+            assert_eq!(axis.current(4), Some(4));
+            for value in ["A1:E5", "$E$5:$A$1", if rows { "1:5" } else { "A:E" }] {
+                assert!(!unchanged(&extension_formula(value), &axes), "{value}");
+            }
+        }
+    }
+
+    #[test]
+    fn extension_formula_constants_functions_and_strings_allow_borrowing() {
+        let mut axes = SheetAxes::default();
+        axes.rows.insert(3, 1);
+        axes.cols.insert(3, 1);
+        for value in [
+            "",
+            "1+2",
+            "1E3+2.5e-4+1E+3",
+            "IF(TRUE,LOG10(100),FALSE)",
+            "_xlfn.FOO(1)",
+            r#""A1"&"Sheet2!E5:E6"&"Table1[Column1]"&"A1""E5""#,
+            "IFERROR(#REF!,#N/A)",
+        ] {
+            assert!(unchanged(&extension_formula(value), &axes), "{value}");
+            assert!(
+                super::unchanged(
+                    &extension_formula(value),
+                    None,
+                    &[("Sheet1", Some(&axes))],
+                    true,
+                ),
+                "{value}"
+            );
+        }
+    }
 
     #[test]
     fn axis_edits_beyond_authored_coordinates_allow_borrowing() {

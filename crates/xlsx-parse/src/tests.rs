@@ -1938,6 +1938,110 @@ fn source_implicit_row_after_explicit_row_is_dropped_when_deleted() {
     check_source_sheet_after_unrelated_edit(body, axes, false);
 }
 
+fn check_extension_formula_after_unrelated_edit(
+    extension: &str,
+    axes: [Option<SheetAxes>; 2],
+    borrowed: bool,
+) {
+    let grid = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts = two_sheet_package(grid, &format!("{grid}{extension}"));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    set_number(&mut workbook, 0, "A1", 2.0);
+    assert_eq!(workbook.sheets[1], parsed.workbook.sheets[1]);
+    let provenance = [
+        parsed.package.source_shared_string_cells(0),
+        parsed.package.source_shared_string_cells(1),
+    ];
+    let save = || {
+        serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &provenance,
+            &axes,
+            SaveEdits {
+                changed: true,
+                moved_references: true,
+            },
+            SheetId(0),
+        )
+        .unwrap()
+    };
+    let saved = save();
+    let (legacy, dispatches) = crate::with_legacy_save_path(save);
+    assert!(dispatches > 0);
+    assert_eq!(saved, legacy);
+    for saved in [&saved, &legacy] {
+        let (_, sheet) = saved
+            .iter()
+            .find(|(path, _)| path == "xl/worksheets/sheet2.xml")
+            .unwrap();
+        if borrowed {
+            assert!(matches!(sheet, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(
+                sheet.as_ref(),
+                part_bytes(&parts, "xl/worksheets/sheet2.xml")
+            );
+        } else {
+            assert!(matches!(sheet, std::borrow::Cow::Owned(_)));
+        }
+        let reopened = parse_workbook(saved).unwrap();
+        assert_eq!(reopened.sheets[1], parsed.workbook.sheets[1]);
+        assert_eq!(reopened, workbook);
+    }
+}
+
+#[test]
+fn source_extension_formula_sparkline_moved_range_refuses_borrowing() {
+    let extension = r#"<extLst><ext uri="{05C60535-1F16-4FD2-B633-F4F36F0B64E0}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:sparklineGroups xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><x14:sparklineGroup><x14:sparklines><x14:sparkline><xm:f>Sheet2!E5:E6</xm:f><xm:sqref>A1</xm:sqref></x14:sparkline></x14:sparklines></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    assert_eq!(axes.rows.current(4), Some(5));
+    assert_eq!(axes.rows.current(5), Some(6));
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        false,
+    );
+}
+
+#[test]
+fn source_extension_formula_unmoved_rows_borrow_byte_identically() {
+    let extension = r#"<extLst xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><x14:dataValidations><x14:dataValidation><x14:formula1><xm:f>SUM('Sheet2'!$E$1:$E$2)</xm:f></x14:formula1><xm:sqref>A1</xm:sqref></x14:dataValidation></x14:dataValidations></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        true,
+    );
+}
+
+#[test]
+fn source_extension_formula_other_sheet_moved_axes_refuse_borrowing() {
+    let extension = r#"<extLst xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><ext><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type="expression"><xm:f>'Sheet1'!$E$5&gt;1</xm:f></x14:cfRule><xm:sqref>A1</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(axes), Some(SheetAxes::default())],
+        false,
+    );
+}
+
+#[test]
+fn source_extension_formula_without_references_borrows() {
+    let extension = r#"<extLst xmlns:x="urn:generic"><ext><x:f>IF(TRUE,LOG10(100),&quot;Sheet2!E5:E6&quot;)</x:f></ext></extLst>"#;
+    let mut axes = SheetAxes::default();
+    axes.rows.insert(3, 1);
+    check_extension_formula_after_unrelated_edit(
+        extension,
+        [Some(SheetAxes::default()), Some(axes)],
+        true,
+    );
+}
+
 fn part_bytes<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> Vec<u8> {
     parts
         .iter()

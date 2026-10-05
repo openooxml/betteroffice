@@ -393,6 +393,21 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
     let shared_strings_stable = wb.shared_strings == package.original_workbook.shared_strings;
     let style_match = StyleMatch::new(&package.original_workbook.styles, &wb.styles);
     let empty_provenance = SharedStringCells::new();
+    let axes_changed = sheet_axes.iter().flatten().any(|axes| !axes.is_identity());
+    let reference_axes = package
+        .original_workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(origin, sheet)| {
+            let axes = origins
+                .iter()
+                .position(|candidate| *candidate == Some(origin))
+                .and_then(|index| sheet_axes.get(index))
+                .and_then(Option::as_ref);
+            (sheet.name.as_str(), axes)
+        })
+        .collect::<Vec<_>>();
     for (index, (sheet, plan)) in wb.sheets.iter().zip(&sheets).enumerate() {
         let source = plan.origin.and_then(|origin| package.sheets.get(origin));
         let original = plan
@@ -405,7 +420,15 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
                 if shared_strings_stable
                     && original.is_some_and(|original| {
                         package.part_bytes(&source.path).is_some_and(|bytes| {
-                            sheet_body_matches(sheet, original, bytes, axes, &style_match)
+                            sheet_body_matches(
+                                sheet,
+                                original,
+                                bytes,
+                                axes,
+                                &reference_axes,
+                                axes_changed,
+                                &style_match,
+                            )
                         })
                     })
                 {
@@ -884,9 +907,11 @@ fn sheet_body_matches(
     original: &Sheet,
     source: &[u8],
     axes: Option<&SheetAxes>,
+    reference_axes: &[(&str, Option<&SheetAxes>)],
+    axes_changed: bool,
     styles: &StyleMatch<'_>,
 ) -> bool {
-    if axes.is_some_and(|axes| !source_coordinates::unchanged(source, axes)) {
+    if !source_coordinates::unchanged(source, axes, reference_axes, axes_changed) {
         return false;
     }
     sheet.freeze_pane == original.freeze_pane
