@@ -1,0 +1,251 @@
+import type { WorkbookHandle, WorkbookSession } from '@betteroffice/xlsx';
+import { hydratePeer, openWorkbookSession } from '../../../xlsx/src/session/client';
+import {
+  createWorkbookEditPeer, type WorkbookEditPeer,
+} from '../../../xlsx/src/session/editPeer';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { XlsxEditorProps } from '../XlsxEditor';
+import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
+import type { XlsxCommandStore } from '../commands/types';
+import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
+import {
+  createWorkerEditorApi, type WorkerEditorApiBridge, type WorkerEditorSessionAccess,
+  type XlsxWorkerEditorApi,
+} from './createWorkerEditorApi';
+
+export const editableWorkbookSessionBackend = {
+  open: openWorkbookSession,
+  hydrate: hydratePeer,
+  attach: createWorkbookEditPeer,
+};
+
+export type EditableSessionWorkbookProps = Omit<XlsxEditorProps, 'onReady' | 'collaboration'> & {
+  onError?: (error: Error) => void;
+  onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
+};
+
+export interface EditableWorkbookSessionOptions {
+  changed(): void;
+  onError(error: Error): void;
+  onReady(): void | (() => void);
+  isCurrent(): boolean;
+  hydration?: 'eager' | 'lazy';
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(
+    value && typeof value === 'object' && 'message' in value ? String(value.message) : String(value)
+  );
+}
+
+export class EditableWorkbookSession implements WorkerEditorSessionAccess {
+  alive = true;
+  peer: WorkbookHandle | null = null;
+  editPeer: WorkbookEditPeer | null = null;
+  failure: Error | null = null;
+  private painted = false;
+  private hydration: Promise<void> | null = null;
+  private readonly hydrated: Promise<void>;
+  private resolveHydrated!: () => void;
+  private rejectHydrated!: (error: unknown) => void;
+  private readonly cancelled: Promise<never>;
+  private rejectCancelled!: (error: unknown) => void;
+  private readonly failed: Promise<never>;
+  private rejectFailed!: (error: unknown) => void;
+  private offFailure = () => {};
+  private cleanup: void | (() => void);
+  private input: WorkerInputCoordinator | null = null;
+
+  constructor(
+    readonly session: WorkbookSession,
+    readonly generation: number,
+    private readonly options: EditableWorkbookSessionOptions
+  ) {
+    this.hydrated = new Promise((resolve, reject) => {
+      this.resolveHydrated = resolve;
+      this.rejectHydrated = reject;
+    });
+    void this.hydrated.catch(() => {});
+    this.cancelled = new Promise((_, reject) => { this.rejectCancelled = reject; });
+    this.failed = new Promise((_, reject) => { this.rejectFailed = reject; });
+    void this.cancelled.catch(() => {});
+    void this.failed.catch(() => {});
+    this.offFailure = session.onFailure((error) => this.fail(error));
+    if (session.failure) this.fail(session.failure);
+  }
+
+  get current(): boolean { return this.alive && this.options.isCurrent(); }
+
+  get ready(): boolean {
+    return this.current && !this.failure && this.peer !== null && this.editPeer?.state === 'ready';
+  }
+
+  whenHydrated(): Promise<void> {
+    if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
+    if (this.failure) return Promise.reject(this.failure);
+    return this.hydrated;
+  }
+
+  connectInput(input: WorkerInputCoordinator | null): void {
+    if (!this.current || this.input === input) return;
+    this.input?.reset();
+    this.input = input;
+    if (this.failure) input?.fail(this.failure);
+  }
+
+  firstPaint(): void {
+    if (!this.current || this.failure || this.painted) return;
+    this.painted = true;
+    try {
+      const cleanup = this.options.onReady();
+      if (!this.current && typeof cleanup === 'function') cleanup();
+      else this.cleanup = cleanup;
+    } catch (error) { this.fail(error); }
+    if (this.current && !this.failure) void this.requestHydration('first-paint').catch(() => {});
+  }
+
+  requestHydration(reason: string): Promise<void> {
+    if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
+    if (this.failure && reason !== 'recovery') return Promise.reject(this.failure);
+    if (this.editPeer) return Promise.resolve();
+    if (reason === 'first-paint' && this.options.hydration === 'lazy') return this.hydrated;
+    if (this.hydration) return this.waitForHydration(this.hydration, reason);
+    const pending = (async () => {
+      let peer: WorkbookHandle | null = null;
+      try {
+        peer = await editableWorkbookSessionBackend.hydrate(this.session);
+        if (!this.current) throw new XlsxCommandAdmissionError('document-replaced');
+        const edits = editableWorkbookSessionBackend.attach({
+          session: this.session, peer, onError: (error) => this.fail(error),
+        });
+        if (!this.current) {
+          edits.dispose();
+          throw new XlsxCommandAdmissionError('document-replaced');
+        }
+        this.peer = peer;
+        this.editPeer = edits;
+        peer = null;
+        if (!this.failure) this.resolveHydrated();
+        this.options.changed();
+      } catch (error) {
+        peer?.dispose();
+        if (this.current) this.fail(error);
+        throw error;
+      }
+    })();
+    this.hydration = pending;
+    void pending.catch(() => {
+      if (this.hydration === pending) this.hydration = null;
+    });
+    return this.waitForHydration(pending, reason);
+  }
+
+  fail(value: unknown): void {
+    if (!this.current || this.failure) return;
+    this.failure = asError(value);
+    this.rejectHydrated(this.failure);
+    this.rejectFailed(this.failure);
+    this.input?.fail(this.failure);
+    this.options.changed();
+    try { this.options.onError(this.failure); } catch {}
+  }
+
+  dispose(): void {
+    if (!this.alive) return;
+    this.alive = false;
+    const error = new XlsxCommandAdmissionError('document-replaced');
+    this.rejectHydrated(error);
+    this.rejectCancelled(error);
+    this.offFailure();
+    this.input?.reset();
+    this.input = null;
+    try { if (typeof this.cleanup === 'function') this.cleanup(); }
+    finally {
+      try { this.editPeer?.dispose(); }
+      finally {
+        try { this.peer?.dispose(); }
+        finally {
+          this.editPeer = null;
+          this.peer = null;
+          void this.session.dispose().catch(() => {});
+        }
+      }
+    }
+  }
+
+  private waitForHydration(pending: Promise<void>, reason: string): Promise<void> {
+    return Promise.race(reason === 'recovery'
+      ? [pending, this.cancelled] : [pending, this.cancelled, this.failed]);
+  }
+}
+
+export function useEditableSessionWorkbook(
+  props: EditableSessionWorkbookProps, commands: XlsxCommandStore, bridge: WorkerEditorApiBridge
+): {
+  run: EditableWorkbookSession | null;
+  error: Error | null;
+  loading: boolean;
+  reportError(value: unknown): void;
+} {
+  const latest = useRef({ props, bridge });
+  latest.current = { props, bridge };
+  const generation = useRef(0);
+  const [run, setRun] = useState<EditableWorkbookSession | null>(null);
+  const [, setRevision] = useState(0);
+  const [error, setError] = useState<Error | null>(null);
+  const [loading, setLoading] = useState(false);
+  const collaboration = (props as EditableSessionWorkbookProps & Pick<XlsxEditorProps, 'collaboration'>).collaboration;
+  const reportError = useCallback((value: unknown) => {
+    const error = asError(value);
+    setError(error);
+    latest.current.props.onError?.(error);
+  }, []);
+
+  useEffect(() => {
+    const token = ++generation.current;
+    const controller = new AbortController();
+    let disposed = false;
+    let opened: EditableWorkbookSession | undefined;
+    const current = () => !disposed && token === generation.current && latest.current.props.file === props.file;
+    const changed = () => { if (current()) setRevision((revision) => revision + 1); };
+    setRun(null);
+    setError(null);
+    setLoading(Boolean(props.file));
+    if (collaboration) {
+      reportError(new Error('Collaboration is unavailable in the worker editor'));
+      setLoading(false);
+    } else if (props.file) void (async () => {
+      try {
+        const session = await editableWorkbookSessionBackend.open(props.file!, {
+          signal: controller.signal, retainPeerHydration: true,
+        });
+        if (!current()) { void session.dispose().catch(() => {}); return; }
+        opened = new EditableWorkbookSession(session, token, {
+          changed, isCurrent: current,
+          onError: (error) => { if (current()) reportError(error); },
+          onReady: () => current() ? latest.current.props.onReady?.(api) : undefined,
+        });
+        const api = createWorkerEditorApi(opened, commands, () => latest.current.bridge);
+        setRun(opened);
+        setLoading(false);
+      } catch (error) {
+        if (!current()) return;
+        if (opened) opened.fail(error);
+        else reportError(error);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+      generation.current += 1;
+      controller.abort();
+      opened?.dispose();
+    };
+  }, [props.file, collaboration, commands, reportError]);
+
+  useLayoutEffect(() => {
+    if (run?.current) run.connectInput(bridge.coordinator());
+  });
+
+  return { run: run?.current ? run : null, error, loading, reportError };
+}
