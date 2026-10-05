@@ -1,9 +1,9 @@
 pub(crate) mod batch;
 #[cfg(test)]
 mod edit_tests;
-mod staging;
 #[path = "snapshot/assembly.rs"]
 pub(crate) mod snapshot_assembly;
+mod staging;
 pub(crate) mod target;
 
 use std::borrow::Cow;

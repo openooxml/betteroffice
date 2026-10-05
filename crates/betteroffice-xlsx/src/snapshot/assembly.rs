@@ -107,9 +107,14 @@ impl Lineage {
             created,
         } = preserved;
         let sheets = model.sheets.len();
-        if [origins.len(), shared_string_cells.len(), axes.len(), created.len()]
-            .iter()
-            .any(|count| *count != sheets)
+        if [
+            origins.len(),
+            shared_string_cells.len(),
+            axes.len(),
+            created.len(),
+        ]
+        .iter()
+        .any(|count| *count != sheets)
             || created.iter().any(|created| *created)
             || axes.iter().flatten().any(|axes| {
                 let xlsx_parse::SheetAxes { rows, cols } = axes;
@@ -244,7 +249,10 @@ impl WorkbookSnapshotEncoder {
                 .map_err(|failure| error(failure.to_string()))?
             {
                 let ordinal = chunk_counts[index(ChunkKind::Facts)];
-                count_chunk(&mut chunk_counts, &frame(ChunkKind::Facts, ordinal, &payload))?;
+                count_chunk(
+                    &mut chunk_counts,
+                    &frame(ChunkKind::Facts, ordinal, &payload),
+                )?;
             }
         }
         if let Some(source) = &workbook.source_container {
@@ -439,7 +447,10 @@ impl WorkbookSnapshotEncoder {
                     {
                         let bytes = source.as_bytes();
                         let end = self.source_offset
-                            + self.part_budget.max_bytes().min(bytes.len() - self.source_offset);
+                            + self
+                                .part_budget
+                                .max_bytes()
+                                .min(bytes.len() - self.source_offset);
                         let chunk = frame(
                             ChunkKind::Source,
                             self.source_ordinal,
@@ -452,7 +463,11 @@ impl WorkbookSnapshotEncoder {
                 }
                 6 => {
                     self.stage = 7;
-                    return Ok(Some(frame(ChunkKind::End, 0, &self.digest.clone().finalize())));
+                    return Ok(Some(frame(
+                        ChunkKind::End,
+                        0,
+                        &self.digest.clone().finalize(),
+                    )));
                 }
                 _ => return Ok(None),
             }
@@ -684,7 +699,10 @@ impl WorkbookSnapshotBuilder {
         let length = reader.var_usize()?;
         let offset = reader.var_usize()?;
         let bytes = reader.rest();
-        if self.snapshot_id.is_some_and(|expected| expected != snapshot_id) {
+        if self
+            .snapshot_id
+            .is_some_and(|expected| expected != snapshot_id)
+        {
             return Err(error("snapshot lineage differs"));
         }
         if bytes.is_empty() || length == 0 || length > MAX_LOGICAL_BYTES {
@@ -1302,7 +1320,8 @@ impl WorkbookSnapshotBuilder {
         if self.failed {
             return Err(error("snapshot builder has failed"));
         }
-        self.ready.ok_or_else(|| error("snapshot hydration is incomplete"))
+        self.ready
+            .ok_or_else(|| error("snapshot hydration is incomplete"))
     }
 }
 

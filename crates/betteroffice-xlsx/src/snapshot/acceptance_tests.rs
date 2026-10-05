@@ -1,7 +1,7 @@
 use crate::{
     CalculationRequest, Cell, CellAddress, CellRef, CellValue, EditOperation, EditRequest,
-    EditStep, ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, UpdateEvent,
-    Viewport, WorkbookModel, XlsxExportOptions,
+    EditStep, ProposalEditInput, ProposalRequest, RangeAddress, RangeTarget, UpdateEvent, Viewport,
+    WorkbookModel, XlsxExportOptions,
 };
 use xlsx_ops::{CellState, Op};
 
@@ -295,7 +295,10 @@ fn canonical_preserved(workbook: &Workbook) -> Vec<Vec<u8>> {
 }
 
 fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
-    assert_eq!(canonical_model(worker.model()), canonical_model(peer.model()));
+    assert_eq!(
+        canonical_model(worker.model()),
+        canonical_model(peer.model())
+    );
     assert_eq!(canonical_base(worker), canonical_base(peer));
     assert_eq!(canonical_preserved(worker), canonical_preserved(peer));
     assert_eq!(worker.active_sheet, peer.active_sheet);
@@ -305,10 +308,16 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
     assert_eq!(worker.last_calculation(), peer.last_calculation());
     assert_eq!(worker.edited_since_open, peer.edited_since_open);
     assert_eq!(worker.recalculated_since_open, peer.recalculated_since_open);
-    assert_eq!(worker.moved_references_since_open, peer.moved_references_since_open);
+    assert_eq!(
+        worker.moved_references_since_open,
+        peer.moved_references_since_open
+    );
     assert_eq!(worker.opened_anchors, peer.opened_anchors);
     assert_eq!(worker.graph.is_some(), peer.graph.is_some());
-    assert_eq!(worker.encode_state_vector_v1(), peer.encode_state_vector_v1());
+    assert_eq!(
+        worker.encode_state_vector_v1(),
+        peer.encode_state_vector_v1()
+    );
     assert!(peer.pending_remote_updates.is_empty());
     assert!(!peer.authority.has_pending_updates());
 }
@@ -398,7 +407,10 @@ fn single_large_sheet_snapshot(rows: u32) {
     assert_eq!(received_context, Some(context()));
     assert_eq!(peer.source_container.as_ref().unwrap().as_bytes(), bytes);
     assert_current_identity(&worker, &peer);
-    assert_eq!(worker.authority.encode_state_as_update_v1(), peer.authority.encode_state_as_update_v1());
+    assert_eq!(
+        worker.authority.encode_state_as_update_v1(),
+        peer.authority.encode_state_as_update_v1()
+    );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
 
@@ -436,7 +448,10 @@ fn snapshot_authority_steps_accept_a_smaller_record_budget() {
     let (peer, received_context) = builder.finish().unwrap().into_parts();
     assert_eq!(received_context, Some(context()));
     assert_current_identity(&worker, &peer);
-    assert_eq!(worker.authority.encode_state_as_update_v1(), peer.authority.encode_state_as_update_v1());
+    assert_eq!(
+        worker.authority.encode_state_as_update_v1(),
+        peer.authority.encode_state_as_update_v1()
+    );
     assert_eq!(worker.save().unwrap(), peer.save().unwrap());
 }
 
@@ -470,13 +485,22 @@ fn snapshot_finish_only_moves_completed_state() {
         let builder = completed_builder(&chunks, budget);
         let ready = builder.ready.as_ref().unwrap();
         let sheets = ready.workbook.model.sheets.as_ptr();
-        let source = ready.workbook.source_container.as_ref().unwrap().as_bytes().as_ptr();
+        let source = ready
+            .workbook
+            .source_container
+            .as_ref()
+            .unwrap()
+            .as_bytes()
+            .as_ptr();
         let changed = ready.workbook.last_calculation.changed.as_ptr();
         let nonce = ready.workbook.version_nonce.as_ptr();
         assert!(ready.workbook.source_package_is_unmaterialized_for_test());
         let (peer, received_context) = builder.finish().unwrap().into_parts();
         assert_eq!(peer.model.sheets.as_ptr(), sheets);
-        assert_eq!(peer.source_container.as_ref().unwrap().as_bytes().as_ptr(), source);
+        assert_eq!(
+            peer.source_container.as_ref().unwrap().as_bytes().as_ptr(),
+            source
+        );
         assert_eq!(peer.last_calculation.changed.as_ptr(), changed);
         assert_eq!(peer.version_nonce.as_ptr(), nonce);
         assert_eq!(received_context, Some(context()));
@@ -490,7 +514,9 @@ fn snapshot_rejects_noninitial_or_incomplete_state() {
     let bytes = source(false, false);
     let budget = SnapshotBudget::new(1, usize::MAX).unwrap();
     let mut edited = worker(&bytes);
-    edited.edit_cell(SheetId(0), CellRef::new(0, 0), "9", context()).unwrap();
+    edited
+        .edit_cell(SheetId(0), CellRef::new(0, 0), "9", context())
+        .unwrap();
     assert!(WorkbookSnapshotEncoder::new(&edited, None, budget).is_err());
     edited.undo(context()).unwrap();
     assert!(edited.can_redo());
@@ -568,8 +594,14 @@ fn snapshot_authority_identity() {
         let worker = worker(&bytes);
         let peer = hydrate(&worker, budget);
         assert_eq!(worker.client_id(), peer.client_id());
-        assert_eq!(worker.authority.snapshot_identity(), peer.authority.snapshot_identity());
-        assert_eq!(worker.encode_state_vector_v1(), peer.encode_state_vector_v1());
+        assert_eq!(
+            worker.authority.snapshot_identity(),
+            peer.authority.snapshot_identity()
+        );
+        assert_eq!(
+            worker.encode_state_vector_v1(),
+            peer.encode_state_vector_v1()
+        );
         assert_eq!(
             canonical_model(&worker.authority.materialize().unwrap()),
             canonical_model(&peer.authority.materialize().unwrap()),
@@ -590,7 +622,10 @@ fn snapshot_authority_identity() {
         simple.sheets.push(sheet);
         let simple = Workbook::from_model(simple).unwrap();
         let twin = hydrate(&simple, budget);
-        assert_eq!(simple.encode_state_as_update_v1(), twin.encode_state_as_update_v1());
+        assert_eq!(
+            simple.encode_state_as_update_v1(),
+            twin.encode_state_as_update_v1()
+        );
     }
 }
 
@@ -644,7 +679,9 @@ fn snapshot_current_state_identity() {
         for context in [
             None,
             Some(CalculationOptions { now_serial: None }),
-            Some(CalculationOptions { now_serial: Some(-0.0) }),
+            Some(CalculationOptions {
+                now_serial: Some(-0.0),
+            }),
             Some(CalculationOptions {
                 now_serial: Some(f64::from_bits(0x7ff8_0000_0000_0017)),
             }),
@@ -655,7 +692,10 @@ fn snapshot_current_state_identity() {
             while let Some(chunk) = encoder.next(&worker).unwrap() {
                 chunks.push(chunk);
             }
-            let (_, decoded) = completed_builder(&chunks, budget).finish().unwrap().into_parts();
+            let (_, decoded) = completed_builder(&chunks, budget)
+                .finish()
+                .unwrap()
+                .into_parts();
             assert_eq!(
                 context.map(|options| options.now_serial.map(f64::to_bits)),
                 decoded.map(|options| options.now_serial.map(f64::to_bits)),
@@ -668,7 +708,10 @@ fn snapshot_current_state_identity() {
 fn snapshot_initial_save_identity() {
     let bytes = source(false, false);
     for budget in budgets() {
-        for worker in [Workbook::open(&bytes).unwrap(), Workbook::open_for_read(&bytes).unwrap()] {
+        for worker in [
+            Workbook::open(&bytes).unwrap(),
+            Workbook::open_for_read(&bytes).unwrap(),
+        ] {
             let peer = hydrate(&worker, budget);
             assert!(peer.source_package_is_unmaterialized_for_test());
             assert_eq!(worker.save().unwrap(), bytes);
@@ -691,10 +734,15 @@ fn snapshot_rebuilt_package_identity() {
         assert_edited_identity(&worker, &peer);
         assert!(!peer.source_package_is_unmaterialized_for_test());
         for workbook in [&mut worker, &mut peer] {
-            workbook.edit_cell(SheetId(0), CellRef::new(0, 0), "7", context()).unwrap();
+            workbook
+                .edit_cell(SheetId(0), CellRef::new(0, 0), "7", context())
+                .unwrap();
         }
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.recalculate_all(context()), peer.recalculate_all(context()));
+        assert_eq!(
+            worker.recalculate_all(context()),
+            peer.recalculate_all(context())
+        );
         assert_edited_identity(&worker, &peer);
         worker.set_active_sheet(SheetId(0)).unwrap();
         peer.set_active_sheet(SheetId(0)).unwrap();
@@ -702,7 +750,11 @@ fn snapshot_rebuilt_package_identity() {
         for workbook in [&mut worker, &mut peer] {
             workbook
                 .apply_ops(
-                    vec![Op::InsertRows { sheet: SheetId(0), at: 0, count: 1 }],
+                    vec![Op::InsertRows {
+                        sheet: SheetId(0),
+                        at: 0,
+                        count: 1,
+                    }],
                     context(),
                 )
                 .unwrap();
@@ -723,8 +775,11 @@ fn snapshot_next_edit_identity() {
         let (peer_events, _peer_subscription) = observe(&peer);
         let before = crate::authority::fast_set_cell_count();
         assert_eq!(
-            worker.edit_cell(SheetId(0), CellRef::new(0, 0), "8", context()).unwrap(),
-            peer.edit_cell(SheetId(0), CellRef::new(0, 0), "8", context()).unwrap(),
+            worker
+                .edit_cell(SheetId(0), CellRef::new(0, 0), "8", context())
+                .unwrap(),
+            peer.edit_cell(SheetId(0), CellRef::new(0, 0), "8", context())
+                .unwrap(),
         );
         assert_eq!(crate::authority::fast_set_cell_count() - before, 2);
         assert_events(&worker_events, &peer_events);
@@ -782,8 +837,11 @@ fn snapshot_replay_history_identity() {
         let (peer_events, _peer_subscription) = observe(&peer);
         assert_events(&worker_events, &peer_events);
         assert_eq!(
-            worker.edit_cell(SheetId(0), CellRef::new(0, 0), "2", context()).unwrap(),
-            peer.edit_cell(SheetId(0), CellRef::new(0, 0), "2", context()).unwrap(),
+            worker
+                .edit_cell(SheetId(0), CellRef::new(0, 0), "2", context())
+                .unwrap(),
+            peer.edit_cell(SheetId(0), CellRef::new(0, 0), "2", context())
+                .unwrap(),
         );
         assert!(worker_events.lock().unwrap().is_empty());
         assert_eq!(
@@ -796,33 +854,59 @@ fn snapshot_replay_history_identity() {
                 .to_string(),
         );
         for workbook in [&mut worker, &mut peer] {
-            workbook.edit_cell(SheetId(0), CellRef::new(0, 0), "6", context()).unwrap();
+            workbook
+                .edit_cell(SheetId(0), CellRef::new(0, 0), "6", context())
+                .unwrap();
         }
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.undo(context()).unwrap(), peer.undo(context()).unwrap());
+        assert_eq!(
+            worker.undo(context()).unwrap(),
+            peer.undo(context()).unwrap()
+        );
         assert_events(&worker_events, &peer_events);
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.redo(context()).unwrap(), peer.redo(context()).unwrap());
+        assert_eq!(
+            worker.redo(context()).unwrap(),
+            peer.redo(context()).unwrap()
+        );
         assert_edited_identity(&worker, &peer);
-        let ops = vec![Op::AddSheet { index: 1, name: "Added".to_owned() }];
+        let ops = vec![Op::AddSheet {
+            index: 1,
+            name: "Added".to_owned(),
+        }];
         assert_eq!(
             worker.apply_ops(ops.clone(), context()).unwrap(),
             peer.apply_ops(ops, context()).unwrap(),
         );
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.undo(context()).unwrap(), peer.undo(context()).unwrap());
+        assert_eq!(
+            worker.undo(context()).unwrap(),
+            peer.undo(context()).unwrap()
+        );
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.redo(context()).unwrap(), peer.redo(context()).unwrap());
+        assert_eq!(
+            worker.redo(context()).unwrap(),
+            peer.redo(context()).unwrap()
+        );
         assert_edited_identity(&worker, &peer);
         let frame = worker.model.sheets[0].charts[0].frame_id();
         assert_eq!(
-            worker.move_chart(SheetId(0), &frame, 20.0, 10.0, context()).unwrap(),
-            peer.move_chart(SheetId(0), &frame, 20.0, 10.0, context()).unwrap(),
+            worker
+                .move_chart(SheetId(0), &frame, 20.0, 10.0, context())
+                .unwrap(),
+            peer.move_chart(SheetId(0), &frame, 20.0, 10.0, context())
+                .unwrap(),
         );
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.undo(context()).unwrap(), peer.undo(context()).unwrap());
+        assert_eq!(
+            worker.undo(context()).unwrap(),
+            peer.undo(context()).unwrap()
+        );
         assert_edited_identity(&worker, &peer);
-        assert_eq!(worker.redo(context()).unwrap(), peer.redo(context()).unwrap());
+        assert_eq!(
+            worker.redo(context()).unwrap(),
+            peer.redo(context()).unwrap()
+        );
         assert_edited_identity(&worker, &peer);
         assert_events(&worker_events, &peer_events);
     }
@@ -850,7 +934,9 @@ fn request(workbook: &Workbook, sheet: usize) -> EditRequest {
         steps: vec![EditStep::new(EditOperation::SetCellInputs {
             target: RangeTarget {
                 sheet_id: format!("sheet:{sheet}"),
-                range: RangeAddress::A1 { a1: "A1".to_owned() },
+                range: RangeAddress::A1 {
+                    a1: "A1".to_owned(),
+                },
             },
             inputs: vec![vec!["5".to_owned()]],
         })],
@@ -863,9 +949,17 @@ fn snapshot_facts_behavior_identity() {
     for budget in budgets() {
         let mut worker = worker(&bytes);
         let mut peer = hydrate(&worker, budget);
-        let viewport = Viewport { x: 0.0, y: 0.0, width: 600.0, height: 400.0 };
+        let viewport = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 600.0,
+            height: 400.0,
+        };
         for sheet in [SheetId(0), SheetId(1), SheetId(2)] {
-            assert_eq!(worker.sheet_info_for(sheet).unwrap(), peer.sheet_info_for(sheet).unwrap());
+            assert_eq!(
+                worker.sheet_info_for(sheet).unwrap(),
+                peer.sheet_info_for(sheet).unwrap()
+            );
             assert_eq!(
                 worker.display_list_for(sheet, &viewport).unwrap(),
                 peer.display_list_for(sheet, &viewport).unwrap(),
@@ -874,13 +968,22 @@ fn snapshot_facts_behavior_identity() {
         assert!(peer.source_package_is_unmaterialized_for_test());
         for sheet in [0, 1] {
             assert_eq!(
-                format!("{:?}", worker.validate_edits(&request(&worker, sheet)).unwrap()),
+                format!(
+                    "{:?}",
+                    worker.validate_edits(&request(&worker, sheet)).unwrap()
+                ),
                 format!("{:?}", peer.validate_edits(&request(&peer, sheet)).unwrap()),
             );
         }
-        let ops = vec![Op::RenameSheet { sheet: SheetId(0), name: "Renamed".to_owned() }];
+        let ops = vec![Op::RenameSheet {
+            sheet: SheetId(0),
+            name: "Renamed".to_owned(),
+        }];
         assert_eq!(
-            worker.apply_ops(ops.clone(), context()).unwrap_err().to_string(),
+            worker
+                .apply_ops(ops.clone(), context())
+                .unwrap_err()
+                .to_string(),
             peer.apply_ops(ops, context()).unwrap_err().to_string(),
         );
         assert_eq!(
@@ -894,10 +997,8 @@ fn snapshot_facts_behavior_identity() {
         assert!(peer.source_package_is_unmaterialized_for_test());
         let options = XlsxExportOptions::default();
         assert_eq!(
-            serde_json::to_value(
-                worker.export_structured(&options).unwrap().unwrap().content,
-            )
-            .unwrap(),
+            serde_json::to_value(worker.export_structured(&options).unwrap().unwrap().content,)
+                .unwrap(),
             serde_json::to_value(peer.export_structured(&options).unwrap().unwrap().content)
                 .unwrap(),
         );
