@@ -45,6 +45,16 @@ interface PendingFrame {
   revision: number;
 }
 
+function publicationOutcome() {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((done, failed) => { resolve = done; reject = failed; });
+  void promise.catch(() => {});
+  return { promise, resolve, reject };
+}
+
+const MAX_PUBLICATION_RETRIES = 3;
+
 const animationScheduler: WorkerPaintScheduler = {
   request: (callback) => requestAnimationFrame(callback),
   cancel: (id) => cancelAnimationFrame(id),
@@ -74,16 +84,27 @@ export class WorkerPaintSource {
   private pending: PendingFrame | null = null;
   private running = false;
   private lastPaint: WorkerPaintResult | null = null;
+  private publication: ReturnType<typeof publicationOutcome> | null = null;
+  private retries = 0;
 
   constructor(private readonly options: WorkerPaintSourceOptions) {
     this.scheduler = options.scheduler ?? animationScheduler;
   }
 
   get painted(): WorkerPaintResult | null { return this.lastPaint; }
+  get publicationOutcome(): Promise<void> | null { return this.publication?.promise ?? null; }
 
   schedule(): void {
+    this.enqueue(true);
+  }
+
+  scheduleEdit(): void {
+    this.enqueue(false);
+  }
+
+  private enqueue(invalidate: boolean): void {
     if (!this.current || this.failed) return;
-    this.revision += 1;
+    if (invalidate) this.revision += 1;
     if (this.raf !== null) return;
     this.raf = this.scheduler.request(() => {
       this.raf = null;
@@ -91,20 +112,24 @@ export class WorkerPaintSource {
       const request = this.capture();
       if (!request) return;
       this.pending = { request, revision: this.revision };
-      void this.drain();
+      void this.drain().catch((error) => this.fail(error));
     });
   }
 
   fail(error: unknown): void {
     if (!this.current || this.failed) return;
     this.failed = true;
+    this.publication?.reject(error);
+    this.publication = null;
     this.cancelFrame();
     try { this.options.onError(error); } catch {}
   }
 
-  dispose(): void {
+  dispose(error: unknown = new Error('Worker paint source disposed')): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.publication?.reject(error);
+    this.publication = null;
     this.cancelFrame();
   }
 
@@ -128,7 +153,11 @@ export class WorkerPaintSource {
     this.pending = null;
   }
 
-  private retry(): void {
+  private retry(
+    request: WorkerPaintRequest, error: unknown = new Error('Worker frame publication retry limit exceeded')
+  ): void {
+    if (!sameRequest(this.capture(), request)) this.retries = 0;
+    else if (++this.retries > MAX_PUBLICATION_RETRIES) { this.fail(error); return; }
     if (!this.pending && this.raf === null && this.capture()) this.schedule();
   }
 
@@ -158,29 +187,35 @@ export class WorkerPaintSource {
         const pending = this.pending;
         this.pending = null;
         if (!this.matches(pending)) {
-          this.retry();
+          this.retry(pending.request);
           continue;
         }
         const { request } = pending;
+        const outcome = publicationOutcome();
+        this.publication = outcome;
         try {
           const frame = await this.options.requestFrame(snapshot(request));
           if (!this.current || this.failed) break;
           if (!this.matches(pending) || frame.sheet !== request.sheet ||
             !sameViewport(frame.viewport, request.viewport) ||
             !(frame.sequence >= this.options.sentSequence())) {
-            this.retry();
+            this.retry(request);
             continue;
           }
           this.publish('worker', request, {
             displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version,
           }, frame.sequence);
+          this.retries = 0;
         } catch (error) {
           if (!this.current || this.failed) break;
           if (!this.matches(pending) || error instanceof Error && error.name === 'SessionSuperseded') {
-            this.retry();
+            this.retry(request, error);
           } else {
             this.fail(error);
           }
+        } finally {
+          outcome.resolve();
+          if (this.publication === outcome) this.publication = null;
         }
       }
     } finally { this.running = false; }

@@ -2300,6 +2300,131 @@ it('rejects a dependent ready host edit on frame publication failure with suspen
   }
 });
 
+it('retires while a dependent host edit waits on a blocked predecessor publication', async () => {
+  const host = harness(true);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const publication = deferred<xlsx.WorkbookFrame>();
+  void publication.promise.catch(() => {});
+  let suspended: { mockRestore(): void } | undefined;
+  let dependent: Promise<unknown> | undefined;
+  try {
+    await act(async () => { await api.editCellAsync(0, 0, 0, 'P'); });
+    const frames = host.sessionMethods.frame.mock.calls.length;
+    host.sessionMethods.frame.mockReturnValueOnce(publication.promise);
+    await tick();
+    expect(host.sessionMethods.frame).toHaveBeenCalledTimes(frames + 1);
+    suspended = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => ++nextAnimation);
+    let settled = false;
+    act(() => {
+      dependent = api.editCellAsync(0, 0, 1, 'H').catch((error) => error);
+      void dependent.then(() => { settled = true; });
+    });
+    await act(async () => {});
+    expect(settled).toBe(false);
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'P'], [0, 0, 1, 'H']]);
+    await act(async () => view.unmount());
+    expect(await dependent).toMatchObject({ code: 'document-replaced' });
+    expect(host.session.dispose).toHaveBeenCalledTimes(1);
+    expect(host.peerMethods.dispose).toHaveBeenCalledTimes(1);
+    expect(host.sessionMethods.frame).toHaveBeenCalledTimes(frames + 1);
+    expect(api.failure).toBeNull();
+  } finally {
+    await act(async () => view.unmount());
+    await act(async () => publication.reject(new Error('Retired publication')));
+    await dependent;
+    suspended?.mockRestore();
+    await advance();
+  }
+});
+
+it('keeps dependent host edits healthy when an old viewport frame rejects after scrolling', async () => {
+  const host = harness(true);
+  const errors = mock((_error: Error) => {});
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onError={errors} onReady={(value) => { api = value; }} />);
+  await opened();
+  const publication = deferred<xlsx.WorkbookFrame>();
+  void publication.promise.catch(() => {});
+  let suspended: { mockRestore(): void } | undefined;
+  let dependent: Promise<EditResult | null> | undefined;
+  try {
+    const scroll = view.getByTestId('xlsx-scroll');
+    const frames = host.sessionMethods.frame.mock.calls.length;
+    host.sessionMethods.frame.mockReturnValueOnce(publication.promise);
+    fireEvent.scroll(scroll);
+    await tick();
+    expect(host.sessionMethods.frame).toHaveBeenCalledTimes(frames + 1);
+    scroll.scrollLeft = 160;
+    fireEvent.scroll(scroll);
+    suspended = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => ++nextAnimation);
+    await act(async () => { expect((await api.editCellAsync(0, 0, 0, 'P'))?.applied).toBe(true); });
+    let settled = false;
+    act(() => {
+      dependent = api.editCellAsync(0, 0, 1, 'H');
+      void dependent.then(() => { settled = true; }, () => { settled = true; });
+    });
+    await act(async () => {});
+    expect(settled).toBe(false);
+    const count = painted.length;
+    await act(async () => publication.reject(new Error('Old viewport frame failed')));
+    await act(async () => { expect((await dependent)?.applied).toBe(true); });
+    expect(api.failure).toBeNull();
+    expect(host.attached!.state).toBe('ready');
+    expect(errors).not.toHaveBeenCalled();
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'P'], [0, 0, 1, 'H']]);
+    expect(host.replay.mock.calls.map(([envelope]) => envelope.op.args)).toEqual([[0, 0, 0, 'P'], [0, 0, 1, 'H']]);
+    expect(host.sessionMethods.frame).toHaveBeenCalledTimes(frames + 1);
+    expect(painted).toHaveLength(count);
+    suspended.mockRestore();
+    suspended = undefined;
+    await advance();
+    expect(host.sessionMethods.frame.mock.calls[frames + 1][0].x).toBe(160);
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+  } finally {
+    await act(async () => publication.reject(new Error('Old viewport frame failed')));
+    await dependent?.catch(() => {});
+    suspended?.mockRestore();
+    await advance();
+  }
+});
+
+it('applies three sequential dependent host edits without extra flushes or frames while animation frames are suspended', async () => {
+  const host = harness(true);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const frames = host.sessionMethods.frame.mock.calls.length;
+  const flush = spyOn(host.attached!, 'flush');
+  const suspended = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => ++nextAnimation);
+  const count = painted.length;
+  try {
+    for (const input of ['first', 'second', 'third']) {
+      await act(async () => { expect((await api.editCellAsync(0, 0, 0, input))?.applied).toBe(true); });
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(input);
+      expect(host.sessionMethods.frame).toHaveBeenCalledTimes(frames);
+      expect(flush).not.toHaveBeenCalled();
+    }
+    expect(host.peerMethods.editCell.mock.calls).toEqual([
+      [0, 0, 0, 'first'], [0, 0, 0, 'second'], [0, 0, 0, 'third'],
+    ]);
+    expect(host.replay.mock.calls.map(([envelope]) => [envelope.sequence, envelope.op.args])).toEqual([
+      [1, [0, 0, 0, 'first']], [2, [0, 0, 0, 'second']], [3, [0, 0, 0, 'third']],
+    ]);
+    expect(host.cells.get('0:0:0')).toBe('third');
+    expect(painted).toHaveLength(count);
+    expect(api.failure).toBeNull();
+  } finally {
+    suspended.mockRestore();
+    flush.mockRestore();
+    await advance();
+  }
+});
+
 it('prepares dependent ready host edits and resolves flush and save with suspended animation frames', async () => {
   const host = harness(true);
   let api!: XlsxWorkerEditorApi;

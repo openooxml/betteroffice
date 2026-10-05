@@ -92,6 +92,106 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void) {
 }
 
 describe('WorkerPaintSource', () => {
+  test('shares an outcome that settles after publication despite a dependent edit schedule', async () => {
+    const { source, requests, paints, errors, tick, respond } = harness();
+    source.schedule();
+    tick();
+    const outcome = source.publicationOutcome!;
+    expect(source.publicationOutcome).toBe(outcome);
+    source.scheduleEdit();
+    expect(source.publicationOutcome).toBe(outcome);
+    await respond(0, frame(requests[0].request));
+    await expect(outcome).resolves.toBeUndefined();
+    expect(paints).toHaveLength(1);
+    expect(errors).toEqual([]);
+    expect(source.publicationOutcome).toBeNull();
+  });
+
+  test('rejects the shared outcome with a real canvas publication failure', async () => {
+    const failure = new Error('Canvas publication failed');
+    const { source, requests, errors, tick, respond } = harness(() => { throw failure; });
+    source.schedule();
+    tick();
+    const outcome = source.publicationOutcome!;
+    await respond(0, frame(requests[0].request));
+    await expect(outcome).rejects.toBe(failure);
+    expect(errors).toEqual([failure]);
+    expect(source.painted).toBeNull();
+    expect(source.publicationOutcome).toBeNull();
+  });
+
+  test('settles a discarded viewport rejection without failing its shared outcome', async () => {
+    const { source, state, requests, errors, tick } = harness();
+    source.schedule();
+    tick();
+    const outcome = source.publicationOutcome!;
+    state.request.viewport.x = 100;
+    source.schedule();
+    requests[0].reply.reject(new Error('Old viewport failed'));
+    await expect(outcome).resolves.toBeUndefined();
+    expect(errors).toEqual([]);
+    expect(source.painted).toBeNull();
+    expect(requests).toHaveLength(1);
+  });
+
+  test('rejects a blocked outcome on disposal before its worker frame settles', async () => {
+    const { source, requests, errors, tick, respond } = harness();
+    source.schedule();
+    tick();
+    const outcome = source.publicationOutcome!;
+    const retirement = new Error('Retired');
+    source.dispose(retirement);
+    await expect(outcome).rejects.toBe(retirement);
+    expect(source.publicationOutcome).toBeNull();
+    expect(errors).toEqual([]);
+    await respond(0, frame(requests[0].request));
+    expect(source.painted).toBeNull();
+    expect(source.publicationOutcome).toBeNull();
+  });
+
+  test('keeps discarding obsolete viewport errors when scrolling exceeds the retry cap', async () => {
+    const { source, state, requests, errors, tick, respond } = harness();
+    source.schedule();
+    for (let index = 0; index < 6; index++) {
+      tick();
+      const outcome = source.publicationOutcome!;
+      state.request.viewport.x += 100;
+      source.schedule();
+      requests[index].reply.reject(new Error('Old viewport failed'));
+      await expect(outcome).resolves.toBeUndefined();
+    }
+    expect(errors).toEqual([]);
+    tick();
+    await respond(6, frame(requests[6].request));
+    expect(source.painted?.request.viewport.x).toBe(600);
+  });
+
+  for (const reply of ['stale', 'superseded'] as const) {
+    test(`bounds repeated ${reply} publication retries`, async () => {
+      const { source, state, requests, errors, callbacks, tick, respond } = harness();
+      const superseded = new Error('Frame superseded');
+      superseded.name = 'SessionSuperseded';
+      state.sentSequence = 1;
+      source.schedule();
+      for (let attempt = 0; attempt < 4; attempt++) {
+        tick();
+        const outcome = source.publicationOutcome!;
+        if (reply === 'stale') await respond(attempt, frame(requests[attempt].request, 0));
+        else {
+          requests[attempt].reply.reject(superseded);
+          await requests[attempt].reply.promise.catch(() => {});
+        }
+        if (attempt < 3) await expect(outcome).resolves.toBeUndefined();
+        else await expect(outcome).rejects.toBe(errors[0]);
+      }
+      expect(errors).toHaveLength(1);
+      expect(callbacks.size).toBe(0);
+      source.scheduleEdit();
+      tick();
+      expect(requests).toHaveLength(4);
+    });
+  }
+
   test('retains the adopted worker frame until a matching edit sequence arrives', async () => {
     const { source, state, requests, paints, errors, callbacks, tick, respond, surface } = harness();
     source.schedule();

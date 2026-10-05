@@ -170,6 +170,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     selectCellsAsync: (...args) => apiBridgeRef.current?.selectCellsAsync(...args) ?? Promise.resolve(false),
     apply: (result, op) => apiBridgeRef.current?.apply(result, op),
     previewEdits: (sheet, edits, op) => apiBridgeRef.current?.previewEdits?.(sheet, edits, op) ?? Promise.resolve(),
+    publicationOutcome: () => apiBridgeRef.current?.publicationOutcome?.() ?? null,
     beforeNavigation: () => apiBridgeRef.current?.beforeNavigation?.() ?? Promise.resolve(),
     canNavigateSync: () => apiBridgeRef.current?.canNavigateSync?.() ?? false,
   }));
@@ -188,7 +189,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const completedPreviews = useMemo(() => new WeakMap<WorkbookReplayOp, number>(), [run]);
   const unpreviewedOps = useMemo(() => new Set<WorkbookReplayOp>(), [run]);
   const previewState = useMemo(() => ({ revision: 0, sequence: Infinity, request: null as WorkerPaintRequest | null }), [run]);
-  const publicationState = useMemo(() => ({ pending: null as Promise<void> | null }), [run]);
   const coordinator = useMemo(() => {
     const owner = run;
     const input = createWorkerInputCoordinator({
@@ -203,7 +203,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       seal: () => inputHooks.current?.seal() ?? {},
       sync: () => inputHooks.current?.sync(),
       write: (draft, applied) => inputHooks.current?.write(draft, applied) ?? false,
-      acknowledge: (intent, result) => inputHooks.current?.acknowledge?.(intent, result) ?? Promise.resolve(),
       onError: (error) => owner?.fail(error),
       onRefusal(error, draft) {
         if (owner?.retiring) { owner.reportRefusal(error); return; }
@@ -475,13 +474,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const owner = runRef.current;
     if (!owner?.peer) { setProposals([]); return; }
     setProposals(owner.peer.listProposals());
-    if (!owner.recovering) sourceRef.current?.schedule();
+    if (!owner.recovering) sourceRef.current?.scheduleEdit();
     commands.refresh();
   }, [commands]);
 
   const peerPaint = useCallback(() => {
     if (run?.retiring || run?.recovering) return;
-    sourceRef.current?.schedule();
+    sourceRef.current?.scheduleEdit();
   }, [run]);
 
   const trackCommit = useCallback((op?: WorkbookReplayOp) => {
@@ -491,7 +490,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     }
     const complete = !unpreviewedOps.size && previewJournal.every((pending) => completedPreviews.has(pending));
     previewState.sequence = complete ? Math.max(0, ...previewJournal.map((pending) => completedPreviews.get(pending)!)) : Infinity;
-    sourceRef.current?.schedule();
+    sourceRef.current?.scheduleEdit();
   }, [run, previewState, completedPreviews, unpreviewedOps, previewJournal]);
 
   const closeWrittenDraft = (draft: InputDraft) => {
@@ -622,6 +621,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       setCapturedFormat(null); commands.refresh();
     },
     refreshProposals, recoverInput, selectCells: place, previewEdits,
+    publicationOutcome: () => run?.ready && previewJournal.length > 1 ? sourceRef.current?.publicationOutcome ?? null : null,
     beforeNavigation: async () => {
       if (!await afterPaint()) throw new WorkerInputRefusal('The edited worker frame is not ready');
     },
@@ -682,21 +682,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     if (!run) return;
     const source = new WorkerPaintSource({
       generation: run.generation, capture, isCurrent: () => run.current && !run.failure,
-      requestFrame(request) {
-        const frame = run.session.call.frame(request.viewport, { sheet: request.sheet });
-        const publication = frame.then(async () => {
-          await Promise.resolve();
-          if (run.failure) throw run.failure;
-        }, async (error) => {
-          await Promise.resolve();
-          if (run.failure) throw run.failure;
-          if (!(error instanceof Error && error.name === 'SessionSuperseded')) throw error;
-        });
-        publicationState.pending = publication;
-        const clear = () => { if (publicationState.pending === publication) publicationState.pending = null; };
-        void publication.then(clear, clear);
-        return frame;
-      },
+      requestFrame: (request) => run.session.call.frame(request.viewport, { sheet: request.sheet }),
       sentSequence: () => run.editPeer?.sentSequence ?? 0,
       publish(painted) {
         const canvas = canvasRef.current;
@@ -749,7 +735,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       source.schedule();
     }).catch((error) => run.fail(error));
     return () => {
-      source.dispose();
+      source.dispose(new XlsxCommandAdmissionError('document-replaced'));
       if (sourceRef.current === source) sourceRef.current = null;
       cancelPendingFrames();
       presentGridRef.current(null);
@@ -782,7 +768,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
 
   useEffect(() => {
     if (!run?.failure) return;
-    sourceRef.current?.dispose();
+    sourceRef.current?.dispose(run.failure);
     cancelPendingFrames();
     chartDrag.current = null;
     flushNudgeRef.current(true);
@@ -845,33 +831,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     isReady: () => run?.ready ?? false, whenReady: () => run!.whenHydrated(),
     requestHydration: (reason) => run!.requestHydration(reason), flushEdits: () => run!.editPeer!.flush(),
     preview, seal, sync: syncDraft,
-    async acknowledge(intent, result) {
-      if (intent.kind !== 'host' || !run?.ready || run.recovering || run.retiring || previewJournal.length < 2) return;
-      const edit = result && typeof result === 'object' && 'result' in result ? result.result : result;
-      if (!edit || typeof edit !== 'object' || !('applied' in edit) || 'ok' in edit && !edit.ok) return;
-      const publication = publicationState.pending;
-      try {
-        await run.editPeer!.flush();
-        await publication;
-        if (run.failure) throw run.failure;
-        while (run.current && !run.retiring && !run.recovering && previewJournal.length) {
-          const request = capture();
-          if (!request) break;
-          const sequence = run.editPeer!.sentSequence;
-          try {
-            const frame = await run.session.call.frame(request.viewport, { sheet: request.sheet });
-            if (frame.sequence >= sequence) break;
-          } catch (error) {
-            if (!(error instanceof Error && error.name === 'SessionSuperseded')) throw error;
-          }
-          if (run.failure) throw run.failure;
-        }
-        if (run.failure) throw run.failure;
-      } catch (error) {
-        run.fail(error);
-        throw run.failure ?? error;
-      }
-    },
     async resolveDraft(draft) {
       if (!draft.value.startsWith('=') && [...draft.value.replace(/^'/, '')].length > 32767) {
         throw new WorkerInputRefusal('Cell text exceeds 32,767 characters');
@@ -1103,6 +1062,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   };
   flushNudgeRef.current = flushNudge;
   if (run) run.beforeRetire = () => {
+    sourceRef.current?.dispose(new XlsxCommandAdmissionError('document-replaced'));
     syncDraft();
     composition.current?.settle(true);
     composition.current = null;
