@@ -611,9 +611,17 @@ impl SheetPatch<'_> {
             masters: masters
                 .into_iter()
                 .filter(|(key, reference)| {
+                    let at = CellRef::new(key.0, key.1);
                     changed.contains(key)
                         || !self.moves_uniformly(*reference)
                         || range_changed(*reference, &changed)
+                        || self
+                            .original
+                            .array_formula(at)
+                            .and_then(|range| self.remap_range(range))
+                            != self
+                                .mapped(at)
+                                .and_then(|mapped| self.sheet.array_formula(mapped))
                 })
                 .map(|(key, _)| key)
                 .collect(),
