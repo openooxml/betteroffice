@@ -252,6 +252,13 @@ fn any_snapshot_preserves_variants_and_number_bits() {
 }
 
 #[cfg(test)]
+impl BoundaryState {
+    fn exact_snapshot(&self) -> (String, BoundaryContext) {
+        (format!("{:?}", self.position), self.context.as_ref().clone())
+    }
+}
+
+#[cfg(test)]
 impl PreviewUnits {
     pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug {
         use yrs::types::ToJson;
@@ -289,8 +296,8 @@ impl PreviewUnits {
                     record.stories.clone(),
                     record.paragraphs.clone(),
                     record.pm.clone(),
-                    record.seed.as_deref().cloned(),
-                    record.after.as_ref().clone(),
+                    record.seed.as_deref().map(BoundaryState::exact_snapshot),
+                    record.after.exact_snapshot(),
                     record.capture_raw,
                 )
             })
@@ -298,7 +305,7 @@ impl PreviewUnits {
         let comments = self
             .comments
             .iter()
-            .map(|comment| (comment.start, comment.end, comment.id))
+            .map(|comment| (comment.start, comment.end, comment.id.to_bits()))
             .collect::<Vec<_>>();
         (records, comments, self.sequences)
     }
