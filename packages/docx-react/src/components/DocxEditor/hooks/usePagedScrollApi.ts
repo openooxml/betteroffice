@@ -65,6 +65,7 @@ interface PendingRefine {
   stop: AbortController;
   scroller: HTMLElement;
   scrollTop: number;
+  compensationSequence: number;
   smoothTarget?: number;
   /** The document version `position` belongs to, when a reveal set it. */
   version?: string;
@@ -106,6 +107,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     if (!pending) return;
     const top = pending.scroller.scrollTop;
     if (Math.abs(top - pending.scrollTop) <= SCROLL_EPSILON) return;
+    const compensation = layoutScrollCompensation(pending.scroller);
     const target = pending.smoothTarget;
     if (
       target !== undefined &&
@@ -113,19 +115,22 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       top <= Math.max(pending.scrollTop, target) + SCROLL_EPSILON
     ) {
       pending.scrollTop = top;
+      pending.compensationSequence = compensation?.sequence ?? pending.compensationSequence;
       if (Math.abs(top - target) <= SCROLL_EPSILON) pending.smoothTarget = undefined;
       return;
     }
-    const compensation = layoutScrollCompensation(pending.scroller);
     const maxScrollTop = Math.max(0, pending.scroller.scrollHeight - pending.scroller.clientHeight);
     if (
       (compensation &&
-        Math.abs(compensation.from - pending.scrollTop) <= SCROLL_EPSILON &&
+        compensation.sequence > pending.compensationSequence &&
+        (Math.abs(compensation.from - pending.scrollTop) <= SCROLL_EPSILON ||
+          Math.abs(compensation.from - Math.min(pending.scrollTop, maxScrollTop)) <= SCROLL_EPSILON) &&
         Math.abs(compensation.to - top) <= SCROLL_EPSILON) ||
       (pending.scrollTop > maxScrollTop + SCROLL_EPSILON &&
         Math.abs(top - maxScrollTop) <= SCROLL_EPSILON)
     ) {
       pending.scrollTop = top;
+      pending.compensationSequence = compensation?.sequence ?? pending.compensationSequence;
       return;
     }
     clearPendingRefine();
@@ -168,7 +173,10 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
             : undefined;
       }
       scroller.scrollTo({ top, behavior });
-      if (pending) pending.scrollTop = scroller.scrollTop;
+      if (pending) {
+        pending.scrollTop = scroller.scrollTop;
+        pending.compensationSequence = layoutScrollCompensation(scroller)?.sequence ?? 0;
+      }
       return true;
     },
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]
@@ -206,6 +214,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
           stop,
           scroller,
           scrollTop: scroller.scrollTop,
+          compensationSequence: layoutScrollCompensation(scroller)?.sequence ?? 0,
         };
       }
       const scrolled = scrollRectIntoView(rect, smooth);

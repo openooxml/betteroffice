@@ -273,6 +273,62 @@ test('scroll height clamping keeps navigation refining', () => {
   }
 });
 
+test('scroll height clamping followed by layout compensation keeps navigation refining', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    let scrollHeight = 10000;
+    Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+    t.rerender({ displayListQueries: unbuiltQueries(false, { ...t.placeholder, y: 1200 }) });
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toEqual([7000]);
+    scrollHeight = 6900;
+    t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+    expect(t.scroller.scrollTop).toBe(6500);
+    restoreScrollSnapshot({ scrollTopSnapshot: 6200 }, t.scroller);
+    t.scroller.dispatchEvent(new Event('scroll'));
+    expect(t.scroller.scrollTop).toBe(6200);
+    expect(nav.builds).toEqual([[6]]);
+    scrollHeight = 10000;
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    const target = 6000 + t.match.y + t.match.height / 2 - 200;
+    expect(t.scrolls).toEqual([7000, target]);
+    expect(t.scroller.scrollTop).toBe(target);
+    expect(nav.builds).toEqual([[6], []]);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
+test('stale layout scroll compensation does not excuse an external move after a reveal', () => {
+  const clock = spyOn(performance, 'now').mockReturnValue(0);
+  const nav = fakePageNavigation();
+  const t = revealApi(nav.pageNavigation);
+  try {
+    Object.defineProperty(t.scroller, 'scrollHeight', { value: 10000 });
+    t.rerender({ displayListQueries: unbuiltQueries(false, { ...t.placeholder, y: 60 }) });
+    t.scroller.scrollTop = 5860;
+    restoreScrollSnapshot({ scrollTopSnapshot: 5960 }, t.scroller);
+    expect(t.scroller.scrollTop).toBe(5960);
+    act(() => t.result.current.revealPositionImpl(500));
+    expect(t.scrolls).toEqual([5860]);
+    expect(t.scroller.scrollTop).toBe(5860);
+    t.scroller.scrollTop = 5960;
+    t.scroller.dispatchEvent(new Event('scroll'));
+    expect(nav.builds).toEqual([[6], []]);
+    act(() => nav.publish(unbuiltQueries(true, t.match)));
+    expect(t.scrolls).toEqual([5860]);
+    expect(t.scroller.scrollTop).toBe(5960);
+  } finally {
+    t.unmount();
+    t.scroller.remove();
+    clock.mockRestore();
+  }
+});
+
 test('plain scrolling cancels navigation across later frames', () => {
   const clock = spyOn(performance, 'now').mockReturnValue(0);
   const nav = fakePageNavigation();

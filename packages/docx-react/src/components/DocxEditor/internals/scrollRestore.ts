@@ -49,16 +49,23 @@ export type ResolveViewportPosition = (position: YrsStickyPosition) => number | 
 /** Candidate anchor lines tried before falling back to a page target. */
 const ANCHOR_CANDIDATE_LIMIT = 8;
 
-const layoutScrollCompensations = new WeakMap<Element, { from: number; to: number }>();
+let layoutScrollCompensationSequence = 0;
+const layoutScrollCompensations = new WeakMap<Element, { from: number; to: number; sequence: number }>();
 
-export function layoutScrollCompensation(el: Element): { from: number; to: number } | undefined {
+export function layoutScrollCompensation(
+  el: Element
+): { from: number; to: number; sequence: number } | undefined {
   return layoutScrollCompensations.get(el);
 }
 
 function setLayoutScrollTop(scrollParent: HTMLElement, top: number): void {
   const from = scrollParent.scrollTop;
   scrollParent.scrollTop = top;
-  layoutScrollCompensations.set(scrollParent, { from, to: scrollParent.scrollTop });
+  layoutScrollCompensations.set(scrollParent, {
+    from,
+    to: scrollParent.scrollTop,
+    sequence: ++layoutScrollCompensationSequence,
+  });
 }
 
 function pageProjection(

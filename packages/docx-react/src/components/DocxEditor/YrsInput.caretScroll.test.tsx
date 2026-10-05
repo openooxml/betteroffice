@@ -381,6 +381,63 @@ test.each([false, true])(
   }
 );
 
+test.each(['Ctrl+Home', 'Home', 'ArrowLeft', 'ArrowUp', 'setSelectionFromDisplay'])(
+  '%s reveals an unchanged caret after a passive relayout',
+  async (action) => {
+    const t = await mountWithPipeline(true);
+    t.expectCaret(0);
+    const selection = t.session.selection();
+    const verticalMove = spyOn(t.queries as unknown as DisplayListQueries, 'verticalMove')
+      .mockReturnValue({ position: t.input.current!.displaySelection()!.head, goalX: 80 });
+    restoreMocks.push(() => verticalMove.mockRestore());
+    expect(t.pipeline().layoutUpdateOrigin).toBe('remote');
+    t.scroller.scrollTop = 2300;
+    fireEvent.scroll(t.scroller);
+    const delta = offscreenCaretDelta(t);
+    expect(delta).toBeLessThan(0);
+    t.scrollChanges.length = 0;
+    const layout = t.pipeline().layout;
+    const frameEpoch = t.frameEpoch();
+    await act(async () => t.pipeline().runLayoutPipeline());
+    await t.frame();
+    expect(t.pipeline().layout).not.toBe(layout);
+    expect(t.frameEpoch()).toBeGreaterThan(frameEpoch);
+    expect(t.pipeline().layoutUpdateOrigin).toBe('remote');
+    expect(t.session.selection()).toEqual(selection);
+    expect(t.scrollChanges).toEqual([]);
+    expect(t.scroller.scrollTop).toBe(2300);
+    await act(async () => {
+      if (action === 'setSelectionFromDisplay') {
+        t.input.current!.setSelectionFromDisplay(t.input.current!.displaySelection()!.head);
+      } else {
+        fireEvent.keyDown(t.view.getByTestId('yrs-input'), {
+          key: action === 'Ctrl+Home' ? 'Home' : action,
+          ctrlKey: action === 'Ctrl+Home',
+        });
+      }
+      await t.input.current!.flushPendingInput();
+    });
+    await t.frame();
+    expect(t.session.selection()).toEqual(selection);
+    expect(t.scroller.scrollTop).toBe(2300 + delta);
+    expect(t.scrollChanges).toEqual([2300 + delta]);
+    const caret = t.queries.caretRect(t.input.current!.displaySelection()!.head);
+    const page = resolveDisplayPageClientRect(
+      t.canvasHostRef.current, t.queries as unknown as DisplayListQueries, caret.pageIndex
+    )!;
+    expect(page.top + caret.y).toBeGreaterThanOrEqual(24);
+    expect(page.top + caret.y + caret.height).toBeLessThanOrEqual(t.scroller.clientHeight - 24);
+    t.scroller.scrollTop = 2300;
+    fireEvent.scroll(t.scroller);
+    t.scrollChanges.length = 0;
+    await act(async () => t.pipeline().runLayoutPipeline());
+    await t.frame();
+    expect(t.scrollChanges).toEqual([]);
+    expect(t.scroller.scrollTop).toBe(2300);
+    expect(t.onError).not.toHaveBeenCalled();
+  }
+);
+
 test('a local Delete reveals a distant caret even when its collapsed selection is unchanged', async () => {
   const t = await mountWithPipeline(true);
   const selection = t.session.selection();
