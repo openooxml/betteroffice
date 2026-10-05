@@ -332,6 +332,7 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<PackageSlot>,
+    snapshot_package_lineage: Option<snapshot_assembly::Lineage>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -439,6 +440,9 @@ impl Workbook {
     }
 
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
+        if self.rand_seed != seed {
+            self.bump_model_epoch();
+        }
         self.rand_seed = seed;
     }
 
@@ -555,6 +559,7 @@ impl Workbook {
             pending_remote_updates: Vec::new(),
             model,
             source_package: source_package.map(PackageSlot::Present),
+            snapshot_package_lineage: None,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -1041,6 +1046,9 @@ impl Workbook {
 
     pub fn set_active_sheet(&mut self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
+        if self.active_sheet != sheet {
+            self.bump_model_epoch();
+        }
         self.active_sheet = sheet;
         self.invalidate_sheet_info();
         Ok(())
@@ -4343,6 +4351,7 @@ impl Workbook {
             pending_remote_updates: Vec::new(),
             model,
             source_package: source_package.map(PackageSlot::Present),
+            snapshot_package_lineage: None,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),

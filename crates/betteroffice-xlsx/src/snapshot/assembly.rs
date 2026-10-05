@@ -30,7 +30,8 @@ fn error(message: impl Into<String>) -> SnapshotError {
     SnapshotError::new(message)
 }
 
-struct Lineage {
+#[doc(hidden)]
+pub(super) struct Lineage {
     nonce: String,
     changes: u64,
     epoch: u64,
@@ -49,6 +50,7 @@ impl Lineage {
             pending_remote_updates,
             model,
             source_package,
+            snapshot_package_lineage: _,
             source_container,
             preserved,
             preserved_undo,
@@ -179,6 +181,7 @@ pub struct WorkbookSnapshotEncoder {
     model: ModelSnapshotEncoder,
     preserved: PreservedSnapshotEncoder,
     facts: PackageFactsEncoder,
+    retained_package_facts: bool,
     source: Option<SourceContainer>,
     source_offset: usize,
     source_ordinal: u64,
@@ -201,6 +204,19 @@ impl WorkbookSnapshotEncoder {
         context: Option<CalculationOptions>,
         budget: SnapshotBudget,
     ) -> SnapshotResult<Self> {
+        let retained_package_facts = workbook
+            .snapshot_package_lineage
+            .as_ref()
+            .map(|lineage| lineage.matches(workbook))
+            .transpose()?
+            .unwrap_or(false);
+        if !retained_package_facts
+            && let Some(package) = &workbook.source_package
+        {
+            package
+                .materialize()
+                .map_err(|failure| error(failure.to_string()))?;
+        }
         let lineage = Lineage::capture(workbook)?;
         if budget.max_bytes() < 64 {
             return Err(error("snapshot byte budget is too small for framing"));
@@ -241,7 +257,9 @@ impl WorkbookSnapshotEncoder {
         }
         if let Some(package) = &workbook.source_package {
             let mut facts = PackageFactsEncoder::new();
-            while let Some(payload) = package.next_facts(&mut facts, part_budget.max_bytes())? {
+            while let Some(payload) =
+                package.next_facts(&mut facts, part_budget.max_bytes(), retained_package_facts)?
+            {
                 let ordinal = chunk_counts[index(ChunkKind::Facts)];
                 count_chunk(
                     &mut chunk_counts,
@@ -304,6 +322,7 @@ impl WorkbookSnapshotEncoder {
             model: ModelSnapshotEncoder::new(),
             preserved: PreservedSnapshotEncoder::new(),
             facts: PackageFactsEncoder::new(),
+            retained_package_facts,
             source: workbook.source_container.clone(),
             source_offset: 0,
             source_ordinal: 0,
@@ -424,8 +443,11 @@ impl WorkbookSnapshotEncoder {
                 }
                 4 => {
                     if let Some(package) = &workbook.source_package
-                        && let Some(payload) =
-                            package.next_facts(&mut self.facts, self.part_budget.max_bytes())?
+                        && let Some(payload) = package.next_facts(
+                            &mut self.facts,
+                            self.part_budget.max_bytes(),
+                            self.retained_package_facts,
+                        )?
                     {
                         let chunk = frame(ChunkKind::Facts, self.facts_ordinal, &payload);
                         self.facts_ordinal += 1;
@@ -1443,17 +1465,28 @@ impl WorkbookSnapshotBuilder {
             client_id: _,
             guid: _,
             next_sheet_id: _,
-            state_vector: _,
+            state_vector,
             chunk_counts: _,
         } = header;
         self.calculation_context = calculation_context;
         self.graph = graph_present.then(SnapshotGraphBuilder::new);
+        let snapshot_package_lineage = Some(Lineage {
+            nonce: version_nonce.clone(),
+            changes: committed_changes,
+            epoch: model_epoch,
+            active_sheet,
+            seed: rand_seed,
+            recalculated: recalculated_since_open,
+            projection_valid,
+            state_vector,
+        });
         self.restored = Some(Workbook {
             authority,
             mode: WorkbookMode::Standalone,
             pending_remote_updates: Vec::new(),
             model,
             source_package,
+            snapshot_package_lineage,
             source_container,
             preserved,
             preserved_undo: Vec::new(),

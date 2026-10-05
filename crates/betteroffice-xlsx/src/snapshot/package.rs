@@ -50,10 +50,16 @@ impl PackageSlot {
         &self,
         encoder: &mut PackageFactsEncoder,
         max_bytes: usize,
+        retained: bool,
     ) -> SnapshotResult<Option<Vec<u8>>> {
         match self {
             Self::Present(package) => encoder.next(package, max_bytes),
-            Self::Deferred { facts, .. } => encoder.next_from_facts(facts, max_bytes),
+            Self::Deferred { facts, .. } if retained => encoder.next_from_facts(facts, max_bytes),
+            Self::Deferred { .. } => encoder.next(
+                self.materialize()
+                    .map_err(|failure| SnapshotError::new(failure.to_string()))?,
+                max_bytes,
+            ),
         }
         .map_err(|failure| SnapshotError::new(failure.to_string()))
     }

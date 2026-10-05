@@ -442,6 +442,60 @@ fn snapshot_unchanged_hydrated_peer_recaptures_without_package_parse() {
 }
 
 #[test]
+fn snapshot_active_sheet_change_recaptures_with_package_parse() {
+    for budget in budgets() {
+        for restore in [false, true] {
+            let mut worker = worker(&source(false, false));
+            let mut peer = hydrate(&worker, budget);
+            assert_eq!(peer.active_sheet(), SheetId(1));
+            assert!(peer.source_package_is_unmaterialized_for_test());
+            for workbook in [&mut worker, &mut peer] {
+                workbook.set_active_sheet(SheetId(0)).unwrap();
+                if restore {
+                    workbook.set_active_sheet(SheetId(1)).unwrap();
+                }
+            }
+            let parses = crate::snapshot::package::rebuild_count();
+            let recaptured = encode(&peer, budget);
+            assert_eq!(crate::snapshot::package::rebuild_count(), parses + 1);
+            assert!(!peer.source_package_is_unmaterialized_for_test());
+            assert_eq!(
+                decoded_snapshot(&recaptured),
+                decoded_snapshot(&encode(&worker, budget)),
+            );
+            assert_current_identity(&worker, &peer);
+        }
+    }
+}
+
+#[test]
+fn snapshot_cell_edit_recapture_parses_and_matches_worker_refusal() {
+    for budget in budgets() {
+        let mut worker = worker(&source(false, false));
+        let mut peer = hydrate(&worker, budget);
+        let parses = crate::snapshot::package::rebuild_count();
+        for workbook in [&mut worker, &mut peer] {
+            workbook
+                .edit_cell(SheetId(0), CellRef::new(0, 0), "7", context())
+                .unwrap();
+        }
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses);
+        assert!(peer.source_package_is_unmaterialized_for_test());
+        let peer_error = WorkbookSnapshotEncoder::new(&peer, Some(context()), budget)
+            .err()
+            .unwrap();
+        assert_eq!(crate::snapshot::package::rebuild_count(), parses + 1);
+        assert!(!peer.source_package_is_unmaterialized_for_test());
+        let worker_error = WorkbookSnapshotEncoder::new(&worker, Some(context()), budget)
+            .err()
+            .unwrap();
+        assert_eq!(peer_error, worker_error);
+        assert_eq!(peer_error.to_string(), "snapshot requires an initial workbook");
+        assert_current_identity(&worker, &peer);
+    }
+}
+
+#[test]
 fn snapshot_structured_reference_insert_rows_refusal_matches_source() {
     let mut worker = worker(&source(false, false));
     let mut peer = hydrate(&worker, budgets()[0]);
@@ -617,12 +671,64 @@ fn snapshot_calculation_storage_growth_respects_step_budget() {
         .collect();
     let chunks = encode(&worker, budget);
     let mut builder = WorkbookSnapshotBuilder::new();
-    for chunk in chunks {
-        builder.push(&chunk).unwrap();
+    builder.push(&chunks[0]).unwrap();
+    assert_step_budget(budget);
+    builder.advance(budget).unwrap();
+    assert_step_budget(budget);
+    let state = builder.header.as_ref().unwrap();
+    assert_eq!(state.header.last_calculation.changed.capacity(), 0);
+    assert_eq!(state.header.last_calculation.cycle_cells.capacity(), 0);
+    assert_eq!(state.header.last_calculation.limited_cells.capacity(), 0);
+    assert!(state.calculation_storage.is_none());
+    let mut capacity = 0;
+    let mut growth_steps = 0;
+    let mut migration_steps = 0;
+    for chunk in &chunks[1..] {
+        let calculation = unframe(chunk).unwrap().0 == ChunkKind::Header;
+        builder.push(chunk).unwrap();
         assert_step_budget(budget);
         builder.advance(budget).unwrap();
         assert_step_budget(budget);
+        if calculation {
+            for _ in 0..=worker.last_calculation.changed.len() {
+                let state = builder.header.as_ref().unwrap();
+                let list = &state.header.last_calculation.changed;
+                assert!(list.capacity() >= capacity);
+                if list.capacity() > capacity {
+                    assert!(list.capacity() <= list.len().saturating_mul(2).max(16));
+                    capacity = list.capacity();
+                    growth_steps += 1;
+                }
+                let copied = state.calculation_storage.as_ref().map(|storage| {
+                    assert_eq!(list.len(), list.capacity());
+                    assert!(storage.capacity() <= list.len().saturating_mul(2).max(16));
+                    assert!(storage.len() < list.len());
+                    storage.len()
+                });
+                if builder.queue.is_empty() {
+                    break;
+                }
+                builder.advance(budget).unwrap();
+                let work = assert_step_budget(budget);
+                if let Some(copied) = copied {
+                    let state = builder.header.as_ref().unwrap();
+                    let migrated = state
+                        .calculation_storage
+                        .as_ref()
+                        .map_or(state.header.last_calculation.changed.len(), Vec::len);
+                    assert!(migrated > copied);
+                    assert!(migrated - copied <= budget.max_records());
+                    assert_eq!(work.records, migrated - copied);
+                    assert_eq!(work.bytes, work.records * size_of::<CellAddress>());
+                    migration_steps += 1;
+                }
+            }
+            assert!(builder.queue.is_empty());
+        }
     }
+    assert!(growth_steps > 1);
+    assert!(migration_steps > 1);
+    assert!(capacity >= worker.last_calculation.changed.len());
     let mut ready = false;
     for _ in 0..100_000 {
         ready = builder.advance(budget).unwrap().is_ready();
