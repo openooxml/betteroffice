@@ -49,21 +49,29 @@ export type ResolveViewportPosition = (position: YrsStickyPosition) => number | 
 /** Candidate anchor lines tried before falling back to a page target. */
 const ANCHOR_CANDIDATE_LIMIT = 8;
 
+interface LayoutScrollCompensation {
+  from: number;
+  to: number;
+  scrollTopSnapshot: number;
+  sequence: number;
+}
+
 let layoutScrollCompensationSequence = 0;
-const layoutScrollCompensations = new WeakMap<Element, { from: number; to: number; sequence: number }>();
+const layoutScrollCompensations = new WeakMap<Element, LayoutScrollCompensation>();
 
 export function layoutScrollCompensation(
   el: Element
-): { from: number; to: number; sequence: number } | undefined {
+): LayoutScrollCompensation | undefined {
   return layoutScrollCompensations.get(el);
 }
 
-function setLayoutScrollTop(scrollParent: HTMLElement, top: number): void {
+function setLayoutScrollTop(scrollParent: HTMLElement, top: number, scrollTopSnapshot: number): void {
   const from = scrollParent.scrollTop;
   scrollParent.scrollTop = top;
   layoutScrollCompensations.set(scrollParent, {
     from,
     to: scrollParent.scrollTop,
+    scrollTopSnapshot,
     sequence: ++layoutScrollCompensationSequence,
   });
 }
@@ -388,7 +396,8 @@ export function restoreDisplayListScrollAnchor(
       { viewportOffset: anchor.clientOffset ?? 0, scrollTopSnapshot: anchor.scrollTopSnapshot },
       nextTargetTop,
       maxScroll
-    )
+    ),
+    anchor.scrollTopSnapshot
   );
 }
 
@@ -406,7 +415,11 @@ export function restoreDisplayListViewportAnchor(
       ? null
       : scrollParent.scrollTop + clientY / viewport.zoom - viewport.top / viewport.zoom;
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
-  setLayoutScrollTop(scrollParent, computeViewportAnchoredScrollTop(anchor, nextTargetTop, maxScroll));
+  setLayoutScrollTop(
+    scrollParent,
+    computeViewportAnchoredScrollTop(anchor, nextTargetTop, maxScroll),
+    anchor.scrollTopSnapshot
+  );
 }
 
 export function restoreScrollSnapshot(
@@ -414,5 +427,9 @@ export function restoreScrollSnapshot(
   scrollParent: HTMLElement
 ): void {
   const maxScroll = Math.max(0, scrollParent.scrollHeight - scrollParent.clientHeight);
-  setLayoutScrollTop(scrollParent, Math.min(Math.max(0, anchor.scrollTopSnapshot), maxScroll));
+  setLayoutScrollTop(
+    scrollParent,
+    Math.min(Math.max(0, anchor.scrollTopSnapshot), maxScroll),
+    anchor.scrollTopSnapshot
+  );
 }

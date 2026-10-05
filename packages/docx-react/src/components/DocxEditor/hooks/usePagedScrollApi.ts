@@ -124,6 +124,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       (compensation &&
         compensation.sequence > pending.compensationSequence &&
         (Math.abs(compensation.from - pending.scrollTop) <= SCROLL_EPSILON ||
+          Math.abs(compensation.scrollTopSnapshot - pending.scrollTop) <= SCROLL_EPSILON ||
           Math.abs(compensation.from - Math.min(pending.scrollTop, maxScrollTop)) <= SCROLL_EPSILON) &&
         Math.abs(compensation.to - top) <= SCROLL_EPSILON) ||
       (pending.scrollTop > maxScrollTop + SCROLL_EPSILON &&

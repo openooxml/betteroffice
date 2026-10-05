@@ -318,7 +318,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     count: number;
   } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
-  const pendingLocalCaretRevealRef = useRef(false);
+  const pendingLocalCaretRevealRef = useRef<{
+    scroller: HTMLElement;
+    scrollTop: number;
+  } | null>(null);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
@@ -491,17 +494,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [displaySelection, onStateChange]
   );
 
+  const requestLocalCaretReveal = useCallback((): void => {
+    const host = canvasHostRef?.current;
+    const scroller = host ? findVerticalScrollParentOrRoot(host) : null;
+    pendingLocalCaretRevealRef.current = scroller ? { scroller, scrollTop: scroller.scrollTop } : null;
+  }, [canvasHostRef]);
+
   const setSelection = useCallback(
     (anchor: YrsLoc, head: YrsLoc = anchor, emit = true): void => {
       if (!session) return;
       session.setSelection(anchor, head);
       if (emit) {
-        if (!readOnly) pendingLocalCaretRevealRef.current = true;
+        if (!readOnly) requestLocalCaretReveal();
         onCaretInterrupt?.();
         emitSelection(false);
       }
     },
-    [emitSelection, onCaretInterrupt, readOnly, session]
+    [emitSelection, onCaretInterrupt, readOnly, requestLocalCaretReveal, session]
   );
 
   const finishMutation = useCallback(
@@ -511,13 +520,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       dirtyStories?: string | readonly string[]
     ): void => {
       verticalCaretGoalRef.current.reset();
-      if (residentLayoutReady) pendingLocalCaretRevealRef.current = true;
+      if (residentLayoutReady) requestLocalCaretReveal();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onCaretInput?.();
       onDirectInput(dirtyStories);
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput]
+    [emitSelection, onCaretInput, onDirectInput, requestLocalCaretReveal]
   );
 
   const finishResidentMutation = useCallback(
@@ -1520,7 +1529,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   useEffect(() => {
     verticalCaretGoalRef.current.reset();
     pendingResidentFrameEpochRef.current = null;
-    pendingLocalCaretRevealRef.current = false;
+    pendingLocalCaretRevealRef.current = null;
   }, [session, story]);
 
   useEffect(() => {
@@ -1591,14 +1600,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       (previousStickySelection === undefined ||
         !sameYrsSelection(previousStickySelection, stickySelection)) &&
       !selectionIsQuiet;
+    const scroller = findVerticalScrollParentOrRoot(host);
+    const pendingReveal = pendingLocalCaretRevealRef.current;
     const caretRevealOrigin =
-      pendingLocalCaretRevealRef.current && !selectionIsQuiet ? 'local' : layoutUpdateOrigin;
-    pendingLocalCaretRevealRef.current = false;
+      pendingReveal &&
+      pendingReveal.scroller === scroller &&
+      pendingReveal.scrollTop === scroller.scrollTop &&
+      !selectionIsQuiet
+        ? 'local'
+        : layoutUpdateOrigin;
+    pendingLocalCaretRevealRef.current = null;
     if (
       selection.anchor === selection.head &&
       shouldScrollCaretIntoView(caretRevealOrigin, selectionChanged, readOnly)
     ) {
-      const scroller = findVerticalScrollParentOrRoot(host);
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
       if (delta !== 0) scroller.scrollTop += delta;
     }

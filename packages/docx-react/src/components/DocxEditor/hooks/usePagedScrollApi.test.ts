@@ -7,7 +7,11 @@ import type {
   DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { YrsSession } from '@betteroffice/docx/yrs';
-import { restoreScrollSnapshot } from '../internals/scrollRestore';
+import {
+  captureDisplayListScrollAnchor,
+  restoreDisplayListScrollAnchor,
+  restoreScrollSnapshot,
+} from '../internals/scrollRestore';
 import type { DisplayPageNavigation } from './useDisplayList';
 import { usePagedScrollApi } from './usePagedScrollApi';
 
@@ -165,7 +169,7 @@ function revealApi(pageNavigation?: DisplayPageNavigation) {
       }),
     { initialProps: { displayListQueries: unbuiltQueries(false, placeholder) } }
   );
-  return { ...hook, scroller, scrolls, placeholder, match };
+  return { ...hook, scroller, host, scrolls, placeholder, match };
 }
 
 test('a position navigation requests its unbuilt page alongside the guess scroll', () => {
@@ -302,6 +306,43 @@ test('scroll height clamping followed by layout compensation keeps navigation re
     clock.mockRestore();
   }
 });
+
+test.each(['scroll', 'frame'])(
+  'height expansion after clamping and layout compensation keeps navigation refining on a %s',
+  (detection) => {
+    const clock = spyOn(performance, 'now').mockReturnValue(0);
+    const nav = fakePageNavigation();
+    const t = revealApi(nav.pageNavigation);
+    try {
+      let scrollHeight = 10000;
+      Object.defineProperty(t.scroller, 'scrollHeight', { get: () => scrollHeight });
+      const queries = unbuiltQueries(false, { ...t.placeholder, y: 1200 });
+      t.rerender({ displayListQueries: queries });
+      act(() => t.result.current.revealPositionImpl(500));
+      expect(t.scrolls).toEqual([7000]);
+      const anchor = captureDisplayListScrollAnchor(queries, t.host, t.scroller, 500);
+      expect(anchor.scrollTopSnapshot).toBe(7000);
+      scrollHeight = 6900;
+      t.scroller.scrollTop = scrollHeight - t.scroller.clientHeight;
+      expect(t.scroller.scrollTop).toBe(6500);
+      restoreDisplayListScrollAnchor(
+        anchor, unbuiltQueries(false, { ...t.placeholder, y: 400 }), t.host, t.scroller
+      );
+      expect(t.scroller.scrollTop).toBe(6200);
+      scrollHeight = 10000;
+      if (detection === 'scroll') t.scroller.dispatchEvent(new Event('scroll'));
+      act(() => nav.publish(unbuiltQueries(true, t.match)));
+      const target = 6000 + t.match.y + t.match.height / 2 - 200;
+      expect(t.scrolls).toEqual([7000, target]);
+      expect(t.scroller.scrollTop).toBe(target);
+      expect(nav.builds).toEqual([[6], []]);
+    } finally {
+      t.unmount();
+      t.scroller.remove();
+      clock.mockRestore();
+    }
+  }
+);
 
 test('stale layout scroll compensation does not excuse an external move after a reveal', () => {
   const clock = spyOn(performance, 'now').mockReturnValue(0);

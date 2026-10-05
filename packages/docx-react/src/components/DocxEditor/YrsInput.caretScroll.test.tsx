@@ -339,7 +339,7 @@ test.each([false, true])(
     const selection = t.session.selection();
     expect(selection).not.toBeNull();
     expect(selection!.anchor).toEqual(selection!.head);
-    for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
+    for (const [index, state] of (['accepted', 'proposed', 'rejected', 'proposed'] as const).entries()) {
       const scrollTop = 2300;
       t.scroller.scrollTop = scrollTop;
       fireEvent.scroll(t.scroller);
@@ -369,8 +369,8 @@ test.each([false, true])(
       expect(t.published.at(-1)!.layout).toBe(t.pipeline().layout!);
       expect(t.published.at(-1)!.frameEpoch).toBeGreaterThan(frameEpoch);
       expect(t.queries.caretRect.mock.calls.length).toBeGreaterThan(caretQueries);
-      expect(t.layoutInWorker).toHaveBeenCalledTimes(workerPasses + 1);
-      expect(t.retainedLayout).toHaveBeenCalledTimes(hostPasses + (workerLayout ? 0 : 1));
+      expect(t.layoutInWorker).toHaveBeenCalledTimes(workerPasses + (index === 0 ? 0 : 1));
+      expect(t.retainedLayout).toHaveBeenCalledTimes(hostPasses + (workerLayout && index > 0 ? 0 : 1));
       expect(t.session.selection()).toEqual(selection);
       expect(t.scrollChanges).toEqual([]);
       expect(t.scroller.scrollTop).toBe(scrollTop);
@@ -380,6 +380,32 @@ test.each([false, true])(
     }
   }
 );
+
+test('a delayed unchanged selection reveal preserves newer scrolling on a passive frame', async () => {
+  const t = await mount(false, true);
+  t.expectCaret(0);
+  const selection = t.session.selection();
+  const position = t.input.current!.displaySelection()!.head;
+  t.scroller.scrollTop = 2300;
+  expect(offscreenCaretDelta(t)).toBeLessThan(0);
+  const ready = spyOn(t.queries, 'isReady').mockReturnValue(false);
+  restoreMocks.push(() => ready.mockRestore());
+  const caretQueries = t.queries.caretRect.mock.calls.length;
+  act(() => t.input.current!.setSelectionFromDisplay(position));
+  expect(ready).toHaveBeenCalled();
+  expect(t.session.selection()).toEqual(selection);
+  expect(t.queries.caretRect.mock.calls).toHaveLength(caretQueries);
+  expect(t.scroller.scrollTop).toBe(2300);
+  t.scroller.scrollTop = 2000;
+  fireEvent.scroll(t.scroller);
+  ready.mockReturnValue(true);
+  expect(offscreenCaretDelta(t)).toBeLessThan(0);
+  const passiveCaretQueries = t.queries.caretRect.mock.calls.length;
+  act(() => t.view.rerender(t.inputFor({ displayListFrameEpoch: 2 })));
+  expect(t.session.selection()).toEqual(selection);
+  expect(t.queries.caretRect.mock.calls.length).toBeGreaterThan(passiveCaretQueries);
+  expect(t.scroller.scrollTop).toBe(2000);
+});
 
 test.each(['Ctrl+Home', 'Home', 'ArrowLeft', 'ArrowUp', 'setSelectionFromDisplay'])(
   '%s reveals an unchanged caret after a passive relayout',
