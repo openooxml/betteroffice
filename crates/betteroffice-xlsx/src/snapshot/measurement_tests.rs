@@ -79,6 +79,82 @@ fn non_gc_doc(client: u64) -> Doc {
     Doc::with_options(options)
 }
 
+fn alternating_sheet_order_history_update(client: u64, items: usize) -> Vec<u8> {
+    let mut update = Writer::new();
+    update.var_usize(2);
+    for parity in 0..2 {
+        update.var_usize((items - parity).div_ceil(2));
+        update.var_u64(client - parity as u64);
+        update.var_u32(0);
+        for index in (parity..items).step_by(2) {
+            let kind = if index + 1 == items {
+                yrs::block::BLOCK_ITEM_ANY_REF_NUMBER
+            } else {
+                yrs::block::BLOCK_ITEM_DELETED_REF_NUMBER
+            };
+            if index == 0 {
+                update.u8(kind);
+                update.var_u32(1);
+                update.str("xlsx:sheet-order");
+            } else {
+                update.u8(yrs::block::HAS_ORIGIN | kind);
+                update.var_u64(client - (1 - parity) as u64);
+                update.var_usize((index - 1) / 2);
+            }
+            update.var_u32(1);
+            if index + 1 == items {
+                update.u8(119);
+                update.str("sheet:0");
+            }
+        }
+    }
+    update.var_usize(2);
+    for parity in 0..2 {
+        update.var_u64(client - parity as u64);
+        update.var_usize(1);
+        update.var_u32(0);
+        update.var_usize((items - 1 - parity).div_ceil(2));
+    }
+    update.into_bytes()
+}
+
+#[test]
+#[ignore]
+fn snapshot_sheet_order_cap_steps_respect_budget() {
+    if cfg!(debug_assertions) {
+        panic!("run this measurement in release mode");
+    }
+    let worker = empty_worker();
+    let doc = non_gc_doc(u64::from(u32::MAX));
+    {
+        let mut txn = doc.transact_mut();
+        txn.apply_update(Update::decode_v1(&worker.encode_state_as_update_v1()).unwrap())
+            .unwrap();
+        txn.get_array("xlsx:sheet-order")
+            .unwrap()
+            .remove_range(&mut txn, 0, 1);
+    }
+    let baseline = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+    let history = alternating_sheet_order_history_update(
+        doc.client_id().get(),
+        crate::snapshot::yrs_split::SHEET_ORDER_MAX_ITEMS - 1,
+    );
+    for (records, bytes) in [(1, 1024), (256, 16_384)] {
+        let budget = SnapshotBudget::new(records, bytes).unwrap();
+        let mut parts = split(&baseline, budget);
+        parts.extend(split(&history, budget));
+        let (chunks, vector) = frames_for_parts(&worker, parts, budget);
+        let peer = measure_frames(&chunks, "sheet order at the item and clock cap", budget);
+        assert_eq!(peer.encode_state_vector_v1(), vector);
+        assert_eq!(
+            canonical_model(worker.model()),
+            canonical_model(peer.model())
+        );
+    }
+}
+
 #[test]
 #[ignore]
 fn snapshot_live_subtree_replacement_steps_respect_budget() {

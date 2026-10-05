@@ -15,6 +15,8 @@ pub(crate) struct SnapshotValidation {
     maps: BTreeMap<SnapshotParent, (usize, &'static str)>,
     sheet_keys: BTreeMap<usize, Arc<str>>,
     sheet_indices: BTreeMap<Arc<str>, usize>,
+    order_keys: BTreeMap<usize, Arc<str>>,
+    style_components: BTreeSet<(u8, u32)>,
     pending_cell: Option<(CellRef, bool)>,
     spill_after: Option<(u32, u32)>,
     version: i64,
@@ -494,6 +496,23 @@ impl SnapshotValidation {
             {
                 return Err(invalid());
             }
+            self.phase = 9;
+            return Ok(false);
+        }
+        if self.phase == 9 {
+            allowance(128, budget, &mut self.unit_bytes)?;
+            let index = self.order_keys.len();
+            if index < model.sheets.len() {
+                let value = order.get(&txn, index as u32).ok_or_else(invalid)?;
+                let Out::Any(Any::String(key)) = value else {
+                    return Err(invalid());
+                };
+                if key.len() > 64 {
+                    return Err(invalid());
+                }
+                self.order_keys.insert(index, key);
+                return Ok(false);
+            }
             self.phase = 8;
             return Ok(false);
         }
@@ -542,7 +561,7 @@ impl SnapshotValidation {
                 Some(xf)
             } else {
                 allowance(64, budget, &mut self.unit_bytes)?;
-                self.phase = 1;
+                self.phase = 10;
                 return Ok(false);
             };
             let start = self.json.bytes;
@@ -580,14 +599,45 @@ impl SnapshotValidation {
             self.style_index += 1;
             return Ok(false);
         }
-        if self.phase == 1 {
-            if let Some(sheet) = model.sheets.get(self.sheet) {
-                let Some(Out::Any(Any::String(key))) = order.get(&txn, self.sheet as u32) else {
-                    return Err(invalid());
-                };
-                if key.len() > 64 {
+        if self.phase == 10 {
+            allowance(768, budget, &mut self.unit_bytes)?;
+            if let Some(xf) = model.styles.cell_xfs.get(self.base_index) {
+                if self.base_index >= base.styles.cell_xfs.len()
+                    && (xf
+                        .font
+                        .is_some_and(|index| index as usize >= model.styles.fonts.len())
+                        || xf
+                            .fill
+                            .is_some_and(|index| index as usize >= model.styles.fills.len())
+                        || xf
+                            .border
+                            .is_some_and(|index| index as usize >= model.styles.borders.len())
+                        || xf == &xlsx_model::styles::Xf::default())
+                {
                     return Err(invalid());
                 }
+                for (field, index) in [(0, xf.font), (1, xf.fill), (2, xf.border)] {
+                    if let Some(index) = index {
+                        self.style_components.insert((field, index));
+                    }
+                }
+                if let Some(id) = xf.num_fmt_id {
+                    self.style_components.insert((3, u32::from(id)));
+                }
+                self.base_index += 1;
+            } else {
+                self.base_index = 0;
+                self.phase = 1;
+            }
+            return Ok(false);
+        }
+        if self.phase == 1 {
+            if let Some(sheet) = model.sheets.get(self.sheet) {
+                let key = self
+                    .order_keys
+                    .get(&self.sheet)
+                    .ok_or_else(invalid)?
+                    .clone();
                 let map = sheets
                     .get(&txn, &key)
                     .and_then(|value| value.cast::<MapRef>().ok())
@@ -1010,9 +1060,7 @@ impl SnapshotValidation {
                             }
                         }
                         SnapshotParent::Root(name) if name.as_ref() == SHEETS => {
-                            if !self.sheet_indices.contains_key(key.as_ref())
-                                || !matches!(value, Out::YMap(_))
-                            {
+                            if !matches!(value, Out::YMap(_)) {
                                 return Err(invalid());
                             }
                         }
@@ -1234,6 +1282,11 @@ impl SnapshotValidation {
             self.maps.pop_first();
             return Ok(false);
         }
+        if let Some((_, key)) = self.order_keys.last_key_value() {
+            allowance(key.len() + 128, budget, &mut self.unit_bytes)?;
+            self.order_keys.pop_last();
+            return Ok(false);
+        }
         if let Some((_, key)) = self.sheet_keys.first_key_value() {
             allowance(key.len() + 128, budget, &mut self.unit_bytes)?;
             self.sheet_keys.pop_first();
@@ -1252,6 +1305,11 @@ impl SnapshotValidation {
         if let Some(key) = self.format_keys.first() {
             allowance(key.len() + 128, budget, &mut self.unit_bytes)?;
             self.format_keys.pop_first();
+            return Ok(false);
+        }
+        if !self.style_components.is_empty() {
+            allowance(128, budget, &mut self.unit_bytes)?;
+            self.style_components.pop_first();
             return Ok(false);
         }
         if !self.number_formats.is_empty() {
@@ -1486,8 +1544,15 @@ impl SnapshotValidation {
                     self.base_index += 1;
                     return Ok(false);
                 }
-                if base.styles.fonts.len() != model.styles.fonts.len() {
-                    return Err(invalid());
+                if let Some(value) = model.styles.fonts.get(index) {
+                    allowance(128, budget, &mut self.unit_bytes)?;
+                    if !self.style_components.contains(&(0, index as u32))
+                        && value != &xlsx_model::styles::Font::default()
+                    {
+                        return Err(invalid());
+                    }
+                    self.base_index += 1;
+                    return Ok(false);
                 }
             }
             7 => {
@@ -1510,8 +1575,15 @@ impl SnapshotValidation {
                     self.base_index += 1;
                     return Ok(false);
                 }
-                if base.styles.fills.len() != model.styles.fills.len() {
-                    return Err(invalid());
+                if let Some(value) = model.styles.fills.get(index) {
+                    allowance(128, budget, &mut self.unit_bytes)?;
+                    if !self.style_components.contains(&(1, index as u32))
+                        && value != &xlsx_model::styles::Fill::default()
+                    {
+                        return Err(invalid());
+                    }
+                    self.base_index += 1;
+                    return Ok(false);
                 }
             }
             8 => {
@@ -1538,8 +1610,15 @@ impl SnapshotValidation {
                     self.base_index += 1;
                     return Ok(false);
                 }
-                if base.styles.borders.len() != model.styles.borders.len() {
-                    return Err(invalid());
+                if let Some(value) = model.styles.borders.get(index) {
+                    allowance(128, budget, &mut self.unit_bytes)?;
+                    if !self.style_components.contains(&(2, index as u32))
+                        && value != &xlsx_model::styles::Border::default()
+                    {
+                        return Err(invalid());
+                    }
+                    self.base_index += 1;
+                    return Ok(false);
                 }
             }
             9 => {
@@ -1556,9 +1635,6 @@ impl SnapshotValidation {
                     }
                     self.base_index += 1;
                     return Ok(false);
-                }
-                if base.styles.cell_xfs.len() != model.styles.cell_xfs.len() {
-                    return Err(invalid());
                 }
             }
             10 => {
@@ -1577,8 +1653,15 @@ impl SnapshotValidation {
                     self.base_index += 1;
                     return Ok(false);
                 }
-                if base.styles.num_fmts.len() != model.styles.num_fmts.len() {
-                    return Err(invalid());
+                if let Some((id, _)) = model.styles.num_fmts.get(index) {
+                    allowance(128, budget, &mut self.unit_bytes)?;
+                    if !self.style_components.contains(&(3, u32::from(*id)))
+                        || self.number_formats.get(id) != Some(&index)
+                    {
+                        return Err(invalid());
+                    }
+                    self.base_index += 1;
+                    return Ok(false);
                 }
             }
             11 => {

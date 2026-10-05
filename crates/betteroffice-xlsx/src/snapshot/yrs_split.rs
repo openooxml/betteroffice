@@ -15,6 +15,7 @@ use yrs::types::{
 const MAX_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 const MAX_CLOCK: u32 = i32::MAX as u32;
 const MAX_NESTING: u8 = 64;
+pub(crate) const SHEET_ORDER_MAX_ITEMS: usize = 16_384;
 
 #[cfg(test)]
 thread_local! {
@@ -34,6 +35,7 @@ pub(crate) enum SplitError {
     RetainedDeletion,
     OversizedStruct,
     SharedText,
+    SheetOrderLimit,
 }
 
 impl SplitError {
@@ -50,6 +52,7 @@ impl SplitError {
             Self::RetainedDeletion => "retained_deletion",
             Self::OversizedStruct => "oversized_struct",
             Self::SharedText => "shared_text_is_not_supported",
+            Self::SheetOrderLimit => "sheet_order_exceeds_item_or_clock_limit",
         }
     }
 }
@@ -68,6 +71,7 @@ struct Struct<'a> {
     dependencies: [Option<(u64, u32)>; 3],
     root: Option<&'a str>,
     key: Option<&'a str>,
+    sheet_keys: bool,
 }
 
 pub(crate) fn split_update_v1(
@@ -628,7 +632,14 @@ pub(crate) struct CausalState {
     kinds: BTreeMap<(u64, u32), (u32, u8)>,
     locations: SnapshotLocations,
     keys: SnapshotKeys,
-    order_seen: bool,
+    order_items: usize,
+    order_clocks: usize,
+}
+
+#[derive(Default)]
+struct AdmissionCheckpoint {
+    clocks: BTreeMap<u64, Option<u32>>,
+    keys: Vec<(SnapshotParent, std::sync::Arc<str>)>,
 }
 
 impl CausalState {
@@ -701,6 +712,47 @@ impl CausalState {
     pub(crate) fn admit(&mut self, update: &[u8]) -> Result<(), SplitError> {
         #[cfg(test)]
         ADMISSION_ATTEMPTS.set(ADMISSION_ATTEMPTS.get() + 1);
+        let mut checkpoint = AdmissionCheckpoint::default();
+        let order_items = self.order_items;
+        let order_clocks = self.order_clocks;
+        let result = self.admit_inner(update, &mut checkpoint);
+        if result.is_err() {
+            self.order_items = order_items;
+            self.order_clocks = order_clocks;
+            for (client, clock) in checkpoint.clocks {
+                let start = clock.unwrap_or_default();
+                while let Some((&key, _)) = self
+                    .locations
+                    .range((client, start)..=(client, u32::MAX))
+                    .next()
+                {
+                    self.locations.remove(&key);
+                }
+                while let Some((&key, _)) = self
+                    .kinds
+                    .range((client, start)..=(client, u32::MAX))
+                    .next()
+                {
+                    self.kinds.remove(&key);
+                }
+                if let Some(clock) = clock {
+                    self.clocks.insert(client, clock);
+                } else {
+                    self.clocks.remove(&client);
+                }
+            }
+            for key in checkpoint.keys {
+                self.keys.remove(&key);
+            }
+        }
+        result
+    }
+
+    fn admit_inner(
+        &mut self,
+        update: &[u8],
+        checkpoint: &mut AdmissionCheckpoint,
+    ) -> Result<(), SplitError> {
         let mut scanner = Scanner::new(update);
         scanner.allow_maps = true;
         let clients = scanner.count()?;
@@ -711,6 +763,10 @@ impl CausalState {
             if count == 0 || clock != self.clocks.get(&client).copied().unwrap_or_default() {
                 return Err(SplitError::MissingDependency);
             }
+            checkpoint
+                .clocks
+                .entry(client)
+                .or_insert_with(|| self.clocks.get(&client).copied());
             for _ in 0..count {
                 let block = scanner.block()?;
                 if block.kind == BLOCK_SKIP_REF_NUMBER {
@@ -767,16 +823,35 @@ impl CausalState {
                 if let Some((parent, key)) = location {
                     if matches!(&parent, SnapshotParent::Root(name) if name.as_ref() == "xlsx:sheet-order")
                     {
-                        if self.order_seen
-                            || block.kind != BLOCK_ITEM_ANY_REF_NUMBER
-                            || key.is_some()
+                        if key.is_some()
+                            || !matches!(
+                                block.kind,
+                                BLOCK_ITEM_ANY_REF_NUMBER
+                                    | BLOCK_ITEM_DELETED_REF_NUMBER
+                                    | BLOCK_GC_REF_NUMBER
+                            )
+                            || (block.kind == BLOCK_ITEM_ANY_REF_NUMBER && !block.sheet_keys)
                         {
                             return Err(SplitError::UnsupportedContent(block.kind));
                         }
-                        self.order_seen = true;
+                        self.order_items += usize::from(block.kind != BLOCK_GC_REF_NUMBER);
+                        let clocks = if block.kind == BLOCK_ITEM_ANY_REF_NUMBER {
+                            1
+                        } else {
+                            block.len as usize
+                        };
+                        self.order_clocks = self.order_clocks.saturating_add(clocks);
+                        if self.order_items > SHEET_ORDER_MAX_ITEMS
+                            || self.order_clocks > SHEET_ORDER_MAX_ITEMS
+                        {
+                            return Err(SplitError::SheetOrderLimit);
+                        }
                     }
                     if let Some(key) = &key {
-                        self.keys.insert((parent.clone(), key.clone()));
+                        let entry = (parent.clone(), key.clone());
+                        if self.keys.insert(entry.clone()) {
+                            checkpoint.keys.push(entry);
+                        }
                     }
                     self.locations
                         .insert((client, clock), (block.len, parent, key));
@@ -1099,6 +1174,7 @@ impl<'a> Scanner<'a> {
         let mut dependencies = [None; 3];
         let mut root = None;
         let mut key = None;
+        let mut sheet_keys = true;
         let len = if info == BLOCK_GC_REF_NUMBER || info == BLOCK_SKIP_REF_NUMBER {
             self.var_u32()?
         } else {
@@ -1182,7 +1258,13 @@ impl<'a> Scanner<'a> {
                 BLOCK_ITEM_ANY_REF_NUMBER => {
                     let len = self.count()?;
                     for _ in 0..len {
-                        self.any(0)?;
+                        if self.bytes.get(self.pos) == Some(&119) {
+                            self.byte()?;
+                            sheet_keys &= self.string()?.len() <= 64;
+                        } else {
+                            sheet_keys = false;
+                            self.any(0)?;
+                        }
                     }
                     len
                 }
@@ -1203,6 +1285,7 @@ impl<'a> Scanner<'a> {
             dependencies,
             root,
             key,
+            sheet_keys,
         })
     }
 
@@ -1765,6 +1848,53 @@ mod tests {
             map.remove(&mut txn, "child");
         }
         assert_doc(&doc);
+    }
+
+    #[test]
+    fn failed_admission_restores_existing_clocks_kinds_locations_and_keys() {
+        use yrs::WriteTxn;
+
+        let doc = Doc::with_client_id(7);
+        let root = doc.get_or_insert_map("journal");
+        root.insert(&mut doc.transact_mut(), "existing", 0_i64);
+        root.insert(&mut doc.transact_mut(), "nested", MapPrelim::default());
+        let baseline = doc.transact().state_vector();
+        let mut causal = CausalState::default();
+        causal
+            .admit(
+                &doc.transact()
+                    .encode_state_as_update_v1(&StateVector::default()),
+            )
+            .unwrap();
+        let clocks = causal.clocks.clone();
+        let kinds = causal.kinds.clone();
+        let locations = causal.locations.clone();
+        let keys = causal.keys.clone();
+        {
+            let mut txn = doc.transact_mut();
+            root.insert(&mut txn, "existing", 1_i64);
+            root.insert(&mut txn, "new", MapPrelim::default());
+            txn.get_or_insert_array("xlsx:sheet-order")
+                .insert(&mut txn, 0, "sheet:0");
+        }
+        let delta = doc.transact().encode_diff_v1(&baseline);
+        let mut malformed = delta.clone();
+        malformed.push(0);
+        assert_eq!(causal.admit(&malformed), Err(SplitError::Malformed));
+        assert_eq!(causal.clocks, clocks);
+        assert_eq!(causal.kinds, kinds);
+        assert_eq!(causal.locations, locations);
+        assert_eq!(causal.keys, keys);
+        assert_eq!(causal.order_items, 0);
+        assert_eq!(causal.order_clocks, 0);
+        causal.admit(&delta).unwrap();
+        assert_eq!(causal.order_items, 1);
+        assert_eq!(causal.order_clocks, 1);
+        assert!(
+            causal
+                .keys
+                .contains(&(SnapshotParent::Root("journal".into()), "new".into()))
+        );
     }
 
     #[test]
