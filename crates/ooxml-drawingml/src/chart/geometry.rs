@@ -3727,8 +3727,8 @@ fn scatter_x_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
     }
     if max <= min {
         match (pinned_min, pinned_max) {
-            (Some(_), None) => max = min + min.abs().max(1.0) * 0.05,
-            (None, Some(_)) => min = max - max.abs().max(1.0) * 0.05,
+            (Some(_), None) => max = (min + min.abs().max(1.0) * 0.05).min(f64::MAX),
+            (None, Some(_)) => min = (max - max.abs().max(1.0) * 0.05).max(f64::MIN),
             (Some(_), Some(_)) => {}
             (None, None) => {
                 let low = min.min(0.0);
@@ -6079,6 +6079,171 @@ mod tests {
                     let ratio = if reversed { 1.0 - fraction } else { fraction };
                     assert!((markers[0].0 - (30.0 + 240.0 * ratio)).abs() < 0.01);
                     assert!((markers[0].1 - 100.0).abs() < 0.01);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_overflow_preserves_pinned_bounds() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, expected, fraction) in [
+                (
+                    -1.75e308,
+                    (None, Some(-1.75e308)),
+                    (f64::MIN, -1.75e308),
+                    1.0,
+                ),
+                (1.75e308, (Some(1.75e308), None), (1.75e308, f64::MAX), 0.0),
+            ] {
+                for reversed in [false, true] {
+                    for major_unit in [None, Some(1.0)] {
+                        let x = [value];
+                        let mut xy = series("XY", &data);
+                        xy.x_values = &x;
+                        xy.bubble_sizes = &sizes;
+                        let mut group = group(chart_type, vec![xy]);
+                        group.axis_ids = vec!["x", "y"];
+                        let x_axis = PlotAxis {
+                            id: Some("x"),
+                            kind: PlotAxisKind::Value,
+                            range: PlotAxisRange {
+                                min: bounds.0,
+                                max: bounds.1,
+                            },
+                            reversed,
+                            major_unit,
+                            ..PlotAxis::default()
+                        };
+                        let chart = PlotChart {
+                            chart_type,
+                            plot_groups: vec![group],
+                            axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                            ..PlotChart::default()
+                        };
+                        let (scale, _) = xy_scales(&chart);
+                        assert_eq!((scale.min, scale.max), expected, "{chart_type}");
+                        assert!(scale.min.is_finite() && scale.max.is_finite());
+                        assert!(scale.max > scale.min);
+                        assert!((scale.max - scale.min).is_finite());
+                        assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                        assert_eq!(scale.fraction(value), fraction);
+                        assert_eq!(
+                            scale.ratio(value),
+                            if reversed { 1.0 - fraction } else { fraction }
+                        );
+                        let ticks = axis_ticks(scale, major_unit);
+                        assert!(ticks.len() >= 2, "{ticks:?}");
+                        assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                        assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_inward_extremes_preserve_pinned_bounds() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds, fraction) in [
+                (f64::MIN, (Some(f64::MIN), None), 0.0),
+                (f64::MAX, (None, Some(f64::MAX)), 1.0),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let x_axis = PlotAxis {
+                        id: Some("x"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: bounds.0,
+                            max: bounds.1,
+                        },
+                        reversed,
+                        ..PlotAxis::default()
+                    };
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    if let Some(min) = bounds.0 {
+                        assert_eq!(scale.min, min);
+                    }
+                    if let Some(max) = bounds.1 {
+                        assert_eq!(scale.max, max);
+                    }
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert!(scale.max > scale.min);
+                    assert!((scale.max - scale.min).is_finite());
+                    assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                    assert_eq!(scale.fraction(value), fraction);
+                    assert_eq!(
+                        scale.ratio(value),
+                        if reversed { 1.0 - fraction } else { fraction }
+                    );
+                    let ticks = axis_ticks(scale, None);
+                    assert!(ticks.len() >= 2, "{ticks:?}");
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert!(ticks.windows(2).all(|pair| pair[0] < pair[1]), "{ticks:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scatter_and_bubble_constant_x_outward_extremes_keep_degenerate_fallback() {
+        let data = source(&[10.0]);
+        let sizes = [2.0];
+        for chart_type in ["scatter", "bubble"] {
+            for (value, bounds) in [
+                (f64::MIN, (None, Some(f64::MIN))),
+                (f64::MAX, (Some(f64::MAX), None)),
+            ] {
+                for reversed in [false, true] {
+                    let x = [value];
+                    let mut xy = series("XY", &data);
+                    xy.x_values = &x;
+                    xy.bubble_sizes = &sizes;
+                    let mut group = group(chart_type, vec![xy]);
+                    group.axis_ids = vec!["x", "y"];
+                    let x_axis = PlotAxis {
+                        id: Some("x"),
+                        kind: PlotAxisKind::Value,
+                        range: PlotAxisRange {
+                            min: bounds.0,
+                            max: bounds.1,
+                        },
+                        reversed,
+                        ..PlotAxis::default()
+                    };
+                    let chart = PlotChart {
+                        chart_type,
+                        plot_groups: vec![group],
+                        axes: vec![x_axis, value_axis("y", 0.0, 20.0)],
+                        ..PlotChart::default()
+                    };
+                    let (scale, _) = xy_scales(&chart);
+                    assert_eq!((scale.min, scale.max), (value, value), "{chart_type}");
+                    assert!(scale.min.is_finite() && scale.max.is_finite());
+                    assert_eq!(scale.max - scale.min, 0.0);
+                    assert!(scale.unit.is_finite() && scale.unit > 0.0);
+                    assert_eq!(scale.fraction(value), 0.0);
+                    assert_eq!(scale.ratio(value), if reversed { 1.0 } else { 0.0 });
+                    let ticks = axis_ticks(scale, None);
+                    assert_eq!(ticks, vec![value; 5]);
+                    assert!(ticks.iter().all(|value| value.is_finite()), "{ticks:?}");
+                    assert!(ticks.windows(2).all(|pair| pair[0] <= pair[1]), "{ticks:?}");
                 }
             }
         }
