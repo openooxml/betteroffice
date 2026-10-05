@@ -414,7 +414,7 @@ describe('workbook edit peers', () => {
     });
     try {
       const proposal = edits.propose('agent', null, [{
-        sheet: 0, row: 6, col: 4, input: '=NOW()+RAND()', numberFormat: 'number',
+        sheet: 0, row: 6, col: 4, input: '=NOW()+RANDBETWEEN(1,1000000)', numberFormat: 'number',
       }]);
       await matchingDigest(1, 'propose', edits, peer, session);
       expect(peer.version()).toBe(await session.call.version());
