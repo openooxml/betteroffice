@@ -2314,6 +2314,8 @@ pub struct Page {
     pub fragments: Vec<Fragment>,
     #[serde(skip)]
     pub(crate) float_bands: Vec<PageFloatBand>,
+    #[serde(skip)]
+    pub(crate) opening_fragment_geometry: Option<Box<crate::page_flow::OpeningFragmentGeometry>>,
     pub margins: PageMargins,
     /// Body flow margins when they differ from the anchor frame.
     #[serde(skip_serializing_if = "Option::is_none")]

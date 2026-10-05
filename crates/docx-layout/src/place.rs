@@ -66,36 +66,6 @@ pub struct LayoutCheckpoint {
     pub page_index: usize,
     pub page_number: u32,
     pub flow: PageFlowGeometry,
-    pub(crate) opening_fragment_geometry: Option<OpeningFragmentGeometry>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct OpeningFragmentGeometry {
-    size: Size,
-    margins: crate::types::PageMargins,
-    columns: Option<crate::types::ColumnLayout>,
-    float_bands: Vec<crate::types::PageFloatBand>,
-    footnote_reserved_height: Option<f64>,
-}
-
-impl OpeningFragmentGeometry {
-    fn from_page(page: &crate::types::Page) -> Self {
-        Self {
-            size: page.size.clone(),
-            margins: page.margins.clone(),
-            columns: page.columns.clone(),
-            float_bands: page.float_bands.clone(),
-            footnote_reserved_height: page.footnote_reserved_height,
-        }
-    }
-
-    fn same_geometry(&self, page: &crate::types::Page) -> bool {
-        self.size == page.size
-            && self.margins == page.margins
-            && self.columns == page.columns
-            && self.float_bands == page.float_bands
-            && self.footnote_reserved_height == page.footnote_reserved_height
-    }
 }
 
 /// Resident result of one placement pass, including execution metadata used
@@ -182,7 +152,11 @@ fn pristine_paragraph_start(
 }
 
 impl<F: PartialEq> ConvergenceInput<'_, F> {
-    fn retained_match(&self, checkpoint: &LayoutCheckpoint) -> Option<Convergence> {
+    fn retained_match(
+        &self,
+        checkpoint: &LayoutCheckpoint,
+        opening_fragment_geometry: Option<&crate::page_flow::OpeningFragmentGeometry>,
+    ) -> Option<Convergence> {
         if checkpoint.block_index <= self.dirty_index {
             return None;
         }
@@ -208,7 +182,12 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
             .find(|previous| {
                 previous.section_index == checkpoint.section_index
                     && previous.page_number == checkpoint.page_number
-                    && previous.opening_fragment_geometry == checkpoint.opening_fragment_geometry
+                    && self
+                        .previous_pages
+                        .get(previous.page_index)
+                        .is_some_and(|page| {
+                            page.opening_fragment_geometry.as_deref() == opening_fragment_geometry
+                        })
                     && if suffix_matches {
                         flow_matches_from_page(
                             &previous.flow,
@@ -318,15 +297,8 @@ fn resumable(
     }) && (fragments.next().is_none()
         || pristine_paragraph_start(checkpoint.block_index, measured, page));
     let flow = &checkpoint.flow;
-    let same_geometry = checkpoint.page_index.checked_sub(1).is_some_and(|before| {
-        pages
-            .get(before)
-            .zip(pages.get(checkpoint.page_index))
-            .is_some_and(|(before, page)| {
-                OpeningFragmentGeometry::from_page(before).same_geometry(page)
-            })
-    });
-    same_geometry
+    checkpoint.page_index > 0
+        && page.opening_fragment_geometry.is_none()
         && starts_paragraph
         && flow.pending_page_size.is_none()
         && flow.pending_margins.is_none()
@@ -960,9 +932,9 @@ fn place<F: PartialEq>(
                 page_index: page_index_offset + page_index,
                 page_number,
                 flow,
-                opening_fragment_geometry: None,
             };
-            if let Some(converged) = convergence.and_then(|value| value.retained_match(&checkpoint))
+            if let Some(converged) =
+                convergence.and_then(|value| value.retained_match(&checkpoint, None))
             {
                 paginator.pages.truncate(page_index);
                 return Ok(PlacementOutcome {
@@ -1033,7 +1005,6 @@ fn place<F: PartialEq>(
             }
         }
 
-        let mut opening_page_index = paginator.pages.len().checked_sub(1);
         match &mb.block {
             LayoutBlock::Paragraph(block) => {
                 let BlockExtent::Paragraph(measure) = &mb.measure else {
@@ -1041,7 +1012,7 @@ fn place<F: PartialEq>(
                         "layoutParagraph: expected paragraph measure".into(),
                     ));
                 };
-                opening_page_index = Some(layout_paragraph(block, measure, paginator)?);
+                layout_paragraph(block, measure, paginator)?;
             }
 
             LayoutBlock::Table(block) => {
@@ -1195,13 +1166,13 @@ fn place<F: PartialEq>(
                 page_index: page_index_offset + page_index,
                 page_number,
                 flow,
-                opening_fragment_geometry: opening_page_index
-                    .and_then(|opening| paginator.pages.get(opening))
-                    .map(OpeningFragmentGeometry::from_page)
-                    .filter(|geometry| !geometry.same_geometry(&paginator.pages[page_index])),
             };
-            if let Some(converged) = convergence.and_then(|value| value.retained_match(&checkpoint))
-            {
+            if let Some(converged) = convergence.and_then(|value| {
+                value.retained_match(
+                    &checkpoint,
+                    paginator.pages[page_index].opening_fragment_geometry.as_deref(),
+                )
+            }) {
                 paginator.pages.truncate(page_index);
                 return Ok(PlacementOutcome {
                     checkpoints,
@@ -1366,7 +1337,7 @@ fn layout_paragraph(
     block: &ParagraphBlock,
     measure: &ParagraphExtent,
     paginator: &mut Paginator,
-) -> Result<usize, LayoutError> {
+) -> Result<(), LayoutError> {
     // an unknown run kind can't be re-emitted faithfully in resolved lines
     if block.runs.iter().any(|r| matches!(r, Run::Unsupported)) {
         return Err(LayoutError::Unsupported("unknown run kind".into()));
@@ -1398,7 +1369,7 @@ fn layout_paragraph(
         });
 
         paginator.add_fragment(fragment, 0.0, space_before, space_after);
-        return Ok(paginator.state(state_idx).page_index);
+        return Ok(());
     }
 
     let space_before = get_spacing_before(block);
@@ -1422,7 +1393,6 @@ fn layout_paragraph(
     }
 
     let mut current_line_index = 0usize;
-    let mut opening_page_index = None;
 
     while current_line_index < lines.len() {
         if paginator.has_float_bands() {
@@ -1526,9 +1496,6 @@ fn layout_paragraph(
         }
 
         let is_first_fragment = current_line_index == 0;
-        if is_first_fragment {
-            opening_page_index = Some(paginator.state(state_idx).page_index);
-        }
         let is_last_fragment = current_line_index + fitting_lines >= lines.len();
         let effective_space_before = if is_first_fragment { space_before } else { 0.0 };
         let effective_space_after = if is_last_fragment { space_after } else { 0.0 };
@@ -1577,13 +1544,7 @@ fn layout_paragraph(
         }
     }
 
-    Ok(match opening_page_index {
-        Some(page_index) => page_index,
-        None => {
-            let current = paginator.get_current();
-            paginator.state(current).page_index
-        }
-    })
+    Ok(())
 }
 
 /// Places inline images in flow and anchored images over the page.
@@ -3049,6 +3010,82 @@ mod pagination_rule_tests {
             serde_json::to_vec(&full.layout).unwrap()
         );
         assert_eq!(incremental.checkpoints, full.checkpoints);
+    }
+
+    #[test]
+    fn incremental_convergence_matches_fitting_geometry_with_first_page_margins() {
+        let value = |margin: f64| {
+            let mut value = input(vec![
+                paragraph(0, 10, 10.0, json!({})),
+                json!({
+                    "block": {
+                        "kind": "sectionBreak", "id": "section", "type": "continuous",
+                        "margins": { "top": 10, "right": margin, "bottom": 10, "left": margin },
+                    },
+                    "measure": { "kind": "sectionBreak" },
+                }),
+                paragraph(2, 1, 10.0, json!({ "alignment": "center" })),
+                paragraph(3, 1, 10.0, json!({})),
+            ]);
+            value.options.final_margins = serde_json::from_value(json!({
+                "top": 10, "right": 30, "bottom": 10, "left": 30,
+            }))
+            .unwrap();
+            value.options.section_page_margins = Some(
+                serde_json::from_value(json!([
+                    { "first": { "top": 10, "right": 10, "bottom": 10, "left": 10 } },
+                    {},
+                ]))
+                .unwrap(),
+            );
+            value
+        };
+        let previous = layout_document_checkpointed(&mut value(10.0)).unwrap();
+        let Fragment::Paragraph(previous_fragment) = &previous.layout.pages[1].fragments[0] else {
+            panic!("paragraph expected")
+        };
+        assert_eq!(previous_fragment.width, 180.0);
+        let incremental = layout_document_incremental(
+            &mut value(20.0),
+            &mut previous.layout.clone(),
+            &previous.checkpoints,
+            &[1_u64; 4],
+            &[1, 2, 1, 1],
+            1,
+        )
+        .unwrap();
+        let mut full_input = value(20.0);
+        let full = layout_document_checkpointed(&mut full_input).unwrap();
+        assert_eq!(full.layout.pages.len(), 2);
+        assert_eq!(previous.layout.pages[0].margins, full.layout.pages[0].margins);
+        assert_ne!(
+            previous.layout.pages[1].opening_fragment_geometry,
+            full.layout.pages[1].opening_fragment_geometry
+        );
+        let Fragment::Paragraph(full_fragment) = &full.layout.pages[1].fragments[0] else {
+            panic!("paragraph expected")
+        };
+        let Fragment::Paragraph(incremental_fragment) = &incremental.layout.pages[1].fragments[0]
+        else {
+            panic!("paragraph expected")
+        };
+        assert_eq!(full_fragment.width, 160.0);
+        assert_eq!(incremental_fragment.width, full_fragment.width);
+        assert_eq!(
+            serde_json::to_vec(&incremental.layout).unwrap(),
+            serde_json::to_vec(&full.layout).unwrap()
+        );
+        assert_eq!(incremental.checkpoints, full.checkpoints);
+        assert_eq!(
+            incremental.layout.pages[1].opening_fragment_geometry,
+            full.layout.pages[1].opening_fragment_geometry
+        );
+        let checkpoint = full
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.block_index == 2 && checkpoint.page_index == 1)
+            .unwrap();
+        assert!(!resumable(checkpoint, &full_input.measured, &full.layout.pages));
     }
 
     #[test]
