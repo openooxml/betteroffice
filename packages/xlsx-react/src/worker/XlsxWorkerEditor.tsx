@@ -474,23 +474,23 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const owner = runRef.current;
     if (!owner?.peer) { setProposals([]); return; }
     setProposals(owner.peer.listProposals());
-    if (!owner.recovering) sourceRef.current?.scheduleEdit();
+    if (!owner.recovering) sourceRef.current?.scheduleEdit(false);
     commands.refresh();
   }, [commands]);
 
   const peerPaint = useCallback(() => {
     if (run?.retiring || run?.recovering) return;
-    sourceRef.current?.scheduleEdit();
+    sourceRef.current?.scheduleEdit(false);
   }, [run]);
 
-  const trackCommit = useCallback((op?: WorkbookReplayOp) => {
+  const trackCommit = useCallback((op?: WorkbookReplayOp, needsPublication = false) => {
     if (op) {
       completedPreviews.set(op, run?.editPeer?.sentSequence ?? 0);
       unpreviewedOps.delete(op);
     }
     const complete = !unpreviewedOps.size && previewJournal.every((pending) => completedPreviews.has(pending));
     previewState.sequence = complete ? Math.max(0, ...previewJournal.map((pending) => completedPreviews.get(pending)!)) : Infinity;
-    sourceRef.current?.scheduleEdit();
+    sourceRef.current?.scheduleEdit(needsPublication && !run?.recovering && !run?.retiring);
   }, [run, previewState, completedPreviews, unpreviewedOps, previewJournal]);
 
   const closeWrittenDraft = (draft: InputDraft) => {
@@ -519,7 +519,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         previewState.request = null;
         setPreviewDraft(null);
       }
-      trackCommit(op);
+      trackCommit(op, (!('ok' in result) || result.ok) && result.applied);
       mutationRef.current += 1;
       const info = owner.peer.sheetInfo();
       if (viewRef.current && info.activeSheet === activeRef.current) {
@@ -621,7 +621,11 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       setCapturedFormat(null); commands.refresh();
     },
     refreshProposals, recoverInput, selectCells: place, previewEdits,
-    publicationOutcome: () => run?.ready && previewJournal.length > 1 ? sourceRef.current?.publicationOutcome ?? null : null,
+    publicationOutcome: () => {
+      if (!run?.ready || previewJournal.length < 2) return null;
+      const source = sourceRef.current;
+      return source?.issuedPublicationOutcome ?? (previewOps.size > 1 ? source?.publicationOutcome ?? null : null);
+    },
     beforeNavigation: async () => {
       if (!await afterPaint()) throw new WorkerInputRefusal('The edited worker frame is not ready');
     },

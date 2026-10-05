@@ -92,6 +92,117 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void) {
 }
 
 describe('WorkerPaintSource', () => {
+  for (const result of ['accepted', 'failed'] as const) {
+    test(`settles an outcome captured before its publication is issued when ${result}`, async () => {
+      const { source, requests, paints, errors, callbacks, tick, respond } = harness();
+      source.scheduleEdit();
+      const outcome = source.publicationOutcome!;
+      expect(outcome).not.toBeNull();
+      expect(source.issuedPublicationOutcome).toBeNull();
+      expect(requests).toHaveLength(0);
+      expect(callbacks.size).toBe(1);
+      let settled = false;
+      void outcome.then(() => { settled = true; }, () => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      tick();
+      expect(requests).toHaveLength(1);
+      expect(source.issuedPublicationOutcome).toBe(outcome);
+      if (result === 'failed') {
+        const failure = new Error('Unissued predecessor publication failed');
+        requests[0].reply.reject(failure);
+        await expect(outcome).rejects.toBe(failure);
+        expect(errors).toEqual([failure]);
+        expect(paints).toEqual([]);
+      } else {
+        await respond(0, frame(requests[0].request));
+        await expect(outcome).resolves.toBeUndefined();
+        expect(errors).toEqual([]);
+        expect(paints).toHaveLength(1);
+      }
+      expect(source.publicationOutcome).toBeNull();
+    });
+  }
+
+  test('settles every coalesced edit slot after one accepted publication', async () => {
+    const { source, state, requests, callbacks, tick, respond } = harness();
+    state.sentSequence = 1;
+    source.scheduleEdit();
+    const first = source.publicationOutcome!;
+    state.sentSequence = 2;
+    source.scheduleEdit();
+    const second = source.publicationOutcome!;
+    expect(second).not.toBe(first);
+    expect(callbacks.size).toBe(1);
+    tick();
+    expect(requests).toHaveLength(1);
+    await respond(0, frame(requests[0].request, 2));
+    await expect(first).resolves.toBeUndefined();
+    await expect(second).resolves.toBeUndefined();
+    expect(source.publicationOutcome).toBeNull();
+  });
+
+  for (const result of ['accepted', 'failed'] as const) {
+    test(`rebinds an unissued edit slot after a stale viewport rejection until ${result}`, async () => {
+      const { source, state, requests, errors, callbacks, tick, respond } = harness();
+      source.scheduleEdit();
+      const outcome = source.publicationOutcome!;
+      let settled = false;
+      void outcome.then(() => { settled = true; }, () => { settled = true; });
+      tick();
+      state.request.viewport.x = 100;
+      source.schedule();
+      requests[0].reply.reject(new Error('Old viewport failed'));
+      await requests[0].reply.promise.catch(() => {});
+      expect(settled).toBe(false);
+      expect(errors).toEqual([]);
+      expect(source.issuedPublicationOutcome).toBeNull();
+      expect(source.publicationOutcome).toBe(outcome);
+      expect(callbacks.size).toBe(1);
+      tick();
+      expect(source.issuedPublicationOutcome).toBe(outcome);
+      if (result === 'failed') {
+        const failure = new Error('Current viewport failed');
+        requests[1].reply.reject(failure);
+        await expect(outcome).rejects.toBe(failure);
+        expect(errors).toEqual([failure]);
+      } else {
+        await respond(1, frame(requests[1].request));
+        await expect(outcome).resolves.toBeUndefined();
+        expect(source.painted?.request.viewport.x).toBe(100);
+        expect(errors).toEqual([]);
+      }
+      expect(source.publicationOutcome).toBeNull();
+    });
+  }
+
+  test('rejects every unissued edit slot on retirement without issuing a frame', async () => {
+    const { source, requests, callbacks, errors, tick } = harness();
+    source.scheduleEdit();
+    const first = source.publicationOutcome!;
+    source.scheduleEdit();
+    const second = source.publicationOutcome!;
+    const retirement = new Error('Retired before publication');
+    source.dispose(retirement);
+    await expect(first).rejects.toBe(retirement);
+    await expect(second).rejects.toBe(retirement);
+    expect(source.publicationOutcome).toBeNull();
+    expect(callbacks.size).toBe(0);
+    tick();
+    expect(requests).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test('does not create an edit slot for a repaint without a local change', () => {
+    const { source, requests, callbacks, tick } = harness();
+    source.scheduleEdit(false);
+    expect(source.publicationOutcome).toBeNull();
+    expect(callbacks.size).toBe(1);
+    source.dispose();
+    tick();
+    expect(requests).toEqual([]);
+  });
+
   test('shares an outcome that settles after publication despite a dependent edit schedule', async () => {
     const { source, requests, paints, errors, tick, respond } = harness();
     source.schedule();

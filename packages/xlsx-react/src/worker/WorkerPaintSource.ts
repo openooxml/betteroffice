@@ -85,6 +85,7 @@ export class WorkerPaintSource {
   private running = false;
   private lastPaint: WorkerPaintResult | null = null;
   private publication: ReturnType<typeof publicationOutcome> | null = null;
+  private readonly editOutcomes = new Set<ReturnType<typeof publicationOutcome>>();
   private retries = 0;
 
   constructor(private readonly options: WorkerPaintSourceOptions) {
@@ -92,13 +93,18 @@ export class WorkerPaintSource {
   }
 
   get painted(): WorkerPaintResult | null { return this.lastPaint; }
-  get publicationOutcome(): Promise<void> | null { return this.publication?.promise ?? null; }
+  get issuedPublicationOutcome(): Promise<void> | null { return this.publication?.promise ?? null; }
+  get publicationOutcome(): Promise<void> | null {
+    return this.issuedPublicationOutcome ?? [...this.editOutcomes].pop()?.promise ?? null;
+  }
 
   schedule(): void {
     this.enqueue(true);
   }
 
-  scheduleEdit(): void {
+  scheduleEdit(needsPublication = true): void {
+    if (!this.current || this.failed) return;
+    if (needsPublication) this.editOutcomes.add(publicationOutcome());
     this.enqueue(false);
   }
 
@@ -119,8 +125,7 @@ export class WorkerPaintSource {
   fail(error: unknown): void {
     if (!this.current || this.failed) return;
     this.failed = true;
-    this.publication?.reject(error);
-    this.publication = null;
+    this.rejectOutcomes(error);
     this.cancelFrame();
     try { this.options.onError(error); } catch {}
   }
@@ -128,9 +133,15 @@ export class WorkerPaintSource {
   dispose(error: unknown = new Error('Worker paint source disposed')): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.rejectOutcomes(error);
+    this.cancelFrame();
+  }
+
+  private rejectOutcomes(error: unknown): void {
     this.publication?.reject(error);
     this.publication = null;
-    this.cancelFrame();
+    for (const outcome of this.editOutcomes) outcome.reject(error);
+    this.editOutcomes.clear();
   }
 
   private get current(): boolean {
@@ -191,7 +202,7 @@ export class WorkerPaintSource {
           continue;
         }
         const { request } = pending;
-        const outcome = publicationOutcome();
+        const outcome = [...this.editOutcomes].pop() ?? publicationOutcome();
         this.publication = outcome;
         try {
           const frame = await this.options.requestFrame(snapshot(request));
@@ -202,9 +213,14 @@ export class WorkerPaintSource {
             this.retry(request);
             continue;
           }
+          const covered = [...this.editOutcomes];
           this.publish('worker', request, {
             displayList: frame.displayList, mergedRanges: frame.mergedRanges ?? [], version: frame.version,
           }, frame.sequence);
+          for (const slot of covered) {
+            slot.resolve();
+            this.editOutcomes.delete(slot);
+          }
           this.retries = 0;
         } catch (error) {
           if (!this.current || this.failed) break;
@@ -214,7 +230,7 @@ export class WorkerPaintSource {
             this.fail(error);
           }
         } finally {
-          outcome.resolve();
+          if (!this.editOutcomes.has(outcome)) outcome.resolve();
           if (this.publication === outcome) this.publication = null;
         }
       }
