@@ -230,6 +230,54 @@ impl DepGraph {
             .map(|n| Arc::clone(&n.ast))
     }
 
+    pub(crate) fn clockless_seeds(&self) -> (Vec<(SheetId, CellRef)>, Vec<(SheetId, CellRef)>) {
+        let mut clocks = Vec::new();
+        let mut dynamic = Vec::new();
+        for (node, entry) in &self.deps {
+            let mut pending = vec![(node.sheet, Arc::clone(&entry.ast))];
+            let mut expanded = HashSet::new();
+            let mut clock = false;
+            let mut hidden = false;
+            while let Some((sheet, expression)) = pending.pop() {
+                let mut uses = Vec::new();
+                let (has_clock, has_hidden) = expression_flags(sheet, &expression, &mut uses);
+                clock |= has_clock;
+                hidden |= has_hidden;
+                for (owner, scope, name) in uses {
+                    let Some((lookup, defined)) = self.resolve_defined_name(owner, &scope, &name)
+                    else {
+                        hidden = true;
+                        continue;
+                    };
+                    if !expanded.insert((lookup, name.to_ascii_lowercase())) {
+                        continue;
+                    }
+                    let Some(body) =
+                        parse_cached(&self.asts, defined.formula.trim_start_matches('='))
+                    else {
+                        hidden = true;
+                        continue;
+                    };
+                    hidden |= !matches!(
+                        body.as_ref(),
+                        Expr::Ref { .. }
+                            | Expr::Range { .. }
+                            | Expr::ColumnRange { .. }
+                            | Expr::RowRange { .. }
+                    );
+                    pending.push((defined.local_sheet.unwrap_or(lookup), body));
+                }
+            }
+            if clock {
+                clocks.push((node.sheet, node.cell()));
+            }
+            if hidden {
+                dynamic.push((node.sheet, node.cell()));
+            }
+        }
+        (clocks, dynamic)
+    }
+
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
         let Some(expr) = parse_cached(&self.asts, src) else {
@@ -416,6 +464,36 @@ impl DepGraph {
         }
         false
     }
+}
+
+fn expression_flags(owner: SheetId, expr: &Expr, uses: &mut Vec<DefinedNameUse>) -> (bool, bool) {
+    let mut expressions = vec![expr];
+    let mut clock = false;
+    let mut dynamic = false;
+    while let Some(expression) = expressions.pop() {
+        match expression {
+            Expr::FuncCall { name, func, args } => {
+                let upper = crate::functions::bare_name(name).to_ascii_uppercase();
+                clock |= matches!(upper.as_str(), "TODAY" | "NOW") && args.is_empty();
+                dynamic |= matches!(upper.as_str(), "INDIRECT" | "OFFSET" | "ANCHORARRAY")
+                    || (func.is_none() && !crate::array::is_array_builtin(name));
+                if func.is_none() && !crate::array::is_array_builtin(name) {
+                    uses.push((owner, None, name.clone()));
+                }
+                expressions.extend(args);
+            }
+            Expr::Name { scope, name } => uses.push((owner, scope.clone(), name.clone())),
+            Expr::ArrayLiteral { values, .. } => expressions.extend(values),
+            Expr::RangeJoin { start, end } => {
+                dynamic |= range_join_span(start, end).is_none();
+                expressions.extend([start.as_ref(), end.as_ref()]);
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
+            Expr::Binary { lhs, rhs, .. } => expressions.extend([lhs.as_ref(), rhs.as_ref()]),
+            _ => {}
+        }
+    }
+    (clock, dynamic)
 }
 
 fn push_table_uses<'a>(expr: &'a Expr, uses: &mut Vec<(&'a str, &'a TableSpec)>) {

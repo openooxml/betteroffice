@@ -205,6 +205,8 @@ describe('workbook calculation context', () => {
       expect(cached).toMatchObject({ kind: 'number' });
       const result = handle.applyEdits(request(handle, '7'));
       expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.failure.message);
+      expect(result.applied).toBe(true);
       expect(values(handle)[0]).toEqual(cached);
       const read = handle.readCells({
         ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'Y40:Z40' } }],

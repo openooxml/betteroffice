@@ -13,6 +13,32 @@ fn number(value: f64) -> CellValue {
     CellValue::Number { value }
 }
 
+fn synthetic(
+    cells: &[(&str, &str, CellValue)],
+    arrays: &[(&str, &str)],
+    names: Vec<DefinedName>,
+) -> Workbook {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Sheet2");
+    for (address, formula, cached) in cells {
+        sheet.set_cell(
+            cell(address),
+            Cell {
+                value: cached.clone(),
+                formula: Some((*formula).into()),
+                style: None,
+            },
+        );
+    }
+    for (anchor, range) in arrays {
+        sheet.set_array_formula(cell(anchor), CellRange::parse_a1(range).unwrap());
+    }
+    model.sheets.extend([Sheet::new("Sheet1"), sheet]);
+    model.defined_names = names;
+    let parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap()
+}
+
 fn fixture() -> Vec<u8> {
     let mut model = WorkbookModel::default();
     let mut sheet = Sheet::new("Sheet1");
@@ -49,13 +75,17 @@ fn value(workbook: &Workbook, address: &str) -> CellValue {
 }
 
 fn assert_source_caches(workbook: &Workbook) {
+    assert_source_caches_with_dependent(workbook, number(45_001.0));
+}
+
+fn assert_source_caches_with_dependent(workbook: &Workbook, dependent: CellValue) {
     for (address, expected) in [
         ("A1", number(45_000.0)),
         ("B1", number(45_000.75)),
         ("C1", number(45_001.0)),
         ("D1", number(45_000.0)),
         ("E1", number(45_000.0)),
-        ("F1", number(45_001.0)),
+        ("F1", dependent),
         ("G1", CellValue::Empty),
         (
             "H1",
@@ -191,12 +221,12 @@ fn clockless_full_recalculation_updates_stale_scalars_and_preserves_clock_caches
             .iter()
             .map(|address| (address.sheet, address.cell))
             .collect::<Vec<_>>(),
-        vec![(SheetId(1), cell("F1")), (SheetId(1), cell("J1"))]
+        vec![(SheetId(1), cell("J1"))]
     );
     let saved = workbook.save().unwrap();
     let reopened = Workbook::open(&saved).unwrap();
     for workbook in [&workbook, &reopened] {
-        assert_source_caches(workbook);
+        assert_source_caches_with_dependent(workbook, number(99.0));
         for (address, expected) in [
             ("J1", number(2.0)),
             ("K1", number(45_001.0)),
@@ -357,5 +387,92 @@ fn invalid_clock_calls_commit_value_errors() {
                 value: ErrorValue::Value,
             }
         );
+    }
+}
+
+#[test]
+fn clockless_array_member_dependents_preserve_cached_and_uncached_results() {
+    for cached in [number(45_003.0), CellValue::Empty] {
+        let mut workbook = synthetic(
+            &[
+                ("A1", "SEQUENCE(1,2)+TODAY()", CellValue::Empty),
+                ("C1", "B1+1", cached.clone()),
+            ],
+            &[("A1", "A1:B1")],
+            Vec::new(),
+        );
+        assert!(
+            workbook
+                .recalculate_all(CalculationOptions::default())
+                .changed
+                .is_empty()
+        );
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        for workbook in [&workbook, &reopened] {
+            assert_eq!(value(workbook, "A1"), CellValue::Empty);
+            assert_eq!(value(workbook, "B1"), CellValue::Empty);
+            assert_eq!(value(workbook, "C1"), cached);
+            assert_eq!(
+                workbook
+                    .sheet(SheetId(1))
+                    .unwrap()
+                    .array_formula(cell("A1")),
+                Some(CellRange::parse_a1("A1:B1").unwrap()),
+            );
+        }
+    }
+}
+
+#[test]
+fn clockless_dynamic_readers_preserve_saved_results_in_both_orders() {
+    for (reader, source) in [("A1", "Z1"), ("Z1", "A1")] {
+        let formula = format!("INDIRECT(\"{source}\")+1");
+        let mut workbook = synthetic(
+            &[
+                (reader, &formula, number(45_001.0)),
+                (source, "TODAY()", CellValue::Empty),
+            ],
+            &[],
+            Vec::new(),
+        );
+        assert!(
+            workbook
+                .recalculate_all(CalculationOptions::default())
+                .changed
+                .is_empty()
+        );
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        for workbook in [&workbook, &reopened] {
+            assert_eq!(value(workbook, reader), number(45_001.0));
+            assert_eq!(value(workbook, source), CellValue::Empty);
+        }
+    }
+}
+
+#[test]
+fn yearless_invalid_dates_commit_errors_and_valid_dates_keep_clockless_caches() {
+    for now_serial in [None, Some(45_000.75)] {
+        let mut workbook = synthetic(
+            &[
+                ("A1", "DATEVALUE(\"13/1\")", number(45_000.0)),
+                ("B1", "DATEVALUE(\"3/15\")", number(99.0)),
+            ],
+            &[],
+            Vec::new(),
+        );
+        workbook.recalculate_all(CalculationOptions { now_serial });
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        for workbook in [&workbook, &reopened] {
+            assert_eq!(
+                value(workbook, "A1"),
+                CellValue::Error {
+                    value: ErrorValue::Value
+                }
+            );
+            assert_eq!(
+                value(workbook, "B1"),
+                number(if now_serial.is_some() { 45_000.0 } else { 99.0 })
+            );
+        }
     }
 }

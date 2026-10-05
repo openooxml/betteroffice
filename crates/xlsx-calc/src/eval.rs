@@ -3,12 +3,12 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use xlsx_model::{CellProvider, CellRef, CellValue, ColId, DateSystem, ErrorValue, RowId, SheetId};
+use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, SheetId};
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
@@ -97,7 +97,6 @@ pub struct EvalContext<'a> {
     shared_budget: Option<Rc<EvaluationBudget>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
-    pub(crate) withheld_cells: Option<&'a HashSet<(SheetId, RowId, ColId)>>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -122,7 +121,6 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
-            withheld_cells: None,
         }
     }
 
@@ -147,7 +145,6 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
-            withheld_cells: None,
         }
     }
 
@@ -176,7 +173,6 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
             parse_cache: None,
-            withheld_cells: None,
         }
     }
 
@@ -201,7 +197,6 @@ impl<'a> EvalContext<'a> {
             lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
             parse_cache: self.parse_cache,
-            withheld_cells: self.withheld_cells,
         }
     }
 
@@ -321,15 +316,7 @@ impl<'a> EvalContext<'a> {
     }
 
     pub(crate) fn cell_value(&self, sheet: SheetId, cell: CellRef) -> Cow<'a, CellValue> {
-        let value = self.provider.value_cow(sheet, cell);
-        if matches!(value.as_ref(), CellValue::Empty)
-            && self
-                .withheld_cells
-                .is_some_and(|cells| cells.contains(&(sheet, cell.row, cell.col)))
-        {
-            self.record_missing_clock();
-        }
-        value
+        self.provider.value_cow(sheet, cell)
     }
 
     fn record_budget_error(&self) {
@@ -1332,6 +1319,44 @@ mod tests {
             );
             assert!(!context.has_missing_clock(), "{formula}");
         }
+    }
+
+    #[test]
+    fn invalid_yearless_dates_do_not_request_the_clock() {
+        let workbook = Workbook::default();
+        for formula in [
+            "DATEVALUE(\"13/1\")",
+            "DATEVALUE(\"0/1\")",
+            "DATEVALUE(\"4/31\")",
+            "DATEVALUE(\"2/30\")",
+            "DATEVALUE(\"3/0\")",
+            "DATEVALUE(\"3/15/invalid\")",
+        ] {
+            for now in [None, Some(45_000.75)] {
+                let mut context = EvalContext::new(&workbook, SheetId(0));
+                context.now_serial = now;
+                assert_eq!(
+                    evaluate(&parse_formula(formula).unwrap(), &context),
+                    err(ErrorValue::Value),
+                    "{formula}"
+                );
+                assert!(!context.has_missing_clock(), "{formula}");
+            }
+        }
+        let context = EvalContext::new(&workbook, SheetId(0));
+        assert_eq!(
+            evaluate(&parse_formula("DATEVALUE(\"2/29\")").unwrap(), &context),
+            err(ErrorValue::Value)
+        );
+        assert!(context.has_missing_clock());
+        let context = EvalContext::with_now(&workbook, SheetId(0), 45_000.75);
+        assert_eq!(
+            evaluate(
+                &parse_formula("DATEVALUE(\"2/29/1900\")").unwrap(),
+                &context
+            ),
+            num(60.0)
+        );
     }
 
     #[test]

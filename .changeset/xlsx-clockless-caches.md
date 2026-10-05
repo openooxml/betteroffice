@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Recalculation without a `nowSerial` clock keeps the saved results of `TODAY()` and `NOW()` formulas instead of writing `#VALUE!`; Excel recalculates them on open.
+Recalculation without a `nowSerial` clock keeps the saved results of `TODAY()` and `NOW()` formulas and of formulas that depend on them.

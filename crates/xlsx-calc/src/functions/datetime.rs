@@ -506,11 +506,14 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
         [a, b] => two_fields(a, b)?,
         _ => return None,
     };
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(2000, m) {
+        return None;
+    }
     let y = match y {
         Some(y) => y,
         None => current_year(ctx)?,
     };
-    if !(1900..=9999).contains(&y) || !(1..=12).contains(&m) {
+    if !(1900..=9999).contains(&y) {
         return None;
     }
     // excel's phantom 1900-02-29 parses even though 1900 was not a leap year
