@@ -3137,6 +3137,57 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn incremental_text_edits_converge_across_sections_with_the_same_geometry() {
+        for (break_type, placed_blocks) in [("continuous", 7), ("nextPage", 6)] {
+            let mut measured: Vec<_> = (0..15)
+                .map(|id| paragraph(id, 1, 20.0, json!({})))
+                .collect();
+            measured.insert(
+                5,
+                json!({
+                    "block": {
+                        "kind": "sectionBreak", "id": "section", "type": break_type,
+                        "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+                    },
+                    "measure": { "kind": "sectionBreak" },
+                }),
+            );
+            let previous = layout_document_checkpointed(&mut input(measured.clone())).unwrap();
+            assert_eq!(previous.layout.pages.len(), 3);
+            assert_eq!(
+                (
+                    previous.checkpoints[1].block_index,
+                    previous.checkpoints[1].section_index,
+                    previous.checkpoints[1].page_index,
+                ),
+                (6, 1, 1)
+            );
+            let mut next = measured;
+            next[2]["block"]["runs"][0]["text"] = json!("y");
+            let mut next_fingerprints = [1_u64; 16];
+            next_fingerprints[2] = 2;
+            let incremental = layout_document_incremental(
+                &mut input(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &[1_u64; 16],
+                &next_fingerprints,
+                2,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut input(next)).unwrap();
+            assert_eq!(incremental.rebuilt_page_start, 0);
+            assert_eq!(incremental.rebuilt_page_end, 1);
+            assert_eq!(incremental.placed_blocks, placed_blocks);
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
     fn incremental_layout_skips_the_clean_pages_between_changes() {
         let keep_next = 41;
         let measured = |lines: &[usize]| -> Vec<serde_json::Value> {
