@@ -1644,7 +1644,7 @@ mod tests {
         ADMISSION_ATTEMPTS.set(0);
         let parts = split_fallback_v1_bounded(&update, 7, 16_384).unwrap();
         let attempts = ADMISSION_ATTEMPTS.get();
-        assert!(attempts >= CLIENTS as usize + 1);
+        assert!(attempts > CLIENTS as usize);
         assert!(attempts <= 4 * CLIENTS as usize + 4, "{attempts}");
         assert_eq!(parts.len(), CLIENTS as usize + 1);
         let peer = Doc::with_client_id(CLIENTS);

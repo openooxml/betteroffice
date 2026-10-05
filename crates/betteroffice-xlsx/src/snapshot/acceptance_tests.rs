@@ -598,7 +598,7 @@ fn snapshot_json_object_embed_and_format_values_match_worker() {
             &mut txn,
             0,
             1,
-            HashMap::from([("format".to_owned(), value)]),
+            HashMap::from([(std::sync::Arc::<str>::from("format"), value)]),
         );
     }
     for budget in [budgets()[0], budgets()[1]] {
@@ -1205,7 +1205,10 @@ fn snapshot_single_million_cell_sheet_cleared_history_steps_respect_budget() {
         "",
     );
     assert_eq!(
-        worker.cell(SheetId(0), CellRef::new(rows - 1, 19)).unwrap().input,
+        worker
+            .cell(SheetId(0), CellRef::new(rows - 1, 19))
+            .unwrap()
+            .input,
         "",
     );
     assert!(
