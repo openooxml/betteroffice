@@ -65,7 +65,11 @@ impl Serialize for AnyJson<'_> {
             Any::Map(entries) => {
                 let mut entries: Vec<_> = entries.iter().collect();
                 entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-                serializer.collect_map(entries.into_iter().map(|(key, value)| (key, AnyJson(value))))
+                serializer.collect_map(
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (key, AnyJson(value))),
+                )
             }
             value => value.serialize(serializer),
         }
@@ -104,11 +108,6 @@ pub(crate) fn segments_json(
         })
         .collect()
 }
-
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../tests/support/preview_fixture.rs"]
-mod fixture;
 
 #[cfg(test)]
 mod tests {
@@ -209,7 +208,10 @@ mod tests {
             .collect();
         let nested = any_map(&[
             ("z", Any::Array(values.clone().into())),
-            ("a\"\\\n😀", any_map(&[("z", Any::Undefined), ("a", Any::Null)])),
+            (
+                "a\"\\\n😀",
+                any_map(&[("z", Any::Undefined), ("a", Any::Null)]),
+            ),
             ("ä", Any::Bool(true)),
             ("😀", Any::Bool(false)),
         ]);
@@ -255,7 +257,7 @@ mod tests {
 
     #[test]
     fn every_corpus_story_matches_value_oracle() {
-        for (name, bytes) in fixture::corpus() {
+        for (name, bytes) in crate::engine::preview_fixture::corpus() {
             let engine = EngineSession::new(75200);
             seed_from_docx(engine.doc(), bytes).unwrap();
             let stories = {

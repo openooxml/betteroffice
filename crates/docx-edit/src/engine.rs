@@ -8888,7 +8888,7 @@ mod lowering_pages;
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../tests/support/preview_fixture.rs"]
-mod preview_fixture;
+pub(crate) mod preview_fixture;
 
 #[cfg(test)]
 mod trigger_routing_tests;

@@ -70,8 +70,8 @@ use crate::{
     ParaAttrDelta, ParaSelector, ParagraphAnchor, ParagraphIdDiagnostic, ParagraphIdOrigin,
     ParagraphIdRefusal, ParagraphOrigin, ParagraphRef, Patch, PersistedParagraphIds, Position,
     RawOp, ReadParagraphsRequest, SeedParagraph, SegmentContent, SimpleFormat, SourceParagraphRef,
-    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange,
-    TextTarget, TriState, UndoCaptureMode, UndoSession, story_ref,
+    SourceStory, SourceStoryKind, StoryRange, TabStop, TableLocator, TableRange, TextTarget,
+    TriState, UndoCaptureMode, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
