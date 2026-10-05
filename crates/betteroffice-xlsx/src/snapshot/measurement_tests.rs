@@ -360,12 +360,15 @@ fn snapshot_refusal_teardown_steps_respect_budget() {
             }
         }
     }
-    eprintln!(
-        "B7 late completion refusal: max advance ms={:.3}, refusal ms={:.3}",
-        max_advance.as_secs_f64() * 1_000.0,
-        refusal.as_secs_f64() * 1_000.0
-    );
+    let start = std::time::Instant::now();
     drop(builder);
+    let refused_drop = start.elapsed();
+    eprintln!(
+        "B7 late completion refusal: max advance ms={:.3}, refusal ms={:.3}, refused drop ms={:.3}",
+        max_advance.max(refused_drop).as_secs_f64() * 1_000.0,
+        refusal.as_secs_f64() * 1_000.0,
+        refused_drop.as_secs_f64() * 1_000.0
+    );
     drop(refused_chunks);
     for finish in [false, true] {
         let (builder, max_advance) = mid_hydration(&chunks, budget);
