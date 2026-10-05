@@ -2157,6 +2157,149 @@ for (const route of ['host', 'clipboard'] as const) {
   });
 }
 
+it('unlinks two refused host predecessors before a same-cell UI refusal', async () => {
+  const host = harness(true);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const writes = deferred<void>();
+  const adoption = deferred<void>();
+  const frame = host.sessionMethods.frame.getMockImplementation()!;
+  host.sessionMethods.frame.mockImplementation(async (...args) => {
+    await adoption.promise;
+    return frame(...args);
+  });
+  const flush = spyOn(host.attached!, 'flush');
+  let blocked: Promise<void> | undefined;
+  let first: Promise<unknown> | undefined;
+  let second: Promise<unknown> | undefined;
+  try {
+    await act(async () => { await api.editCellAsync(0, 0, 0, 'P'); });
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('P');
+    flush.mockReturnValue(writes.promise);
+    act(() => { blocked = api.flush(); });
+    await act(async () => {});
+    expect(flush).toHaveBeenCalledTimes(1);
+    const h1 = new RangeError('Invalid H1 formula');
+    const h2 = new RangeError('Invalid H2 formula');
+    host.peerMethods.editCell.mockImplementationOnce(() => { throw h1; });
+    host.peerMethods.editCell.mockImplementationOnce(() => { throw h2; });
+    host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid R formula'); });
+    act(() => { first = api.editCellAsync(0, 0, 0, '=H1()').catch((error) => error); });
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=H1()');
+    act(() => { second = api.editCellAsync(0, 0, 0, '=H2()').catch((error) => error); });
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=H2()');
+    reviewEdit(view, '=R()');
+    await act(async () => {});
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=R()');
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'P']]);
+    await act(async () => writes.resolve());
+    await advance();
+    await blocked;
+    expect(await first).toBe(h1);
+    expect(await second).toBe(h2);
+    expect(host.peerMethods.editCell.mock.calls).toEqual([
+      [0, 0, 0, 'P'], [0, 0, 0, '=H1()'], [0, 0, 0, '=H2()'], [0, 0, 0, '=R()'],
+    ]);
+    expect(api.failure).toBeNull();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Invalid R formula');
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('P');
+    expect(host.cells.get('0:0:0')).toBe('P');
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    expect(host.replay.mock.calls[0][0].op.args).toEqual([0, 0, 0, 'P']);
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('P');
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance();
+    await act(async () => { await api.flush(); });
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('P');
+    expect(host.peerMethods.editCell).toHaveBeenCalledTimes(4);
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    await act(async () => adoption.resolve());
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
+    await act(async () => { await api.flush(); });
+    expect(host.peerMethods.editCell).toHaveBeenCalledTimes(4);
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    expect(host.preview).not.toHaveBeenCalled();
+  } finally {
+    try {
+      await act(async () => { writes.resolve(); adoption.resolve(); });
+      await advance();
+      await Promise.all([blocked, first, second]);
+    } finally {
+      flush.mockRestore();
+      host.sessionMethods.frame.mockImplementation(frame);
+    }
+  }
+});
+
+it('rejects a dependent ready host edit on frame publication failure with suspended animation frames', async () => {
+  const host = harness(true);
+  const failure = new Error('Host predecessor publication failed');
+  const errors = mock((_error: Error) => {});
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onError={errors} onReady={(value) => { api = value; }} />);
+  await opened();
+  const publication = deferred<xlsx.WorkbookFrame>();
+  let suspended: { mockRestore(): void } | undefined;
+  let retained: Promise<EditResult | null> | undefined;
+  try {
+    await act(async () => { expect((await api.editCellAsync(0, 0, 0, 'first'))?.applied).toBe(true); });
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('first');
+    const initialFrames = host.sessionMethods.frame.mock.calls.length;
+    host.sessionMethods.frame.mockReturnValueOnce(publication.promise);
+    await tick();
+    const frames = host.sessionMethods.frame.mock.calls.length;
+    expect(frames).toBe(initialFrames + 1);
+    const count = painted.length;
+    suspended = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => ++nextAnimation);
+    let settled = false;
+    act(() => {
+      retained = api.editCellAsync(0, 0, 1, 'retained');
+      void retained.then(() => { settled = true; }, () => { settled = true; });
+    });
+    await act(async () => {});
+    expect(host.sessionMethods.frame).toHaveBeenCalledTimes(frames);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('retained');
+    expect(settled).toBe(false);
+    await act(async () => publication.reject(failure));
+    await expect(retained!).rejects.toBe(failure);
+    expect(api.failure).toBe(failure);
+    expect(host.session.failure).toBeUndefined();
+    expect(host.attached!.state).toBe('failed');
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(suspended).toHaveBeenCalled();
+    expect(painted).toHaveLength(count);
+    await expect(api.flush()).rejects.toBe(failure);
+    await expect(api.save()).rejects.toBe(failure);
+    const replays = host.replay.mock.calls.length;
+    let saved!: { bytes: Uint8Array; recovery: true };
+    await act(async () => { saved = await api.recoverySave(); });
+    expect(saved.recovery).toBe(true);
+    expect(JSON.parse(new TextDecoder().decode(saved.bytes))).toEqual([
+      ['0:0:0', 'first'], ['0:0:1', 'retained'],
+    ]);
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'first'], [0, 0, 1, 'retained']]);
+    expect(host.replay).toHaveBeenCalledTimes(replays);
+    expect(host.session.save).not.toHaveBeenCalled();
+    expect(host.peerMethods.save).toHaveBeenCalledTimes(1);
+  } finally {
+    await act(async () => publication.reject(failure));
+    await retained?.catch(() => {});
+    suspended?.mockRestore();
+    await advance();
+  }
+});
+
 it('prepares dependent ready host edits and resolves flush and save with suspended animation frames', async () => {
   const host = harness(true);
   let api!: XlsxWorkerEditorApi;

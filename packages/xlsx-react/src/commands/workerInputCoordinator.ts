@@ -71,6 +71,7 @@ export interface WorkerInputCoordinatorHooks
   preview(draft: InputDraft): Promise<void>;
   requestHydration(reason: string): void | Promise<void>;
   flushEdits(): Promise<void>;
+  acknowledge?(intent: WorkerInputIntent, result: unknown): Promise<void>;
   onError?(error: unknown): void;
   onRefusal?(error: unknown, draft?: InputDraft): void;
 }
@@ -379,6 +380,10 @@ export function createWorkerInputCoordinator(
           }
           const result = await wait(entry.run(markApplied), lease);
           check(entry.intent, lease);
+          if (!entry.refused && hooks.acknowledge) {
+            await wait(hooks.acknowledge(entry.intent, result), lease);
+            check(entry.intent, lease);
+          }
           if (!entry.refused) entry.applied = true;
           entry.resolve(result);
           entries = entries.filter((candidate) => candidate !== entry);
