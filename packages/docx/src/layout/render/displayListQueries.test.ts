@@ -669,6 +669,53 @@ describe('createDisplayListQueries page-restricted range rects', () => {
         .map((_, index) => ({ pageIndex: page.pageIndex, x: index * 20, y: 0, width: 10, height: 10 }))
     );
 
+  test('direct wasm range exports normalize page bounds', async () => {
+    const wasm = await import('../../wasm/layout');
+    await wasm.preloadLayoutWasm();
+    const json = JSON.stringify(list());
+    const all = JSON.parse(wasm.rangeRectsJson(json, 2, 104)) as DisplayListRect[];
+    expect([...new Set(all.map((rect) => rect.pageIndex))]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    const bounds: Array<[number, number]> = [
+      [5.5, 5.5],
+      [4.2, 5.0],
+      [1.2, 4.8],
+      [NaN, 5],
+      [0, NaN],
+      [-3, 1],
+      [-3.2, 2.8],
+      [-5, -1],
+      [5, 2],
+      [2, Infinity],
+      [-Infinity, Infinity],
+      [Infinity, Infinity],
+      [0, -Infinity],
+      [0, 0x100000000],
+      [0x100000000, Infinity],
+    ];
+    const handle = wasm.openDisplayList(json);
+    try {
+      for (const [first, last] of bounds) {
+        const expected = all.filter(
+          (rect) => rect.pageIndex >= Math.ceil(first) && rect.pageIndex <= Math.floor(last)
+        );
+        expect(JSON.parse(wasm.rangeRectsOnPagesJson(json, 2, 104, first, last))).toEqual(expected);
+        expect(JSON.parse(wasm.rangeRectsOnPagesByHandle(handle, 2, 104, first, last))).toEqual(
+          expected
+        );
+        if (
+          Number.isNaN(first) ||
+          Number.isNaN(last) ||
+          Math.floor(last) < Math.max(0, Math.ceil(first))
+        ) {
+          expect(wasm.rangeRectsOnPagesJson('invalid', 2, 104, first, last)).toBe('[]');
+          expect(wasm.rangeRectsOnPagesByHandle(0xffffffff, 2, 104, first, last)).toBe('[]');
+        }
+      }
+    } finally {
+      wasm.closeDisplayList(handle);
+    }
+  });
+
   function storeEngine() {
     const { engine } = fakeEngine();
     let stored: DisplayPage[] = [];

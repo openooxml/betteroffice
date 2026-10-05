@@ -2025,6 +2025,18 @@ pub fn range_rects_json(display_list: &str, from: i64, to: i64) -> Result<String
     serde_json::to_string(&range_rects(&dl, from, to)).map_err(|e| format!("serialize: {e}"))
 }
 
+pub fn page_window(first: f64, last: f64) -> Option<(usize, usize)> {
+    if first.is_nan() || last.is_nan() {
+        return None;
+    }
+    let lo = first.ceil().max(0.0);
+    let hi = last.floor();
+    if hi < lo {
+        return None;
+    }
+    Some((lo as usize, hi as usize))
+}
+
 pub fn range_rects_on_pages_json(
     display_list: &str,
     from: i64,
@@ -2878,6 +2890,92 @@ mod tests {
         assert_eq!(note.note_id, None);
         assert_eq!(note.pos, None);
         assert_eq!(note.target, HoverTarget::None);
+    }
+
+    #[test]
+    fn page_window_normalizes_float_bounds() {
+        for (first, last, expected) in [
+            (5.5, 5.5, None),
+            (4.2, 5.0, Some((5, 5))),
+            (f64::NAN, 5.0, None),
+            (0.0, f64::NAN, None),
+            (-3.0, 1.0, Some((0, 1))),
+            (2.0, f64::INFINITY, Some((2, usize::MAX))),
+            (5.0, 2.0, None),
+            (-5.0, -1.0, None),
+            (f64::NEG_INFINITY, f64::INFINITY, Some((0, usize::MAX))),
+            (f64::INFINITY, f64::INFINITY, Some((usize::MAX, usize::MAX))),
+            (0.0, f64::NEG_INFINITY, None),
+        ] {
+            assert_eq!(page_window(first, last), expected, "{first}..={last}");
+        }
+    }
+
+    #[test]
+    fn range_rects_on_pages_exports_normalize_float_bounds() {
+        let mut dl = page(Value::Null, vec![run(100.0, 100.0, 50.0, 1)]);
+        let template = dl.pages[0].clone();
+        dl.pages = (0..8)
+            .map(|page_index| DisplayPage {
+                page_index,
+                ..template.clone()
+            })
+            .collect();
+        let json = serde_json::to_string(&dl).unwrap();
+        let all: Vec<Value> = serde_json::from_str(&range_rects_json(&json, 2, 4).unwrap()).unwrap();
+        assert_eq!(all.len(), dl.pages.len());
+        let handle = crate::session::open_display_list(&json).unwrap();
+        for (first, last) in [
+            (5.5, 5.5),
+            (4.2, 5.0),
+            (1.2, 4.8),
+            (f64::NAN, 5.0),
+            (0.0, f64::NAN),
+            (-3.0, 1.0),
+            (-3.2, 2.8),
+            (-5.0, -1.0),
+            (2.0, f64::INFINITY),
+            (5.0, 2.0),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (0.0, 4294967296.0),
+            (4294967296.0, f64::INFINITY),
+        ] {
+            let expected: Vec<_> = all
+                .iter()
+                .filter(|rect| {
+                    let index = rect["pageIndex"].as_u64().unwrap() as f64;
+                    index >= first.ceil() && index <= last.floor()
+                })
+                .collect();
+            let expected_json = serde_json::to_string(&expected).unwrap();
+            assert_eq!(
+                crate::range_rects_on_pages_json(&json, 2.0, 4.0, first, last).unwrap(),
+                expected_json,
+                "JSON {first}..={last}"
+            );
+            assert_eq!(
+                crate::range_rects_on_pages_by_handle(handle, 2.0, 4.0, first, last).unwrap(),
+                expected_json,
+                "handle {first}..={last}"
+            );
+        }
+        crate::session::close_display_list(handle);
+    }
+
+    #[test]
+    fn empty_page_windows_skip_display_list_and_handle_access() {
+        for (first, last) in [(5.5, 5.5), (f64::NAN, 5.0), (0.0, f64::NAN), (5.0, 2.0)] {
+            assert_eq!(
+                crate::range_rects_on_pages_json("invalid", 2.0, 4.0, first, last).unwrap(),
+                "[]"
+            );
+            assert_eq!(
+                crate::range_rects_on_pages_by_handle(u32::MAX, 2.0, 4.0, first, last).unwrap(),
+                "[]"
+            );
+        }
     }
 
     #[test]

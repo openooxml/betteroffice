@@ -2359,9 +2359,13 @@ impl EditSession {
         &self,
         from: f64,
         to: f64,
-        first_page: usize,
-        last_page: usize,
+        first_page: f64,
+        last_page: f64,
     ) -> Result<String, JsValue> {
+        let Some((first_page, last_page)) = docx_layout::hit::page_window(first_page, last_page)
+        else {
+            return Ok("[]".to_string());
+        };
         let _fonts = self.fonts.enter();
         self.engine
             .display_range_rects_on_pages_json(from as i64, to as i64, first_page, last_page)
