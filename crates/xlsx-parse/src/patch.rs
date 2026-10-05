@@ -602,9 +602,12 @@ impl SheetPatch<'_> {
         }
         let style = self.styles.written(original.style, cell.style);
         if style != original.style {
-            remove_attribute(&mut attributes, "s");
+            attributes.retain(|attribute| attribute.name != "s");
             if let Some(style) = style {
-                set_attribute(&mut attributes, "s", "s", style.to_string());
+                attributes.push(XmlAttribute {
+                    name: "s".to_owned(),
+                    value: style.to_string(),
+                });
             }
         }
         let markup = cell_value_markup(cell, self.sst_index, None);
@@ -648,6 +651,14 @@ impl SheetPatch<'_> {
             return Ok(None);
         };
         let (_, attributes) = start_tag(&data[source.tag.clone()])?;
+        if attributes.iter().any(|attribute| {
+            matches!(
+                attribute.name.as_str(),
+                "xmlns:r" | "xmlns:s" | "xmlns:t" | "xmlns:cm" | "xmlns:vm"
+            )
+        }) {
+            return Ok(None);
+        }
         let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
         let metadata = attributes
             .iter()

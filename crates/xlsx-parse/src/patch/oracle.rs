@@ -351,9 +351,12 @@ impl SheetPatch<'_> {
             set_attribute(&mut attributes, "r", "r", at.to_a1());
         }
         if !self.equivalent_style_oracle(original.style, cell.style) {
-            remove_attribute(&mut attributes, "s");
+            attributes.retain(|attribute| attribute.name != "s");
             if let Some(style) = cell.style {
-                set_attribute(&mut attributes, "s", "s", style.to_string());
+                attributes.push(XmlAttribute {
+                    name: "s".to_owned(),
+                    value: style.to_string(),
+                });
             }
         }
         if let Some(ty) = ty {
@@ -398,6 +401,14 @@ impl SheetPatch<'_> {
             return Ok(None);
         };
         let (_, cell_attributes) = start_tag(&data[source.tag.clone()])?;
+        if cell_attributes.iter().any(|attribute| {
+            matches!(
+                attribute.name.as_str(),
+                "xmlns:r" | "xmlns:s" | "xmlns:t" | "xmlns:cm" | "xmlns:vm"
+            )
+        }) {
+            return Ok(None);
+        }
         let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
         if cell_attributes
             .iter()
