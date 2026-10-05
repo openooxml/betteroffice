@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Scatter and bubble chart axes now fit charts whose X values are all equal, and Y values without an X value no longer stretch the Y axis.
+Scatter and bubble chart X axes now fit charts whose X values are all equal, and X values without a Y value no longer stretch the X axis.
