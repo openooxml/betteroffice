@@ -4,8 +4,8 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use ooxml_opc::PackageBytes;
-use serde::Deserialize;
 use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use yrs::types::Attrs;
 use yrs::{Any, Array as _, Map as YrsMap, Out, ReadTxn, Text as _, Transact};
@@ -243,6 +243,8 @@ struct LoweringContext {
 
 /// A story's source blocks as the save projection sees them when it puts raw XML back: each raw
 /// block goes in front of the first following source paragraph that still exists.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 enum SourceBlock {
     Raw,
     /// A paragraph with a source id, which a raw block can be restored in front of.
@@ -262,15 +264,20 @@ pub(crate) enum Restoration {
 }
 
 /// Source structure the story stream does not carry, retained for batch planning.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceStructure {
     /// Source block order of the stories that hold raw XML blocks.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     blocks: HashMap<String, Vec<SourceBlock>>,
     /// Paragraphs whose runs carry tracked formatting changes.
+    #[serde(with = "crate::peer_bootstrap::sorted_set")]
     run_revisions: HashSet<(String, String)>,
 }
 
 /// Package context retained after lowering, for planning host edits and exporting in Rust.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceMetadata {
     styles: StyleResolver,
     structure: SourceStructure,
@@ -322,6 +329,10 @@ pub(crate) fn style_resolved_keys() -> impl Iterator<Item = &'static str> {
 }
 
 impl SourceMetadata {
+    pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
+        self.read.rebuild_peer_metadata()
+    }
+
     pub(crate) fn has_paragraph_style(&self, style_id: &str) -> bool {
         self.styles
             .style(style_id)
@@ -582,15 +593,22 @@ impl<'de> Deserialize<'de> for OrderedValue {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StyleResolver {
     enabled: bool,
     styles: BTreeMap<String, Value>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     doc_defaults: Option<Value>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     default_paragraph: Option<String>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     default_table: Option<String>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     default_character: Option<String>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     table_paragraph_formatting: Option<Value>,
+    #[serde(skip)]
     memo: StyleMemo,
 }
 
@@ -5790,7 +5808,7 @@ pub(crate) fn seed_blocks(
 
 /// Source metadata, identity index and referenced fonts for a package whose stories arrive
 /// another way, such as shared state, from one lowering.
-#[cfg(feature = "wasm")]
+#[cfg(any(test, feature = "wasm"))]
 pub(crate) fn replica_source(
     envelope: docx_parse::S9WireEnvelope,
     parts: Vec<(String, Vec<u8>)>,

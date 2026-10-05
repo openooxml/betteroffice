@@ -88,6 +88,7 @@ mod list_marker;
 pub mod media;
 mod op;
 mod ops;
+mod peer_bootstrap;
 mod policy;
 mod presence;
 mod queries;
