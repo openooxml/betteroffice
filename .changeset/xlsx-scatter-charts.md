@@ -3,4 +3,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Scatter and bubble charts now render instead of a placeholder.
+Supported scatter and bubble charts now render instead of a placeholder.
