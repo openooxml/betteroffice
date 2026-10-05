@@ -8,6 +8,8 @@ use ooxml_opc::{PackageBytes, RetainedPackage};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use yrs::updates::decoder::Decode;
+use yrs::{ReadTxn, Transact, Update};
 
 use crate::EditingDoc;
 use crate::identity::{SourceIndex, SourcePackage};
@@ -19,8 +21,11 @@ const SHAPE: &str = "docx-edit.peer-metadata/unseeded-v1;source-serde-v1;identit
 const HEADER_LEN: usize = 8 + 4 + 32 + 8 + 8;
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum PeerMetadataError {
+pub enum PeerMetadataError {
     MissingSource,
+    SourceRequired,
+    NonEmptyDocument,
+    InvalidState(String),
     BadMagic,
     UnsupportedVersion(u32),
     ShapeMismatch,
@@ -38,6 +43,9 @@ impl fmt::Display for PeerMetadataError {
             Self::MissingSource => {
                 f.write_str("peer metadata requires an indexed source and media")
             }
+            Self::SourceRequired => f.write_str("peer bootstrap requires retained source bytes"),
+            Self::NonEmptyDocument => f.write_str("peer bootstrap requires an empty document"),
+            Self::InvalidState(error) => write!(f, "invalid peer state: {error}"),
             Self::BadMagic => f.write_str("invalid peer metadata magic"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported peer metadata version {version}")
@@ -54,6 +62,119 @@ impl fmt::Display for PeerMetadataError {
 }
 
 impl std::error::Error for PeerMetadataError {}
+
+impl PeerMetadataError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingSource => "missing-source",
+            Self::SourceRequired => "source-required",
+            Self::NonEmptyDocument => "non-empty-document",
+            Self::InvalidState(_) => "invalid-state",
+            Self::BadMagic => "bad-magic",
+            Self::UnsupportedVersion(_) => "unsupported-version",
+            Self::ShapeMismatch => "shape-mismatch",
+            Self::Truncated => "truncated",
+            Self::InvalidLength => "invalid-length",
+            Self::Json(_) => "invalid-json",
+            Self::InvalidMetadata(_) => "invalid-metadata",
+            Self::SourceMismatch => "source-mismatch",
+            Self::Package(_) => "invalid-package",
+        }
+    }
+}
+
+pub struct PeerBootstrap {
+    metadata: PeerMetadata,
+}
+
+pub struct PeerBootstrapSource {
+    pub source: PackageBytes,
+    pub digest: String,
+}
+
+impl EditingDoc {
+    pub fn encode_peer_metadata(&self) -> Result<Vec<u8>, PeerMetadataError> {
+        encode(self)
+    }
+
+    fn require_empty_peer(&self) -> Result<(), PeerMetadataError> {
+        let txn = self.yrs_doc().transact();
+        if !txn.state_vector().is_empty() || txn.has_missing_updates() {
+            return Err(PeerMetadataError::NonEmptyDocument);
+        }
+        Ok(())
+    }
+
+    pub fn prepare_peer_bootstrap(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<PackageBytes>,
+    ) -> Result<PeerBootstrap, PeerMetadataError> {
+        sections(metadata)?;
+        self.require_empty_peer()?;
+        let update = Update::decode_v1(state)
+            .map_err(|error| PeerMetadataError::InvalidState(error.to_string()))?;
+        let (source, digest) = match source {
+            Some(source) => {
+                let digest = crate::seed::package_digest(&source);
+                (source, digest)
+            }
+            None => {
+                let retained = self
+                    .source
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                match retained.as_ref() {
+                    Some(SourcePackage::Ready(index)) => {
+                        (index.bytes(), index.package_digest().to_owned())
+                    }
+                    Some(SourcePackage::Pending(bytes, digest)) => (
+                        bytes.clone(),
+                        digest
+                            .clone()
+                            .unwrap_or_else(|| crate::seed::package_digest(bytes)),
+                    ),
+                    None => return Err(PeerMetadataError::SourceRequired),
+                }
+            }
+        };
+        let metadata = decode(metadata, source, &digest)?;
+        let validation = EditingDoc::new(self.client_id);
+        validation
+            .yrs_doc()
+            .transact_mut()
+            .apply_update(update)
+            .map_err(|error| PeerMetadataError::InvalidState(error.to_string()))?;
+        Ok(PeerBootstrap { metadata })
+    }
+
+    pub fn install_peer_bootstrap(
+        &self,
+        bootstrap: PeerBootstrap,
+        entropy: u64,
+    ) -> Result<PeerBootstrapSource, PeerMetadataError> {
+        self.require_empty_peer()?;
+        let PeerMetadata {
+            mut source,
+            index,
+            media,
+            retained_source,
+            source_digest,
+            comment_baseline: CommentBaseline::RebaseOnFirstLoad,
+            media_sources,
+        } = bootstrap.metadata;
+        source.watch_comments(self);
+        self.install_source(source, entropy);
+        self.retain_source(SourcePackage::Ready(Arc::new(index)));
+        self.install_media(media);
+        self.set_media_sources(media_sources);
+        Ok(PeerBootstrapSource {
+            source: retained_source,
+            digest: source_digest,
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) enum CommentBaseline {
@@ -562,6 +683,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use serde_json::json;
+    use yrs::block::{BLOCK_ITEM_ANY_REF_NUMBER, HAS_PARENT_SUB};
+    use yrs::encoding::write::Write;
+    use yrs::updates::encoder::{Encoder, EncoderV1};
     use yrs::{Any, Map, MapPrelim, MapRef, ReadTxn, Transact};
 
     use super::*;
@@ -572,6 +696,419 @@ mod tests {
         ooxml_opc::rezip_parts(&fixture::principal_parts())
             .unwrap()
             .into()
+    }
+
+    #[test]
+    fn peer_bootstrap_installs_normalized_metadata_and_shares_source() {
+        let source = synthetic_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let peer = EditingDoc::new(19);
+        let version = peer.version();
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+            .unwrap();
+        assert!(peer.source_metadata().is_none());
+        assert_eq!(peer.version(), version);
+        let retained = peer.install_peer_bootstrap(prepared, 17).unwrap();
+        assert_ne!(peer.version(), version);
+        assert_eq!(retained.digest, digest);
+        assert_eq!(retained.source.as_ptr(), source.as_ptr());
+        let index = peer.source_index().unwrap();
+        assert_eq!(index.bytes().as_ptr(), source.as_ptr());
+        assert!(!index.seed_states_initialized());
+        let read = peer.source_metadata().unwrap();
+        assert_peer_runtime(read.read());
+        assert!(peer.media_sources().is_empty());
+        let expected = decode(&metadata, source.clone(), &digest).unwrap();
+        assert_fields(
+            &canonical(serde_json::to_value(read.as_ref()).unwrap()),
+            &canonical(serde_json::to_value(&expected.source).unwrap()),
+            "installed.source",
+        );
+        assert_eq!(
+            peer.media.lock().unwrap().as_ref().unwrap().descriptors(),
+            expected.media.descriptors(),
+        );
+        peer.apply_update_v1(&state).unwrap();
+        assert_eq!(peer.encode_state_as_update_v1(), state);
+        assert_eq!(peer.paragraph_identities(), worker.paragraph_identities());
+        assert!(!read.read().comment_writes.snapshot().is_empty());
+    }
+
+    #[test]
+    fn peer_bootstrap_rejections_leave_native_session_untouched() {
+        let source = synthetic_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let mut cases = Vec::new();
+        for (offset, code) in [
+            (0, "bad-magic"),
+            (8, "unsupported-version"),
+            (12, "shape-mismatch"),
+        ] {
+            let mut bad = metadata.clone();
+            bad[offset] ^= 1;
+            cases.push((bad, code));
+        }
+        cases.push((metadata[..HEADER_LEN - 1].to_vec(), "truncated"));
+        cases.push((metadata[..metadata.len() - 1].to_vec(), "truncated"));
+        let mut bad = metadata.clone();
+        bad.push(0);
+        cases.push((bad, "invalid-length"));
+        let mut bad = metadata.clone();
+        bad[44..52].copy_from_slice(&u64::MAX.to_le_bytes());
+        cases.push((bad, "invalid-length"));
+        let mut bad = metadata.clone();
+        bad[HEADER_LEN] = b'!';
+        cases.push((bad, "invalid-json"));
+        let (json, blobs) = sections(&metadata).unwrap();
+        let wire: Value = serde_json::from_slice(json).unwrap();
+        let mut bad = wire.clone();
+        bad["source"].as_object_mut().unwrap().remove("read");
+        cases.push((
+            frame(&serde_json::to_vec(&bad).unwrap(), blobs).unwrap(),
+            "invalid-json",
+        ));
+        let mut bad = wire.clone();
+        bad["index"]["parts"][0]["uri"] = json!("");
+        cases.push((
+            frame(&serde_json::to_vec(&bad).unwrap(), blobs).unwrap(),
+            "invalid-metadata",
+        ));
+        let mut bad = wire.clone();
+        bad["media"]["parts"][0]["display"] = json!({"offset": 1, "length": 0});
+        cases.push((
+            frame(&serde_json::to_vec(&bad).unwrap(), blobs).unwrap(),
+            "invalid-length",
+        ));
+        let mut bad = wire;
+        bad["source_digest"] = json!("0".repeat(64));
+        cases.push((
+            frame(&serde_json::to_vec(&bad).unwrap(), blobs).unwrap(),
+            "source-mismatch",
+        ));
+        for (bad, code) in cases {
+            let peer = EditingDoc::new(19);
+            let before = peer.encode_state_as_update_v1();
+            let version = peer.version();
+            let error = peer
+                .prepare_peer_bootstrap(&state, &bad, Some(source.clone()))
+                .err()
+                .unwrap();
+            assert_eq!(error.code(), code);
+            assert_eq!(peer.encode_state_as_update_v1(), before);
+            assert_eq!(peer.version(), version);
+            assert!(peer.source_metadata().is_none());
+            assert!(peer.source.lock().unwrap().is_none());
+            assert!(peer.media.lock().unwrap().is_none());
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+                .unwrap();
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            peer.apply_update_v1(&state).unwrap();
+            assert_eq!(peer.paragraph_identities(), worker.paragraph_identities());
+        }
+    }
+
+    #[test]
+    fn peer_bootstrap_requires_matching_source_and_decodable_state() {
+        let source = synthetic_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let peer = EditingDoc::new(19);
+        let version = peer.version();
+        assert_eq!(
+            peer.prepare_peer_bootstrap(&state, &metadata, None)
+                .err()
+                .unwrap(),
+            PeerMetadataError::SourceRequired
+        );
+        let mut wrong = source.to_vec();
+        wrong[0] ^= 1;
+        assert_eq!(
+            peer.prepare_peer_bootstrap(&state, &metadata, Some(wrong.into()))
+                .err()
+                .unwrap(),
+            PeerMetadataError::SourceMismatch
+        );
+        assert!(matches!(
+            peer.prepare_peer_bootstrap(&[], &metadata, Some(source.clone()))
+                .err()
+                .unwrap(),
+            PeerMetadataError::InvalidState(_)
+        ));
+        assert_eq!(peer.version(), version);
+        assert!(peer.source_metadata().is_none());
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+            .unwrap();
+        let retained = peer.install_peer_bootstrap(prepared, 17).unwrap();
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, None)
+            .unwrap();
+        let reused = peer.install_peer_bootstrap(prepared, 18).unwrap();
+        assert_eq!(retained.source.as_ptr(), reused.source.as_ptr());
+        peer.apply_update_v1(&state).unwrap();
+        assert_eq!(
+            peer.prepare_peer_bootstrap(&state, &metadata, None)
+                .err()
+                .unwrap(),
+            PeerMetadataError::NonEmptyDocument
+        );
+        let pending_source = EditingDoc::new(23);
+        pending_source.retain_source_docx(Arc::<[u8]>::from(source.as_ref()));
+        let prepared = pending_source
+            .prepare_peer_bootstrap(&state, &metadata, None)
+            .unwrap();
+        let retained = pending_source.install_peer_bootstrap(prepared, 17).unwrap();
+        assert_eq!(retained.source.as_ref(), source.as_ref());
+        assert_eq!(
+            retained.source.as_ptr(),
+            pending_source.source_index().unwrap().bytes().as_ptr()
+        );
+    }
+
+    #[test]
+    fn peer_bootstrap_rechecks_empty_document_at_installation() {
+        let source = synthetic_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        for deleted in [false, true] {
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+                .unwrap();
+            let map = peer.yrs_doc().get_or_insert_map("other-root");
+            map.insert(&mut peer.yrs_doc().transact_mut(), "value", true);
+            if deleted {
+                map.remove(&mut peer.yrs_doc().transact_mut(), "value");
+            }
+            let before = peer.encode_state_as_update_v1();
+            let version = peer.version();
+            assert_eq!(
+                peer.install_peer_bootstrap(prepared, 17).err().unwrap(),
+                PeerMetadataError::NonEmptyDocument
+            );
+            assert_eq!(
+                peer.prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+                    .err()
+                    .unwrap(),
+                PeerMetadataError::NonEmptyDocument
+            );
+            assert_eq!(peer.encode_state_as_update_v1(), before);
+            assert_eq!(peer.version(), version);
+            assert!(peer.source_metadata().is_none());
+            assert!(peer.media.lock().unwrap().is_none());
+        }
+        let map = worker.yrs_doc().get_or_insert_map("other-root").insert(
+            &mut worker.yrs_doc().transact_mut(),
+            "parent",
+            MapPrelim::default(),
+        );
+        let vector = worker.encode_state_vector_v1();
+        map.insert(&mut worker.yrs_doc().transact_mut(), "value", true);
+        let pending = EditingDoc::new(19);
+        pending
+            .apply_update_v1(&worker.encode_diff_v1(&vector).unwrap())
+            .unwrap();
+        assert!(pending.yrs_doc().transact().state_vector().is_empty());
+        assert!(pending.yrs_doc().transact().has_missing_updates());
+        let before = pending.encode_state_as_update_v1();
+        let version = pending.version();
+        assert_eq!(
+            pending
+                .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+                .err()
+                .unwrap(),
+            PeerMetadataError::NonEmptyDocument
+        );
+        assert_eq!(pending.encode_state_as_update_v1(), before);
+        assert_eq!(pending.version(), version);
+        let vector = worker.encode_state_vector_v1();
+        map.remove(&mut worker.yrs_doc().transact_mut(), "value");
+        let pending_delete = EditingDoc::new(19);
+        pending_delete
+            .apply_update_v1(&worker.encode_diff_v1(&vector).unwrap())
+            .unwrap();
+        assert!(
+            pending_delete
+                .yrs_doc()
+                .transact()
+                .state_vector()
+                .is_empty()
+        );
+        assert!(pending_delete.yrs_doc().transact().has_missing_updates());
+        let before = pending_delete.encode_state_as_update_v1();
+        let version = pending_delete.version();
+        assert_eq!(
+            pending_delete
+                .prepare_peer_bootstrap(&state, &metadata, Some(source))
+                .err()
+                .unwrap(),
+            PeerMetadataError::NonEmptyDocument
+        );
+        assert_eq!(pending_delete.encode_state_as_update_v1(), before);
+        assert_eq!(pending_delete.version(), version);
+    }
+
+    #[test]
+    fn peer_bootstrap_rejects_decodable_state_with_invalid_parent_atomically() {
+        let source = synthetic_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let mut encoder = EncoderV1::new();
+        encoder.write_var(1u32);
+        encoder.write_var(2u32);
+        encoder.write_client(yrs::ClientID::new(7));
+        encoder.write_var(0u32);
+        encoder.write_info(HAS_PARENT_SUB | BLOCK_ITEM_ANY_REF_NUMBER);
+        encoder.write_parent_info(true);
+        encoder.write_string("other-root");
+        encoder.write_string("parent");
+        encoder.write_len(1);
+        encoder.write_any(&Any::Bool(true));
+        encoder.write_info(HAS_PARENT_SUB | BLOCK_ITEM_ANY_REF_NUMBER);
+        encoder.write_parent_info(false);
+        encoder.write_left_id(&yrs::ID::new(yrs::ClientID::new(7), 0));
+        encoder.write_string("child");
+        encoder.write_len(1);
+        encoder.write_any(&Any::Bool(true));
+        encoder.write_var(0u32);
+        let invalid = encoder.to_vec();
+        assert!(Update::decode_v1(&invalid).is_ok());
+        let peer = EditingDoc::new(19);
+        let before = peer.encode_state_as_update_v1();
+        let version = peer.version();
+        assert!(matches!(
+            peer.prepare_peer_bootstrap(&invalid, &metadata, Some(source.clone()))
+                .err()
+                .unwrap(),
+            PeerMetadataError::InvalidState(_)
+        ));
+        assert_eq!(peer.encode_state_as_update_v1(), before);
+        assert_eq!(peer.version(), version);
+        assert!(peer.source_metadata().is_none());
+        assert!(peer.source.lock().unwrap().is_none());
+        assert!(peer.media.lock().unwrap().is_none());
+        let state = worker.encode_state_as_update_v1();
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
+        assert_eq!(peer.paragraph_identities(), worker.paragraph_identities());
+    }
+
+    #[test]
+    fn peer_bootstrap_invalid_package_is_atomic() {
+        let source = synthetic_package();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let (json, blobs) = sections(&metadata).unwrap();
+        let mut wire: Value = serde_json::from_slice(json).unwrap();
+        let invalid: PackageBytes = vec![0; source.len()].into();
+        let invalid_digest = seed::package_digest(&invalid);
+        wire["source_digest"] = json!(invalid_digest);
+        wire["index"]["package_sha256"] = wire["source_digest"].clone();
+        let bad = frame(&serde_json::to_vec(&wire).unwrap(), blobs).unwrap();
+        let peer = EditingDoc::new(19);
+        let before = peer.encode_state_as_update_v1();
+        let version = peer.version();
+        assert!(matches!(
+            peer.prepare_peer_bootstrap(&state, &bad, Some(invalid))
+                .err()
+                .unwrap(),
+            PeerMetadataError::Package(_)
+        ));
+        assert_eq!(peer.encode_state_as_update_v1(), before);
+        assert_eq!(peer.version(), version);
+        assert!(peer.source_metadata().is_none());
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+    }
+
+    #[test]
+    fn peer_bootstrap_full_corpus_installation_matches_replica_source() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let mut paths = Vec::new();
+        for directory in [
+            "crates/docx-edit/tests/fixtures",
+            "crates/betteroffice-docx/tests/corpus/fixtures",
+            "packages/docx/src/yrs/__fixtures__",
+        ] {
+            let start = paths.len();
+            collect_docx(&root.join(directory), &mut paths);
+            assert!(paths.len() > start, "empty corpus root {directory}");
+        }
+        paths.sort();
+        let mut supported = 0;
+        for path in paths {
+            let source: PackageBytes = std::fs::read(&path).unwrap().into();
+            let digest = seed::package_digest(&source);
+            let (envelope, parts, media) =
+                match seed::parse_docx_package_with_media(source.clone(), digest.clone()) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        eprintln!("unsupported {}: {error}", path.display());
+                        continue;
+                    }
+                };
+            let worker = worker(&source, &digest, 7).unwrap();
+            let state = worker.encode_state_as_update_v1();
+            let metadata = worker.encode_peer_metadata().unwrap();
+            let (mut expected_source, index, _) =
+                seed::replica_source(envelope, parts, source.clone(), digest).unwrap();
+            let baseline = EditingDoc::new(19);
+            expected_source.watch_comments(&baseline);
+            baseline.install_source(expected_source, 17);
+            baseline.retain_source(SourcePackage::Ready(Arc::new(index)));
+            baseline.install_media(media);
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &metadata, Some(source))
+                .unwrap();
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            assert_fields(
+                &canonical(serde_json::to_value(peer.source_metadata().unwrap().as_ref()).unwrap()),
+                &canonical(
+                    serde_json::to_value(baseline.source_metadata().unwrap().as_ref()).unwrap(),
+                ),
+                &path.display().to_string(),
+            );
+            peer.apply_update_v1(&state).unwrap();
+            baseline.apply_update_v1(&state).unwrap();
+            assert_eq!(
+                peer.encode_state_as_update_v1(),
+                baseline.encode_state_as_update_v1(),
+                "{}",
+                path.display()
+            );
+            assert_eq!(
+                peer.paragraph_identities(),
+                baseline.paragraph_identities(),
+                "{}",
+                path.display()
+            );
+            supported += 1;
+        }
+        assert!(supported > 0);
     }
 
     fn worker(bytes: &PackageBytes, digest: &str, client: u64) -> Result<EditingDoc, String> {

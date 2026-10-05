@@ -416,7 +416,6 @@ impl SourceMetadata {
     }
 
     /// Records the comment writes committed to `doc` from now on.
-    #[cfg(feature = "wasm")]
     pub(crate) fn watch_comments(&mut self, doc: &EditingDoc) {
         self.read.comment_writes = CommentWrites::watch(doc);
     }

@@ -138,6 +138,7 @@ pub use ops::paragraph::{
 pub use ops::resolve::ChangeTarget;
 pub use ops::table::{CellLoc, TableLocator, TableRange, TableReceipt};
 pub use ops::text::RichRun;
+pub use peer_bootstrap::{PeerBootstrap, PeerBootstrapSource, PeerMetadataError};
 pub use queries::{
     ChangeInfo, ChangeKind, CommentInfo, FindMatch, FindOptions, LayoutBridge, NavDirection,
     NavUnit, PageContent, PageParagraph, SelectionInfo, TextView,
