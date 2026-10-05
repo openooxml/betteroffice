@@ -313,6 +313,133 @@ fn assert_current_identity(worker: &Workbook, peer: &Workbook) {
     assert!(!peer.authority.has_pending_updates());
 }
 
+fn assert_step_budget(budget: SnapshotBudget) -> crate::snapshot::step::StepWork {
+    let work = crate::snapshot::step::current();
+    assert!(work.records <= budget.max_records(), "{work:?}");
+    assert!(work.bytes <= budget.max_bytes(), "{work:?}");
+    work
+}
+
+fn single_large_sheet_snapshot(rows: u32) {
+    let mut model = WorkbookModel::default();
+    let mut sheet = xlsx_model::Sheet::new("Large");
+    for row in 0..rows {
+        for col in 0..20 {
+            sheet.set_cell(
+                CellRef::new(row, col),
+                Cell {
+                    value: CellValue::Number {
+                        value: f64::from(row * 20 + col),
+                    },
+                    formula: None,
+                    style: None,
+                },
+            );
+        }
+    }
+    let mut small = xlsx_model::Sheet::new("Small");
+    small.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            formula: Some("Large!A1+7".to_owned()),
+            style: None,
+        },
+    );
+    model.sheets = vec![sheet, small];
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    drop(model);
+    let worker = worker(&bytes);
+    let budget = SnapshotBudget::new(256, 16 * 1024).unwrap();
+    let mut encoder = WorkbookSnapshotEncoder::new(&worker, Some(context()), budget).unwrap();
+    assert_eq!(encoder.split_fallback_reason(), None);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    let mut updates = 0;
+    let mut initialized = 0;
+    let mut initialization_steps = 0;
+    while let Some(chunk) = encoder.next(&worker).unwrap() {
+        assert!(chunk.len() <= budget.max_bytes());
+        let (kind, _, payload) = unframe(&chunk).unwrap();
+        let mut reader = Reader::new(payload);
+        reader.var_u64().unwrap();
+        reader.var_u64().unwrap();
+        reader.var_usize().unwrap();
+        let offset = reader.var_usize().unwrap();
+        if kind == ChunkKind::Yrs && offset == 0 {
+            updates += 1;
+        }
+        builder.push(&chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        let work = assert_step_budget(budget);
+        initialized += work.initialized_bytes;
+        initialization_steps += usize::from(work.initialized_bytes != 0);
+    }
+    assert!(updates > 2, "the large sheet authority was not subdivided");
+    let mut steps = 0;
+    loop {
+        let ready = builder.advance(budget).unwrap().is_ready();
+        let work = assert_step_budget(budget);
+        initialized += work.initialized_bytes;
+        initialization_steps += usize::from(work.initialized_bytes != 0);
+        if ready {
+            break;
+        }
+        steps += 1;
+        assert!(steps < rows as usize * 40 + bytes.len().div_ceil(budget.max_bytes()) + 10_000);
+    }
+    assert_eq!(initialized, bytes.len());
+    assert_eq!(
+        initialization_steps,
+        bytes.len().div_ceil(budget.max_bytes())
+    );
+    assert!(initialization_steps > 1);
+    let (peer, received_context) = builder.finish().unwrap().into_parts();
+    assert_eq!(received_context, Some(context()));
+    assert_eq!(peer.source_container.as_ref().unwrap().as_bytes(), bytes);
+    assert_current_identity(&worker, &peer);
+    assert_eq!(worker.authority.encode_state_as_update_v1(), peer.authority.encode_state_as_update_v1());
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
+#[test]
+fn snapshot_single_large_sheet_and_source_steps_respect_budget() {
+    single_large_sheet_snapshot(5_000);
+}
+
+#[test]
+#[ignore]
+fn snapshot_single_million_cell_sheet_and_source_steps_respect_budget() {
+    single_large_sheet_snapshot(50_000);
+}
+
+#[test]
+fn snapshot_authority_steps_accept_a_smaller_record_budget() {
+    let worker = worker(&source(false, false));
+    let encode_budget = SnapshotBudget::new(256, 16 * 1024).unwrap();
+    let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+    let chunks = encode(&worker, encode_budget);
+    let mut builder = WorkbookSnapshotBuilder::new();
+    for chunk in chunks {
+        builder.push(&chunk).unwrap();
+        assert_step_budget(budget);
+        builder.advance(budget).unwrap();
+        assert_step_budget(budget);
+    }
+    loop {
+        let ready = builder.advance(budget).unwrap().is_ready();
+        assert_step_budget(budget);
+        if ready {
+            break;
+        }
+    }
+    let (peer, received_context) = builder.finish().unwrap().into_parts();
+    assert_eq!(received_context, Some(context()));
+    assert_current_identity(&worker, &peer);
+    assert_eq!(worker.authority.encode_state_as_update_v1(), peer.authority.encode_state_as_update_v1());
+    assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+}
+
 fn assert_edited_identity(worker: &Workbook, peer: &Workbook) {
     assert_current_identity(worker, peer);
     assert_eq!(worker.history_state(), peer.history_state());

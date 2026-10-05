@@ -2,8 +2,11 @@
 //! cell changes, which formulas must re-evaluate?".
 
 mod builder;
+mod snapshot;
 
 pub use builder::DepGraphBuilder;
+#[doc(hidden)]
+pub use snapshot::SnapshotGraphBuilder;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

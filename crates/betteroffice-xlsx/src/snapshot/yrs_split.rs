@@ -26,6 +26,7 @@ pub(crate) enum SplitError {
     JsonLengthMismatch,
     MissingDependency,
     RetainedDeletion,
+    OversizedStruct,
 }
 
 impl SplitError {
@@ -40,6 +41,7 @@ impl SplitError {
             Self::JsonLengthMismatch => "json_length_mismatch",
             Self::MissingDependency => "missing_dependency",
             Self::RetainedDeletion => "retained_deletion",
+            Self::OversizedStruct => "oversized_struct",
         }
     }
 }
@@ -62,7 +64,37 @@ pub(crate) fn split_update_v1(
     update: &[u8],
     max_part_bytes: usize,
 ) -> Result<Vec<Vec<u8>>, SplitError> {
-    if max_part_bytes == 0 {
+    split_update_v1_parts(update, usize::MAX, max_part_bytes)
+}
+
+pub(crate) fn split_update_v1_bounded(
+    update: &[u8],
+    max_records: usize,
+    max_part_bytes: usize,
+) -> Result<Vec<Vec<u8>>, SplitError> {
+    let parts = split_update_v1_parts(update, max_records, max_part_bytes)?;
+    let mut bounded = Vec::new();
+    for part in parts {
+        let mut cursor = UpdateCursor::default();
+        while let Some(part) = cursor.next(&part, max_records, max_part_bytes)? {
+            bounded.push(part.bytes);
+        }
+    }
+    if bounded.is_empty() {
+        if max_part_bytes < 2 {
+            return Err(SplitError::OversizedStruct);
+        }
+        bounded.push(vec![0, 0]);
+    }
+    Ok(bounded)
+}
+
+fn split_update_v1_parts(
+    update: &[u8],
+    max_records: usize,
+    max_part_bytes: usize,
+) -> Result<Vec<Vec<u8>>, SplitError> {
+    if max_records == 0 || max_part_bytes == 0 {
         return Err(SplitError::InvalidLimit);
     }
     let mut scanner = Scanner::new(update);
@@ -127,7 +159,9 @@ pub(crate) fn split_update_v1(
             let candidate_size = run_size(client, run_clock, candidate_count)
                 .checked_add(scanner.pos - run_start)
                 .ok_or(SplitError::Malformed)?;
-            if run_count != 0 && candidate_size > max_part_bytes {
+            if run_count != 0
+                && (candidate_size > max_part_bytes || run_count as usize == max_records)
+            {
                 parts.push(encode_run(
                     client,
                     run_clock,
@@ -139,7 +173,7 @@ pub(crate) fn split_update_v1(
                 run_count = 0;
             }
             run_count += 1;
-            let known = clients.get_mut(&client).unwrap();
+            let known = clients.get_mut(&client).ok_or(SplitError::Malformed)?;
             if matches!(block.kind, BLOCK_GC_REF_NUMBER | BLOCK_ITEM_TYPE_REF_NUMBER) {
                 if let Some((start, len, kind)) = known.ranges.last_mut()
                     && *kind == block.kind
@@ -209,6 +243,137 @@ pub(crate) fn split_update_v1(
     Ok(parts)
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct UpdateCursor {
+    position: usize,
+    phase: u8,
+    clients: u32,
+    client: Option<(u64, u32, u32)>,
+}
+
+pub(crate) struct UpdatePart {
+    pub(crate) bytes: Vec<u8>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) records: usize,
+}
+
+impl UpdateCursor {
+    pub(crate) fn next(
+        &mut self,
+        update: &[u8],
+        max_records: usize,
+        max_bytes: usize,
+    ) -> Result<Option<UpdatePart>, SplitError> {
+        if max_records == 0 || max_bytes == 0 {
+            return Err(SplitError::InvalidLimit);
+        }
+        let mut next = *self;
+        let mut scanner = Scanner::new(update);
+        scanner.pos = next.position;
+        if next.phase == 0 {
+            next.clients = scanner.count()?;
+            next.phase = 1;
+        }
+        loop {
+            if next.client.is_none() {
+                if next.clients == 0 {
+                    if next.phase == 1 {
+                        next.clients = scanner.count()?;
+                        next.phase = 2;
+                        continue;
+                    }
+                    if scanner.pos != update.len() {
+                        return Err(SplitError::Malformed);
+                    }
+                    next.position = scanner.pos;
+                    *self = next;
+                    return Ok(None);
+                }
+                next.client = Some(if next.phase == 1 {
+                    let count = scanner.count()?;
+                    let client = scanner.client()?;
+                    (client, scanner.clock()?, count)
+                } else {
+                    let client = scanner.client()?;
+                    (client, 0, scanner.count()?)
+                });
+                next.clients -= 1;
+            }
+            let (client, clock, remaining) = next.client.ok_or(SplitError::Malformed)?;
+            if remaining == 0 {
+                return Err(SplitError::Malformed);
+            }
+            let start = scanner.pos;
+            let mut end = start;
+            let mut count = 0u32;
+            let mut next_clock = clock;
+            while count < remaining && (count as usize) < max_records {
+                let length = if next.phase == 1 {
+                    scanner.block()?.len
+                } else {
+                    scanner.delete_range()?;
+                    0
+                };
+                let size = if next.phase == 1 {
+                    run_size(client, clock, count + 1)
+                } else {
+                    2 + var_len(client) + var_len(u64::from(count + 1))
+                };
+                if size.saturating_add(scanner.pos - start) > max_bytes {
+                    if count == 0 {
+                        return Err(SplitError::OversizedStruct);
+                    }
+                    break;
+                }
+                end = scanner.pos;
+                count += 1;
+                next_clock = next_clock
+                    .checked_add(length)
+                    .ok_or(SplitError::Malformed)?;
+                if next_clock > MAX_CLOCK {
+                    return Err(SplitError::Malformed);
+                }
+            }
+            let bytes = if next.phase == 1 {
+                encode_run(client, clock, count, &update[start..end])
+            } else {
+                let mut bytes = vec![0, 1];
+                write_var(&mut bytes, client);
+                write_var(&mut bytes, u64::from(count));
+                bytes.extend_from_slice(&update[start..end]);
+                bytes
+            };
+            next.position = end;
+            next.client = (count < remaining).then_some((client, next_clock, remaining - count));
+            *self = next;
+            return Ok(Some(UpdatePart {
+                bytes,
+                records: count as usize,
+            }));
+        }
+    }
+
+    pub(crate) fn is_complete(&mut self, update: &[u8]) -> Result<bool, SplitError> {
+        if self.client.is_some() || self.clients != 0 || self.phase == 0 {
+            return Ok(false);
+        }
+        let mut scanner = Scanner::new(update);
+        scanner.pos = self.position;
+        if self.phase == 1 {
+            let count = scanner.count()?;
+            if count != 0 {
+                return Ok(false);
+            }
+        }
+        if scanner.pos != update.len() {
+            return Err(SplitError::Malformed);
+        }
+        self.phase = 2;
+        self.position = scanner.pos;
+        Ok(true)
+    }
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct SplitParts {
     pub(crate) parts: Vec<Vec<u8>>,
@@ -268,7 +433,7 @@ fn validate_deletions(update: &[u8], clients: &HashMap<u64, Client>) -> Result<(
         let count = scanner.count()?;
         let client = scanner.client()?;
         let mut clock = scanner.clock()?;
-        let known = &clients[&client];
+        let known = clients.get(&client).ok_or(SplitError::Malformed)?;
         let mut deletes = Scanner::new(update);
         deletes.pos = known.delete_offset.unwrap_or(update.len());
         let mut remaining = known.delete_count;
@@ -1096,6 +1261,60 @@ mod tests {
             map.remove(&mut txn, "child");
         }
         assert_doc(&doc);
+    }
+
+    #[test]
+    fn bounded_subupdates_preserve_structs_deletions_and_full_encode() {
+        let doc = Doc::with_client_id(7);
+        let map = doc.get_or_insert_map("map");
+        {
+            let mut txn = doc.transact_mut();
+            for index in 0..500 {
+                map.insert(&mut txn, format!("key{index}"), index);
+            }
+        }
+        {
+            let mut txn = doc.transact_mut();
+            for index in (0..500).step_by(2) {
+                map.remove(&mut txn, &format!("key{index}"));
+            }
+        }
+        let txn = doc.transact();
+        let update = txn.encode_state_as_update_v1(&StateVector::default());
+        let vector = vector_bytes(&txn.state_vector());
+        drop(txn);
+        for records in [1, 7, 256] {
+            let parts = split_update_v1_bounded(&update, records, 384).unwrap();
+            assert!(parts.len() > 1);
+            for part in &parts {
+                assert!(part.len() <= 384);
+                let mut cursor = UpdateCursor::default();
+                let mut processed = 0;
+                while let Some(part) = cursor.next(part, records, 384).unwrap() {
+                    processed += part.records;
+                }
+                assert!(processed <= records);
+            }
+            assert_applied_parts(&update, &vector, 7, &parts, |doc, part| {
+                hydrate_snapshot_part(doc, part).unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn subupdate_cursor_rejects_truncated_input_without_panicking() {
+        let workbook = Workbook::from_model(small_model()).unwrap();
+        let update = workbook.encode_state_as_update_v1();
+        for end in 0..update.len() {
+            let mut cursor = UpdateCursor::default();
+            loop {
+                match cursor.next(&update[..end], 7, 512) {
+                    Ok(Some(_)) => {}
+                    Err(_) => break,
+                    Ok(None) => panic!("accepted truncated Yrs update at {end}"),
+                }
+            }
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ use xlsx_parse::{SharedStringCells, SheetAxes};
 
 use crate::workbook::PreservedSheetState;
 
-use super::wire::{ChunkKind, Reader, Writer, frame, unframe};
+use super::wire::{ChunkKind, Reader, Writer, frame, reserve, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotResult};
 
 const HEADER: u8 = 0;
@@ -229,20 +229,34 @@ impl PreservedSnapshotBuilder {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
+        self.push_bounded(payload, SnapshotBudget::new(usize::MAX, usize::MAX)?)
+    }
+
+    pub(crate) fn push_bounded(
+        &mut self,
+        payload: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<()> {
         if self.failed {
             return Err(SnapshotError::new(
                 "snapshot preservation builder has failed",
             ));
         }
-        let result = self.push_inner(payload);
+        let result = self.push_inner(payload, budget);
         if result.is_err() {
             self.failed = true;
         }
         result
     }
 
-    fn push_inner(&mut self, chunk: &[u8]) -> SnapshotResult<()> {
+    fn push_inner(&mut self, chunk: &[u8], budget: SnapshotBudget) -> SnapshotResult<()> {
+        if chunk.len() > budget.max_bytes() {
+            return Err(SnapshotError::new(
+                "snapshot preservation exceeds advance byte budget",
+            ));
+        }
         let (kind, ordinal, payload) = unframe(chunk)?;
         if kind != ChunkKind::Preserved || ordinal != self.ordinal || payload.is_empty() {
             return Err(SnapshotError::new(
@@ -250,7 +264,15 @@ impl PreservedSnapshotBuilder {
             ));
         }
         let mut r = Reader::new(payload);
+        #[cfg(test)]
+        crate::snapshot::step::record(0, chunk.len());
+        let mut records = 0;
         while !r.is_empty() {
+            if records == budget.max_records() {
+                return Err(SnapshotError::new(
+                    "snapshot preservation exceeds advance record budget",
+                ));
+            }
             let tag = r.u8()?;
             if !self.started {
                 if tag != HEADER {
@@ -262,6 +284,9 @@ impl PreservedSnapshotBuilder {
             } else {
                 self.read_record(tag, &mut r)?;
             }
+            records += 1;
+            #[cfg(test)]
+            crate::snapshot::step::record(1, 0);
         }
         r.finish()?;
         self.ordinal += 1;
@@ -275,6 +300,13 @@ impl PreservedSnapshotBuilder {
             .ok_or_else(|| SnapshotError::new("snapshot preservation count is zero"))?;
         for tag in [ORIGIN, STRINGS, AXES, CREATED] {
             let count = r.var_usize()?;
+            match tag {
+                ORIGIN => reserve(&mut self.state.origins, count)?,
+                STRINGS => reserve(self.shared_string_cells()?, count)?,
+                AXES => reserve(&mut self.state.axes, count)?,
+                CREATED => reserve(&mut self.state.created, count)?,
+                _ => return Err(SnapshotError::new("invalid snapshot preservation tag")),
+            }
             if count != 0 {
                 self.runs.push_back((tag, count));
             }
@@ -306,7 +338,7 @@ impl PreservedSnapshotBuilder {
             ORIGIN => self.state.origins.push(r.option(Reader::var_usize)?),
             STRINGS => {
                 let count = r.var_usize()?;
-                Arc::make_mut(&mut self.state.shared_string_cells).push(SharedStringCells::new());
+                self.shared_string_cells()?.push(SharedStringCells::new());
                 if count != 0 {
                     self.runs.push_front((STRING_CELL, count));
                 }
@@ -314,7 +346,8 @@ impl PreservedSnapshotBuilder {
             STRING_CELL => {
                 let key = (r.var_u32()?, r.var_u32()?);
                 let index = r.var_usize()?;
-                let cells = Arc::make_mut(&mut self.state.shared_string_cells)
+                let cells = self
+                    .shared_string_cells()?
                     .last_mut()
                     .ok_or_else(|| SnapshotError::new("snapshot SST cell has no sheet"))?;
                 if cells
@@ -347,6 +380,11 @@ impl PreservedSnapshotBuilder {
             ));
         }
         Ok(self.state)
+    }
+
+    fn shared_string_cells(&mut self) -> SnapshotResult<&mut Vec<SharedStringCells>> {
+        Arc::get_mut(&mut self.state.shared_string_cells)
+            .ok_or_else(|| SnapshotError::new("snapshot SST cells are already shared"))
     }
 }
 

@@ -123,7 +123,7 @@ impl Default for DepGraphBuilder {
     }
 }
 
-fn next_cell(sheet: &Sheet, last: Option<(RowId, ColId)>) -> Option<(CellRef, &Cell)> {
+pub(super) fn next_cell(sheet: &Sheet, last: Option<(RowId, ColId)>) -> Option<(CellRef, &Cell)> {
     let row = match last {
         Some((row, col)) => {
             if let Some(col) = col.checked_add(1)
@@ -276,6 +276,16 @@ mod tests {
         let model = workbook();
         for model in [&empty, &metadata_only, &model] {
             let expected = DepGraph::build(model);
+            let mut snapshot = crate::graph::SnapshotGraphBuilder::new();
+            loop {
+                let (ready, records, bytes) = snapshot.advance(model, 512).unwrap();
+                assert!(records <= 1);
+                assert!(bytes <= 512);
+                if ready {
+                    break;
+                }
+            }
+            snapshot.finish().unwrap().assert_matches(&expected);
             let visits = model.sheets.len() * 2
                 + model.defined_names.len()
                 + model.tables.len()
@@ -450,5 +460,41 @@ mod tests {
             .finish()
             .unwrap()
             .assert_matches(&DepGraph::build(&model));
+    }
+
+    #[test]
+    fn snapshot_graph_bounds_name_expansion_and_wide_table_clones() {
+        let mut model = Workbook::default();
+        model.sheets.push(Sheet::new("Data"));
+        for index in 0..300 {
+            model.defined_names.push(defined(
+                &format!("Name{index}"),
+                &if index == 299 {
+                    "A1+NOW()".to_owned()
+                } else {
+                    format!("Name{}+A{}", index + 1, index + 1)
+                },
+                None,
+            ));
+        }
+        let mut wide = table("Wide", SheetId(0), "A1:XFD4");
+        wide.columns = (0..2_000).map(|index| format!("Column{index}")).collect();
+        model.tables.push(wide);
+        model.sheets[0].set_cell(a1("A5"), formula("Name0+SUM(Wide[Column1999])"));
+        let expected = DepGraph::build(&model);
+        let mut builder = crate::graph::SnapshotGraphBuilder::new();
+        let mut steps = 0;
+        loop {
+            let (ready, records, bytes) = builder.advance(&model, 256).unwrap();
+            assert!(records <= 1);
+            assert!(bytes <= 256);
+            steps += 1;
+            assert!(steps < 20_000);
+            if ready {
+                break;
+            }
+        }
+        assert!(steps > 2_000);
+        builder.finish().unwrap().assert_matches(&expected);
     }
 }

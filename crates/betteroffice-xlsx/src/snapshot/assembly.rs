@@ -1,11 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::LinkedList;
 use std::mem::size_of;
-use std::num::NonZeroUsize;
 
-use ooxml_opc::{SourceContainer, SourceContainerBuilder};
+use ooxml_opc::{SourceContainer, SourceContainerBuilder, SourceContainerInitializer};
 use sha2::{Digest, Sha256};
-use xlsx_calc::graph::DepGraphBuilder;
-use xlsx_model::{CellRange, CellRef, Workbook as WorkbookModel};
+use xlsx_calc::graph::SnapshotGraphBuilder;
+use xlsx_model::CellRef;
 use xlsx_parse::{PackageFactsBuilder, PackageFactsEncoder};
 
 use crate::authority::snapshot::{AuthorityHydrator, AuthoritySnapshotEncoder};
@@ -16,7 +15,7 @@ use crate::snapshot::wire::{ChunkKind, Reader, Writer, frame, unframe};
 use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 
 use super::{
-    Arc, BTreeMap, ChartCache, ChartAnchor, HashMap, Mutex, PackageSlot, PreservedSheetState,
+    Arc, BTreeMap, ChartAnchor, ChartCache, HashMap, Mutex, PackageSlot, PreservedSheetState,
     ProposalSet, SheetId, UndoStack, UpdateObservers, Workbook, WorkbookMode,
 };
 use crate::{CalculationOptions, CalculationResult, CellAddress};
@@ -212,7 +211,10 @@ impl WorkbookSnapshotEncoder {
             .clamp(1, MAX_LOGICAL_BYTES - 12);
         let part_budget = SnapshotBudget::new(1, part_bytes)?;
         let record_budget = SnapshotBudget::new(1, MAX_LOGICAL_BYTES)?;
-        let authority = AuthoritySnapshotEncoder::new(&workbook.authority, part_budget)?;
+        let authority = AuthoritySnapshotEncoder::new(
+            &workbook.authority,
+            SnapshotBudget::new(budget.max_records(), part_bytes)?,
+        )?;
         let split_fallback = authority.split_fallback();
         let (base_count, yrs_count) = authority.chunk_counts(part_budget);
         let CalculationResult {
@@ -521,16 +523,35 @@ struct HeaderState {
     calculation_index: usize,
 }
 
+enum SourceBuilder {
+    Initializing(SourceContainerInitializer),
+    Ready(SourceContainerBuilder),
+}
+
+impl SourceBuilder {
+    fn finish(self) -> Result<SourceContainer, String> {
+        match self {
+            Self::Initializing(_) => Err("source initialization is incomplete".to_owned()),
+            Self::Ready(builder) => builder.finish(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct StreamAdmission {
     remaining: usize,
     length: usize,
     varint: u64,
     shift: u32,
+    records: usize,
+    bytes: usize,
 }
 
 impl StreamAdmission {
-    fn push(&mut self, mut payload: &[u8], max_bytes: usize) -> SnapshotResult<()> {
+    fn push(&mut self, mut payload: &[u8], budget: SnapshotBudget) -> SnapshotResult<()> {
+        let max_bytes = budget.max_bytes();
+        self.records = 0;
+        self.bytes = 0;
         if self.remaining != 0 && self.length > max_bytes.min(MAX_LOGICAL_BYTES) {
             return Err(error("snapshot record exceeds advance byte budget"));
         }
@@ -539,6 +560,15 @@ impl StreamAdmission {
                 let count = self.remaining.min(payload.len());
                 self.remaining -= count;
                 payload = &payload[count..];
+                if self.remaining == 0 {
+                    self.records += 1;
+                    self.bytes = self.bytes.saturating_add(self.length);
+                    if self.records > budget.max_records() || self.bytes > max_bytes {
+                        return Err(error(
+                            "snapshot stream exceeds advance record or byte budget",
+                        ));
+                    }
+                }
             } else {
                 let byte = payload[0];
                 payload = &payload[1..];
@@ -572,89 +602,13 @@ impl StreamAdmission {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct GraphCursor {
-    phase: u8,
-    index: usize,
-    after: Option<CellRef>,
-}
-
-impl GraphCursor {
-    fn next_cost(&mut self, model: &WorkbookModel) -> Option<usize> {
-        loop {
-            match self.phase {
-                0 => {
-                    if let Some(sheet) = model.sheets.get(self.index) {
-                        self.index += 1;
-                        return Some(sheet.name.len().saturating_add(32));
-                    }
-                }
-                1 => {
-                    if let Some(name) = model.defined_names.get(self.index) {
-                        self.index += 1;
-                        return Some(name.name.len().saturating_add(name.formula.len()));
-                    }
-                }
-                2 => {
-                    if let Some(table) = model.tables.get(self.index) {
-                        self.index += 1;
-                        return Some(table.columns.iter().fold(table.name.len(), |bytes, column| {
-                            bytes.saturating_add(column.len())
-                        }));
-                    }
-                }
-                3 => {
-                    let Some(sheet) = model.sheets.get(self.index) else {
-                        return None;
-                    };
-                    let row = self.after.map_or(0, |at| at.row);
-                    let next_col = self.after.and_then(|at| at.col.checked_add(1));
-                    let current_row = next_col.and_then(|col| {
-                        sheet
-                            .cells_in_range(CellRange::new(
-                                CellRef::new(row, col),
-                                CellRef::new(row, u32::MAX),
-                            ))
-                            .next()
-                    });
-                    let start_row = if self.after.is_none() {
-                        Some(0)
-                    } else {
-                        row.checked_add(1)
-                    };
-                    let next = current_row.or_else(|| {
-                        start_row.and_then(|row| {
-                            sheet
-                                .cells_in_range(CellRange::new(
-                                    CellRef::new(row, 0),
-                                    CellRef::new(u32::MAX, u32::MAX),
-                                ))
-                                .next()
-                        })
-                    });
-                    if let Some((at, cell)) = next {
-                        self.after = Some(at);
-                        return Some(cell.formula.as_ref().map_or(1, String::len));
-                    }
-                    self.index += 1;
-                    self.after = None;
-                    return Some(1);
-                }
-                _ => return None,
-            }
-            self.phase += 1;
-            self.index = 0;
-        }
-    }
-}
-
 pub struct WorkbookSnapshotBuilder {
     header: Option<HeaderState>,
     snapshot_id: Option<u64>,
     ordinals: [u64; 9],
     received: [u64; 9],
     fragment: Option<Fragment>,
-    queue: VecDeque<Vec<u8>>,
+    queue: LinkedList<Vec<u8>>,
     digest: Sha256,
     ended: bool,
     failed: bool,
@@ -662,9 +616,9 @@ pub struct WorkbookSnapshotBuilder {
     model: Option<ModelSnapshotBuilder>,
     preserved: Option<PreservedSnapshotBuilder>,
     facts: Option<PackageFactsBuilder>,
-    source: Option<SourceContainerBuilder>,
+    source: Option<SourceBuilder>,
     restored: Option<Workbook>,
-    graph: Option<DepGraphBuilder>,
+    graph: Option<SnapshotGraphBuilder>,
     anchor_sheet: usize,
     anchor_chart: usize,
     anchors_done: bool,
@@ -672,7 +626,6 @@ pub struct WorkbookSnapshotBuilder {
     calculation_context: Option<CalculationOptions>,
     base_admission: StreamAdmission,
     facts_admission: StreamAdmission,
-    graph_cursor: GraphCursor,
 }
 
 impl WorkbookSnapshotBuilder {
@@ -683,7 +636,7 @@ impl WorkbookSnapshotBuilder {
             ordinals: [0; 9],
             received: [0; 9],
             fragment: None,
-            queue: VecDeque::new(),
+            queue: LinkedList::new(),
             digest: Sha256::new(),
             ended: false,
             failed: false,
@@ -701,11 +654,12 @@ impl WorkbookSnapshotBuilder {
             calculation_context: None,
             base_admission: StreamAdmission::default(),
             facts_admission: StreamAdmission::default(),
-            graph_cursor: GraphCursor::default(),
         }
     }
 
     pub fn push(&mut self, chunk: &[u8]) -> SnapshotResult<SnapshotProgress> {
+        #[cfg(test)]
+        crate::snapshot::step::reset();
         if self.failed {
             return Err(error("snapshot builder has failed"));
         }
@@ -719,6 +673,8 @@ impl WorkbookSnapshotBuilder {
             return Err(error("snapshot has extra chunks"));
         }
         let (kind, ordinal, payload) = unframe(chunk)?;
+        #[cfg(test)]
+        crate::snapshot::step::record(0, chunk.len());
         if ordinal != self.ordinals[index(kind)] {
             return Err(error("snapshot transport ordinal differs"));
         }
@@ -738,7 +694,11 @@ impl WorkbookSnapshotBuilder {
             let expected_kind = match &self.header {
                 None if self.received[index(ChunkKind::Header)] == 0 => index(ChunkKind::Header),
                 None => {
-                    let last = self.received.iter().rposition(|count| *count != 0).unwrap();
+                    let last = self
+                        .received
+                        .iter()
+                        .rposition(|count| *count != 0)
+                        .ok_or_else(|| error("snapshot header is missing"))?;
                     if index(kind) < last {
                         return Err(error("snapshot chunks are reordered"));
                     }
@@ -765,7 +725,10 @@ impl WorkbookSnapshotBuilder {
                 bytes: storage,
             });
         }
-        let fragment = self.fragment.as_mut().expect("snapshot fragment exists");
+        let fragment = self
+            .fragment
+            .as_mut()
+            .ok_or_else(|| error("snapshot fragment is missing"))?;
         if fragment.kind != kind
             || fragment.ordinal != logical_ordinal
             || fragment.length != length
@@ -789,7 +752,10 @@ impl WorkbookSnapshotBuilder {
         if fragment.bytes.len() != length {
             return Ok(SnapshotProgress::pending());
         }
-        let fragment = self.fragment.take().expect("complete snapshot fragment");
+        let fragment = self
+            .fragment
+            .take()
+            .ok_or_else(|| error("snapshot fragment is missing"))?;
         let (inner_kind, inner_ordinal, payload) = unframe(&fragment.bytes)?;
         if let Some(state) = &self.header {
             let expected = self
@@ -885,12 +851,13 @@ impl WorkbookSnapshotBuilder {
         {
             return Err(error("snapshot package counts differ"));
         }
-        let last = self.received.iter().rposition(|count| *count != 0).unwrap();
-        for (kind, (&received, expected)) in self
+        let last = self
             .received
             .iter()
-            .zip(header.chunk_counts)
-            .enumerate()
+            .rposition(|count| *count != 0)
+            .ok_or_else(|| error("snapshot header is missing"))?;
+        for (kind, (&received, expected)) in
+            self.received.iter().zip(header.chunk_counts).enumerate()
         {
             if received > expected || (kind < last && received != expected) {
                 return Err(error("snapshot chunk counts differ"));
@@ -918,7 +885,10 @@ impl WorkbookSnapshotBuilder {
     }
 
     fn accept_calculation(&mut self, payload: &[u8]) -> SnapshotResult<()> {
-        let state = self.header.as_mut().expect("validated snapshot header");
+        let state = self
+            .header
+            .as_mut()
+            .ok_or_else(|| error("snapshot header is missing"))?;
         while state.calculation_list < state.calculation_counts.len()
             && state.calculation_index == state.calculation_counts[state.calculation_list]
         {
@@ -949,6 +919,8 @@ impl WorkbookSnapshotBuilder {
     }
 
     pub fn advance(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
+        #[cfg(test)]
+        crate::snapshot::step::reset();
         if self.failed {
             return Err(error("snapshot builder has failed"));
         }
@@ -969,80 +941,116 @@ impl WorkbookSnapshotBuilder {
             };
             if let Some(admission) = admission {
                 let mut next = *admission;
-                next.push(payload, budget.max_bytes())?;
+                next.push(payload, budget)?;
                 *admission = next;
             }
         }
-        if self.anchors_done
-            && self.graph.is_some()
-            && let Some(workbook) = &self.restored
-        {
-            let mut next = self.graph_cursor;
-            if next
-                .next_cost(&workbook.model)
-                .is_some_and(|bytes| bytes > budget.max_bytes())
-            {
-                return Err(error("snapshot graph record exceeds advance byte budget"));
-            }
-            self.graph_cursor = next;
-        }
         let result = self.advance_inner(budget);
-        self.failed = result.is_err();
+        self.failed = result.as_ref().err().is_some_and(|failure| {
+            !matches!(
+                failure.to_string().as_str(),
+                "snapshot graph record exceeds advance byte budget"
+                    | "Yrs snapshot record exceeds advance byte budget"
+            )
+        });
         result
     }
 
     fn advance_inner(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
+        if let Some(chunk) = self.queue.front() {
+            let (kind, _, payload) = unframe(chunk)?;
+            if kind == ChunkKind::Yrs {
+                let authority = self
+                    .authority
+                    .as_mut()
+                    .ok_or_else(|| error("snapshot header is missing"))?;
+                if authority.advance_yrs(payload, budget)?.is_ready() {
+                    self.queue.pop_front();
+                }
+                return Ok(SnapshotProgress::pending());
+            }
+            if kind == ChunkKind::Source {
+                if self.source.is_none() {
+                    let length = self
+                        .header
+                        .as_ref()
+                        .and_then(|state| state.source_length)
+                        .ok_or_else(|| error("snapshot source length is missing"))?;
+                    self.source = Some(SourceBuilder::Initializing(
+                        SourceContainerInitializer::new(length).map_err(error)?,
+                    ));
+                }
+                if let Some(SourceBuilder::Initializing(initializer)) = self.source.as_mut() {
+                    let _count = initializer.advance(budget.max_bytes()).map_err(error)?;
+                    #[cfg(test)]
+                    crate::snapshot::step::initialize(_count);
+                    if initializer.is_ready() {
+                        let Some(SourceBuilder::Initializing(initializer)) = self.source.take()
+                        else {
+                            return Err(error("snapshot source initializer is missing"));
+                        };
+                        self.source =
+                            Some(SourceBuilder::Ready(initializer.finish().map_err(error)?));
+                    }
+                    return Ok(SnapshotProgress::pending());
+                }
+            }
+        }
         if let Some(chunk) = self.queue.pop_front() {
             let (kind, _, payload) = unframe(&chunk)?;
             match kind {
                 ChunkKind::Header => {
                     if self.header.is_none() {
-                        let snapshot_id = self.snapshot_id.expect("received snapshot identity");
+                        let snapshot_id = self
+                            .snapshot_id
+                            .ok_or_else(|| error("snapshot identity is missing"))?;
                         self.accept_header(payload, snapshot_id)?;
                     } else {
                         self.accept_calculation(payload)?;
                     }
+                    #[cfg(test)]
+                    crate::snapshot::step::record(1, chunk.len());
                 }
                 ChunkKind::AuthorityBase => {
-                    let authority = self.authority.as_mut().expect("validated snapshot header");
+                    let authority = self
+                        .authority
+                        .as_mut()
+                        .ok_or_else(|| error("snapshot header is missing"))?;
                     authority.push_base(payload)?;
-                    authority.advance(SnapshotBudget::new(1, budget.max_bytes())?)?;
+                    authority.advance_bounded(budget)?;
+                    #[cfg(test)]
+                    crate::snapshot::step::bytes_at_least(payload.len());
                 }
-                ChunkKind::Yrs => self
-                    .authority
-                    .as_mut()
-                    .expect("validated snapshot header")
-                    .push_yrs(payload)?,
+                ChunkKind::Yrs => return Err(error("unexpected queued Yrs chunk")),
                 ChunkKind::Model | ChunkKind::Cells => self
                     .model
                     .as_mut()
-                    .expect("validated snapshot header")
-                    .push(&chunk)?,
+                    .ok_or_else(|| error("snapshot header is missing"))?
+                    .push_bounded(&chunk, budget)?,
                 ChunkKind::Preserved => self
                     .preserved
                     .as_mut()
-                    .expect("validated snapshot header")
-                    .push(&chunk)?,
-                ChunkKind::Facts => self
-                    .facts
-                    .as_mut()
-                    .ok_or_else(|| error("unexpected snapshot facts"))?
-                    .push(payload)
-                    .map_err(|failure| error(failure.to_string()))?,
-                ChunkKind::Source => {
-                    if self.source.is_none() {
-                        let length = self
-                            .header
-                            .as_ref()
-                            .and_then(|state| state.source_length)
-                            .ok_or_else(|| error("snapshot source length is missing"))?;
-                        self.source = Some(SourceContainerBuilder::new(length).map_err(error)?);
-                    }
-                    self.source
+                    .ok_or_else(|| error("snapshot header is missing"))?
+                    .push_bounded(&chunk, budget)?,
+                ChunkKind::Facts => {
+                    self.facts
                         .as_mut()
-                        .expect("snapshot source builder exists")
+                        .ok_or_else(|| error("unexpected snapshot facts"))?
                         .push(payload)
-                        .map_err(error)?;
+                        .map_err(|failure| error(failure.to_string()))?;
+                    #[cfg(test)]
+                    crate::snapshot::step::record(
+                        self.facts_admission.records,
+                        self.facts_admission.bytes.max(payload.len()),
+                    );
+                }
+                ChunkKind::Source => {
+                    let Some(SourceBuilder::Ready(source)) = self.source.as_mut() else {
+                        return Err(error("snapshot source builder is missing"));
+                    };
+                    source.push(payload).map_err(error)?;
+                    #[cfg(test)]
+                    crate::snapshot::step::record(1, payload.len());
                 }
                 ChunkKind::End => {
                     return Err(error("unexpected queued snapshot control chunk"));
@@ -1054,14 +1062,20 @@ impl WorkbookSnapshotBuilder {
             return Ok(SnapshotProgress::pending());
         }
         if self.restored.is_none() {
-            let authority = self.authority.as_mut().expect("validated snapshot header");
-            if !authority.advance(budget)?.is_ready() {
+            let authority = self
+                .authority
+                .as_mut()
+                .ok_or_else(|| error("snapshot header is missing"))?;
+            if !authority.advance_bounded(budget)?.is_ready() {
                 return Ok(SnapshotProgress::pending());
             }
             self.complete_parts()?;
             return Ok(SnapshotProgress::pending());
         }
-        let workbook = self.restored.as_mut().expect("completed snapshot parts");
+        let workbook = self
+            .restored
+            .as_mut()
+            .ok_or_else(|| error("snapshot parts are missing"))?;
         if !self.anchors_done {
             let mut records = 0;
             let mut bytes = 0usize;
@@ -1078,8 +1092,15 @@ impl WorkbookSnapshotBuilder {
                     return Err(error("snapshot preservation state is not initial"));
                 }
                 if let Some(chart) = sheet.charts.get(self.anchor_chart) {
-                    let frame_id = chart.frame_id();
-                    let cost = frame_id.len().saturating_add(size_of::<ChartAnchor>());
+                    let digits = chart
+                        .anchor_index
+                        .checked_ilog10()
+                        .map_or(1, |log| log as usize + 1);
+                    let cost = chart
+                        .drawing
+                        .len()
+                        .saturating_add(1 + digits)
+                        .saturating_add(size_of::<ChartAnchor>());
                     if cost > budget.max_bytes().saturating_sub(bytes) {
                         if records == 0 {
                             return Err(error("snapshot chart exceeds advance byte budget"));
@@ -1087,7 +1108,9 @@ impl WorkbookSnapshotBuilder {
                         break;
                     }
                     bytes += cost;
-                    workbook.opened_anchors.insert(frame_id, chart.anchor);
+                    workbook
+                        .opened_anchors
+                        .insert(chart.frame_id(), chart.anchor);
                     self.anchor_chart += 1;
                 } else {
                     self.anchor_sheet += 1;
@@ -1095,16 +1118,49 @@ impl WorkbookSnapshotBuilder {
                 }
                 records += 1;
             }
+            #[cfg(test)]
+            crate::snapshot::step::record(records, bytes);
             return Ok(SnapshotProgress::pending());
         }
         if let Some(graph) = self.graph.as_mut() {
-            if !graph.advance(&workbook.model, NonZeroUsize::MIN) {
+            let mut ready = false;
+            let mut _records = 0;
+            let mut bytes = 0;
+            for visit in 0..budget.max_records() {
+                match graph.advance(&workbook.model, budget.max_bytes() - bytes) {
+                    Ok((done, count, cost)) => {
+                        _records += count;
+                        bytes += cost;
+                        ready = done;
+                        if ready {
+                            break;
+                        }
+                    }
+                    Err(failure)
+                        if visit != 0
+                            && failure == "snapshot graph record exceeds advance byte budget" =>
+                    {
+                        break;
+                    }
+                    Err(failure) => return Err(error(failure)),
+                }
+            }
+            #[cfg(test)]
+            crate::snapshot::step::record(_records, bytes);
+            if !ready {
                 return Ok(SnapshotProgress::pending());
             }
-            workbook.graph = self.graph.take().expect("completed graph builder").finish();
+            workbook.graph = self
+                .graph
+                .take()
+                .ok_or_else(|| error("completed graph builder is missing"))?
+                .finish();
         }
         self.ready = Some(HydratedWorkbook {
-            workbook: self.restored.take().expect("completed snapshot workbook"),
+            workbook: self
+                .restored
+                .take()
+                .ok_or_else(|| error("completed snapshot workbook is missing"))?,
             calculation_context: self.calculation_context,
         });
         Ok(SnapshotProgress::ready())
@@ -1121,7 +1177,10 @@ impl WorkbookSnapshotBuilder {
             calculation_counts,
             calculation_list: _,
             calculation_index: _,
-        } = self.header.take().expect("validated snapshot header");
+        } = self
+            .header
+            .take()
+            .ok_or_else(|| error("validated snapshot header is missing"))?;
         if self.received != header.chunk_counts {
             return Err(error("snapshot chunk counts differ"));
         }
@@ -1136,10 +1195,14 @@ impl WorkbookSnapshotBuilder {
         let mut authority = self
             .authority
             .take()
-            .expect("snapshot authority builder exists")
+            .ok_or_else(|| error("snapshot authority builder is missing"))?
             .finish()?;
         authority.set_snapshot_projection_valid(projection_valid);
-        let model = self.model.take().expect("snapshot model builder exists").finish()?;
+        let model = self
+            .model
+            .take()
+            .ok_or_else(|| error("snapshot model builder is missing"))?
+            .finish()?;
         if model.styles.snapshot_field_counts() != style_counts
             || model.sheets.get(header.active_sheet.0 as usize).is_none()
         {
@@ -1148,7 +1211,7 @@ impl WorkbookSnapshotBuilder {
         let preserved = self
             .preserved
             .take()
-            .expect("snapshot preservation builder exists")
+            .ok_or_else(|| error("snapshot preservation builder is missing"))?
             .finish()?;
         let sheets = model.sheets.len();
         if [
@@ -1165,14 +1228,14 @@ impl WorkbookSnapshotBuilder {
         let source_container = self
             .source
             .take()
-            .map(SourceContainerBuilder::finish)
+            .map(SourceBuilder::finish)
             .transpose()
             .map_err(error)?;
         let source_package = if package_present {
             let facts = self
                 .facts
                 .take()
-                .expect("snapshot facts builder exists")
+                .ok_or_else(|| error("snapshot facts builder is missing"))?
                 .finish()
                 .map_err(|failure| error(failure.to_string()))?;
             let source = source_container
@@ -1202,7 +1265,7 @@ impl WorkbookSnapshotBuilder {
             chunk_counts: _,
         } = header;
         self.calculation_context = calculation_context;
-        self.graph = graph_present.then(DepGraphBuilder::new);
+        self.graph = graph_present.then(SnapshotGraphBuilder::new);
         self.restored = Some(Workbook {
             authority,
             mode: WorkbookMode::Standalone,

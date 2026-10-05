@@ -6,8 +6,8 @@ use xlsx_model::styles::{
 use xlsx_model::{AnchorCell, ChartRefKind};
 
 use crate::snapshot::header::{SnapshotHeader, SnapshotMode};
-use crate::snapshot::wire::{ChunkKind, Reader, Writer, frame};
-use crate::snapshot::yrs_split::split_or_whole_v1;
+use crate::snapshot::wire::{ChunkKind, Reader, Writer, frame, reserve};
+use crate::snapshot::yrs_split::{SplitError, UpdateCursor, split_update_v1_bounded};
 use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 
 use super::*;
@@ -651,18 +651,14 @@ impl AuthoritySnapshotEncoder {
         let update = doc
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let split = split_or_whole_v1(&update, budget.max_bytes());
-        let (parts, split_fallback) = if let Some(reason) = split.fallback {
-            (split.parts, Some(reason.reason().to_owned()))
-        } else if split
-            .parts
-            .iter()
-            .any(|part| part.len() > budget.max_bytes())
-        {
-            (vec![update], Some("oversized_struct".to_owned()))
-        } else {
-            (split.parts, None)
-        };
+        let (parts, split_fallback) =
+            match split_update_v1_bounded(&update, budget.max_records(), budget.max_bytes()) {
+                Ok(parts) if parts.iter().all(|part| part.len() <= budget.max_bytes()) => {
+                    (parts, None)
+                }
+                Ok(_) => (vec![update], Some("oversized_struct".to_owned())),
+                Err(reason) => (vec![update], Some(reason.reason().to_owned())),
+            };
         let yrs_count = parts.len() as u64;
         Ok(Self {
             base: BaseEncoder::new(Arc::clone(base)),
@@ -762,9 +758,31 @@ impl BaseBuilder {
                 styles,
                 tables: Vec::new(),
             });
+            let base = self
+                .base
+                .as_mut()
+                .ok_or_else(|| SnapshotError::new("authority base is missing"))?;
+            reserve(&mut base.defined_names, self.counts[0])?;
+            reserve(&mut base.freeze_panes, self.counts[2])?;
+            reserve(&mut base.formats, self.counts[3])?;
+            reserve(&mut base.col_styles, self.counts[4])?;
+            reserve(&mut base.hyperlinks, self.counts[5])?;
+            reserve(&mut base.charts, self.counts[6])?;
+            reserve(&mut base.hidden_dimensions, self.counts[7])?;
+            reserve(&mut base.shared_strings, self.counts[8])?;
+            reserve(&mut base.styles.fonts, self.counts[9])?;
+            reserve(&mut base.styles.fills, self.counts[10])?;
+            reserve(&mut base.styles.borders, self.counts[11])?;
+            reserve(&mut base.styles.cell_xfs, self.counts[12])?;
+            reserve(&mut base.styles.num_fmts, self.counts[13])?;
+            reserve(&mut base.styles.indexed_colors, self.counts[14])?;
+            reserve(&mut base.tables, self.counts[15])?;
             self.cursor.section = 1;
         } else {
-            let base = self.base.as_mut().expect("manifest precedes base records");
+            let base = self
+                .base
+                .as_mut()
+                .ok_or_else(|| SnapshotError::new("authority base manifest is missing"))?;
             match section {
                 1 => base.defined_names.push(Codec::read(&mut r)?),
                 2 => {
@@ -795,7 +813,7 @@ impl BaseBuilder {
                 14 => base.styles.num_fmts.push(Codec::read(&mut r)?),
                 15 => base.styles.indexed_colors.push(Codec::read(&mut r)?),
                 16 => base.tables.push(Codec::read(&mut r)?),
-                _ => unreachable!(),
+                _ => return Err(SnapshotError::new("invalid authority base section")),
             }
             self.cursor.index += 1;
         }
@@ -829,6 +847,7 @@ pub(crate) struct AuthorityHydrator {
     state_vector: Vec<u8>,
     next_sheet_id: u64,
     failed: bool,
+    yrs_cursor: Option<UpdateCursor>,
 }
 
 impl AuthorityHydrator {
@@ -860,6 +879,7 @@ impl AuthorityHydrator {
             state_vector: header.state_vector.clone(),
             next_sheet_id: header.next_sheet_id,
             failed: false,
+            yrs_cursor: None,
         })
     }
 
@@ -879,6 +899,7 @@ impl AuthorityHydrator {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn push_yrs(&mut self, payload: &[u8]) -> SnapshotResult<()> {
         let result = (|| {
             if self.failed || self.yrs_chunks >= self.expected_yrs_chunks {
@@ -890,6 +911,44 @@ impl AuthorityHydrator {
         })();
         self.failed |= result.is_err();
         result
+    }
+
+    pub(crate) fn advance_yrs(
+        &mut self,
+        payload: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        if self.failed || self.yrs_chunks >= self.expected_yrs_chunks {
+            return Err(SnapshotError::new("unexpected Yrs snapshot chunk"));
+        }
+        let cursor = self.yrs_cursor.get_or_insert_with(UpdateCursor::default);
+        if let Some(part) = cursor
+            .next(payload, budget.max_records(), budget.max_bytes())
+            .map_err(|failure| {
+                if failure == SplitError::OversizedStruct {
+                    SnapshotError::new("Yrs snapshot record exceeds advance byte budget")
+                } else {
+                    SnapshotError::new(format!("invalid Yrs snapshot: {}", failure.reason()))
+                }
+            })?
+        {
+            hydrate_local_doc(&self.doc, &part.bytes).map_err(SnapshotError::new)?;
+            #[cfg(test)]
+            crate::snapshot::step::record(part.records, part.bytes.len());
+            if !cursor
+                .is_complete(payload)
+                .map_err(|_| SnapshotError::new("invalid Yrs snapshot tail"))?
+            {
+                return Ok(SnapshotProgress::pending());
+            }
+            self.yrs_cursor = None;
+            self.yrs_chunks += 1;
+            Ok(SnapshotProgress::ready())
+        } else {
+            self.yrs_cursor = None;
+            self.yrs_chunks += 1;
+            Ok(SnapshotProgress::ready())
+        }
     }
 
     pub(crate) fn advance(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
@@ -904,8 +963,13 @@ impl AuthorityHydrator {
             if index > 0 && record.len() > budget.max_bytes().saturating_sub(bytes) {
                 break;
             }
-            let record = self.pending_base.pop_front().expect("queued base record");
+            let record = self
+                .pending_base
+                .pop_front()
+                .ok_or_else(|| SnapshotError::new("authority base record is missing"))?;
             bytes = bytes.saturating_add(record.len());
+            #[cfg(test)]
+            crate::snapshot::step::record(1, record.len());
             if let Err(error) = self.base.push(&record) {
                 self.failed = true;
                 return Err(error);
@@ -921,6 +985,22 @@ impl AuthorityHydrator {
         }
     }
 
+    pub(crate) fn advance_bounded(
+        &mut self,
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        if self
+            .pending_base
+            .front()
+            .is_some_and(|record| record.len() > budget.max_bytes())
+        {
+            return Err(SnapshotError::new(
+                "authority base record exceeds advance byte budget",
+            ));
+        }
+        self.advance(budget)
+    }
+
     pub(crate) fn finish(self) -> SnapshotResult<WorkbookAuthority> {
         if self.failed
             || self.base_chunks != self.expected_base_chunks
@@ -930,7 +1010,7 @@ impl AuthorityHydrator {
                 "authority snapshot chunks are incomplete",
             ));
         }
-        if !self.pending_base.is_empty() {
+        if !self.pending_base.is_empty() || self.yrs_cursor.is_some() {
             return Err(SnapshotError::new(
                 "authority snapshot has pending base records",
             ));

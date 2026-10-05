@@ -3,6 +3,8 @@ pub(crate) mod header;
 pub(crate) mod model;
 pub(crate) mod package;
 pub(crate) mod preserved;
+#[cfg(test)]
+pub(crate) mod step;
 pub(crate) mod wire;
 pub(crate) mod yrs_split;
 

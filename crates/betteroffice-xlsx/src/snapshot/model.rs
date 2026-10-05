@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{LinkedList, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use xlsx_model::{
@@ -9,7 +9,7 @@ use xlsx_model::{
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
-use super::wire::{ChunkKind, Reader, Writer, frame, unframe};
+use super::wire::{ChunkKind, Reader, Writer, frame, reserve, unframe};
 use super::{SnapshotBudget, SnapshotError, SnapshotResult};
 
 const HEADER: u8 = 0;
@@ -404,7 +404,7 @@ pub(crate) struct ModelSnapshotBuilder {
     declared_cells: usize,
     expected_sheets: usize,
     runs: VecDeque<(u8, usize)>,
-    sheet_cells: VecDeque<(usize, usize)>,
+    sheet_cells: LinkedList<(usize, usize)>,
     cell_cursor: CellCursor,
     theme_index: usize,
     array_key: Option<(u32, u32)>,
@@ -422,25 +422,39 @@ impl ModelSnapshotBuilder {
             declared_cells: 0,
             expected_sheets: 0,
             runs: VecDeque::new(),
-            sheet_cells: VecDeque::new(),
+            sheet_cells: LinkedList::new(),
             cell_cursor: CellCursor::default(),
             theme_index: 0,
             array_key: None,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn push(&mut self, payload: &[u8]) -> SnapshotResult<()> {
+        self.push_bounded(payload, SnapshotBudget::new(usize::MAX, usize::MAX)?)
+    }
+
+    pub(crate) fn push_bounded(
+        &mut self,
+        payload: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<()> {
         if self.failed {
             return Err(SnapshotError::new("snapshot model builder has failed"));
         }
-        let result = self.push_inner(payload);
+        let result = self.push_inner(payload, budget);
         if result.is_err() {
             self.failed = true;
         }
         result
     }
 
-    fn push_inner(&mut self, chunk: &[u8]) -> SnapshotResult<()> {
+    fn push_inner(&mut self, chunk: &[u8], budget: SnapshotBudget) -> SnapshotResult<()> {
+        if chunk.len() > budget.max_bytes() {
+            return Err(SnapshotError::new(
+                "snapshot model exceeds advance byte budget",
+            ));
+        }
         let (kind, ordinal, payload) = unframe(chunk)?;
         if ordinal != self.ordinal || payload.is_empty() {
             return Err(SnapshotError::new(
@@ -448,12 +462,20 @@ impl ModelSnapshotBuilder {
             ));
         }
         let mut r = Reader::new(payload);
+        #[cfg(test)]
+        crate::snapshot::step::record(0, chunk.len());
         match kind {
             ChunkKind::Model => {
                 if self.started && self.remaining_records == 0 {
                     return Err(SnapshotError::new("unexpected snapshot model metadata"));
                 }
+                let mut records = 0;
                 while !r.is_empty() {
+                    if records == budget.max_records() {
+                        return Err(SnapshotError::new(
+                            "snapshot model exceeds advance record budget",
+                        ));
+                    }
                     let tag = r.u8()?;
                     if !self.started {
                         if tag != HEADER {
@@ -463,6 +485,9 @@ impl ModelSnapshotBuilder {
                     } else {
                         self.read_record(tag, &mut r)?;
                     }
+                    records += 1;
+                    #[cfg(test)]
+                    crate::snapshot::step::record(1, 0);
                 }
             }
             ChunkKind::Cells => {
@@ -471,7 +496,7 @@ impl ModelSnapshotBuilder {
                         "snapshot cells precede complete metadata",
                     ));
                 }
-                self.read_cells(&mut r)?;
+                self.read_cells(&mut r, budget.max_records())?;
             }
             _ => return Err(SnapshotError::new("wrong snapshot model chunk kind")),
         }
@@ -496,6 +521,16 @@ impl ModelSnapshotBuilder {
             *count = r.var_usize()?;
         }
         self.expected_sheets = counts[9];
+        reserve(&mut self.model.defined_names, counts[0])?;
+        reserve(&mut self.model.shared_strings, counts[1])?;
+        reserve(&mut self.model.styles.fonts, counts[2])?;
+        reserve(&mut self.model.styles.fills, counts[3])?;
+        reserve(&mut self.model.styles.borders, counts[4])?;
+        reserve(&mut self.model.styles.cell_xfs, counts[5])?;
+        reserve(&mut self.model.styles.num_fmts, counts[6])?;
+        reserve(&mut self.model.styles.indexed_colors, counts[7])?;
+        reserve(&mut self.model.tables, counts[8])?;
+        reserve(&mut self.model.sheets, counts[9])?;
         for (tag, count) in [
             (NAME, counts[0]),
             (STRING, counts[1]),
@@ -549,7 +584,8 @@ impl ModelSnapshotBuilder {
             }
             INDEXED => self.model.styles.indexed_colors.push(r.str()?.to_owned()),
             TABLE => {
-                let (table, columns) = read_table(r)?;
+                let (mut table, columns) = read_table(r)?;
+                reserve(&mut table.columns, columns)?;
                 self.model.tables.push(table);
                 if columns != 0 {
                     self.runs.push_front((TABLE_COLUMN, columns));
@@ -588,6 +624,10 @@ impl ModelSnapshotBuilder {
         for count in &mut counts {
             *count = r.var_usize()?;
         }
+        reserve(&mut sheet.hyperlinks, counts[0])?;
+        reserve(&mut sheet.merges, counts[1])?;
+        reserve(&mut sheet.col_styles, counts[4])?;
+        reserve(&mut sheet.charts, counts[5])?;
         add_count(&mut self.declared_cells, counts[7])?;
         if counts[7] != 0 {
             self.sheet_cells
@@ -642,7 +682,8 @@ impl ModelSnapshotBuilder {
                 xf: r.var_u32()?,
             }),
             CHART => {
-                let (chart, refs) = read_chart(r)?;
+                let (mut chart, refs) = read_chart(r)?;
+                reserve(&mut chart.refs, refs)?;
                 sheet.charts.push(chart);
                 if refs != 0 {
                     self.runs.push_front((CHART_REF, refs));
@@ -671,10 +712,15 @@ impl ModelSnapshotBuilder {
         Ok(())
     }
 
-    fn read_cells(&mut self, r: &mut Reader<'_>) -> SnapshotResult<()> {
+    fn read_cells(&mut self, r: &mut Reader<'_>, max_records: usize) -> SnapshotResult<()> {
         let sheet_index = r.var_usize()?;
         let base = (r.var_u32()?, r.var_u32()?);
         let count = r.var_usize()?;
+        if count > max_records {
+            return Err(SnapshotError::new(
+                "snapshot cells exceed advance record budget",
+            ));
+        }
         let Some(&(expected_sheet, remaining)) = self.sheet_cells.front() else {
             return Err(SnapshotError::new("extra snapshot cell block"));
         };
@@ -692,7 +738,11 @@ impl ModelSnapshotBuilder {
                 "snapshot cell block is missing or reordered",
             ));
         }
-        let sheet = &mut self.model.sheets[sheet_index];
+        let sheet = self
+            .model
+            .sheets
+            .get_mut(sheet_index)
+            .ok_or_else(|| SnapshotError::new("snapshot cell sheet is missing"))?;
         let mut previous = base;
         for _ in 0..count {
             let row_delta = r.var_u32()?;
@@ -724,17 +774,24 @@ impl ModelSnapshotBuilder {
                         style: Some(0),
                     },
                 );
-                *sheet.cell_mut(at).expect("inserted cell") = cell;
+                *sheet
+                    .cell_mut(at)
+                    .ok_or_else(|| SnapshotError::new("snapshot cell was not inserted"))? = cell;
             } else {
                 sheet.set_cell(at, cell);
             }
             self.cell_cursor.after = Some(key);
             previous = key;
+            #[cfg(test)]
+            crate::snapshot::step::record(1, 0);
         }
         if count == remaining {
             self.sheet_cells.pop_front();
         } else {
-            self.sheet_cells.front_mut().expect("current cell sheet").1 -= count;
+            self.sheet_cells
+                .front_mut()
+                .ok_or_else(|| SnapshotError::new("snapshot cell sheet is missing"))?
+                .1 -= count;
         }
         self.remaining_cells -= count;
         Ok(())
