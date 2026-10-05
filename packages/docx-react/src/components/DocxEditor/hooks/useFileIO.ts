@@ -204,24 +204,19 @@ export function useFileIO({
             throw new Error('The document changed while saving');
           }
         };
-        const saver = initialSession ? workerOpenSave(initialSession) : null;
-        if (initialSession && !viewer && saver &&
-          (workerOpenReplicaStarted(initialSession) || !saver.available())) {
-          await requestWorkerOpenReplica(initialSession);
-          assertCurrent();
+        if (initialSession) {
+          const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
+          const inWorker = pending && (await pending);
+          if (inWorker) {
+            onSave?.(inWorker);
+            return inWorker;
+          }
+          if (!viewer && workerOpenSave(initialSession)) {
+            await requestWorkerOpenReplica(initialSession);
+            assertCurrent();
+          }
         }
         const task = async (): Promise<ArrayBuffer | null> => {
-          if (initialSession) {
-            const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
-            const inWorker = pending && (await pending);
-            if (inWorker) {
-              return inWorker;
-            }
-            if (!viewer && workerOpenSave(initialSession)) {
-              await requestWorkerOpenReplica(initialSession);
-              assertCurrent();
-            }
-          }
           const { editor, session } = await flushedSession(pagedEditorRef);
           assertCurrent();
           if (session.isDisplayOnly?.()) throw new Error('The document is still opening');

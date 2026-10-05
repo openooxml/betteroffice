@@ -510,21 +510,19 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           if (isViewerSession(session) && workerRequirements == null) {
             throw new Error('The document worker did not return font requirements');
           }
-          if (workerRequirements == null && workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
-            if (!onHost) ensureWorkerOpenReplica(session);
-            if (workerOpenReplicaPending(session)) {
-              requestWorkerOpenReplicaReadiness(session);
-              void awaitWorkerOpenReplica(session)?.then(() => {
-                if (pass === passRef.current && sessionRef.current === session) run(workerRequirements);
-              }, (error: unknown) => {
-                if (pass !== passRef.current || sessionRef.current !== session) return;
-                invalidateRetainedLayout();
-                markLayoutQueued(session, false);
-                reportLayoutError(session, error);
-                syncCoordinator.onLayoutComplete(currentEpoch);
-              });
-              return;
-            }
+          if (onHost && workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
+            markLayoutQueued(session, true);
+            requestWorkerOpenReplicaReadiness(session);
+            void awaitWorkerOpenReplica(session)?.then(() => {
+              if (pass === passRef.current && sessionRef.current === session) run(workerRequirements);
+            }, (error: unknown) => {
+              if (pass !== passRef.current || sessionRef.current !== session) return;
+              invalidateRetainedLayout();
+              markLayoutQueued(session, false);
+              reportLayoutError(session, error);
+              syncCoordinator.onLayoutComplete(currentEpoch);
+            });
+            return;
           }
           const requirements = JSON.parse(
             workerRequirements ?? session.layoutFontRequirementsJson(input)
@@ -695,11 +693,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             // An edit may have landed since the pass began.
             if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
             if (workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
+              markLayoutQueued(session, true);
               requestWorkerOpenReplicaReadiness(session);
               void awaitWorkerOpenReplica(session)?.then(() => {
                 if (pass === passRef.current && sessionRef.current === session) layOutHere({ recovery });
               }, (error: unknown) => {
                 if (pass !== passRef.current || sessionRef.current !== session) return;
+                markLayoutQueued(session, false);
                 reportLayoutError(session, error);
               });
               return;

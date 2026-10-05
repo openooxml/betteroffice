@@ -435,13 +435,14 @@ export function registerWorkerProposalAuthority(
     const revision = layoutRevision;
     const reply = await Promise.race([worker.proposal({ kind: 'snapshot' }), retired.then(() => null)]).catch((error: unknown) => {
       if (retirementReason) return null;
-      if (revision === layoutRevision) initializationFailure = { error };
+      if (revision === layoutRevision && mirror === null) initializationFailure = { error };
       throw error;
     });
     assertCurrent();
     if (!reply || retirementReason || revision !== layoutRevision) return;
     const previousVersion = mirror?.version;
     initialized = true;
+    initializing = Promise.resolve();
     store(reply);
     hooks.adopted(reply.mirror.version);
     if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
@@ -455,6 +456,7 @@ export function registerWorkerProposalAuthority(
     const unchanged = session.version() === version;
     if (reply.repair) integrate(reply.repair, []);
     peerHydrated = true;
+    initializationFailure = null;
     adoptWorkerOpenHandoverVersion(session, reply.version);
     session.mirrorWorkerDocument(null, false);
     recordCorrespondence(reply.version, unchanged, reply.stateVector);
@@ -538,7 +540,7 @@ export function registerWorkerProposalAuthority(
       if (failure) return Promise.reject(failure.error);
       if (retirementReason) return Promise.resolve();
       if (initializing) return initializing;
-      const waitingForPeer = !peerReady() && !workerOpenDocumentHeld(session);
+      const waitingForPeer = !editorPeer() && !peerReady() && !workerOpenDocumentHeld(session);
       initializing = Promise.race([
         hooks.laidOut(), stopped, retired,
         ...(waitingForPeer ? [hydrated] : []),
@@ -565,7 +567,9 @@ export function registerWorkerProposalAuthority(
       !retirementReason && correspondence && request.expectVersion === correspondence.worker &&
       session.version() === correspondence.peer
         ? { ...request, expectVersion: correspondence.peer }
-        : request,
+        : !retirementReason && hooks.passiveEditor && mirror === null
+          ? workerOpenRequest(session, request)
+          : request,
     getProposals: (main, admission) => round(async () => {
       if (peerReady() && editorPeer()) {
         const reply = await worker.proposal({ kind: 'snapshot' });

@@ -45,7 +45,7 @@ function reply(version = 'worker-1', changedStories: string[] = []): ResidentPro
   };
 }
 
-function harness(laidOut = () => Promise.resolve(), editorPeer = false, pendingReplica = true) {
+function harness(laidOut = () => Promise.resolve(), editorPeer = false, pendingReplica = true, passiveEditor = false) {
   let mainVersion = 'main-1';
   let workerVersion = 'worker-1';
   let mirror: ResidentProposalReply['mirror'] | null = null;
@@ -92,7 +92,7 @@ function harness(laidOut = () => Promise.resolve(), editorPeer = false, pendingR
   const authority = registerWorkerProposalAuthority(
     session, worker as unknown as WorkerOpenedDocument,
     {
-      editorPeer, relayout, current: () => current, laidOut, contentChanged, projectionChanged,
+      editorPeer, passiveEditor, relayout, current: () => current, laidOut, contentChanged, projectionChanged,
       adopted: () => {},
     }
   );
@@ -706,7 +706,14 @@ test('hand-over waits for the running worker call and routes queued calls to mai
   const staleMain = mock(unusedMain);
   h.mainVersion('main-3');
   expect(handedOverRequest(h.session, { expectVersion: 'worker-2' }).expectVersion).toBe('worker-2');
-  expect(await h.authority.propose({ ...request, expectVersion: 'worker-2' }, staleMain))
+  expect(await h.authority.propose({
+    ...request, expectVersion: 'worker-2', proposals: [{
+      id: 'stale-content',
+      paragraph: { kind: 'session', sessionId: 'session', story: 'body', paraId: 'first' },
+      suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      op: 'insertText', at: 'start', text: 'Stale ',
+    }],
+  }, staleMain))
     .toMatchObject({ ok: false, version: 'main-3', failure: { code: 'stale-version' } });
   expect(staleMain).not.toHaveBeenCalled();
 });
@@ -825,6 +832,48 @@ test('a round queued after a failed initialization reuses its rejection', async 
   await expect(h.authority.initialize()).rejects.toBe(error);
   await expect(h.authority.propose(request, unusedMain)).rejects.toBe(error);
   expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+});
+
+test('editor hydration preserves initialization waiting for the first layout', async () => {
+  const layout = deferred<void>();
+  const h = harness(() => layout.promise, true);
+  const initializing = h.authority.initialize();
+  deferPeer(h, async () => () => { h.mainVersion('main-2'); },
+    () => { throw new Error('unexpected fallback'); }, () => {});
+  await requestWorkerOpenReplica(h.session);
+  expect(h.authority.initialized).toBe(false);
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  layout.resolve();
+  await initializing;
+  expect(h.authority.initialized).toBe(true);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+});
+
+test('a failed recovery snapshot allows the queued read to retry initialization', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  h.authority.restart();
+  const error = new Error('recovery snapshot failed');
+  h.worker.proposal.mockRejectedValueOnce(error);
+  const first = h.authority.getProposals(unusedMain).catch((failure: unknown) => failure);
+  const queued = h.authority.getProposals(unusedMain);
+  expect(await first).toBe(error);
+  expect(await queued).toMatchObject({ proposals: [] });
+  await h.authority.initialize();
+  expect(h.worker.proposal).toHaveBeenCalledTimes(3);
+  expect(h.authority.initialized).toBe(true);
+});
+
+test('a passive replica maps its loaded token before proposal initialization', async () => {
+  const h = harness(() => new Promise<void>(() => {}), true, true, true);
+  const replica = deferWorkerOpenReplica(h.session, async () => () => { h.mainVersion('main-2'); },
+    () => { throw new Error('unexpected fallback'); }, () => {});
+  replica.handoverVersion = 'worker-1';
+  await requestWorkerOpenReplica(h.session);
+  expect(handedOverRequest(h.session, request).expectVersion).toBe('main-2');
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  h.mainVersion('main-3');
+  expect(handedOverRequest(h.session, request).expectVersion).toBe('worker-1');
 });
 
 test('equivalent state vectors retain the pre-hydration worker token', async () => {

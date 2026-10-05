@@ -1645,6 +1645,17 @@ export function useRustDisplayList(
           throw new SupersededPreviewError();
         }
         let owner = workerRef.current?.engine === hostEngine ? workerRef.current : null;
+        if (owner?.client.hasFailed() && workerOpenReplicaReady(hostEngine) &&
+          workerProposalRegistryState(hostEngine) !== null && !holdsCommittedWorkerProposals(hostEngine)) {
+          const outcome = replaceOutOfMemoryWorker(hostEngine, owner,
+            new Error('The document worker is unavailable'), stage);
+          if (outcome === 'retry') {
+            registeredWorkerProposalAuthority(hostEngine)?.restart();
+            requestLayoutRef.current?.();
+            continue;
+          }
+          throw workerFailureRef.current.get(hostEngine) ?? new SupersededPreviewError();
+        }
         try {
           if (workerRef.current?.engine !== hostEngine) {
             if (!source || handedOverPreview(hostEngine)) throw new SupersededPreviewError();
@@ -1968,8 +1979,8 @@ export function useRustDisplayList(
           replicaReady: () => {
             if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current) return;
             if (
-              needsLayout ||
-              (workerRef.current?.engine === hostEngine && !workerRef.current.client.bootstrapSent())
+              !isLayoutQueued(hostEngine) && (needsLayout ||
+                (workerRef.current?.engine === hostEngine && !workerRef.current.client.bootstrapSent()))
             ) {
               const load = documentLoadsRef.current;
               setTimeout(() => {
@@ -2884,6 +2895,18 @@ export function useRustDisplayList(
           return layoutInWorkerRef.current?.(hostEngine, request) ?? null;
         }
         if (!isCurrentWorker(hostEngine, owner)) return null;
+        const registry = workerProposalRegistryState(hostEngine);
+        if (workerOpenReplicaReady(hostEngine) && registry !== null && owner.client.hasFailed()) {
+          const outcome = replaceOutOfMemoryWorker(hostEngine, owner,
+            cause instanceof Error ? cause : new Error(String(cause)), 'layout');
+          if (outcome === 'retry') {
+            registeredWorkerProposalAuthority(hostEngine)?.restart();
+            return layoutInWorkerRef.current(hostEngine, request);
+          }
+          return rejectedWorkerLayout(outcome === 'stale'
+            ? new SupersededPreviewError()
+            : workerFailureRef.current.get(hostEngine) ?? cause);
+        }
         if (!dropWorker(hostEngine, cause)) {
           return rejectedWorkerLayout(workerFailureRef.current.get(hostEngine)!);
         }
