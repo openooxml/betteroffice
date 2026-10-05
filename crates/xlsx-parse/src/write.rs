@@ -922,6 +922,7 @@ impl HyperlinkPlan {
 
 /// Everything a worksheet part carries. The sheet name lives in the workbook
 /// part, so a rename leaves the worksheet bytes reusable.
+#[allow(clippy::too_many_arguments)]
 fn sheet_body_matches(
     sheet: &Sheet,
     original: &Sheet,
