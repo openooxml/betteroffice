@@ -341,11 +341,11 @@ describe('workbook edit peers', () => {
       const proposal = edits.propose('agent', null, [{
         sheet: 0, row: 0, col: 2, input: '=A1*2', numberFormat: 'automatic',
       }]);
-      expect(proposal.edits[0]?.newText).toBe('20');
+      expect(proposal.cells[0]?.newText).toBe('20');
       await matchingDigest(2, 'propose', edits, peer, session);
       expect(edits.editCell(0, 0, 0, '99').applied).toBe(true);
       expect(() => edits.acceptProposal(proposal.id)).toThrow(StaleProposalError);
-      expect(peer.listProposals()[0]?.edits[0]?.newText).toBe('198');
+      expect(peer.listProposals()[0]?.cells[0]?.newText).toBe('198');
       expect(edits.sentSequence).toBe(4);
       expect(edits.editCell(0, 0, 1, '=A1+1').applied).toBe(true);
       await matchingDigest(5, 'editCell', edits, peer, session);

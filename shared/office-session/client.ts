@@ -115,7 +115,10 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
     } else if (message.kind === 'wasm-module') {
-      try { options.onWasmModule?.(message.url, message.module, message.hydration); } catch {}
+      try {
+        if (message.hydration === undefined) options.onWasmModule?.(message.url, message.module);
+        else options.onWasmModule?.(message.url, message.module, message.hydration);
+      } catch {}
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);

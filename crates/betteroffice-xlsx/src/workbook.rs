@@ -377,9 +377,11 @@ struct CachedChartSpace {
     space: Arc<ChartSpace>,
 }
 
+type PeerHydrationCell = (CellRef, CellValue, Option<String>, Option<u32>);
+
 #[derive(Serialize, Deserialize)]
 struct PeerHydration {
-    cells: Vec<Vec<(CellRef, CellValue, Option<String>, Option<u32>)>>,
+    cells: Vec<Vec<PeerHydrationCell>>,
     arrays: Vec<Vec<(CellRef, CellRange)>>,
     last_calculation: CalculationResult,
     recalculated_since_open: bool,
@@ -389,6 +391,7 @@ struct PeerHydration {
 }
 
 impl Workbook {
+    #[doc(hidden)]
     pub fn peer_hydration_json(&self) -> Result<String> {
         if self.edited_since_open {
             return Err(Error::InvalidOperation(
@@ -424,6 +427,7 @@ impl Workbook {
         .map_err(|error| Error::InvalidRequest(error.to_string()))
     }
 
+    #[doc(hidden)]
     pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self> {
         let hydration: PeerHydration = serde_json::from_str(hydration)
             .map_err(|error| Error::InvalidRequest(error.to_string()))?;
@@ -684,6 +688,7 @@ impl Workbook {
         DocumentVersion::new(&self.version_nonce, self.committed_changes)
     }
 
+    #[doc(hidden)]
     pub fn adopt_peer_version(&mut self, version: &str) -> Result<()> {
         if self.edited_since_open {
             return Err(Error::InvalidOperation(
