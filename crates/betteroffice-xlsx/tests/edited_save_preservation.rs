@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use betteroffice_xlsx::{CalculationOptions, CellRange, CellRef, SheetId, Workbook};
+use betteroffice_xlsx::{CalculationOptions, CellRange, CellRef, Error, SheetId, Workbook};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -78,6 +78,10 @@ fn worksheet(sheet_data: &str) -> String {
 }
 
 fn package(variant: &str) -> Vec<u8> {
+    package_with_second_sheet(variant, SHEET2)
+}
+
+fn package_with_second_sheet(variant: &str, second_sheet: &str) -> Vec<u8> {
     let parts = [
         (
             "[Content_Types].xml",
@@ -130,7 +134,7 @@ fn package(variant: &str) -> Vec<u8> {
         ),
         ("xl/styles.xml", styles(variant)),
         ("xl/worksheets/sheet1.xml", worksheet(SHEET1)),
-        ("xl/worksheets/sheet2.xml", worksheet(SHEET2)),
+        ("xl/worksheets/sheet2.xml", worksheet(second_sheet)),
     ]
     .map(|(path, xml)| (path.to_owned(), xml.into_bytes()));
     ooxml_opc::rezip_parts(&parts).unwrap()
@@ -302,4 +306,46 @@ fn genuine_style_change_writes_the_new_index() {
             "{name}: {edited}"
         );
     }
+}
+
+#[test]
+fn refused_grid_regeneration_preserves_source_after_undo_and_unrelated_edit() {
+    let second_sheet = concat!(
+        r#"<sheetData><row s="2" customFormat="1"><c r="A1" s="2"><v>1</v></c>"#,
+        r#"<c r="B1" s="2"><v>2</v></c></row></sheetData>"#,
+    );
+    let source = package_with_second_sheet(VARIANTS[0].1, second_sheet);
+    let before = parts(&source);
+    let mut workbook = Workbook::open(&source).unwrap();
+    workbook
+        .edit_cell(SheetId(1), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
+
+    let Error::Spreadsheet(xlsx_parse::ParseError::UnsupportedEdit(message)) =
+        workbook.save().unwrap_err()
+    else {
+        panic!("expected spreadsheet UnsupportedEdit");
+    };
+    assert!(message.starts_with("sheet Sheet2:"), "{message}");
+    assert!(message.contains(r#"<row> attribute s="2""#), "{message}");
+
+    assert!(
+        workbook
+            .undo(CalculationOptions::default())
+            .unwrap()
+            .applied
+    );
+    let after_undo = parts(&workbook.save().unwrap());
+    for path in ["xl/worksheets/sheet2.xml", "xl/styles.xml"] {
+        assert_eq!(after_undo[path], before[path], "{path}");
+    }
+
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
+        .unwrap();
+    let after_edit = parts(&workbook.save().unwrap());
+    for path in ["xl/worksheets/sheet2.xml", "xl/styles.xml"] {
+        assert_eq!(after_edit[path], before[path], "{path}");
+    }
+    assert!(cells(&text(&after_edit, "xl/worksheets/sheet1.xml"))["A1"].contains("<v>5</v>"));
 }

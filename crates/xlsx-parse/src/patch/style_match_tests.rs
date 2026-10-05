@@ -39,7 +39,7 @@ fn parsed() -> ParsedWorkbook {
     parsed_sheet(SHEET)
 }
 
-fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
+pub(super) fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
     let mut parts = package(sheet, &[], false);
     parts.push(("xl/styles.xml".to_owned(), STYLES.as_bytes().to_vec()));
     parse_workbook_with_package(&parts).unwrap()
