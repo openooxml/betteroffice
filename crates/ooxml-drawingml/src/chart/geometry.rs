@@ -6490,10 +6490,12 @@ mod tests {
                                     } else if is_x {
                                         (0.0, 1.0)
                                     } else {
-                                        sample.iter().copied().fold(
-                                            (0.0_f64, 0.0_f64),
-                                            |(min, max), value| (min.min(value), max.max(value)),
-                                        )
+                                        sample
+                                            .iter()
+                                            .copied()
+                                            .fold((0.0_f64, 0.0_f64), |(min, max), value| {
+                                                (min.min(value), max.max(value))
+                                            })
                                     };
                                     let mut expected_min = min.unwrap_or(data_bounds.0);
                                     let mut expected_max = max.unwrap_or(data_bounds.1);
@@ -6502,7 +6504,7 @@ mod tests {
                                         && data_bounds.0 == data_bounds.1;
                                     let inverted_pins =
                                         min.zip(max).is_some_and(|(min, max)| min > max);
-                                    let normalized = !(expected_max - expected_min).is_finite()
+                                    let mut normalized = !(expected_max - expected_min).is_finite()
                                         || constant_x
                                             && expected_max <= expected_min
                                             && !inverted_pins;
@@ -6530,6 +6532,7 @@ mod tests {
                                                 expected_min -= padding;
                                             }
                                         }
+                                        normalized = !(expected_max - expected_min).is_finite();
                                         let unit = major_unit.unwrap_or_else(|| {
                                             if is_x {
                                                 nice_unit(
@@ -6541,8 +6544,7 @@ mod tests {
                                             }
                                         });
                                         if min.is_none() {
-                                            expected_min =
-                                                round_to_unit(expected_min, unit, false);
+                                            expected_min = round_to_unit(expected_min, unit, false);
                                         } else {
                                             assert_eq!(
                                                 scale.min.to_bits(),
@@ -6551,14 +6553,27 @@ mod tests {
                                             );
                                         }
                                         if max.is_none() {
-                                            expected_max =
-                                                round_to_unit(expected_max, unit, true);
+                                            expected_max = round_to_unit(expected_max, unit, true);
                                         } else {
                                             assert_eq!(
                                                 scale.max.to_bits(),
                                                 expected_max.to_bits(),
                                                 "{context:?}"
                                             );
+                                        }
+                                        if !normalized {
+                                            assert_eq!(
+                                                (scale.min.to_bits(), scale.max.to_bits()),
+                                                (expected_min.to_bits(), expected_max.to_bits()),
+                                                "{context:?}"
+                                            );
+                                            assert_eq!(
+                                                scale.unit.to_bits(),
+                                                unit.to_bits(),
+                                                "{context:?}"
+                                            );
+                                            assert_eq!(scale.log_base, None, "{context:?}");
+                                            assert!(!scale.percent, "{context:?}");
                                         }
                                     }
                                     let degenerate = if normalized {
@@ -6623,7 +6638,7 @@ mod tests {
                                             || min == Some(f64::MAX) && max.is_none()
                                             || max == Some(f64::MIN) && min.is_none()
                                     } else {
-                                        expected_max == expected_min
+                                        expected_max <= expected_min
                                     };
                                     let ticks = axis_ticks(scale, major_unit);
                                     assert!(ticks.len() >= 2, "{context:?}: {ticks:?}");
@@ -6631,7 +6646,20 @@ mod tests {
                                         ticks.iter().all(|tick| tick.is_finite()),
                                         "{context:?}: {ticks:?}"
                                     );
-                                    if degenerate {
+                                    if !normalized && expected_max < expected_min {
+                                        assert!(scale.max < scale.min, "{context:?}");
+                                        assert_eq!(scale.fraction(scale.min), 0.0, "{context:?}");
+                                        let expected_span = expected_max - expected_min;
+                                        let expected_ticks: Vec<f64> = (0..=4)
+                                            .map(|step| match step {
+                                                4 => expected_max,
+                                                step => {
+                                                    expected_min + expected_span * step as f64 / 4.0
+                                                }
+                                            })
+                                            .collect();
+                                        assert_eq!(ticks, expected_ticks, "{context:?}");
+                                    } else if degenerate {
                                         assert_eq!(scale.max, scale.min, "{context:?}");
                                         assert_eq!(scale.fraction(scale.min), 0.0, "{context:?}");
                                         assert_eq!(ticks, vec![scale.min; 5], "{context:?}");
