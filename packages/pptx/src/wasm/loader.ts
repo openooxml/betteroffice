@@ -242,6 +242,138 @@ export interface PresentationHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+
+/** @internal */
+export class PresentationPeerError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'PresentationPeerError';
+  }
+}
+
+const replayMethods = [
+  'insertText', 'deleteText', 'formatText', 'insertParagraphBreak', 'setParagraphAlignment',
+  'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
+  'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
+  'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
+  'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment',
+  'setCommentFlavor', 'propose', 'acceptProposal', 'rejectProposal', 'applyEdits',
+  'addUndoBoundary', 'undo', 'redo',
+] as const satisfies readonly (keyof PresentationHandle)[];
+
+/** @internal */
+export type PresentationReplayOp = {
+  [K in typeof replayMethods[number]]: { method: K; args: Parameters<PresentationHandle[K]> }
+}[typeof replayMethods[number]];
+
+/** @internal */
+export interface PresentationReplayOutcome {
+  result: unknown;
+  applied: boolean;
+  changedTargets: string[];
+  canUndo: boolean;
+  canRedo: boolean;
+}
+
+/** @internal */
+export interface PresentationReplayEnvelope {
+  sequence: number;
+  baseVersion: string;
+  op: PresentationReplayOp;
+  expectedOutcome?: PresentationReplayOutcome | null;
+}
+
+/** @internal */
+export interface PresentationReplayReply {
+  sequence: number;
+  revision: number;
+  version: string;
+  engineVersion: string;
+  consumed: boolean;
+  outcome: PresentationReplayOutcome;
+}
+
+/** @internal */
+export type PresentationPeerHandle = Pick<PresentationHandle,
+  'clientId' | 'snapshot' | 'story' | 'anchorCaret' | 'resolveCaretAnchor' | 'version' |
+  'readContent' | 'findText' | 'exportStructured' | 'exportMarkdown' | 'validateEdits' |
+  'searchText' | 'isProposalsAvailable' | 'listProposals' | 'previewProposal' |
+  'layoutProposalSlide' | 'layoutProposalDiffSlide' | 'layoutSlide' | 'hitTest' |
+  'mediaBytes' | 'save' | 'canUndo' | 'canRedo' | 'undoCaptureMode' | 'onUpdate' | 'dispose'
+>;
+
+type PeerMode = { kind: 'baseline' } | { kind: 'peer'; identity: string };
+type PeerInternals = {
+  registerFonts(): Promise<void>;
+  adopt(): void;
+  hydration(): string;
+  metadata(): PresentationMetadata;
+  displayListJson(slideIndex: number): string;
+  replay(envelope: PresentationReplayEnvelope, captured?: (reply: PresentationReplayReply) => void): PresentationReplayReply;
+};
+const peerInternals = new WeakMap<PresentationPeerHandle, PeerInternals>();
+
+function peerInternal(handle: PresentationPeerHandle): PeerInternals {
+  const internal = peerInternals.get(handle);
+  if (!internal) throw new PresentationPeerError('stage', 'Presentation is not a retained replay handle');
+  return internal;
+}
+
+/** @internal */
+export function openPresentationReplayBaseline(
+  bytes: Uint8Array, options: OpenPresentationOptions = {}
+): PresentationPeerHandle {
+  try {
+    return openPresentationInternal(bytes, options, { kind: 'baseline' });
+  } catch (error) {
+    throw peerError(error);
+  }
+}
+
+/** @internal */
+export function openPresentationPeerDeck(
+  bytes: Uint8Array, identity: string, options: Omit<OpenPresentationOptions, 'clientId'> = {}
+): PresentationPeerHandle {
+  try {
+    return openPresentationInternal(bytes, options, { kind: 'peer', identity });
+  } catch (error) {
+    throw peerError(error);
+  }
+}
+
+/** @internal */
+export function registerPresentationPeerFonts(handle: PresentationPeerHandle): Promise<void> {
+  return peerInternal(handle).registerFonts();
+}
+
+/** @internal */
+export function adoptPresentationPeerIdentity(handle: PresentationPeerHandle): void {
+  peerInternal(handle).adopt();
+}
+
+/** @internal */
+export function presentationPeerHydration(handle: PresentationPeerHandle): string {
+  return peerInternal(handle).hydration();
+}
+
+/** @internal */
+export function presentationPeerMetadata(handle: PresentationPeerHandle): PresentationMetadata {
+  return peerInternal(handle).metadata();
+}
+
+/** @internal */
+export function presentationPeerDisplayListJson(handle: PresentationPeerHandle, slideIndex: number): string {
+  return peerInternal(handle).displayListJson(slideIndex);
+}
+
+/** @internal */
+export function replayPresentation(
+  handle: PresentationPeerHandle, envelope: PresentationReplayEnvelope,
+  captured?: (reply: PresentationReplayReply) => void
+): PresentationReplayReply {
+  return peerInternal(handle).replay(envelope, captured);
+}
+
 const displayListJsonReaders = new WeakMap<PresentationHandle, (slideIndex: number) => string>();
 
 type SessionMetadataDocument = PptxDocument & { sessionMetadataJson(): string };
@@ -355,20 +487,46 @@ export function openPresentation(
   bytes: Uint8Array,
   options: OpenPresentationOptions = {}
 ): PresentationHandle {
+  return openPresentationInternal(bytes, options);
+}
+
+function openPresentationInternal(
+  bytes: Uint8Array, options: OpenPresentationOptions, peer?: PeerMode
+): PresentationHandle {
   requireInitialized();
-  const collaborationClientId = options.clientId ?? clientId();
-  const doc = construct(() =>
-    options.initialUpdate === undefined
-      ? PptxDocument.openCollaborative(bytes, collaborationClientId)
+  const faces = peer ? [
+    ...(options.fonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: false })),
+    ...(options.fallbackFonts ?? []).map((face) => ({ ...face, bytes: new Uint8Array(face.bytes), fallback: true })),
+  ] : [];
+  const peerUpdate = peer && options.initialUpdate !== undefined
+    ? new Uint8Array(options.initialUpdate) : undefined;
+  const collaborationClientId = peer ? options.clientId : options.clientId ?? clientId();
+  const doc = construct(() => peer
+    ? peer.kind === 'baseline'
+      ? PptxDocument.openReplayBaseline(new Uint8Array(bytes), collaborationClientId, peerUpdate)
+      : PptxDocument.openPeerDeckJson(new Uint8Array(bytes), peer.identity, peerUpdate)
+    : options.initialUpdate === undefined
+      ? PptxDocument.openCollaborative(bytes, collaborationClientId!)
       : PptxDocument.openCollaborativeFromUpdate(
           options.initialUpdate.slice(),
-          collaborationClientId,
+          collaborationClientId!,
           bytes.slice()
         )
   );
-  const renderer = construct(() => new PptxRenderer());
-  for (const face of options.fonts ?? []) registerFont(renderer, face);
-  for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+  let renderer: PptxRenderer;
+  try {
+    renderer = construct(() => new PptxRenderer());
+  } catch (error) {
+    if (peer) {
+      try { doc.free(); } catch {}
+      throw peerError(error);
+    }
+    throw error;
+  }
+  if (!peer) {
+    for (const face of options.fonts ?? []) registerFont(renderer, face);
+    for (const face of options.fallbackFonts ?? []) registerFont(renderer, face, true);
+  }
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -850,6 +1008,7 @@ export function openPresentation(
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      faces.length = 0;
       listeners.clear();
       pendingUpdates.length = 0;
       let disposalError: unknown;
@@ -892,7 +1051,129 @@ export function openPresentation(
         jsonWasmCall(() => renderer.hitTestSlideJson(doc, slideId, x, y)),
     },
   });
+  if (peer) {
+    let stage: 'deck' | 'registering' | 'fonts' | 'ready' | 'failed' = 'deck';
+    let manifest = '';
+    let hydration: string | undefined;
+    let replaying = false;
+
+    const failStage = (error: unknown): never => {
+      stage = 'failed';
+      faces.length = 0;
+      try { handle.dispose(); } catch {}
+      throw peerError(error);
+    };
+    const requireStage = (expected: 'deck' | 'registering' | 'fonts' | 'ready' | 'failed'): void => {
+      if (disposed || stage !== expected) {
+        throw new PresentationPeerError('stage', `Presentation peer requires ${expected} stage`);
+      }
+    };
+
+    peerInternals.set(handle, {
+      metadata() {
+        requireStage('ready');
+        return jsonWasmCall(() => (doc as SessionMetadataDocument).sessionMetadataJson());
+      },
+      displayListJson(slideIndex) {
+        requireStage('ready');
+        return wasmCall(() => renderer.layoutSlideJson(doc, slideIndex));
+      },
+      async registerFonts() {
+        try {
+          requireStage('deck');
+          stage = 'registering';
+          const entries = [];
+          for (const face of faces) {
+            const digest = await globalThis.crypto.subtle.digest('SHA-256', face.bytes);
+            requireStage('registering');
+            entries.push({
+              family: face.family, bold: face.bold ?? false, italic: face.italic ?? false,
+              fallback: face.fallback,
+              fingerprint: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(''),
+            });
+          }
+          manifest = JSON.stringify(entries);
+          wasmCall(() => {
+            for (const face of faces) registerFont(renderer, face, face.fallback);
+            if (peer.kind === 'peer') doc.registerPeerFontsJson(manifest);
+          });
+          faces.length = 0;
+          stage = 'fonts';
+        } catch (error) {
+          return failStage(error);
+        }
+      },
+      adopt() {
+        try {
+          requireStage('fonts');
+          if (peer.kind !== 'peer') {
+            throw new PresentationPeerError('stage', 'Only a peer can adopt identity');
+          }
+          wasmCall(() => doc.adoptPeerIdentity());
+          stage = 'ready';
+        } catch (error) {
+          return failStage(error);
+        }
+      },
+      hydration() {
+        if (peer.kind !== 'baseline') {
+          throw new PresentationPeerError('stage', 'Only the worker baseline can capture hydration');
+        }
+        if (hydration !== undefined) {
+          requireStage('ready');
+          return hydration;
+        }
+        try {
+          requireStage('fonts');
+          hydration = wasmCall(() => doc.peerHydrationJson(manifest));
+          stage = 'ready';
+          return hydration;
+        } catch (error) {
+          return failStage(error);
+        }
+      },
+      replay(envelope, captured) {
+        requireStage('ready');
+        if (replaying || flushingUpdates) {
+          throw new PresentationPeerError('stage', 'Presentation replay cannot reenter');
+        }
+        replaying = true;
+        try {
+          const ownedJson = requestJson(envelope);
+          return wasmCall(() => {
+            const reply = JSON.parse(doc.replayJson(ownedJson)) as PresentationReplayReply;
+            freezeReplayValue(reply);
+            captured?.(reply);
+            return reply;
+          }, true);
+        } finally {
+          replaying = false;
+        }
+      },
+    });
+    for (const method of [
+      ...replayMethods, 'insertTextProfiled', 'deleteTextProfiled', 'insertSlideProfiled',
+      'addTextBoxProfiled', 'moveShapeProfiled', 'undoProfiled', 'applyUpdate',
+      'setUndoCaptureMode', 'registerFont', 'registerFallbackFont',
+    ] as const) {
+      Object.defineProperty(handle, method, {
+        value: () => { throw new PresentationPeerError('stage', 'Retained presentations require ordered replay'); },
+      });
+    }
+  }
   return handle;
+}
+
+function freezeReplayValue(value: unknown): void {
+  if (value === null || typeof value !== 'object') return;
+  for (const child of Object.values(value)) freezeReplayValue(child);
+  Object.freeze(value);
+}
+
+function peerError(error: unknown): PresentationPeerError {
+  const mapped = toError(error);
+  return mapped instanceof PresentationPeerError
+    ? mapped : new PresentationPeerError('engine', mapped.message);
 }
 
 /** JSON for a host request; `JSON.stringify` would turn NaN and infinities into `null`. */
@@ -953,6 +1234,12 @@ function call<T>(operation: () => string): T {
 }
 
 function toError(error: unknown): Error {
+  if (error instanceof PresentationPeerError) return error;
+  if (error !== null && typeof error === 'object' && 'name' in error &&
+      error.name === 'PresentationPeerError' && 'code' in error && typeof error.code === 'string' &&
+      'message' in error && typeof error.message === 'string') {
+    return new PresentationPeerError(error.code, error.message);
+  }
   if (error instanceof Error) return error;
   if (typeof error === 'string') {
     try {
