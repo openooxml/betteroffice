@@ -8837,7 +8837,9 @@ test('a ready copy queued behind navigation writes the new selection once and an
   try {
     const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
     act(() => textarea.focus());
-    selectOpeningText(opened);
+    fireEvent.mouseDown(opened.canvas, pointAt(1));
+    fireEvent.mouseMove(window, pointAt(6));
+    fireEvent.mouseUp(window, pointAt(6));
     await act(async () => opened.editor.current!.flushPendingInput());
     expect(opened.session.selection()?.anchor.offset).toBe(0);
     expect(opened.session.selection()?.head.offset).toBe(5);
