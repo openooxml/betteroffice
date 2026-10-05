@@ -338,7 +338,7 @@ export function registerWorkerProposalAuthority(
     const integrated = worker.integrateProposalUpdate(diff, stories);
     const changed: readonly string[] = Array.isArray(integrated) ? integrated : stories;
     hooks.projectionChanged?.(changed);
-    hooks.peerUpdated?.(changed);
+    if (changed.length > 0) hooks.peerUpdated?.(changed);
   };
   const recordCorrespondence = (workerVersion: string, unchanged: boolean, vector: Uint8Array): void => {
     const peerVector = session.encodeStateVector();
