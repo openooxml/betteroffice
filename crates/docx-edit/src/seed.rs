@@ -3803,23 +3803,62 @@ fn resolve_color_to_hex(color: Option<&Value>, theme: Option<&Value>) -> Option<
         .map(|value| value.trim_start_matches('#').to_ascii_uppercase())
 }
 
-fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)> {
-    let mut result = BTreeMap::new();
+fn table_grid_count(value: Option<&Value>, default: u32, minimum: u32) -> Result<u32, String> {
+    let value = number(value).unwrap_or(f64::from(default));
+    if value.fract() != 0.0 || !(f64::from(minimum)..=f64::from(u32::MAX)).contains(&value) {
+        return Err("invalid source table grid count".to_owned());
+    }
+    Ok(value as u32)
+}
+
+fn table_column_add(column: u32, span: u32) -> Result<u32, String> {
+    column
+        .checked_add(span)
+        .ok_or_else(|| "source table column overflow".to_owned())
+}
+
+fn table_cell_columns(row: &Value) -> Result<u32, String> {
+    array(field(Some(row), "cells"))
+        .iter()
+        .try_fold(0, |column, cell| {
+            table_column_add(
+                column,
+                table_grid_count(field(field(Some(cell), "formatting"), "gridSpan"), 1, 1)?,
+            )
+        })
+}
+
+fn table_synthetic_columns(table: &Value) -> Result<u32, String> {
+    let widths = array(field(Some(table), "columnWidths"));
+    if !widths.is_empty() {
+        return u32::try_from(widths.len()).map_err(|_| "source table column overflow".to_owned());
+    }
+    array(field(Some(table), "rows"))
+        .iter()
+        .try_fold(0u32, |columns, row| {
+            Ok(columns.max(table_cell_columns(row)?))
+        })
+}
+
+fn calculate_row_spans(table: &Value) -> Result<BTreeMap<(usize, usize), (usize, bool)>, String> {
+    let mut result = BTreeMap::<(usize, usize), (usize, bool)>::new();
     let mut active = BTreeMap::<usize, usize>::new();
     for (row_index, row) in array(field(Some(table), "rows")).iter().enumerate() {
-        let mut column = 0usize;
+        let mut column = 0u32;
         let cells: Vec<_> = array(field(Some(row), "cells"))
             .iter()
             .map(|cell| {
                 let current = column;
-                column += number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
-                    as usize;
-                (
-                    current,
+                column = table_column_add(
+                    column,
+                    table_grid_count(field(field(Some(cell), "formatting"), "gridSpan"), 1, 1)?,
+                )?;
+                Ok((
+                    current as usize,
                     string(field(field(Some(cell), "formatting"), "vMerge")),
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<Vec<_>, String>>()?;
         let empty = !cells.is_empty()
             && cells
                 .iter()
@@ -3840,7 +3879,7 @@ fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)>
                 Some("continue") => {
                     if let Some(start) = active.get(&column).copied() {
                         if let Some(owner) = result.get_mut(&(start, column)) {
-                            owner.0 += 1;
+                            owner.0 = table_column_add(owner.0 as u32, 1)? as usize;
                         }
                         result.insert((row_index, column), (1, true));
                     } else {
@@ -3854,7 +3893,7 @@ fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)>
             }
         }
     }
-    result
+    Ok(result)
 }
 
 fn revision_attrs(info: &Value) -> Value {
@@ -4037,46 +4076,47 @@ fn project_cell<'a>(cell: &'a Value, options: CellOptions<'_>) -> ProjectedCell<
 }
 
 struct TableStyleContext<'a> {
-    column_count: usize,
+    column_count: u32,
     style: Option<&'a Value>,
     borders: Option<&'a Value>,
     margins: Option<&'a Value>,
     theme: Option<&'a Value>,
 }
 
-fn table_column_count(table: &Value) -> usize {
+fn table_column_count(table: &Value) -> Result<u32, String> {
+    let widths = u32::try_from(array(field(Some(table), "columnWidths")).len())
+        .map_err(|_| "source table column overflow".to_owned())?;
     array(field(Some(table), "rows"))
         .iter()
-        .map(|row| {
-            let row_formatting = field(Some(row), "formatting");
-            let omitted = number(field(row_formatting, "gridBefore")).unwrap_or(0.0) as usize
-                + number(field(row_formatting, "gridAfter")).unwrap_or(0.0) as usize;
-            omitted
-                + array(field(Some(row), "cells"))
-                    .iter()
-                    .map(|cell| {
-                        number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
-                            as usize
-                    })
-                    .sum::<usize>()
+        .try_fold(widths, |columns, row| {
+            let formatting = field(Some(row), "formatting");
+            let before = table_grid_count(field(formatting, "gridBefore"), 0, 0)?;
+            let after = table_grid_count(field(formatting, "gridAfter"), 0, 0)?;
+            let end = table_column_add(before, table_cell_columns(row)?)?;
+            Ok(columns.max(table_column_add(end, after)?))
         })
-        .max()
-        .unwrap_or(0)
-        .max(array(field(Some(table), "columnWidths")).len())
 }
 
 fn table_cell_paragraph_formatting(
     table: &Value,
     style: Option<&Value>,
     row_index: usize,
-    start_column: usize,
-    end_column: usize,
-    columns: usize,
-) -> Option<Value> {
+    start_column: u32,
+    end_column: u32,
+    columns: u32,
+) -> Result<Option<Value>, String> {
+    let rows = array(field(Some(table), "rows"));
+    let grid_before = table_grid_count(
+        field(field(rows.get(row_index), "formatting"), "gridBefore"),
+        0,
+        0,
+    )?;
+    let start_column = table_column_add(start_column, grid_before)?;
+    let end_column = table_column_add(end_column, grid_before)?;
     let mut result = field(style, "pPr").cloned();
     let parts = array(field(style, "tblStylePr"));
     if !parts.iter().any(|part| field(Some(part), "pPr").is_some()) {
-        return result;
+        return Ok(result);
     }
     let formatting = field(Some(table), "formatting");
     let style_formatting = field(style, "tblPr");
@@ -4089,14 +4129,6 @@ fn table_cell_paragraph_formatting(
     let last_row = flag("lastRow", 0x40);
     let first_column = flag("firstColumn", 0x80);
     let last_column = flag("lastColumn", 0x100);
-    let rows = array(field(Some(table), "rows"));
-    let grid_before = number(field(
-        field(rows.get(row_index), "formatting"),
-        "gridBefore",
-    ))
-    .unwrap_or(0.0) as usize;
-    let start_column = start_column + grid_before;
-    let end_column = end_column + grid_before;
     let at_first_row = first_row && row_index == 0;
     let at_last_row = last_row && row_index + 1 == rows.len();
     let at_first_column = first_column && start_column == 0;
@@ -4117,8 +4149,7 @@ fn table_cell_paragraph_formatting(
         });
     }
     if !flag("noVBand", 0x400) && !at_first_column && !at_last_column && column_band_size > 0.0 {
-        let band = (start_column.saturating_sub(usize::from(first_column)) as f64
-            / column_band_size)
+        let band = (start_column.saturating_sub(u32::from(first_column)) as f64 / column_band_size)
             .floor();
         regions.push(if band % 2.0 == 0.0 {
             "band1Vert"
@@ -4146,7 +4177,7 @@ fn table_cell_paragraph_formatting(
             .find(|part| string(field(Some(part), "type")) == Some(region));
         result = merge_paragraph_formatting(result.as_ref(), field(conditional, "pPr"));
     }
-    result
+    Ok(result)
 }
 
 fn project_row<'a>(
@@ -4155,7 +4186,7 @@ fn project_row<'a>(
     row_index: usize,
     row_spans: &BTreeMap<(usize, usize), (usize, bool)>,
     style_context: &TableStyleContext<'_>,
-) -> ProjectedRow<'a> {
+) -> Result<ProjectedRow<'a>, String> {
     let formatting = field(Some(row), "formatting");
     let mut attrs = map_from_value(json!({
         "height": nullish(field(field(formatting, "height"), "value")),
@@ -4184,40 +4215,24 @@ fn project_row<'a>(
     let widths = array(field(Some(table), "columnWidths"));
     let total_width: f64 = widths.iter().filter_map(Value::as_f64).sum();
     let rows = array(field(Some(table), "rows"));
-    let total_columns = if !widths.is_empty() {
-        widths.len()
-    } else {
-        rows.iter()
-            .map(|row| {
-                array(field(Some(row), "cells"))
-                    .iter()
-                    .map(|cell| {
-                        number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
-                            as usize
-                    })
-                    .sum()
-            })
-            .max()
-            .unwrap_or(0)
-    };
+    let total_columns = table_synthetic_columns(table)?;
     let cells_source = array(field(Some(row), "cells"));
-    let mut column = 0usize;
+    let mut column = 0u32;
     let mut cells = Vec::new();
     for cell in cells_source {
-        let colspan =
-            number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
+        let colspan = table_grid_count(field(field(Some(cell), "formatting"), "gridSpan"), 1, 1)?;
         let start_column = column;
-        let span = row_spans.get(&(row_index, start_column));
+        let span = row_spans.get(&(row_index, start_column as usize));
         let grid_width = (!widths.is_empty() && total_width > 0.0).then(|| {
             let cell_width: f64 = widths
                 .iter()
-                .skip(start_column)
-                .take(colspan)
+                .skip(start_column as usize)
+                .take(colspan as usize)
                 .filter_map(Value::as_f64)
                 .sum();
             (cell_width / total_width * 100.0).round()
         });
-        column += colspan;
+        column = table_column_add(column, colspan)?;
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
@@ -4248,10 +4263,13 @@ fn project_row<'a>(
             start_column,
             column,
             style_context.column_count,
-        );
+        )?;
         cells.push(projected);
     }
     if cells.is_empty() {
+        let before = table_grid_count(field(formatting, "gridBefore"), 0, 0)?;
+        let after = table_grid_count(field(formatting, "gridAfter"), 0, 0)?;
+        table_column_add(table_column_add(before, total_columns.max(1))?, after)?;
         let synthetic = if total_columns > 1 {
             json!({
                 "type": "tableCell",
@@ -4292,23 +4310,24 @@ fn project_row<'a>(
                 0,
                 total_columns,
                 style_context.column_count,
-            ),
+            )?,
             attrs: projected.attrs,
             content: Cow::Owned(projected.content.into_owned()),
         });
     }
-    ProjectedRow {
+    Ok(ProjectedRow {
         attrs: structural_attrs(attrs, &[]),
         cells,
-    }
+    })
 }
 
-fn project_table<'a>(
+fn checked_project_table<'a>(
     table: &'a Value,
     styles: &StyleResolver,
     theme: Option<&Value>,
     compatibility_mode: u8,
-) -> ProjectedTable<'a> {
+) -> Result<ProjectedTable<'a>, String> {
+    TableLayout::validate_peer_row_count(array(field(Some(table), "rows")).len())?;
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
     let style_id = string(field(formatting, "styleId"));
@@ -4393,8 +4412,8 @@ fn project_table<'a>(
             field(Some(table), "propertyChanges").unwrap().clone(),
         );
     }
-    let row_spans = calculate_row_spans(table);
-    let column_count = table_column_count(table);
+    let row_spans = calculate_row_spans(table)?;
+    let column_count = table_column_count(table)?;
     let rows = array(field(Some(table), "rows"))
         .iter()
         .enumerate()
@@ -4413,8 +4432,18 @@ fn project_table<'a>(
                 },
             )
         })
-        .collect();
-    ProjectedTable { attrs, rows }
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(ProjectedTable { attrs, rows })
+}
+
+#[cfg(test)]
+fn project_table<'a>(
+    table: &'a Value,
+    styles: &StyleResolver,
+    theme: Option<&Value>,
+    compatibility_mode: u8,
+) -> ProjectedTable<'a> {
+    checked_project_table(table, styles, theme, compatibility_mode).unwrap()
 }
 
 fn table_cell_story_id(parent: &str, table: usize, row: usize, cell: usize) -> String {
@@ -4655,26 +4684,28 @@ fn add_comment_coverage(plan: &mut StoryPlan) {
 }
 
 /// For each row of `table`, the source index of every cell seeding keeps as a cell story.
-fn source_cells(table: &Value) -> Vec<Vec<usize>> {
-    let spans = calculate_row_spans(table);
+fn source_cells(table: &Value) -> Result<Vec<Vec<usize>>, String> {
+    let spans = calculate_row_spans(table)?;
     array(field(Some(table), "rows"))
         .iter()
         .enumerate()
         .map(|(row_index, row)| {
-            let mut column = 0usize;
-            array(field(Some(row), "cells"))
-                .iter()
-                .enumerate()
-                .filter_map(|(index, cell)| {
-                    let start = column;
-                    column += number(field(field(Some(cell), "formatting"), "gridSpan"))
-                        .unwrap_or(1.0) as usize;
-                    (!spans
-                        .get(&(row_index, start))
-                        .is_some_and(|(_, skipped)| *skipped))
-                    .then_some(index)
-                })
-                .collect()
+            let mut column = 0u32;
+            let mut cells = Vec::new();
+            for (index, cell) in array(field(Some(row), "cells")).iter().enumerate() {
+                let start = column as usize;
+                column = table_column_add(
+                    column,
+                    table_grid_count(field(field(Some(cell), "formatting"), "gridSpan"), 1, 1)?,
+                )?;
+                if !spans
+                    .get(&(row_index, start))
+                    .is_some_and(|(_, skipped)| *skipped)
+                {
+                    cells.push(index);
+                }
+            }
+            Ok(cells)
         })
         .collect()
 }
@@ -4700,15 +4731,16 @@ fn has_content(value: &Value) -> bool {
 }
 
 /// Where each source cell of `table` sits on its grid, with the cell story seeding made for it.
-fn table_layout(table: &Value, story_id: &str, table_index: usize) -> TableLayout {
-    let sources = source_cells(table);
+fn table_layout(table: &Value, story_id: &str, table_index: usize) -> Result<TableLayout, String> {
+    let sources = source_cells(table)?;
     let count = |value: Option<&Value>, default: f64| {
         number(value)
             .filter(|value| value.is_finite())
             .unwrap_or(default)
             .clamp(0.0, f64::from(u16::MAX)) as u32
     };
-    let mut grid_columns = array(field(Some(table), "columnWidths")).len() as u32;
+    let mut grid_columns = u32::try_from(array(field(Some(table), "columnWidths")).len())
+        .map_err(|_| "source table column overflow".to_owned())?;
     let rows = array(field(Some(table), "rows"))
         .iter()
         .enumerate()
@@ -4740,29 +4772,22 @@ fn table_layout(table: &Value, story_id: &str, table_index: usize) -> TableLayou
                         story,
                         content: has_content(field(Some(cell), "content").unwrap_or(&Value::Null)),
                     };
-                    column = column.saturating_add(span);
-                    layout
+                    column = table_column_add(column, span)?;
+                    Ok(layout)
                 })
-                .collect();
-            grid_columns = grid_columns.max(column.saturating_add(grid_after));
-            RowLayout {
+                .collect::<Result<Vec<_>, String>>()?;
+            grid_columns = grid_columns.max(table_column_add(column, grid_after)?);
+            Ok(RowLayout {
                 grid_before,
                 grid_after,
                 cells,
-            }
+            })
         })
-        .collect();
-    TableLayout { grid_columns, rows }
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(TableLayout { grid_columns, rows })
 }
 
 pub(crate) fn validate_peer_blocks(blocks: &[Value]) -> Result<(), String> {
-    let count = |value: Option<&Value>, default: u32, minimum: u32| {
-        let value = number(value).unwrap_or(f64::from(default));
-        if value.fract() != 0.0 || !(f64::from(minimum)..=f64::from(u32::MAX)).contains(&value) {
-            return Err("invalid source table grid count".to_owned());
-        }
-        Ok(value as u32)
-    };
     let mut pending: Vec<&Value> = blocks.iter().collect();
     while let Some(value) = pending.pop() {
         match value {
@@ -4770,14 +4795,25 @@ pub(crate) fn validate_peer_blocks(blocks: &[Value]) -> Result<(), String> {
                 if string(object.get("type")) == Some("table") {
                     let rows = array(object.get("rows"));
                     TableLayout::validate_peer_row_count(rows.len())?;
-                    for row in rows {
+                    let synthetic_columns = table_synthetic_columns(value)?.max(1);
+                    let spans = calculate_row_spans(value)?;
+                    for (row_index, row) in rows.iter().enumerate() {
                         let formatting = field(Some(row), "formatting");
-                        let before = count(field(formatting, "gridBefore"), 0, 0)?;
-                        let after = count(field(formatting, "gridAfter"), 0, 0)?;
+                        let before = table_grid_count(field(formatting, "gridBefore"), 0, 0)?;
+                        let after = table_grid_count(field(formatting, "gridAfter"), 0, 0)?;
                         let mut column = before;
+                        let mut local_column = 0u32;
+                        let mut kept = false;
                         for cell in array(field(Some(row), "cells")) {
-                            let span =
-                                count(field(field(Some(cell), "formatting"), "gridSpan"), 1, 1)?;
+                            let span = table_grid_count(
+                                field(field(Some(cell), "formatting"), "gridSpan"),
+                                1,
+                                1,
+                            )?;
+                            kept |= !spans
+                                .get(&(row_index, local_column as usize))
+                                .is_some_and(|(_, skip)| *skip);
+                            local_column = table_column_add(local_column, span)?;
                             column = column
                                 .checked_add(span)
                                 .ok_or("source table column overflow")?;
@@ -4785,8 +4821,12 @@ pub(crate) fn validate_peer_blocks(blocks: &[Value]) -> Result<(), String> {
                         column
                             .checked_add(after)
                             .ok_or("source table column overflow")?;
+                        if !kept {
+                            table_column_add(table_column_add(before, synthetic_columns)?, after)?;
+                        }
                     }
-                    table_layout(value, "peer", 0).validate_peer_metadata()?;
+                    table_column_count(value)?;
+                    table_layout(value, "peer", 0)?.validate_peer_metadata()?;
                 }
                 pending.extend(object.values());
             }
@@ -4876,12 +4916,12 @@ fn record_breaks(
     }
 }
 
-fn visit_story(
+fn checked_visit_story(
     context: &mut LoweringContext,
     story_id: String,
     source_blocks: &[Value],
     options: StoryOptions,
-) {
+) -> Result<(), String> {
     let plan_index = context.plans.len();
     context.plans.push(StoryPlan {
         story_id: story_id.clone(),
@@ -5069,17 +5109,17 @@ fn visit_story(
                 let current_table = position.table;
                 context.provenance.tables.insert(
                     format!("{story_id}:t{current_table}"),
-                    table_layout(block, &story_id, current_table),
+                    table_layout(block, &story_id, current_table)?,
                 );
                 let ProjectedTable {
                     mut attrs,
                     mut rows,
-                } = project_table(
+                } = checked_project_table(
                     block,
                     &context.styles,
                     context.theme.as_ref(),
                     context.compatibility_mode,
-                );
+                )?;
                 let payload_rows = rows
                     .iter_mut()
                     .enumerate()
@@ -5139,7 +5179,7 @@ fn visit_story(
                     .units
                     .push(embed_unit("table", payload, &[], 1));
                 let previous_table_state = context.styles.set_table_paragraph_formatting(None);
-                let sources = source_cells(block);
+                let sources = source_cells(block)?;
                 for (row_index, row) in rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
                         context
@@ -5168,7 +5208,7 @@ fn visit_story(
                                 steps,
                             );
                         }
-                        visit_story(
+                        checked_visit_story(
                             context,
                             table_cell_story_id(&story_id, current_table, row_index, cell_index),
                             &cell.content,
@@ -5177,7 +5217,7 @@ fn visit_story(
                                 append_body_tail: false,
                                 seed_comments: options.seed_comments,
                             },
-                        );
+                        )?;
                     }
                 }
                 context
@@ -5200,7 +5240,7 @@ fn visit_story(
                     steps.extend([Step::Block(block_index), Step::Content]);
                     context.locators.insert(child_story.clone(), steps);
                 }
-                visit_story(
+                checked_visit_story(
                     context,
                     child_story,
                     array(field(Some(block), "content")),
@@ -5209,7 +5249,7 @@ fn visit_story(
                         append_body_tail: false,
                         seed_comments: options.seed_comments,
                     },
-                );
+                )?;
                 last_kind = Some("blockSdt");
             }
         }
@@ -5254,6 +5294,17 @@ fn visit_story(
     if options.seed_comments {
         add_comment_coverage(&mut context.plans[plan_index]);
     }
+    Ok(())
+}
+
+#[cfg(test)]
+fn visit_story(
+    context: &mut LoweringContext,
+    story_id: String,
+    source_blocks: &[Value],
+    options: StoryOptions,
+) {
+    checked_visit_story(context, story_id, source_blocks, options).unwrap();
 }
 
 fn collect_font_entry(key: &str, value: &Value, fonts: &mut BTreeSet<String>) {
@@ -5557,12 +5608,12 @@ fn lower_docx_with(
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
     let mut read = read_source(package, &parsed, parts);
-    let (mut context, roots) = lower_package(package, source_json);
+    let (mut context, roots) = checked_lower_package(package, source_json)?;
     drop(parsed);
     read.provenance = std::mem::take(&mut context.provenance);
     read.seeded_comments = seeded_comments(&context.plans);
     if let Some(parts) = parts {
-        let comment_raw = comment_raw_sources(&context.styles, &read);
+        let comment_raw = comment_raw_sources(&context.styles, &read)?;
         let represented = represented_controls(&context.plans, &read);
         read.resolve_sources(parts, comment_raw, &represented);
     }
@@ -5710,16 +5761,19 @@ fn seed_lowered(
 
 /// Where the raw XML blocks of every source comment body sit in the comments part, as lowering
 /// the body into a story of its own records them.
-fn comment_raw_sources(styles: &StyleResolver, read: &ReadSource) -> Vec<RawSource> {
+fn comment_raw_sources(
+    styles: &StyleResolver,
+    read: &ReadSource,
+) -> Result<Vec<RawSource>, String> {
     let mut context = scratch_context(styles.clone());
     for comment in &read.comments {
         let story = format!("comment:{}", comment.id);
         context
             .locators
             .insert(story.clone(), vec![Step::Comment(comment.id.clone())]);
-        visit_story(&mut context, story, &comment.body, scratch_options());
+        checked_visit_story(&mut context, story, &comment.body, scratch_options())?;
     }
-    context.provenance.raw_sources
+    Ok(context.provenance.raw_sources)
 }
 
 fn scratch_context(styles: StyleResolver) -> LoweringContext {
@@ -5824,7 +5878,7 @@ pub(crate) fn seed_blocks(
             .unwrap_or_default(),
     );
     for (story, blocks) in stories {
-        visit_story(&mut context, story.clone(), blocks, scratch_options());
+        checked_visit_story(&mut context, story.clone(), blocks, scratch_options())?;
     }
     doc.create_empty_stories(
         &context
@@ -5886,10 +5940,10 @@ pub(crate) fn replica_source(
     ))
 }
 
-fn lower_package(
+fn checked_lower_package(
     package: &Value,
     source_json: BTreeMap<String, String>,
-) -> (LoweringContext, Vec<SourceRoot>) {
+) -> Result<(LoweringContext, Vec<SourceRoot>), String> {
     let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
@@ -5905,7 +5959,7 @@ fn lower_package(
         locators: HashMap::from([("body".to_owned(), vec![Step::Body])]),
     };
     let mut roots = vec![("body".to_owned(), SourceStoryKind::Body, None)];
-    visit_story(
+    checked_visit_story(
         &mut context,
         "body".to_owned(),
         array(field(field(Some(package), "document"), "content")),
@@ -5914,7 +5968,7 @@ fn lower_package(
             append_body_tail: true,
             seed_comments: true,
         },
-    );
+    )?;
     for (key, kind) in [
         ("headerEntries", SourceStoryKind::Header),
         ("footerEntries", SourceStoryKind::Footer),
@@ -5930,7 +5984,7 @@ fn lower_package(
             context.root = story_id.clone();
             context.locators.insert(story_id.clone(), Vec::new());
             roots.push((story_id.clone(), kind, Some(relationship_id.to_owned())));
-            visit_story(
+            checked_visit_story(
                 &mut context,
                 story_id,
                 array(field(Some(part), "content")),
@@ -5939,7 +5993,7 @@ fn lower_package(
                     append_body_tail: false,
                     seed_comments: true,
                 },
-            );
+            )?;
         }
     }
     for (key, prefix, element, kind) in [
@@ -5956,7 +6010,7 @@ fn lower_package(
                 .locators
                 .insert(story_id.clone(), vec![Step::Note(element, js_string(id))]);
             roots.push((story_id.clone(), kind, Some(js_string(id))));
-            visit_story(
+            checked_visit_story(
                 &mut context,
                 story_id,
                 array(field(Some(note), "content")),
@@ -5965,10 +6019,18 @@ fn lower_package(
                     append_body_tail: false,
                     seed_comments: true,
                 },
-            );
+            )?;
         }
     }
-    (context, roots)
+    Ok((context, roots))
+}
+
+#[cfg(test)]
+fn lower_package(
+    package: &Value,
+    source_json: BTreeMap<String, String>,
+) -> (LoweringContext, Vec<SourceRoot>) {
+    checked_lower_package(package, source_json).unwrap()
 }
 
 const COMMENT_COMPANIONS: [&str; 2] = ["word/commentsExtended.xml", "word/commentsIds.xml"];

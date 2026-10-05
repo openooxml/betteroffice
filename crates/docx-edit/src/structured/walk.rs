@@ -2713,6 +2713,24 @@ impl<'a> Exporter<'a> {
         }
     }
 
+    fn table_continuations(
+        &mut self,
+        covered: &mut BTreeMap<u32, (u32, u32, u32, u32)>,
+        column: &mut u32,
+        row_index: u32,
+        anchor: &Anchor,
+        cells: &mut Vec<TableCell>,
+    ) {
+        for column in continuations(covered, column, anchor, cells) {
+            self.note(
+                DiagnosticCode::UnsupportedContent,
+                Severity::Warning,
+                Some(anchor.clone()),
+                format!("The cell at row {row_index}, column {column} continues a vertical merge no cell above starts, so it is exported as a cell of its own."),
+            );
+        }
+    }
+
     /// The table as the editing model holds it, for tables without a matching source grid.
     #[allow(clippy::too_many_arguments)]
     fn table_from_stream<T: ReadTxn>(
@@ -2762,7 +2780,7 @@ impl<'a> Exporter<'a> {
                 _ => Vec::new(),
             };
             for cell in row_cells {
-                continuations(&mut covered, &mut column, anchor, &mut cells);
+                self.table_continuations(&mut covered, &mut column, row_index, anchor, &mut cells);
                 let span = span_of(&cell, "colspan");
                 let rows_spanned = span_of(&cell, "rowspan");
                 let story = any_text(cell.get("story"));
@@ -2771,6 +2789,18 @@ impl<'a> Exporter<'a> {
                     Some(story) => self.nested(views, ctx, story, depth, list, anchor),
                     None => Vec::new(),
                 };
+                if any_map(cell.get("tcPr"))
+                    .and_then(|properties| any_map(properties.get("_originalFormatting")))
+                    .and_then(|original| any_str(original.get("vMerge")))
+                    == Some("continue")
+                {
+                    self.note(
+                        DiagnosticCode::UnsupportedContent,
+                        Severity::Warning,
+                        Some(cell_anchor.clone()),
+                        format!("The cell at row {row_index}, column {column} continues a vertical merge no cell above starts, so it is exported as a cell of its own."),
+                    );
+                }
                 if rows_spanned > 1 {
                     for slot in column..column.saturating_add(span) {
                         covered.insert(slot, (row_index, column, span, rows_spanned - 1));
@@ -2792,7 +2822,7 @@ impl<'a> Exporter<'a> {
                 });
                 column = column.saturating_add(span);
             }
-            continuations(&mut covered, &mut column, anchor, &mut cells);
+            self.table_continuations(&mut covered, &mut column, row_index, anchor, &mut cells);
             grid_columns = u32::max(grid_columns, column.saturating_add(grid_after));
             output_rows.push(TableRow {
                 header: header(row),
@@ -3957,31 +3987,50 @@ fn continuations(
     column: &mut u32,
     anchor: &Anchor,
     cells: &mut Vec<TableCell>,
-) {
+) -> Vec<u32> {
+    let mut repaired = Vec::new();
     while let Some((origin_row, origin_column, span, remaining)) = covered.get(column).copied() {
         if remaining == 0 || origin_column != *column {
             break;
         }
-        for slot in *column..column.saturating_add(span) {
-            if let Some(entry) = covered.get_mut(&slot) {
-                entry.3 -= 1;
+        let end = column.saturating_add(span);
+        let matched = (*column..end).all(|slot| {
+            covered
+                .get(&slot)
+                .is_some_and(|entry| *entry == (origin_row, origin_column, span, remaining))
+        });
+        if matched {
+            for slot in *column..end {
+                if let Some(entry) = covered.get_mut(&slot) {
+                    if entry.0 == origin_row && entry.1 == origin_column && entry.3 > 0 {
+                        entry.3 -= 1;
+                    }
+                }
             }
+        } else {
+            repaired.push(*column);
+            covered.retain(|_, entry| entry.0 != origin_row || entry.1 != origin_column);
         }
         cells.push(TableCell {
             anchor: anchor.clone(),
             story: None,
             column: *column,
             grid_span: span,
-            row_span: 0,
-            vertical_merge: VerticalMerge::Continue,
-            merge_origin: Some(CellPosition {
+            row_span: if matched { 0 } else { 1 },
+            vertical_merge: if matched {
+                VerticalMerge::Continue
+            } else {
+                VerticalMerge::None
+            },
+            merge_origin: matched.then_some(CellPosition {
                 row: origin_row,
                 column: origin_column,
             }),
             blocks: Vec::new(),
         });
-        *column = column.saturating_add(span);
+        *column = end;
     }
+    repaired
 }
 
 /// The table id seeding gives a table embed, read from its first cell story.
