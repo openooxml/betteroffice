@@ -5,7 +5,8 @@ import { createWorkerTransport, type SessionTransport } from '../../../../shared
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, openWorkbookPeer, type OpenWorkbookOptions, type Viewport, type WorkbookHandle,
+  createWorkbookSnapshotBuilder, initWasm, openWorkbookPeer,
+  type OpenWorkbookOptions, type Viewport, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_METHODS,
@@ -32,6 +33,7 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 const wasmModules = new Map<string, WebAssembly.Module>();
 const peerSources = new WeakMap<WorkbookSession, WorkbookPeerSource>();
+const PEER_SNAPSHOT_BUDGET = { records: 256, bytes: 16 * 1024 } as const;
 
 interface WorkbookPeerSource {
   bytes: Uint8Array<ArrayBuffer>;
@@ -42,6 +44,8 @@ interface WorkbookPeerSource {
   sequence?: number;
   disposed: boolean;
   pending?: Promise<WorkbookHandle>;
+  snapshot?: Pick<Promisified<WorkbookInternalSessionMethods>,
+    'beginPeerSnapshot' | 'pullPeerSnapshot' | 'endPeerSnapshot'>;
 }
 
 /**
@@ -121,6 +125,43 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
   if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
   if (source.hydration === undefined) throw new WorkbookPeerHydrationError('missing-hydration',
     'Workbook worker did not retain peer calculation state');
+  if (source.snapshot) {
+    const snapshot = source.snapshot;
+    let builder: ReturnType<typeof createWorkbookSnapshotBuilder> | undefined;
+    let peer: WorkbookHandle | undefined;
+    try {
+      const pinned = await snapshot.beginPeerSnapshot(PEER_SNAPSHOT_BUDGET.records, PEER_SNAPSHOT_BUDGET.bytes);
+      if (pinned.version !== source.version || pinned.sequence !== source.sequence) {
+        throw new Error('Workbook snapshot differs from retained peer hydration');
+      }
+      builder = createWorkbookSnapshotBuilder(source.options);
+      for (;;) {
+        if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+        const chunk = await snapshot.pullPeerSnapshot();
+        if (chunk === undefined) break;
+        builder.push(new Uint8Array(chunk));
+      }
+      for (;;) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+        if (builder.advance(PEER_SNAPSHOT_BUDGET.records, PEER_SNAPSHOT_BUDGET.bytes)) break;
+      }
+      peer = builder.finish();
+      if (peer.version() !== pinned.version) throw new Error('Workbook snapshot peer version differs from worker');
+      await snapshot.endPeerSnapshot(false);
+      if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+      return peer;
+    } catch (error) {
+      try { peer?.dispose(); } catch {}
+      try { await snapshot.endPeerSnapshot(true); } catch {}
+      if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+      try {
+        console.warn(`xlsx worker editor: snapshot hydration fell back: ${error instanceof Error ? error.message : String(error)}`);
+      } catch {}
+    } finally {
+      try { builder?.dispose(); } catch {}
+    }
+  }
   try { return openWorkbookPeer(source.bytes, source.options, source.hydration); } catch (error) {
     throw new WorkbookPeerHydrationError('missing-hydration',
       `Workbook worker supplied invalid peer hydration: ${error instanceof Error ? error.message : String(error)}`);
@@ -304,6 +345,11 @@ export async function createWorkbookSession(
     return reply;
   };
   const source = peerSource;
+  if (source) source.snapshot = {
+    beginPeerSnapshot: (...args) => client.call.beginPeerSnapshot(...args),
+    pullPeerSnapshot: () => client.call.pullPeerSnapshot(),
+    endPeerSnapshot: (discard) => client.call.endPeerSnapshot(discard),
+  };
   const attachPeer = source ? async (peerVersion: string) => {
     try {
       await client.call.attachPeer(peerVersion, source.sequence!);

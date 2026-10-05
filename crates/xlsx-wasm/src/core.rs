@@ -2,16 +2,22 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op,
+    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
     PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
-    UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, SnapshotBudget,
+    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
 };
 use serde::{Deserialize, Serialize};
 
 pub struct Session {
     workbook: Workbook,
     calculation_context: Option<CalculationOptions>,
+    snapshot: Option<PeerSnapshot>,
+}
+
+struct PeerSnapshot {
+    encoder: WorkbookSnapshotEncoder,
+    version: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -292,6 +298,54 @@ struct AcceptResult {
 }
 
 impl Session {
+    pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), String> {
+        self.snapshot = None;
+        let budget = SnapshotBudget::new(records, bytes).map_err(|error| error.to_string())?;
+        let encoder =
+            WorkbookSnapshotEncoder::new(&self.workbook, self.calculation_context, budget)
+                .map_err(|error| error.to_string())?;
+        if let Some(reason) = encoder.split_fallback_reason() {
+            return Err(reason.to_owned());
+        }
+        self.snapshot = Some(PeerSnapshot {
+            encoder,
+            version: self.document_version(),
+        });
+        Ok(())
+    }
+
+    pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let mut snapshot = self
+            .snapshot
+            .take()
+            .ok_or_else(|| "workbook peer snapshot is not active".to_owned())?;
+        if snapshot.version != self.document_version() {
+            return Err("workbook changed during peer snapshot".to_owned());
+        }
+        let chunk = snapshot
+            .encoder
+            .next(&self.workbook)
+            .map_err(|error| error.to_string())?;
+        if let Some(reason) = snapshot.encoder.split_fallback_reason() {
+            return Err(reason.to_owned());
+        }
+        self.snapshot = Some(snapshot);
+        Ok(chunk)
+    }
+
+    pub fn end_peer_snapshot(&mut self) {
+        self.snapshot = None;
+    }
+
+    pub fn from_hydrated_workbook(hydrated: HydratedWorkbook) -> Self {
+        let (workbook, calculation_context) = hydrated.into_parts();
+        Self {
+            workbook,
+            calculation_context,
+            snapshot: None,
+        }
+    }
+
     #[doc(hidden)]
     pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), String> {
         self.workbook
@@ -321,6 +375,7 @@ impl Session {
         Ok(Self {
             workbook,
             calculation_context: hydration.calculation_context,
+            snapshot: None,
         })
     }
 
@@ -329,6 +384,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
+                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -342,6 +398,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: Some(options),
+                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -377,6 +434,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
+                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }

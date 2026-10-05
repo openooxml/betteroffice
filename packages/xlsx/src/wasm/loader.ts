@@ -13,6 +13,7 @@ import initWasmModule, {
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import * as xlsxWasm from './generated/xlsx_wasm.js';
 import { wasmAssetUrl } from './asset';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
@@ -583,6 +584,56 @@ export function openWorkbook(
 
 const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
 const peerVersionAdopters = new WeakMap<WorkbookHandle, (version: string) => void>();
+const peerSnapshotAccess = new WeakMap<WorkbookHandle, {
+  begin(records: number, bytes: number): void;
+  next(): Uint8Array | undefined;
+  end(): void;
+}>();
+
+export function workbookPeerSnapshot(handle: WorkbookHandle) {
+  const snapshot = peerSnapshotAccess.get(handle);
+  if (!snapshot) throw new TypeError('Workbook does not support peer snapshots');
+  return snapshot;
+}
+
+type SnapshotBuilder = {
+  push(chunk: Uint8Array): void;
+  advance(records: number, bytes: number): boolean;
+  finish(): XlsxDocument;
+  free(): void;
+};
+
+export function createWorkbookSnapshotBuilder(options: OpenWorkbookOptions) {
+  requireInitialized();
+  const Constructor = (xlsxWasm as unknown as {
+    XlsxSnapshotBuilder?: new () => SnapshotBuilder;
+  }).XlsxSnapshotBuilder;
+  if (!Constructor) throw new Error('Workbook wasm does not support peer snapshots');
+  let builder: SnapshotBuilder | undefined = new Constructor();
+  function active(): SnapshotBuilder {
+    if (!builder) throw new Error('Workbook snapshot builder is disposed');
+    return builder;
+  }
+  return {
+    push(chunk: Uint8Array): void {
+      try { active().push(chunk); } catch (error) { throw toError(error); }
+    },
+    advance(records: number, bytes: number): boolean {
+      try { return active().advance(records, bytes); } catch (error) { throw toError(error); }
+    },
+    finish(): WorkbookHandle {
+      const finishing = active();
+      builder = undefined;
+      try { return wrapWorkbookDocument(finishing.finish(), options, true); }
+      catch (error) { throw toError(error); }
+    },
+    dispose(): void {
+      const disposing = builder;
+      builder = undefined;
+      disposing?.free();
+    },
+  };
+}
 
 export function workbookPeerHydration(handle: WorkbookHandle): string {
   const read = peerHydrationReaders.get(handle);
@@ -630,12 +681,19 @@ function openWorkbookInternal(
     throw toError(e);
   }
 
+  return wrapWorkbookDocument(doc, options, hydration !== undefined);
+}
+
+function wrapWorkbookDocument(
+  doc: XlsxDocument, options: OpenWorkbookOptions, hydrated: boolean
+): WorkbookHandle {
+  const collaborativeClientId = resolveCollaborativeClientId(options);
   const listeners = new Map<number, WorkbookUpdateListener>();
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
   let nextListenerId = 0;
   let disposed = false;
   let hasCalculationContext = options.calculation !== undefined ||
-    (hydration !== undefined && collaborativeClientId === undefined);
+    (hydrated && collaborativeClientId === undefined);
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -1049,8 +1107,19 @@ function openWorkbookInternal(
   displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
   peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
+  peerSnapshotAccess.set(handle, {
+    begin: (records, bytes) => wasmCall(() => (doc as SnapshotDocument).beginPeerSnapshot(records, bytes)),
+    next: () => wasmCall(() => (doc as SnapshotDocument).nextPeerSnapshotChunk()),
+    end: () => wasmCall(() => (doc as SnapshotDocument).endPeerSnapshot()),
+  });
   return handle;
 }
+
+type SnapshotDocument = XlsxDocument & {
+  beginPeerSnapshot(records: number, bytes: number): void;
+  nextPeerSnapshotChunk(): Uint8Array | undefined;
+  endPeerSnapshot(): void;
+};
 
 type PeerDocument = XlsxDocument & {
   peerHydrationJson(): string;

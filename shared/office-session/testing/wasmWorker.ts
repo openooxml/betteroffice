@@ -49,6 +49,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
               export const workbookPeerHydration = () => { throw new Error('workbookPeerHydration is not stubbed'); };
+              export const workbookPeerSnapshot = () => { throw new Error('workbookPeerSnapshot is not stubbed'); };
+              export const createWorkbookSnapshotBuilder = () => { throw new Error('createWorkbookSnapshotBuilder is not stubbed'); };
             `,
             loader: 'js',
           }));
