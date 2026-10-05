@@ -574,6 +574,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         );
         const laidOut = laidOutRef.current;
         if (
+          !isViewerSession(session) &&
           registeredWorkerProposalAuthority(session)?.holdsWorkerState() !== true &&
           workerOpenEnabledRef.current &&
           workerOpenReplicaPending(session) && workerOpenReplicaStarted(session) &&

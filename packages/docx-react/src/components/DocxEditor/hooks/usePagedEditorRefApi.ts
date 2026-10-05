@@ -268,7 +268,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
         return;
       }
       const pending = input.flushPendingInput();
-      const ready = workerOpenEnabledRef.current && !session.isDisplayOnly() && !viewerSelectionRef.current && !workerOpenDocumentHeld(session)
+      const ready = workerOpenEnabledRef.current && !viewerSelectionRef.current && !workerOpenDocumentHeld(session) && !session.isDisplayOnly()
         ? awaitWorkerOpenReplica(session)
         : undefined;
       await (ready ? Promise.all([pending, ready]) : pending);

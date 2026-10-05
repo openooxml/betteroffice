@@ -188,7 +188,7 @@ test('a request after the replica was cancelled does not start it', async () => 
   expect(hydrate).not.toHaveBeenCalled();
 });
 
-test.each(['rejection', 'load', 'ensure'] as const)('a replica %s falls back once', async (cause) => {
+test.each(['rejection', 'load', 'ensure'] as const)('a replica %s fallback defaults to failure', async (cause) => {
   const session = fakeSession();
   const fallback = mock(() => {});
   deferWorkerOpenReplica(session, async () => {
@@ -198,7 +198,7 @@ test.each(['rejection', 'load', 'ensure'] as const)('a replica %s falls back onc
   if (cause === 'ensure') ensureWorkerOpenReplica(session);
   else await requestWorkerOpenReplica(session);
   expect(fallback).toHaveBeenCalledTimes(1);
-  expect(fallback).toHaveBeenCalledWith();
+  expect(fallback).toHaveBeenCalledWith('failure');
   expect(workerOpenReplicaPending(session)).toBe(false);
 });
 
@@ -284,7 +284,7 @@ test.each([1, 2])('a stale hydration at yield %s cancels without readiness or fa
     const cancel = mock(() => {});
     let current = true;
     const replica = deferWorkerOpenReplica(session, async () => [openDocx, loadState, complete],
-      fallback, onReady, undefined, { current: () => current, cancel });
+      fallback, onReady, { current: () => current, cancel });
     replica.start();
     await Promise.resolve();
     if (boundary === 2) await tasks.run();

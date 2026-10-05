@@ -320,6 +320,7 @@ interface HarnessProps {
   previewFirstPage?: boolean;
   /** Opens the first-page preview in the worker, as DocxEditor does. */
   workerPreview?: boolean;
+  handleSave?: () => Promise<ArrayBuffer>;
   openInWorker?: OpenInWorker;
   openPreviewInWorker?: OpenPreviewInWorker;
   source: Uint8Array;
@@ -517,7 +518,7 @@ function useHarness(props: HarnessProps) {
     documentFromYrs: core.documentFromYrs,
     historyStateRef: { current: host?.document ?? null },
     pagedEditorRef,
-    handleSave: async () => new ArrayBuffer(0),
+    handleSave: props.handleSave ?? (async () => new ArrayBuffer(0)),
     zoom: 1,
     setZoom: () => {},
     scrollPageInfo: { currentPage: 1, totalPages: 1, visible: true },
@@ -4784,7 +4785,18 @@ async function openingEditor(workerPreview = true, viewer = false, options: {
     viewer, workerProposals: viewer, readOnly: viewer };
   const selections: Array<ReturnType<YrsSession['cellSelection']>> = [];
   function Editable({ source, generation, readOnly = viewer, viewer: viewerSession = viewer }: Pick<HarnessProps, 'source' | 'generation' | 'readOnly' | 'viewer'>) {
-    harness = useHarness({ ...props, source, generation, readOnly, viewer: viewerSession });
+    harness = useHarness({
+      ...props, source, generation, readOnly, viewer: viewerSession,
+      handleSave: async () => {
+        const current = editor.current;
+        const session = current?.getYrsSession();
+        if (session && replicaHelpers.workerOpenReplicaStarted(session)) {
+          await awaitWorkerOpenReplica(session);
+        }
+        await current?.flushPendingInput();
+        return new ArrayBuffer(0);
+      },
+    });
     const layoutInWorker = useMemo<LayoutInWorker>(() => {
       const layout = harness.renderer.layoutInWorker;
       if (!options.holdFullLayout) return layout;
@@ -6954,7 +6966,7 @@ test('overlay projection builds in a task after replica readiness', async () => 
     const target = document.createElement('div');
     const host = createRef<HTMLDivElement>();
     const editor = () => <PagedEditor document={result.current.host!.document}
-      yrsCore={result.current.core} readOnly
+      yrsCore={result.current.core} readOnly holdInput
       canvasOverlayTarget={target} canvasHostRef={host}
       displayListQueries={result.current.renderer.queries}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
