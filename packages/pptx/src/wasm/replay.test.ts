@@ -119,7 +119,7 @@ function refusal(operation: () => unknown, code: string) {
 }
 
 test('all_supported_ops_match_across_handles', async () => {
-  const { peer, run } = await pair(fonts());
+  const { worker, peer, run } = await pair(fonts());
   const seen = new Set<string>();
   const apply = (op: PresentationReplayOp) => {
     seen.add(op.method);
