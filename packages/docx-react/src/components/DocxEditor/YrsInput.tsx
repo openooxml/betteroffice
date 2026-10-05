@@ -1523,7 +1523,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const copyAfterReplica = useCallback((cut = false): CutCopy | null => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
     const held = holdInput && !readOnly && (cut || heldInputRef.current.entries.length > 0);
-    if (!session || (!held && replicaReadyRef?.current !== false) || !clipboard) {
+    const queued = held || replicaReadyRef?.current === false || !!inputOperationQueueRef.current?.hasPending();
+    if (!session || !queued || !clipboard) {
       return null;
     }
     const result: CutCopy = { written: false };

@@ -57,6 +57,7 @@ interface QueuedGesture {
   head: CanvasPointHit;
   kind: 'caret' | 'range' | 'word' | 'paragraph';
   dragging: boolean;
+  rebind?: () => void;
 }
 
 export interface UsePagesPointerOptions {
@@ -493,9 +494,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       kind: e.detail >= 3 ? 'paragraph' : e.detail === 2 ? 'word' : 'caret', dragging: true,
     };
     const scope = gestureScopeRef.current;
-    const apply = yrsSession && !replicaPending?.() && queries.isReady()
+    let apply = yrsSession && !replicaPending?.() && queries.isReady()
       ? prepareQueuedGestureRef.current(gesture)
       : null;
+    if (apply) gesture.rebind = () => {
+      if (inputQueriesRef.current === queries && queries.isReady()) apply = prepareQueuedGestureRef.current(gesture);
+    };
     const queued = yrsInputRef.current?.queueSelection?.(async () => {
       if (apply) return gestureScopeRef.current === scope ? apply : () => {};
       await queries.whenReady();
@@ -525,7 +529,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     const host = canvasHostRef?.current ?? pagesContainerRef.current;
     if (!gesture?.dragging || !host) return;
     const point = resolveCanvasPoint(host, gesture.queries, clientX, clientY, { clampToNearestPage: true });
-    if (point) gesture.head = point;
+    if (!point) return;
+    gesture.head = point;
+    gesture.rebind?.();
   }, [canvasHostRef, pagesContainerRef]);
 
   const beginTextDrag = useCallback(
