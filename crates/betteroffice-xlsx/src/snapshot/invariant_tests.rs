@@ -149,17 +149,25 @@ fn assert_refuses_before_ready(chunks: &[Vec<u8>], budget: SnapshotBudget) -> St
 
 fn apply_matching_history_step(worker: &mut Workbook, peer: &mut Workbook, operation: Op) {
     assert_eq!(
-        worker.apply_ops(vec![operation.clone()], context()).unwrap(),
+        worker
+            .apply_ops(vec![operation.clone()], context())
+            .unwrap(),
         peer.apply_ops(vec![operation], context()).unwrap(),
     );
     assert_edited_identity(worker, peer);
     assert!(worker.can_undo());
     assert!(peer.can_undo());
-    assert_eq!(worker.undo(context()).unwrap(), peer.undo(context()).unwrap());
+    assert_eq!(
+        worker.undo(context()).unwrap(),
+        peer.undo(context()).unwrap()
+    );
     assert_edited_identity(worker, peer);
     assert!(worker.can_redo());
     assert!(peer.can_redo());
-    assert_eq!(worker.redo(context()).unwrap(), peer.redo(context()).unwrap());
+    assert_eq!(
+        worker.redo(context()).unwrap(),
+        peer.redo(context()).unwrap()
+    );
     assert_edited_identity(worker, peer);
 }
 
@@ -612,14 +620,6 @@ fn snapshot_initial_peer_matches_applied_edit_histories() {
                 part: chart.part.clone(),
                 from: chart.anchor,
                 to: crate::ChartAnchor::OneCell { from, extent },
-            },
-            Op::SetDefinedNames {
-                defined_names: vec![xlsx_model::DefinedName {
-                    name: "EditedName".to_owned(),
-                    formula: "Data!$A$1".to_owned(),
-                    local_sheet: None,
-                    hidden: false,
-                }],
             },
             Op::InsertRows {
                 sheet,

@@ -1861,7 +1861,10 @@ mod tests {
         let baseline = doc.transact().state_vector();
         let mut causal = CausalState::default();
         causal
-            .admit(&doc.transact().encode_state_as_update_v1(&StateVector::default()))
+            .admit(
+                &doc.transact()
+                    .encode_state_as_update_v1(&StateVector::default()),
+            )
             .unwrap();
         let clocks = causal.clocks.clone();
         let kinds = causal.kinds.clone();
