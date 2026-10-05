@@ -7,6 +7,7 @@ import {
   type DisplayListQueries,
   type DisplayListRect,
   type DisplayListRegionHit,
+  type ResidentDisplayListQueryEngine,
 } from './displayListQueries';
 import type { DisplayPage } from './displayList';
 import type { RustDisplayListQueryEngine } from './rustDisplayList';
@@ -673,6 +674,7 @@ describe('createDisplayListQueries page-restricted range rects', () => {
     let stored: DisplayPage[] = [];
     const loaded: number[] = [];
     const visited: number[] = [];
+    const windows: Array<[number, number]> = [];
     engine.openDisplayList = (json) => {
       stored = JSON.parse(json).pages;
       return 1;
@@ -687,13 +689,33 @@ describe('createDisplayListQueries page-restricted range rects', () => {
     engine.rangeRectsByHandle = (_handle, from, to) => JSON.stringify(rects(stored, from, to));
     engine.rangeRectsJson = (json, from, to) => JSON.stringify(rects(JSON.parse(json).pages, from, to));
     engine.rangeRectsOnPagesByHandle = (_handle, from, to, first, last) => {
-      const pages = stored.slice(first, last + 1);
+      windows.push([first, last]);
+      const pages = stored.slice(first >>> 0, (last >>> 0) + 1);
       visited.push(...pages.map((page) => page.pageIndex));
       return JSON.stringify(rects(pages, from, to));
     };
-    engine.rangeRectsOnPagesJson = (json, from, to, first, last) =>
-      JSON.stringify(rects(JSON.parse(json).pages.slice(first, last + 1), from, to));
-    return { engine, loaded, visited };
+    engine.rangeRectsOnPagesJson = (json, from, to, first, last) => {
+      windows.push([first, last]);
+      return JSON.stringify(
+        rects(JSON.parse(json).pages.slice(first >>> 0, (last >>> 0) + 1), from, to)
+      );
+    };
+    return { engine, loaded, visited, windows };
+  }
+
+  function residentEngine(pages: () => DisplayPage[]) {
+    const windows: Array<[number, number]> = [];
+    const engine: ResidentDisplayListQueryEngine = {
+      displayHitTestRegionsJson: () => 'null',
+      displayVerticalMoveJson: () => 'null',
+      displayRangeRectsRegionJson: () => '[]',
+      displayRangeRectsJson: (from, to) => JSON.stringify(rects(pages(), from, to)),
+      displayRangeRectsOnPagesJson: (from, to, first, last) => {
+        windows.push([first, last]);
+        return JSON.stringify(rects(pages().slice(first >>> 0, (last >>> 0) + 1), from, to));
+      },
+    };
+    return { engine, windows };
   }
 
   test('loads and visits only zero-based page 5, including after other pages are loaded', () => {
@@ -793,6 +815,102 @@ describe('createDisplayListQueries page-restricted range rects', () => {
     expect(older.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(expected);
     older.dispose();
     queries.dispose();
+  });
+
+  test('retained resident facades query pages added by a rebuild with and without the export', () => {
+    for (const exported of [true, false]) {
+      let current = list().pages.slice(0, 1);
+      const { engine, windows } = residentEngine(() => current);
+      if (!exported) engine.displayRangeRectsOnPagesJson = undefined;
+      const queries = createDisplayListQueries({ pages: current }, engine);
+      expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual([]);
+      current = list().pages;
+      const all = queries.rangeRects(2, 4);
+      const expected = all.filter((rect) => rect.pageIndex === 5);
+      expect(expected).toHaveLength(2);
+      expect(queries.rangeRectsOnPages!(2, 4, 5, 5)).toEqual(expected);
+      expect(queries.rangeRectsOnPages!(2, 4, 4, Infinity)).toEqual(
+        all.filter((rect) => rect.pageIndex >= 4)
+      );
+      expect(windows).toEqual(exported ? [[5, 5], [5, 5], [4, 0xffffffff]] : []);
+      queries.dispose();
+    }
+  });
+
+  test('normalizes page bounds identically for exports, fallbacks, residents and live queries', () => {
+    const bounds: Array<[number, number]> = [
+      [1.2, 4.8],
+      [5.5, 5.5],
+      [-3.2, 2.8],
+      [-5, -1],
+      [NaN, 5],
+      [0, NaN],
+      [NaN, NaN],
+      [5, 2],
+      [8, 20],
+      [-Infinity, Infinity],
+      [4.2, Infinity],
+      [Infinity, Infinity],
+      [0, -Infinity],
+      [0, 0x100000000],
+      [0x100000000, Infinity],
+    ];
+    const results: DisplayListRect[][][] = [];
+    for (const path of [
+      'handle',
+      'json',
+      'fallback-method',
+      'fallback-export',
+      'resident',
+      'resident-fallback',
+      'live',
+      'live-fallback',
+    ]) {
+      const displayList = list();
+      const store = storeEngine();
+      const resident = residentEngine(() => displayList.pages);
+      let queries: DisplayListQueries;
+      let successor: DisplayListQueries | undefined;
+      if (path.startsWith('resident')) {
+        if (path === 'resident-fallback') resident.engine.displayRangeRectsOnPagesJson = undefined;
+        queries = createDisplayListQueries({ pages: [displayList.pages[0]] }, resident.engine);
+      } else {
+        if (path === 'json') store.engine.hasDisplayListSession = () => false;
+        if (path === 'fallback-method') store.engine.rangeRectsOnPagesJson = undefined;
+        if (path === 'fallback-export') store.engine.hasRangeRectsOnPages = () => false;
+        if (path.startsWith('live')) {
+          const line = {};
+          queries = createDisplayListQueries(
+            { pages: [displayList.pages[0]] }, store.engine, null, line
+          );
+          queries.rangeRects(2, 104);
+          successor = createDisplayListQueries(displayList, store.engine, queries, line);
+          successor.rangeRects(2, 104);
+          if (path === 'live-fallback') successor.rangeRectsOnPages = undefined;
+        } else {
+          queries = createDisplayListQueries(displayList, store.engine);
+        }
+      }
+      const all = queries.rangeRects(2, 104);
+      expect(all).toHaveLength(16);
+      const actual = bounds.map(([first, last]) => {
+        const expected = all.filter((rect) => rect.pageIndex >= first && rect.pageIndex <= last);
+        const restricted = queries.rangeRectsOnPages!(2, 104, first, last);
+        expect(restricted).toEqual(expected);
+        return restricted;
+      });
+      results.push(actual);
+      for (const [first, last] of [...store.windows, ...resident.windows]) {
+        expect(Number.isInteger(first)).toBe(true);
+        expect(Number.isInteger(last)).toBe(true);
+        expect(first).toBeGreaterThanOrEqual(0);
+        expect(last).toBeLessThanOrEqual(path === 'resident' ? 0xffffffff : 7);
+        expect(first).toBeLessThanOrEqual(last);
+      }
+      successor?.dispose();
+      queries.dispose();
+    }
+    for (const actual of results) expect(actual).toEqual(results[0]);
   });
 
   test('a handed-off facade uses the live page count', () => {

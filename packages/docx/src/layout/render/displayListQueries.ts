@@ -999,20 +999,17 @@ export function createDisplayListQueries(
     firstPage: number,
     lastPage: number
   ): DisplayListRect[] => {
+    const first = Math.max(0, Math.ceil(firstPage));
+    let last = Math.min(0xffffffff, Math.floor(lastPage));
+    if (Number.isNaN(first) || Number.isNaN(last) || first > last || from === to) return [];
+    const filter = (rects: DisplayListRect[]): DisplayListRect[] =>
+      rects.filter((rect) => rect.pageIndex >= first && rect.pageIndex <= last);
     const live = handedOff();
     if (live !== undefined) {
       return live
-        ? (live.rangeRectsOnPages?.(from, to, firstPage, lastPage) ??
-            live.rangeRects(from, to).filter(
-              (rect) => rect.pageIndex >= firstPage && rect.pageIndex <= lastPage
-            ))
+        ? (live.rangeRectsOnPages?.(from, to, first, last) ?? filter(live.rangeRects(from, to)))
         : [];
     }
-    const first = Math.max(0, Math.ceil(firstPage));
-    const last = Math.min(list.pages.length - 1, Math.floor(lastPage));
-    if (!Number.isInteger(first) || !Number.isInteger(last) || first > last || from === to) return [];
-    const filter = (rects: DisplayListRect[]): DisplayListRect[] =>
-      rects.filter((rect) => rect.pageIndex >= first && rect.pageIndex <= last);
     if (resident) {
       if (!resident.displayRangeRectsOnPagesJson) return filter(rangeRects(from, to));
       return parseQuery(
@@ -1024,6 +1021,8 @@ export function createDisplayListQueries(
         'range_rects_on_pages'
       );
     }
+    last = Math.min(list.pages.length - 1, last);
+    if (first > last) return [];
     if (!cell.eng?.rangeRectsOnPagesJson || cell.eng.hasRangeRectsOnPages?.() === false) {
       return filter(rangeRects(from, to));
     }
