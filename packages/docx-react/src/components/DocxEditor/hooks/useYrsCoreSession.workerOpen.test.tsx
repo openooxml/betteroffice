@@ -7882,7 +7882,7 @@ test('a keystroke during completion slices starts the peer and replays once afte
   }
 });
 
-test.each(['ctrlKey', 'metaKey'] as const)('programmatic select-all during completion slices waits for keyboard select-all with %s', async (modifier) => {
+test.each(['ctrlKey', 'metaKey'] as const)('keyboard and menu select-all during completion slices wait for layout-complete with %s', async (modifier) => {
   const opened = await openingEditor(true, false, { holdFullLayout: true });
   const tasks = holdHydrationTasks();
   try {
@@ -7902,12 +7902,17 @@ test.each(['ctrlKey', 'metaKey'] as const)('programmatic select-all during compl
     const textarea = opened.view.getByTestId('yrs-input');
     act(() => textarea.focus());
     fireEvent.keyDown(textarea, { key: 'a', [modifier]: true });
-    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
     expect(opened.editor.current!.hasPendingInput()).toBe(true);
-    await finishHeldHydration(opened, tasks);
     const completion = await opened.received('completeLayout');
+    await act(async () => opened.reply(completion));
+    await opened.frames.waitFor(() => expect(opened.harness.renderer.layoutCompleteSession).toBe(full));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await finishHeldHydration(opened, tasks);
     await act(async () => {
-      opened.reply(completion);
       await awaitWorkerOpenReplica(full);
       await opened.editor.current!.flushPendingInput();
     });
@@ -7949,8 +7954,8 @@ async function editorWithoutLayoutCompleteSignal(holdInput = false) {
   const editor = createRef<PagedEditorRef>();
   const canvasHost = createRef<HTMLDivElement>();
   let harness!: ReturnType<typeof useHarness>;
-  function Editable({ held }: { held: boolean }) {
-    harness = useHarness({ ...initialProps, source, layoutCompleteSession: null, onLayoutWait });
+  function Editable({ held, layoutCompleteSession = null }: { held: boolean; layoutCompleteSession?: YrsSession | null }) {
+    harness = useHarness({ ...initialProps, source, layoutCompleteSession, onLayoutWait });
     return <>
       <div ref={canvasHost} className="canvas-pages"><canvas className="canvas-page" data-page-index="0" /></div>
       <PagedEditor ref={editor} document={harness.host?.document ?? null} yrsCore={harness.core}
@@ -7987,7 +7992,9 @@ async function editorWithoutLayoutCompleteSignal(holdInput = false) {
     return {
       ...worker, frames, view, session, editor, canvas, onLayoutWait, close,
       get harness() { return harness; },
-      releaseHeldInput() { view.rerender(<Editable held={false} />); },
+      releaseHeldInput(layoutCompleteSession: YrsSession | null = null) {
+        view.rerender(<Editable held={false} layoutCompleteSession={layoutCompleteSession} />);
+      },
     };
   } catch (error) {
     close();
@@ -8044,18 +8051,16 @@ test.each([false, true])('a queued keystroke starts the peer before the layout s
   }
 });
 
-test.each(['navigation', 'paste', 'cut', 'composition'] as const)('queued %s starts the peer immediately without a layout waiter', async (kind) => {
+test.each(['paste', 'cut', 'composition'] as const)('queued %s starts the peer immediately without a layout waiter', async (kind) => {
   const opened = await editorWithoutLayoutCompleteSignal();
   const insert = spyOn(opened.session, 'insertText');
   const remove = spyOn(opened.session, 'deleteRange');
-  const select = spyOn(opened.session, 'setSelection');
   const clipboard = openingClipboard();
   try {
     const textarea = opened.view.getByTestId('yrs-input');
     act(() => textarea.focus());
     if (kind === 'cut') selectOpeningText(opened);
-    if (kind === 'navigation') fireEvent.keyDown(textarea, { key: 'ArrowRight' });
-    else if (kind === 'paste') fireEvent.paste(textarea, { clipboardData: { getData: () => 'P' } });
+    if (kind === 'paste') fireEvent.paste(textarea, { clipboardData: { getData: () => 'P' } });
     else if (kind === 'cut') fireEvent.cut(textarea);
     else fireEvent.compositionStart(textarea);
     if (kind === 'composition') fireEvent.compositionEnd(textarea, { data: 'I' });
@@ -8077,13 +8082,9 @@ test.each(['navigation', 'paste', 'cut', 'composition'] as const)('queued %s sta
       expect(opened.harness.core.replicaReady).toBe(true);
       expect(insert).toHaveBeenCalledTimes(kind === 'paste' || kind === 'composition' ? 1 : 0);
       expect(remove).toHaveBeenCalledTimes(kind === 'cut' ? 1 : 0);
-      if (kind === 'navigation') {
-        expect(select.mock.calls.filter(([anchor, head]) => (head ?? anchor).offset === 1)).toHaveLength(1);
-        expect(opened.session.selection()?.head.offset).toBe(1);
-      }
       expect(opened.session.paragraphs('body')[0].text).toBe(
         kind === 'paste' ? 'PFirst paragraph' : kind === 'composition' ? 'IFirst paragraph' :
-          kind === 'cut' ? ' paragraph' : 'First paragraph'
+          ' paragraph'
       );
       if (kind === 'cut') {
         expect(clipboard.writeText).toHaveBeenCalledTimes(1);
@@ -8104,9 +8105,145 @@ test.each(['navigation', 'paste', 'cut', 'composition'] as const)('queued %s sta
   } finally {
     insert.mockRestore();
     remove.mockRestore();
-    select.mockRestore();
     opened.close();
     clipboard.restore();
+  }
+});
+
+test.each([false, true].flatMap((held) =>
+  ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].flatMap((key) =>
+    [false, true].map((shift) => [key, shift, held] as const)
+  )
+))('queued %s does not start the peer before layout-complete with Shift=%s and heldInput=%s', async (key, shift, held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const insert = spyOn(opened.session, 'insertText');
+  const remove = spyOn(opened.session, 'deleteRange');
+  const select = spyOn(opened.session, 'setSelection');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    fireEvent.keyDown(textarea, { key, shiftKey: shift });
+    expect(document.activeElement).toBe(textarea);
+    expect(insert).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(opened.harness.mainOpens).toEqual([]);
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.received('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const assertReplay = () => {
+      expect(opened.harness.core.replicaReady).toBe(true);
+      expect(insert).toHaveBeenCalledTimes(0);
+      expect(remove).toHaveBeenCalledTimes(0);
+      if (key === 'ArrowRight') {
+        expect(select.mock.calls.filter(([anchor, head]) => (head ?? anchor).offset === 1)).toHaveLength(1);
+        expect(opened.session.selection()?.head.offset).toBe(1);
+      }
+      expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    insert.mockRestore();
+    remove.mockRestore();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
+test.each([false, true])('ArrowRight and PageDown wait for a typed character to start the peer and queued input replays once in order with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  const replay: string[] = [];
+  const setSelection = opened.session.setSelection.bind(opened.session);
+  const insertText = opened.session.insertText.bind(opened.session);
+  const select = spyOn(opened.session, 'setSelection').mockImplementation((anchor, head) => {
+    if ((head ?? anchor).offset === 1) replay.push('ArrowRight');
+    return setSelection(anchor, head);
+  });
+  const insert = spyOn(opened.session, 'insertText').mockImplementation((...args) => {
+    replay.push(args[1]);
+    return insertText(...args);
+  });
+  const load = spyOn(opened.session, 'loadState');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    for (const key of ['ArrowRight', 'PageDown']) {
+      fireEvent.keyDown(textarea, { key });
+      expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+      expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    }
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    fireEvent.keyDown(textarea, { key: 'A' });
+    fireEvent.input(textarea, { target: { value: 'A' } });
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.harness.core.replicaReady).toBe(false);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(replay).toEqual([]);
+    expect(insert).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+    expect(opened.onLayoutWait).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(textarea);
+    await opened.received('encodeState');
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.mainOpens).toEqual([]);
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const assertReplay = () => {
+      expect(opened.harness.core.replicaReady).toBe(true);
+      expect(load).toHaveBeenCalledTimes(1);
+      expect(insert).toHaveBeenCalledTimes(1);
+      expect(select.mock.calls.filter(([anchor, head]) => (head ?? anchor).offset === 1)).toHaveLength(1);
+      expect(replay).toEqual(['ArrowRight', 'A']);
+      expect(opened.session.paragraphs('body')[0].text).toBe('FAirst paragraph');
+      expect(opened.session.selection()?.head.offset).toBe(2);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    select.mockRestore();
+    insert.mockRestore();
+    load.mockRestore();
+    opened.close();
   }
 });
 

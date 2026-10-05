@@ -202,14 +202,14 @@ type HeldInput = (
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
   | { kind: 'delete-selection' }
-  | { kind: 'select-all'; keyboard: boolean }
+  | { kind: 'select-all' }
   | { kind: 'copy'; apply: (session: YrsSession) => void | Promise<void>; onDropped: () => void }
   | { kind: 'undo-boundary' }
 ) & { inputTime?: number };
 
 function isOpeningHeldInput(entry: HeldInput): boolean {
-  return entry.kind !== 'selection' && entry.kind !== 'copy' &&
-    (entry.kind !== 'select-all' || entry.keyboard);
+  return entry.kind === 'text' || entry.kind === 'composition' || entry.kind === 'split' ||
+    entry.kind === 'delete' || entry.kind === 'delete-selection';
 }
 
 interface HeldReplayBatch {
@@ -488,7 +488,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         admitted && replicaReadyRef?.current === false
           ? awaitWorkerOpenReplica(admitted)
           : undefined;
-      if (replica && openingInput && (!readOnly || kind === 'selection')) requestOpeningPeer();
+      if (replica && openingInput && !readOnly) requestOpeningPeer();
       if (!replica) {
         const apply = () => {
           if (!isCurrentInput(admitted, queue)) return onDropped?.();
@@ -1207,7 +1207,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           }
         }
         setSelection(extend ? current.anchor : next, next);
-      }, 'selection', undefined, undefined, true);
+      });
     },
     [
       displayPositionToLoc,
@@ -1223,8 +1223,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ]
   );
 
-  const selectAll = useCallback((keyboard = false): void => {
-    if (holdOperation({ kind: 'select-all', keyboard })) return;
+  const selectAll = useCallback((): void => {
+    if (holdOperation({ kind: 'select-all' })) return;
     enqueueInputOperation(() => {
       verticalCaretGoalRef.current.reset();
       const current = ensureSelection();
@@ -1238,7 +1238,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         { story: activeStory, paraId: first.paraId, offset: 0 },
         { story: activeStory, paraId: last.paraId, offset: last.length }
       );
-    }, 'selection', undefined, undefined, keyboard);
+    });
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
   const deleteSelection = useCallback(
@@ -1334,7 +1334,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     }
     enqueueInputOperation(() => {
       moveTableCell(shift);
-    }, 'mutation');
+    }, 'mutation', undefined, undefined, false);
     return true;
   }, [enqueueInputOperation, holdInput, holdOperation, moveTableCell, readOnly, readSelection, replicaReadyRef]);
 
@@ -1348,7 +1348,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     else if (entry.kind === 'split') handlers.splitParagraph();
     else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
     else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
-    else if (entry.kind === 'select-all') handlers.selectAll(entry.keyboard);
+    else if (entry.kind === 'select-all') handlers.selectAll();
     else if (entry.kind === 'copy') handlers.enqueueInputOperation(
       () => handlers.session ? entry.apply(handlers.session) : undefined,
       'selection', entry.onDropped, undefined, false
@@ -1441,7 +1441,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         } else if (entry.kind === 'navigation' && (entry.direction === 'up' || entry.direction === 'down')) {
           if (batch.length) replayHeldBatch(batch);
           batch = [];
-          enqueueInputOperation(() => session.addUndoBoundary(), 'mutation');
+          enqueueInputOperation(() => session.addUndoBoundary(), 'mutation', undefined, undefined, false);
           replayHeldEntry(entry);
         } else batch.push(entry);
       }
@@ -1539,7 +1539,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const key = event.key.toLowerCase();
       if (mod && key === 'a') {
         event.preventDefault();
-        selectAll(true);
+        selectAll();
       } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
         if (copyAfterReplica()) event.preventDefault();
         else primeCopy();
