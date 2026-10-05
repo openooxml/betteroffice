@@ -665,7 +665,8 @@ impl AuthoritySnapshotEncoder {
                     split_fallback_v1_bounded(&update, budget.max_records(), budget.max_bytes())
                         .map_err(|failure| {
                             SnapshotError::new(format!(
-                                "invalid Yrs snapshot: {}", failure.reason(),
+                                "invalid Yrs snapshot: {}",
+                                failure.reason(),
                             ))
                         })?,
                     Some(reason.reason().to_owned()),
@@ -998,18 +999,23 @@ impl AuthorityHydrator {
         {
             if has_pending(&self.doc) {
                 self.failed = true;
-                return Err(SnapshotError::new("authority snapshot has pending Yrs state"));
+                return Err(SnapshotError::new(
+                    "authority snapshot has pending Yrs state",
+                ));
             }
             if let Err(failure) = self.causal.admit(&part.bytes) {
                 self.failed = true;
                 return Err(SnapshotError::new(format!(
-                    "invalid Yrs snapshot: {}", failure.reason(),
+                    "invalid Yrs snapshot: {}",
+                    failure.reason(),
                 )));
             }
             hydrate_snapshot_doc(&self.doc, &part.bytes).map_err(SnapshotError::new)?;
             if has_pending(&self.doc) {
                 self.failed = true;
-                return Err(SnapshotError::new("authority snapshot has pending Yrs state"));
+                return Err(SnapshotError::new(
+                    "authority snapshot has pending Yrs state",
+                ));
             }
             #[cfg(test)]
             crate::snapshot::step::record(part.records, part.bytes.len());
@@ -1242,19 +1248,40 @@ mod tests {
         hydrator.push_base(&payload).unwrap();
         crate::snapshot::step::reset();
         assert!(hydrator.advance_bounded(budget).unwrap().is_ready());
-        assert_eq!(hydrator.base.base.as_ref().unwrap().shared_strings.capacity(), 0);
+        assert_eq!(
+            hydrator
+                .base
+                .base
+                .as_ref()
+                .unwrap()
+                .shared_strings
+                .capacity(),
+            0
+        );
         let work = crate::snapshot::step::current();
         assert_eq!(work.records, 1);
         assert!(work.bytes <= budget.max_bytes());
         let failure: SnapshotError = hydrator.finish().err().unwrap();
-        assert_eq!(failure.to_string(), "authority snapshot chunks are incomplete");
+        assert_eq!(
+            failure.to_string(),
+            "authority snapshot chunks are incomplete"
+        );
 
         header.chunk_counts[ChunkKind::AuthorityBase as usize - 1] = 1;
         let mut hydrator = AuthorityHydrator::new(&header).unwrap();
         hydrator.push_base(&payload).unwrap();
         let failure: SnapshotError = hydrator.advance_bounded(budget).unwrap_err();
         assert_eq!(failure.to_string(), "authority base is incomplete");
-        assert_eq!(hydrator.base.base.as_ref().unwrap().shared_strings.capacity(), 0);
+        assert_eq!(
+            hydrator
+                .base
+                .base
+                .as_ref()
+                .unwrap()
+                .shared_strings
+                .capacity(),
+            0
+        );
     }
 
     #[test]
@@ -1267,7 +1294,10 @@ mod tests {
         manifest.u8(0);
         write_manifest(&base, &mut manifest);
         builder.push(&manifest.into_bytes()).unwrap();
-        let mut cursor = BaseCursor { section: 1, ..BaseCursor::default() };
+        let mut cursor = BaseCursor {
+            section: 1,
+            ..BaseCursor::default()
+        };
         let mut refused = false;
         while let Some(record) = cursor.next(&base) {
             if record[0] == 5 {
@@ -1323,7 +1353,10 @@ mod tests {
         assert!(steps > base_chunks);
         let restored = hydrator.finish().unwrap();
         assert_eq!(base_records(&a.base), base_records(&restored.base));
-        assert_eq!(restored.encode_state_as_update_v1(), a.encode_state_as_update_v1());
+        assert_eq!(
+            restored.encode_state_as_update_v1(),
+            a.encode_state_as_update_v1()
+        );
     }
 
     #[test]
@@ -1345,7 +1378,10 @@ mod tests {
             let mut hydrator = AuthorityHydrator::new(&header).unwrap();
             crate::snapshot::step::reset();
             let failure: SnapshotError = hydrator.advance_yrs(&payload, budget).unwrap_err();
-            assert_eq!(failure.to_string(), "invalid Yrs snapshot: missing_dependency");
+            assert_eq!(
+                failure.to_string(),
+                "invalid Yrs snapshot: missing_dependency"
+            );
             assert!(hydrator.doc.transact().state_vector().is_empty());
             assert!(!has_pending(&hydrator.doc));
             assert_eq!(crate::snapshot::step::current().records, 0);
@@ -1363,7 +1399,9 @@ mod tests {
                 nested.insert(&mut txn, index.to_string(), index);
             }
         }
-        let update = foreign.transact().encode_state_as_update_v1(&StateVector::default());
+        let update = foreign
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         let a = source();
         let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
         let encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
@@ -1371,7 +1409,10 @@ mod tests {
         header.chunk_counts[ChunkKind::Yrs as usize - 1] = 2;
         let mut hydrator = AuthorityHydrator::new(&header).unwrap();
         while !hydrator.advance_yrs(&update, budget).unwrap().is_ready() {}
-        let before = hydrator.doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let before = hydrator
+            .doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         let mut payload = Writer::new();
         payload.raw(&[0, 1]);
         payload.var_u64(99);
@@ -1382,10 +1423,16 @@ mod tests {
         let failure: SnapshotError = hydrator
             .advance_yrs(&payload.into_bytes(), budget)
             .unwrap_err();
-        assert_eq!(failure.to_string(), "invalid Yrs snapshot: retained_deletion");
+        assert_eq!(
+            failure.to_string(),
+            "invalid Yrs snapshot: retained_deletion"
+        );
         assert_eq!(crate::snapshot::step::current().records, 0);
         assert_eq!(
-            hydrator.doc.transact().encode_state_as_update_v1(&StateVector::default()),
+            hydrator
+                .doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
             before,
         );
         assert!(!has_pending(&hydrator.doc));
@@ -1408,7 +1455,10 @@ mod tests {
         let failure: SnapshotError = hydrator
             .advance_yrs(&payload.into_bytes(), budget)
             .unwrap_err();
-        assert_eq!(failure.to_string(), "Yrs snapshot deletion exceeds advance record budget");
+        assert_eq!(
+            failure.to_string(),
+            "Yrs snapshot deletion exceeds advance record budget"
+        );
         assert_eq!(crate::snapshot::step::current().records, 0);
         assert!(!has_pending(&hydrator.doc));
     }
@@ -1727,11 +1777,16 @@ mod tests {
         }
         let restored = hydrator.finish().unwrap();
         assert_eq!(restored.snapshot_identity(), a.snapshot_identity());
-        assert_eq!(restored.encode_state_vector_v1(), a.encode_state_vector_v1());
+        assert_eq!(
+            restored.encode_state_vector_v1(),
+            a.encode_state_vector_v1()
+        );
         assert_eq!(restored.materialize().unwrap(), a.materialize().unwrap());
         let txn = restored.doc.transact();
         assert_eq!(
-            txn.get_map("production-fallback").unwrap().get(&txn, "value"),
+            txn.get_map("production-fallback")
+                .unwrap()
+                .get(&txn, "value"),
             Some(Out::Any(value)),
         );
         assert!(!restored.has_pending_updates());

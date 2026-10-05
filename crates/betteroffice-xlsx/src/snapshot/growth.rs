@@ -26,16 +26,12 @@ struct Move<S, T> {
 
 impl<S, T> Migration<S> for Move<S, T> {
     fn advance(&mut self, state: &mut S, budget: SnapshotBudget) -> SnapshotResult<bool> {
-        let count = self
-            .records
-            .len()
-            .min(budget.max_records())
-            .min(budget.max_bytes() / size_of::<T>().max(1));
-        if count == 0 && !self.records.as_slice().is_empty() {
-            return Err(SnapshotError::new(
-                "snapshot storage exceeds advance byte budget",
-            ));
-        }
+        let count = self.records.len().min(
+            budget
+                .max_records()
+                .min(budget.max_bytes() / size_of::<T>().max(1))
+                .max(1),
+        );
         self.storage.extend(self.records.by_ref().take(count));
         #[cfg(test)]
         super::step::record(count, count * size_of::<T>());
@@ -65,7 +61,7 @@ impl<S: 'static> Growth<S> {
         if values.len() < values.capacity() {
             return Ok(true);
         }
-        let capacity = values.len().checked_mul(2).unwrap_or(usize::MAX).max(1);
+        let capacity = values.len().saturating_mul(2).max(1);
         let mut storage = Vec::new();
         storage
             .try_reserve_exact(capacity)
@@ -120,5 +116,27 @@ mod tests {
         }
         assert_eq!(steps, 4);
         assert_eq!(records, (0..8).map(|value| [value; 64]).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn storage_migration_moves_one_oversized_record_per_step() {
+        let mut records: Vec<[u8; 64]> = (0..4).map(|value| [value; 64]).collect();
+        records.shrink_to_fit();
+        let budget = SnapshotBudget::new(3, 16).unwrap();
+        let mut growth = Growth::default();
+        let mut steps = 0;
+        loop {
+            crate::snapshot::step::reset();
+            let ready = growth
+                .ensure(&mut records, |records| Ok(records), budget)
+                .unwrap();
+            if ready {
+                break;
+            }
+            assert_eq!(crate::snapshot::step::current().records, 1);
+            steps += 1;
+        }
+        assert_eq!(steps, 4);
+        assert_eq!(records, (0..4).map(|value| [value; 64]).collect::<Vec<_>>());
     }
 }

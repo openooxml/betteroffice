@@ -536,7 +536,11 @@ impl CausalState {
                         continue;
                     };
                     if dependency_clock
-                        >= self.clocks.get(&dependency_client).copied().unwrap_or_default()
+                        >= self
+                            .clocks
+                            .get(&dependency_client)
+                            .copied()
+                            .unwrap_or_default()
                     {
                         return Err(SplitError::MissingDependency);
                     }
@@ -1495,7 +1499,9 @@ mod tests {
         let second = Doc::with_client_id(99);
         apply_raw_part(
             &second,
-            &first.transact().encode_state_as_update_v1(&StateVector::default()),
+            &first
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
         );
         let nested = {
             let txn = second.transact();
@@ -1538,7 +1544,9 @@ mod tests {
         let array = doc.get_or_insert_array("deleted");
         array.insert_range(&mut doc.transact_mut(), 0, 0..100);
         array.remove_range(&mut doc.transact_mut(), 0, 100);
-        let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let update = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
         assert_eq!(
             split_update_v1_bounded(&update, 1, 384),
             Err(SplitError::UnsupportedMap),
@@ -1560,7 +1568,10 @@ mod tests {
             assert!(txn.store().pending_ds().is_none());
         }
         assert_eq!(deleted, 100);
-        assert_eq!(peer.transact().state_vector(), doc.transact().state_vector());
+        assert_eq!(
+            peer.transact().state_vector(),
+            doc.transact().state_vector()
+        );
         assert_eq!(canonical_snapshot(&peer), canonical_snapshot(&doc));
     }
 

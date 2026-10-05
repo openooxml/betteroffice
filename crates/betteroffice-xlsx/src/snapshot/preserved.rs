@@ -263,12 +263,12 @@ impl PreservedSnapshotBuilder {
         budget: SnapshotBudget,
     ) -> SnapshotResult<SnapshotProgress> {
         if self.failed {
-            return Err(SnapshotError::new("snapshot preservation builder has failed"));
+            return Err(SnapshotError::new(
+                "snapshot preservation builder has failed",
+            ));
         }
         let result = self.advance_inner(chunk, budget);
-        self.failed |= result.as_ref().err().is_some_and(|failure| {
-            failure.to_string() != "snapshot storage exceeds advance byte budget"
-        });
+        self.failed |= result.is_err();
         result
     }
 
@@ -278,28 +278,44 @@ impl PreservedSnapshotBuilder {
         budget: SnapshotBudget,
     ) -> SnapshotResult<SnapshotProgress> {
         if chunk.len() > budget.max_bytes() {
-            return Err(SnapshotError::new("snapshot preservation exceeds advance byte budget"));
+            return Err(SnapshotError::new(
+                "snapshot preservation exceeds advance byte budget",
+            ));
         }
         let (kind, ordinal, payload) = unframe(chunk)?;
         if kind != ChunkKind::Preserved || ordinal != self.ordinal || payload.is_empty() {
-            return Err(SnapshotError::new("snapshot preservation chunk is missing or reordered"));
+            return Err(SnapshotError::new(
+                "snapshot preservation chunk is missing or reordered",
+            ));
         }
         let mut r = Reader::new(&payload[self.offset..]);
         let tag = r.u8()?;
         if self.started {
-            if self.runs.front().map(|&(expected, _)| expected) != Some(tag)
-                || self.remaining == 0
+            if self.runs.front().map(|&(expected, _)| expected) != Some(tag) || self.remaining == 0
             {
-                return Err(SnapshotError::new("snapshot preservation records are reordered"));
+                return Err(SnapshotError::new(
+                    "snapshot preservation records are reordered",
+                ));
             }
             let ready = match tag {
-                ORIGIN => self.growth.ensure(&mut self.state, |s| Ok(&mut s.origins), budget)?,
-                STRINGS => self.growth.ensure(&mut self.state, |s| {
-                    Arc::get_mut(&mut s.shared_string_cells)
-                        .ok_or_else(|| SnapshotError::new("snapshot SST cells are already shared"))
-                }, budget)?,
-                AXES => self.growth.ensure(&mut self.state, |s| Ok(&mut s.axes), budget)?,
-                CREATED => self.growth.ensure(&mut self.state, |s| Ok(&mut s.created), budget)?,
+                ORIGIN => self
+                    .growth
+                    .ensure(&mut self.state, |s| Ok(&mut s.origins), budget)?,
+                STRINGS => self.growth.ensure(
+                    &mut self.state,
+                    |s| {
+                        Arc::get_mut(&mut s.shared_string_cells).ok_or_else(|| {
+                            SnapshotError::new("snapshot SST cells are already shared")
+                        })
+                    },
+                    budget,
+                )?,
+                AXES => self
+                    .growth
+                    .ensure(&mut self.state, |s| Ok(&mut s.axes), budget)?,
+                CREATED => self
+                    .growth
+                    .ensure(&mut self.state, |s| Ok(&mut s.created), budget)?,
                 _ => true,
             };
             if !ready {
@@ -308,7 +324,9 @@ impl PreservedSnapshotBuilder {
             self.read_record(tag, &mut r)?;
         } else {
             if tag != HEADER {
-                return Err(SnapshotError::new("snapshot preservation header is missing"));
+                return Err(SnapshotError::new(
+                    "snapshot preservation header is missing",
+                ));
             }
             self.read_header(&mut r)?;
         }
@@ -445,11 +463,14 @@ impl PreservedSnapshotBuilder {
 
     fn validate_counts(&self) -> SnapshotResult<()> {
         let minimum = self.runs.iter().try_fold(0usize, |total, &(_, count)| {
-            total.checked_add(count)
+            total
+                .checked_add(count)
                 .ok_or_else(|| SnapshotError::new("snapshot preservation count overflows usize"))
         })?;
         if minimum > self.remaining {
-            return Err(SnapshotError::new("snapshot preservation counts do not match"));
+            return Err(SnapshotError::new(
+                "snapshot preservation counts do not match",
+            ));
         }
         Ok(())
     }
@@ -461,7 +482,9 @@ impl PreservedSnapshotBuilder {
             || self.offset != 0
             || self.growth.is_pending()
         {
-            return Err(SnapshotError::new("snapshot preservation state is incomplete"));
+            return Err(SnapshotError::new(
+                "snapshot preservation state is incomplete",
+            ));
         }
         Ok(())
     }
@@ -521,7 +544,10 @@ mod tests {
         assert_eq!(work.records, 1);
         assert!(work.bytes <= budget.max_bytes());
         let failure: SnapshotError = builder.finish().err().unwrap();
-        assert_eq!(failure.to_string(), "snapshot preservation state is incomplete");
+        assert_eq!(
+            failure.to_string(),
+            "snapshot preservation state is incomplete"
+        );
     }
 
     #[test]
@@ -534,16 +560,21 @@ mod tests {
             w.var_usize(count);
         }
         let mut builder = PreservedSnapshotBuilder::new();
-        builder.advance_bounded(&frame(ChunkKind::Preserved, 0, &w.into_bytes()), budget).unwrap();
+        builder
+            .advance_bounded(&frame(ChunkKind::Preserved, 0, &w.into_bytes()), budget)
+            .unwrap();
         assert_eq!(builder.state.shared_string_cells.capacity(), 0);
         let mut w = Writer::new();
         w.u8(STRINGS);
         w.var_usize(50_000_000);
         super::super::step::reset();
-        let failure: SnapshotError = builder.advance_bounded(
-            &frame(ChunkKind::Preserved, 1, &w.into_bytes()), budget,
-        ).unwrap_err();
-        assert_eq!(failure.to_string(), "snapshot preservation counts do not match");
+        let failure: SnapshotError = builder
+            .advance_bounded(&frame(ChunkKind::Preserved, 1, &w.into_bytes()), budget)
+            .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            "snapshot preservation counts do not match"
+        );
         assert!(builder.state.shared_string_cells.capacity() <= 1);
         assert!(builder.state.shared_string_cells[0].is_empty());
         assert!(super::super::step::current().records <= budget.max_records());

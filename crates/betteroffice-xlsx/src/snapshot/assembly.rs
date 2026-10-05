@@ -1166,7 +1166,6 @@ impl WorkbookSnapshotBuilder {
                 failure.to_string().as_str(),
                 "snapshot graph record exceeds advance byte budget"
                     | "Yrs snapshot record exceeds advance byte budget"
-                    | "snapshot storage exceeds advance byte budget"
             )
         });
         result
@@ -1185,7 +1184,10 @@ impl WorkbookSnapshotBuilder {
                 }
                 return Ok(SnapshotProgress::pending());
             }
-            if matches!(kind, ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved) {
+            if matches!(
+                kind,
+                ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved
+            ) {
                 let progress = if kind == ChunkKind::Preserved {
                     self.preserved
                         .as_mut()

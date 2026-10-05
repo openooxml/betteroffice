@@ -452,9 +452,7 @@ impl ModelSnapshotBuilder {
             return Err(SnapshotError::new("snapshot model builder has failed"));
         }
         let result = self.advance_inner(chunk, budget);
-        self.failed |= result.as_ref().err().is_some_and(|failure| {
-            failure.to_string() != "snapshot storage exceeds advance byte budget"
-        });
+        self.failed |= result.is_err();
         result
     }
 
@@ -527,16 +525,18 @@ impl ModelSnapshotBuilder {
             NUM_FMT => g.ensure(m, |m| Ok(&mut m.styles.num_fmts), budget),
             INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
             TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
-            TABLE_COLUMN => g.ensure(
-                m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget,
-            ),
+            TABLE_COLUMN => g.ensure(m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget),
             SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
             HYPERLINK => g.ensure(
-                m, |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks), budget,
+                m,
+                |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks),
+                budget,
             ),
             MERGE => g.ensure(m, |m| Ok(&mut m.sheets.last_mut().unwrap().merges), budget),
             COL_STYLE => g.ensure(
-                m, |m| Ok(&mut m.sheets.last_mut().unwrap().col_styles), budget,
+                m,
+                |m| Ok(&mut m.sheets.last_mut().unwrap().col_styles),
+                budget,
             ),
             CHART => g.ensure(m, |m| Ok(&mut m.sheets.last_mut().unwrap().charts), budget),
             CHART_REF => g.ensure(
@@ -732,7 +732,9 @@ impl ModelSnapshotBuilder {
         }
         add_count(&mut self.declared_cells, counts[7])?;
         if self.declared_cells > self.remaining_cells {
-            return Err(SnapshotError::new("snapshot model cell counts do not match"));
+            return Err(SnapshotError::new(
+                "snapshot model cell counts do not match",
+            ));
         }
         if counts[7] != 0 {
             self.sheet_cells
@@ -1449,8 +1451,12 @@ mod tests {
         counts[1] = 50_000_000;
         let mut builder = ModelSnapshotBuilder::new();
         super::super::step::reset();
-        assert!(builder.advance_bounded(&declared_header(50_000_013, counts), budget)
-            .unwrap().is_ready());
+        assert!(
+            builder
+                .advance_bounded(&declared_header(50_000_013, counts), budget)
+                .unwrap()
+                .is_ready()
+        );
         assert_eq!(builder.model.shared_strings.capacity(), 0);
         assert_eq!(builder.model.sheets.capacity(), 0);
         let work = super::super::step::current();
@@ -1460,7 +1466,8 @@ mod tests {
         assert_eq!(failure.to_string(), "snapshot model is incomplete");
 
         let mut builder = ModelSnapshotBuilder::new();
-        let failure: SnapshotError = builder.advance_bounded(&declared_header(13, counts), budget)
+        let failure: SnapshotError = builder
+            .advance_bounded(&declared_header(13, counts), budget)
             .unwrap_err();
         assert_eq!(failure.to_string(), "snapshot model counts do not match");
         assert_eq!(builder.model.shared_strings.capacity(), 0);
@@ -1495,7 +1502,10 @@ mod tests {
                 record.u8(TABLE);
                 record.str("");
                 record.var_u32(0);
-                write_range(&mut record, &CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)));
+                write_range(
+                    &mut record,
+                    &CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+                );
                 record.var_u32(0);
                 record.var_u32(0);
                 record.var_usize(50_000_000);
@@ -1505,8 +1515,13 @@ mod tests {
                 record.u8(0);
                 write_format(&mut record, &SheetFormat::default());
                 for index in 0..8 {
-                    record.var_usize(if tag == SHEET && index == 0 { 50_000_000 }
-                        else if tag == CHART && index == 5 { 1 } else { 0 });
+                    record.var_usize(if tag == SHEET && index == 0 {
+                        50_000_000
+                    } else if tag == CHART && index == 5 {
+                        1
+                    } else {
+                        0
+                    });
                 }
             }
             let mut ordinal = 13;
@@ -1523,16 +1538,22 @@ mod tests {
                 record.str("");
                 record.str("");
                 record.var_usize(0);
-                write_anchor(&mut record, &ChartAnchor::Absolute {
-                    pos: AnchorPos { x: 0, y: 0 },
-                    extent: AnchorExtent { cx: 0, cy: 0 },
-                });
+                write_anchor(
+                    &mut record,
+                    &ChartAnchor::Absolute {
+                        pos: AnchorPos { x: 0, y: 0 },
+                        extent: AnchorExtent { cx: 0, cy: 0 },
+                    },
+                );
                 record.var_usize(50_000_000);
             }
             super::super::step::reset();
-            let failure: SnapshotError = builder.advance_bounded(
-                &frame(ChunkKind::Model, ordinal, &record.into_bytes()), budget,
-            ).unwrap_err();
+            let failure: SnapshotError = builder
+                .advance_bounded(
+                    &frame(ChunkKind::Model, ordinal, &record.into_bytes()),
+                    budget,
+                )
+                .unwrap_err();
             assert_eq!(failure.to_string(), "snapshot model counts do not match");
             assert!(super::super::step::current().records <= budget.max_records());
             match tag {
@@ -1577,7 +1598,10 @@ mod tests {
             let at = CellRef::new(row, row % 20);
             sheet.set_array_formula(at, CellRange::new(at, CellRef::new(row + 1, row % 20 + 1)));
         }
-        let mut cursor = MetadataCursor { sheet_phase: ARRAY, ..MetadataCursor::default() };
+        let mut cursor = MetadataCursor {
+            sheet_phase: ARRAY,
+            ..MetadataCursor::default()
+        };
         for (at, range) in sheet.array_formulas() {
             let mut actual = Writer::new();
             assert!(cursor.write_sheet(&mut actual, &sheet).unwrap());
