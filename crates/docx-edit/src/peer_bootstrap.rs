@@ -1450,12 +1450,50 @@ mod tests {
         }
     }
 
+    fn assert_retained_extent_geometry(
+        document: &EditingDoc,
+        stories: Option<Vec<crate::structured::StorySelection>>,
+        before: u32,
+        after: u32,
+    ) {
+        for view in [
+            crate::structured::RevisionView::Accepted,
+            crate::structured::RevisionView::Original,
+            crate::structured::RevisionView::Markup,
+        ] {
+            let mut options = crate::structured::ExportOptions::new(view);
+            options.stories = stories.clone();
+            let actual = document.export_structured(&options).unwrap().content;
+            let crate::structured::BlockKind::Table { table } =
+                &actual.stories[0].blocks[0].content
+            else {
+                panic!("expected retained extent table");
+            };
+            let bound = u32::from(u16::MAX);
+            assert_eq!(table.grid_columns, bound + before + after);
+            assert_eq!(table.rows.len(), 2);
+            for row in &table.rows {
+                assert_eq!(row.cells.len(), 1);
+                assert_eq!(row.cells[0].grid_span, bound);
+                assert_eq!(row.cells[0].row_span, 1);
+                assert!(!row.cells[0].blocks.is_empty());
+            }
+            assert_eq!(table.rows[0].cells[0].column, 0);
+            assert_eq!(table.rows[1].cells[0].column, before);
+            assert_eq!(table.rows[1].grid_before, before);
+            assert_eq!(table.rows[1].grid_after, after);
+            assert!(!actual.diagnostics.iter().any(|diagnostic| diagnostic.code
+                == crate::structured::DiagnosticCode::UnsupportedContent));
+        }
+    }
+
     #[test]
-    fn peer_bootstrap_rejects_retained_synthetic_extent_overflow_atomically() {
+    fn peer_bootstrap_retained_synthetic_extent_metadata_exports_clamped() {
         let source = retained_comment_table_package(&retained_extent_table(u32::MAX, 0, 0));
         let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
         let metadata = worker.encode_peer_metadata().unwrap();
-        let (json, _) = sections(&metadata).unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let (json, blobs) = sections(&metadata).unwrap();
         let wire: Value = serde_json::from_slice(json).unwrap();
         assert_eq!(
             wire["source"]["read"]["comments"][0]["body"][0]["rows"][0]["cells"][0]["formatting"]["gridSpan"],
@@ -1466,77 +1504,93 @@ mod tests {
                 .is_object()
         );
         for (before, after) in [(1, 0), (0, 1)] {
-            let mut bad = wire.clone();
-            let row = &mut bad["source"]["read"]["comments"][0]["body"][0]["rows"][1];
-            row["formatting"]["gridBefore"] = json!(before);
-            row["formatting"]["gridAfter"] = json!(after);
-            assert_invalid_metadata_is_atomic(
-                &worker,
-                &source,
-                &metadata,
-                &bad,
-                "source table column overflow",
-            );
-        }
-        for case in ["span-sum", "leading-sum", "trailing-sum"] {
-            let mut bad = wire.clone();
-            let row = &mut bad["source"]["read"]["comments"][0]["body"][0]["rows"][0];
-            match case {
-                "span-sum" => row["cells"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({ "content": [] })),
-                "leading-sum" => row["formatting"]["gridBefore"] = json!(1),
-                "trailing-sum" => row["formatting"]["gridAfter"] = json!(1),
-                _ => unreachable!(),
-            }
-            assert_invalid_metadata_is_atomic(
-                &worker,
-                &source,
-                &metadata,
-                &bad,
-                "source table column overflow",
+            let mut accepted = wire.clone();
+            let table = &mut accepted["source"]["read"]["comments"][0]["body"][0];
+            table["rows"][1]["formatting"]["gridBefore"] = json!(before);
+            table["rows"][1]["formatting"]["gridAfter"] = json!(after);
+            assert!(seed::validate_peer_blocks(std::slice::from_ref(table)).is_ok());
+            let metadata = frame(&serde_json::to_vec(&accepted).unwrap(), blobs).unwrap();
+            let peer = EditingDoc::new(19);
+            let prepared = peer
+                .prepare_peer_bootstrap(&state, &metadata, Some(source.clone()))
+                .unwrap();
+            peer.install_peer_bootstrap(prepared, 17).unwrap();
+            peer.apply_update_v1(&state).unwrap();
+            assert_retained_extent_geometry(
+                &peer,
+                Some(vec![crate::structured::StorySelection::Comments]),
+                before,
+                after,
             );
         }
     }
 
     #[test]
-    fn peer_bootstrap_source_retained_synthetic_extent_overflow_returns_error() {
+    fn peer_bootstrap_source_retained_synthetic_extent_exports_clamped() {
         for (before, after) in [(1, 0), (0, 1)] {
-            let source =
-                retained_comment_table_package(&retained_extent_table(u32::MAX, before, after));
-            let digest = seed::package_digest(&source);
-            assert_eq!(
-                worker(&source, &digest, 7).err().unwrap(),
-                "source table column overflow"
-            );
-            let (envelope, parts, _) =
-                seed::parse_docx_package_with_media(source.clone(), digest.clone()).unwrap();
-            assert_eq!(
-                seed::replica_source(envelope, parts, source, digest)
-                    .err()
-                    .unwrap(),
-                "source table column overflow"
-            );
-        }
-        let source = retained_comment_table_package(&retained_extent_table(u32::MAX, 0, 0));
-        let worker = worker(&source, &seed::package_digest(&source), 7).unwrap();
-        let read = worker.source_metadata().unwrap();
-        let mut table = read.read().comments[0].body[0].clone();
-        table["rows"][1]["formatting"]["gridBefore"] = json!(1);
-        for styled in [true, false] {
-            let scratch = EditingDoc::new(29);
-            let before = scratch.encode_state_as_update_v1();
-            let source = if styled { Some(read.as_ref()) } else { None };
-            let error = seed::seed_blocks(
-                &scratch,
-                source,
-                &[("comment:1".to_owned(), std::slice::from_ref(&table))],
-            )
-            .err()
-            .unwrap();
-            assert_eq!(error, "source table column overflow");
-            assert_eq!(scratch.encode_state_as_update_v1(), before);
+            for styled in [true, false] {
+                let table = retained_extent_table(u32::MAX, before, after);
+                let table = if styled {
+                    table
+                } else {
+                    table.replace(
+                        r#"<w:tblPr><w:tblStyle w:val="RetainedArithmetic"/></w:tblPr>"#,
+                        "",
+                    )
+                };
+                let source = retained_comment_table_package(&table);
+                let digest = seed::package_digest(&source);
+                let worker = worker(&source, &digest, 7).unwrap();
+                let read = worker.source_metadata().unwrap();
+                let retained = &read.read().comments[0].body[0];
+                assert!(seed::validate_peer_blocks(std::slice::from_ref(retained)).is_ok());
+                let metadata = worker.encode_peer_metadata().unwrap();
+                let state = worker.encode_state_as_update_v1();
+                let (envelope, parts, media) =
+                    seed::parse_docx_package_with_media(source.clone(), digest.clone()).unwrap();
+                let (mut expected_source, index, _) =
+                    seed::replica_source(envelope, parts, source.clone(), digest).unwrap();
+                let baseline = EditingDoc::new(19);
+                expected_source.watch_comments(&baseline);
+                baseline.install_source(expected_source, 17);
+                baseline.retain_source(SourcePackage::Ready(Arc::new(index)));
+                baseline.install_media(media);
+                baseline.apply_update_v1(&state).unwrap();
+                let peer = EditingDoc::new(19);
+                let prepared = peer
+                    .prepare_peer_bootstrap(&state, &metadata, Some(source))
+                    .unwrap();
+                peer.install_peer_bootstrap(prepared, 17).unwrap();
+                peer.apply_update_v1(&state).unwrap();
+                for document in [&worker, &baseline, &peer] {
+                    assert_retained_extent_geometry(
+                        document,
+                        Some(vec![crate::structured::StorySelection::Comments]),
+                        before,
+                        after,
+                    );
+                }
+                for view in [
+                    crate::structured::RevisionView::Accepted,
+                    crate::structured::RevisionView::Original,
+                    crate::structured::RevisionView::Markup,
+                ] {
+                    let mut options = crate::structured::ExportOptions::new(view);
+                    options.stories = Some(vec![crate::structured::StorySelection::Comments]);
+                    assert_eq!(
+                        peer.export_structured(&options).unwrap().content,
+                        baseline.export_structured(&options).unwrap().content,
+                    );
+                }
+                let scratch = EditingDoc::new(29);
+                seed::seed_blocks(
+                    &scratch,
+                    if styled { Some(read.as_ref()) } else { None },
+                    &[("body".to_owned(), std::slice::from_ref(retained))],
+                )
+                .unwrap();
+                assert_retained_extent_geometry(&scratch, None, before, after);
+            }
         }
     }
 
@@ -1568,13 +1622,85 @@ mod tests {
             assert_eq!(table.rows.len(), 2);
             assert_eq!(table.rows[0].cells.len(), 1);
             assert_eq!(table.rows[1].cells.len(), 1);
+            assert_retained_extent_geometry(
+                &worker,
+                Some(vec![crate::structured::StorySelection::Comments]),
+                before,
+                after,
+            );
+            assert_retained_extent_geometry(
+                &peer,
+                Some(vec![crate::structured::StorySelection::Comments]),
+                before,
+                after,
+            );
             assert!(!actual.diagnostics.iter().any(|diagnostic| diagnostic.code
                 == crate::structured::DiagnosticCode::UnsupportedContent));
+        }
+        let mut parts = fixture::principal_parts();
+        let body = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/document.xml")
+            .unwrap();
+        body.1 = format!(
+            r#"<w:document {}><w:body><w:tbl><w:tr><w:tc><w:tcPr><w:gridSpan w:val="4294967296"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#,
+            fixture::NS,
+        ).into_bytes();
+        let source: PackageBytes = ooxml_opc::rezip_parts(&parts).unwrap().into();
+        let digest = seed::package_digest(&source);
+        let worker = worker(&source, &digest, 7).unwrap();
+        let metadata = worker.encode_peer_metadata().unwrap();
+        let state = worker.encode_state_as_update_v1();
+        let (envelope, parts, media) =
+            seed::parse_docx_package_with_media(source.clone(), digest.clone()).unwrap();
+        let (mut expected_source, index, _) =
+            seed::replica_source(envelope, parts, source.clone(), digest).unwrap();
+        let baseline = EditingDoc::new(19);
+        expected_source.watch_comments(&baseline);
+        baseline.install_source(expected_source, 17);
+        baseline.retain_source(SourcePackage::Ready(Arc::new(index)));
+        baseline.install_media(media);
+        baseline.apply_update_v1(&state).unwrap();
+        let peer = EditingDoc::new(19);
+        let prepared = peer
+            .prepare_peer_bootstrap(&state, &metadata, Some(source))
+            .unwrap();
+        peer.install_peer_bootstrap(prepared, 17).unwrap();
+        peer.apply_update_v1(&state).unwrap();
+        for document in [&worker, &baseline, &peer] {
+            let read = document.source_metadata().unwrap();
+            let layout = &read.read().provenance.tables["body:t0"];
+            assert_eq!(layout.grid_columns, u32::from(u16::MAX));
+            assert!(layout.validate_peer_metadata().is_ok());
+            for view in [
+                crate::structured::RevisionView::Accepted,
+                crate::structured::RevisionView::Original,
+                crate::structured::RevisionView::Markup,
+            ] {
+                let options = crate::structured::ExportOptions::new(view);
+                let actual = document.export_structured(&options).unwrap().content;
+                assert_eq!(
+                    actual,
+                    baseline.export_structured(&options).unwrap().content
+                );
+                let crate::structured::BlockKind::Table { table } =
+                    &actual.stories[0].blocks[0].content
+                else {
+                    panic!("expected clamped single-cell table");
+                };
+                assert_eq!(table.grid_columns, u32::from(u16::MAX));
+                assert_eq!(table.rows.len(), 1);
+                assert_eq!(table.rows[0].cells.len(), 1);
+                assert_eq!(table.rows[0].cells[0].grid_span, u32::from(u16::MAX));
+                assert!(!table.rows[0].cells[0].blocks.is_empty());
+                assert!(!actual.diagnostics.iter().any(|diagnostic| diagnostic.code
+                    == crate::structured::DiagnosticCode::UnsupportedContent));
+            }
         }
     }
 
     #[test]
-    fn peer_bootstrap_retained_exhausted_continuation_exports_own_cell() {
+    fn peer_bootstrap_retained_started_continuation_exports_without_orphan_warning() {
         let source = retained_comment_table_package(
             r#"<w:tbl><w:tblGrid><w:gridCol w:w="900"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p/></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge w:val="continue"/></w:tcPr><w:p/></w:tc></w:tr><w:tr/></w:tbl>"#,
         );
@@ -1597,7 +1723,13 @@ mod tests {
             else {
                 panic!("expected retained continuation table");
             };
+            assert_eq!(table.grid_columns, 1);
             assert_eq!(table.rows.len(), 3);
+            for row in &table.rows {
+                assert_eq!(row.cells.len(), 1);
+                assert_eq!(row.cells[0].grid_span, 1);
+                assert!(!row.cells[0].blocks.is_empty());
+            }
             assert_eq!(table.rows[1].cells.len(), 1);
             let cell = &table.rows[1].cells[0];
             assert_eq!(cell.row_span, 1);
@@ -1613,7 +1745,7 @@ mod tests {
                             && diagnostic.message.contains("continues a vertical merge")
                     })
                     .count(),
-                1
+                0
             );
         }
     }

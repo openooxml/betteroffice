@@ -2789,18 +2789,6 @@ impl<'a> Exporter<'a> {
                     Some(story) => self.nested(views, ctx, story, depth, list, anchor),
                     None => Vec::new(),
                 };
-                if any_map(cell.get("tcPr"))
-                    .and_then(|properties| any_map(properties.get("_originalFormatting")))
-                    .and_then(|original| any_str(original.get("vMerge")))
-                    == Some("continue")
-                {
-                    self.note(
-                        DiagnosticCode::UnsupportedContent,
-                        Severity::Warning,
-                        Some(cell_anchor.clone()),
-                        format!("The cell at row {row_index}, column {column} continues a vertical merge no cell above starts, so it is exported as a cell of its own."),
-                    );
-                }
                 if rows_spanned > 1 {
                     for slot in column..column.saturating_add(span) {
                         covered.insert(slot, (row_index, column, span, rows_spanned - 1));
@@ -3994,20 +3982,18 @@ fn continuations(
             break;
         }
         let end = column.saturating_add(span);
-        let matched = (*column..end).all(|slot| {
-            covered
-                .get(&slot)
-                .is_some_and(|entry| *entry == (origin_row, origin_column, span, remaining))
-        });
-        if matched {
-            for slot in *column..end {
-                if let Some(entry) = covered.get_mut(&slot) {
-                    if entry.0 == origin_row && entry.1 == origin_column && entry.3 > 0 {
-                        entry.3 -= 1;
-                    }
+        let mut matched = true;
+        for slot in *column..end {
+            if let Some(entry) = covered.get_mut(&slot) {
+                if let Some(remaining) = entry.3.checked_sub(1) {
+                    entry.3 = remaining;
+                } else {
+                    matched = false;
+                    break;
                 }
             }
-        } else {
+        }
+        if !matched {
             repaired.push(*column);
             covered.retain(|_, entry| entry.0 != origin_row || entry.1 != origin_column);
         }
