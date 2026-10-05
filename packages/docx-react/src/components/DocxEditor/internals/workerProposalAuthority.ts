@@ -141,7 +141,8 @@ export interface WorkerProposalAuthority {
   subscribe(listener: () => void): () => void;
 }
 
-type PeerSnapshot = { state: Uint8Array; version: string };
+type PeerSnapshot = Pick<Awaited<ReturnType<WorkerOpenedDocument['handOver']>>,
+  'state' | 'version' | 'metadata' | 'metadataReason'>;
 type RegisteredAuthority = WorkerProposalAuthority & {
   readsInWorker(): boolean;
   peerSnapshot(): Promise<PeerSnapshot>;
@@ -580,7 +581,12 @@ export function registerWorkerProposalAuthority(
     peerSnapshot: () => enqueue(async () => {
       const snapshot = await worker.handOver();
       assertCurrent();
-      return { state: snapshot.state, version: snapshot.version };
+      return {
+        state: snapshot.state,
+        version: snapshot.version,
+        ...(snapshot.metadata === undefined ? {} : { metadata: snapshot.metadata }),
+        ...(snapshot.metadataReason === undefined ? {} : { metadataReason: snapshot.metadataReason }),
+      };
     }),
   };
   authorities.set(session, authority);

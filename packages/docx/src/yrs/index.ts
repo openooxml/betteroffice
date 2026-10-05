@@ -150,7 +150,7 @@ export {
   type DocxSessionSave,
 } from './saveYrsDocx';
 export { sessionSourcePackage } from './sessionInternals';
-export { PeerMetadataError } from './peerMetadata';
+export { PeerMetadataError, peerMetadataTags } from './peerMetadata';
 export {
   DirtyProjectionStories,
   dirtyProjectionStory,

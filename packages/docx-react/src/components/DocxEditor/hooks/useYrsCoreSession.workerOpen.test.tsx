@@ -17,6 +17,7 @@ import {
   preloadResidentEngineWorker,
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
+  PeerMetadataError,
   proposalRevisionPreview,
   createYrsPositionProjection,
   yrsLocToProjectedDisplayPosition,
@@ -35,7 +36,7 @@ import type {
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
-import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
+import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker, type WorkerOpenedDocument } from './useDisplayList';
 import type { ResolveDisplayListQueries } from './displayListQueryEpochGate';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
@@ -176,6 +177,7 @@ function withTimeout<T>(promise: PromiseLike<T>, timeout: number, label: string)
 }
 
 function installWorker(options: {
+  peerMetadata?: boolean;
   failOpen?: boolean;
   failState?: boolean;
   failProposal?: boolean;
@@ -288,7 +290,12 @@ function installWorker(options: {
               ? { id: request.id, ok: false, error: 'revision count failed' }
               : { id: request.id, ok: true, revisionCount: options.revisionCount ?? 0 },
           } as MessageEvent));
-        } else send(request, transfer);
+        } else send(
+          request.type === 'encodeState' && !options.peerMetadata
+            ? { ...request, peerMetadata: undefined }
+            : request,
+          transfer,
+        );
       };
       workers.push(worker);
       return worker;
@@ -619,6 +626,224 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+async function peerHydrationSource(): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await longFixture(1));
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>',
+    '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>'));
+  zip.file('word/_rels/document.xml.rels',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>');
+  zip.file('word/document.xml', `<w:document ${ns}><w:body><w:p w14:paraId="0000B001">` +
+    '<w:commentRangeStart w:id="1"/><w:r><w:t>Peer paragraph</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+    '<w:r><w:commentReference w:id="1"/></w:r></w:p><w:sectPr/></w:body></w:document>');
+  zip.file('word/comments.xml', `<w:comments ${ns}><w:comment w:id="1" w:author="Peer author" w:date="2026-10-01T00:00:00Z">` +
+    '<w:p w14:paraId="0000C001"><w:r><w:t>Peer comment</w:t></w:r></w:p></w:comment></w:comments>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+async function peerHydrationHarness(metadata: boolean) {
+  const worker = installWorker({ peerMetadata: metadata, holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const source = await peerHydrationSource();
+  let snapshot: Awaited<ReturnType<NonNullable<WorkerOpenedDocument['encodeVersionedState']>>> | undefined;
+  let corruptOffset: number | undefined;
+  let fallback: ReturnType<typeof mock> | undefined;
+  const replicas: Array<YrsSession | null> = [];
+  const props: HarnessProps = {
+    ...initialProps, source,
+    collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    onWorkerOpen: (opened) => {
+      if (!opened?.encodeVersionedState) throw new Error('Expected a versioned worker snapshot');
+      const encode = opened.encodeVersionedState;
+      opened.encodeVersionedState = async (prefetch) => {
+        snapshot = await encode(prefetch);
+        if (corruptOffset !== undefined) {
+          if (!snapshot.metadata) throw new Error('No metadata to corrupt');
+          snapshot = { ...snapshot, metadata: snapshot.metadata.slice() };
+          snapshot.metadata![corruptOffset] ^= 1;
+        }
+        return snapshot;
+      };
+      const openedFallback = spyOn(opened, 'fallback');
+      fallback ??= openedFallback;
+      registerRestore(() => openedFallback.mockRestore());
+    },
+  };
+  const view = renderHook(useHarness, { initialProps: props });
+  await waitFor(() => expect(view.result.current.host).not.toBeNull());
+  const session = view.result.current.core.session!;
+  const bootstrap = spyOn(session, 'bootstrapPeer');
+  const load = spyOn(session, 'loadState');
+  const open = spyOn(session, 'openDocx');
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  registerRestore(() => { bootstrap.mockRestore(); load.mockRestore(); open.mockRestore(); warn.mockRestore(); });
+  return {
+    ...view, worker, frames, tasks, props, source, session, bootstrap, load, open, warn, replicas,
+    get snapshot() {
+      if (!snapshot) throw new Error('No captured peer snapshot');
+      return snapshot;
+    },
+    get fallback() {
+      if (!fallback) throw new Error('No opened worker');
+      return fallback;
+    },
+    corruptMetadata(offset: number) { corruptOffset = offset; },
+    async start() {
+      const pending = requestWorkerOpenReplica(session);
+      if (!pending) throw new Error('No pending peer hydration');
+      void pending.catch(() => {});
+      await waitFor(() => expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(true));
+      await act(async () => {
+        await withTimeout(Promise.resolve(worker.workers[0]!.release()), 1000, 'held peer snapshot release');
+      });
+      await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+      return { pending };
+    },
+    async finish(pending: Promise<void>) {
+      await act(async () => tasks.run());
+      await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+      await act(async () => {
+        replicaHelpers.notifyWorkerOpenLayoutProgress(session, 'complete');
+        await tasks.run();
+        await withTimeout(pending, 1000, 'peer hydration readiness');
+      });
+    },
+    close() {
+      view.unmount();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+    },
+  };
+}
+
+test('metadata hydration bootstraps the peer and matches compatibility paragraphs, ids and comment exports', async () => {
+  const peer = await peerHydrationHarness(true);
+  try {
+    const { pending } = await peer.start();
+    expect(peer.snapshot.metadata).toBeDefined();
+    expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+    expect(peer.bootstrap.mock.calls[0]![0]).toBe(peer.snapshot.state);
+    expect(peer.bootstrap.mock.calls[0]![1]).toBe(peer.snapshot.metadata);
+    expect(peer.bootstrap.mock.calls[0]![2]).toEqual(peer.source);
+    expect(peer.bootstrap.mock.calls[0]![3]).toBe(peer.result.current.host);
+    expect(peer.open).not.toHaveBeenCalled();
+    expect(peer.load).not.toHaveBeenCalled();
+    expect(peer.result.current.core.replicaReady).toBe(false);
+    await peer.finish(pending);
+    expect(peer.result.current.core.replicaReady).toBe(true);
+    expect(peer.replicas).toEqual([peer.session]);
+    expect(peer.load).not.toHaveBeenCalled();
+    expect(peer.warn).not.toHaveBeenCalled();
+    expect(peer.fallback).not.toHaveBeenCalled();
+    const baseline = await createYrsSession({ clientId: peer.session.clientId });
+    sessions.push(baseline);
+    baseline.openDocx(peer.source, false);
+    baseline.loadState(peer.snapshot.state);
+    expect(peer.session.storyIds()).toEqual(baseline.storyIds());
+    for (const story of baseline.storyIds()) {
+      expect(peer.session.paragraphs(story)).toEqual(baseline.paragraphs(story));
+      expect(peer.session.storyParagraphIds(story)).toEqual(baseline.storyParagraphIds(story));
+    }
+    expect(peer.session.paragraphIdentities()).toEqual(baseline.paragraphIdentities());
+    expect(peer.session.listComments()).toEqual(baseline.listComments());
+    const options = { revisionView: 'markup' as const, stories: ['comments' as const] };
+    const actual = peer.session.exportStructured(options);
+    const expected = baseline.exportStructured(options);
+    if (!actual.ok || !expected.ok) throw new Error('Comment export failed');
+    expect(actual.content.stories).toHaveLength(1);
+    expect(actual.content).toEqual(expected.content);
+    expect(peer.result.current.errors).toEqual([]);
+  } finally {
+    peer.close();
+  }
+});
+
+test('metadata absence uses the captured state and warns exactly once with the reason and tags', async () => {
+  const peer = await peerHydrationHarness(false);
+  try {
+    const { pending } = await peer.start();
+    expect(peer.bootstrap).not.toHaveBeenCalled();
+    expect(peer.open).toHaveBeenCalledTimes(1);
+    expect(peer.open).toHaveBeenCalledWith(peer.source, false, undefined);
+    expect(peer.load).not.toHaveBeenCalled();
+    await peer.finish(pending);
+    expect(peer.load).toHaveBeenCalledTimes(1);
+    expect(peer.load.mock.calls[0]![0]).toBe(peer.snapshot.state);
+    expect(peer.warn).toHaveBeenCalledTimes(1);
+    expect(peer.warn.mock.calls[0]![0]).toContain('missing-capability: Worker omitted peer metadata');
+    expect(peer.warn.mock.calls[0]![0]).toContain('expected tag v1/');
+    expect(peer.warn.mock.calls[0]![0]).toContain('received tag absent');
+    expect(peer.fallback).not.toHaveBeenCalled();
+    expect(peer.result.current.core.replicaReady).toBe(true);
+  } finally {
+    peer.close();
+  }
+});
+
+test.each(['bootstrap-rejection', 'unsupported-version', 'shape-mismatch'] as const)(
+  'metadata %s falls back on the same session and state without worker fallback', async (reason) => {
+    const peer = await peerHydrationHarness(true);
+    try {
+      if (reason === 'bootstrap-rejection') {
+        peer.bootstrap.mockImplementation(() => { throw new PeerMetadataError('source-mismatch', 'Rejected source'); });
+      } else {
+        peer.corruptMetadata(reason === 'unsupported-version' ? 8 : 12);
+      }
+      const { pending } = await peer.start();
+      expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+      expect(peer.open).toHaveBeenCalledWith(peer.source, false, undefined);
+      expect(peer.load).not.toHaveBeenCalled();
+      await peer.finish(pending);
+      expect(peer.load).toHaveBeenCalledTimes(1);
+      expect(peer.load.mock.calls[0]![0]).toBe(peer.snapshot.state);
+      expect(peer.result.current.core.session).toBe(peer.session);
+      expect(peer.open.mock.calls.map((call) => call[1])).toEqual([false]);
+      expect(peer.fallback).not.toHaveBeenCalled();
+      expect(peer.warn).toHaveBeenCalledTimes(1);
+      expect(peer.warn.mock.calls[0]![0]).toContain(reason === 'bootstrap-rejection' ? 'source-mismatch' : reason);
+      expect(peer.warn.mock.calls[0]![0]).toContain('expected tag v1/');
+      expect(peer.warn.mock.calls[0]![0]).toContain(`received tag v${reason === 'unsupported-version' ? 0 : 1}/`);
+      expect(peer.result.current.errors).toEqual([]);
+      expect(peer.result.current.core.replicaReady).toBe(true);
+    } finally {
+      peer.close();
+    }
+  },
+);
+
+test.each(['replace', 'unmount'] as const)('a document %s during metadata bootstrap discards hydration', async (action) => {
+  const peer = await peerHydrationHarness(true);
+  try {
+    const { pending } = await peer.start();
+    expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+    expect(peer.result.current.core.replicaReady).toBe(false);
+    expect(peer.replicas).toEqual([]);
+    const errors = peer.result.current.errors;
+    if (action === 'replace') {
+      act(() => peer.rerender({ ...peer.props, source: peer.source.slice(), generation: 2 }));
+      await waitFor(() => expect(peer.result.current.core.sessionGeneration).toBe(2));
+    } else peer.unmount();
+    await act(async () => peer.tasks.run());
+    await expect(withTimeout(pending, 1000, 'cancelled peer hydration')).rejects.toThrow('The document changed');
+    expect(replicaHelpers.workerOpenReplicaPending(peer.session)).toBe(false);
+    expect(peer.load).not.toHaveBeenCalled();
+    expect(peer.open).not.toHaveBeenCalled();
+    expect(peer.warn).not.toHaveBeenCalled();
+    expect(peer.fallback).not.toHaveBeenCalled();
+    expect(peer.replicas).toEqual([]);
+    expect(errors).toEqual([]);
+    if (action === 'replace') expect(peer.result.current.core.replicaReady).toBe(false);
+  } finally {
+    peer.close();
+  }
+});
 
 function parsedDocument(originalBuffer?: ArrayBuffer): Document {
   return {

@@ -3,6 +3,16 @@ const VERSION = 1;
 const HEADER_LENGTH = 60;
 const SHAPE = '99297429e552981d11c59676fbec625b869187d6222616525f083618550f250a';
 
+/** @internal */
+export function peerMetadataTags(metadata?: Uint8Array): { expected: string; received: string } {
+  const expected = `v${VERSION}/${SHAPE}`;
+  if (!metadata) return { expected, received: 'absent' };
+  if (metadata.byteLength < 44) return { expected, received: `truncated (${metadata.byteLength} bytes)` };
+  const version = new DataView(metadata.buffer, metadata.byteOffset, metadata.byteLength).getUint32(8, true);
+  const shape = Array.from(metadata.subarray(12, 44), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return { expected, received: `v${version}/${shape}` };
+}
+
 export class PeerMetadataError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);

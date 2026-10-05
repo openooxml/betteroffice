@@ -183,7 +183,7 @@ export type ResidentEngineWorkerRequest =
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
   | { id: number; type: 'layoutJson'; layoutRevision: number }
-  | { id: number; type: 'encodeState' }
+  | { id: number; type: 'encodeState'; peerMetadata?: true }
   | {
       id: number;
       type: 'save';
@@ -349,6 +349,8 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      peerMetadata?: ArrayBuffer;
+      peerMetadataReason?: string;
       /** @internal */
       saved?: ArrayBuffer;
       revisionCount?: number;

@@ -42,6 +42,7 @@ import {
 import { registerWorkerOpenSave } from '../internals/workerOpenSave';
 import { registerWorkerOpenExport } from '../internals/workerOpenExport';
 import { registerQueuedOpeningInput } from '../internals/queuedOpeningInput';
+import { bootstrapWorkerOpenPeer } from '../internals/bootstrapWorkerOpenPeer';
 
 export { dirtyProjectionStory, mergeDocxHostMetadata } from '@betteroffice/docx/yrs';
 
@@ -651,6 +652,7 @@ export function useYrsCoreSession(
             inheritedFrameRef.current = renderedFrameRef.current;
             const worker = openedWorker;
             const source = bytes;
+            const workerHost = full.host!;
             unregisterExport = registerWorkerOpenExport(next, {
               export: (options, context) => {
                 if (stale()) return Promise.reject(new Error('The document changed while exporting'));
@@ -774,9 +776,12 @@ export function useYrsCoreSession(
                 next,
                 async () => {
                   const update = await encodeReplicaState();
+                  let bootstrapped = false;
                   return [
-                    () => { next.openDocx(source, false); },
-                    () => next.loadState(update.state),
+                    () => {
+                      bootstrapped = bootstrapWorkerOpenPeer(next, update, source, workerHost);
+                    },
+                    () => { if (!bootstrapped) next.loadState(update.state); },
                     () => {
                       if (update.version !== undefined) {
                         adoptWorkerOpenHandoverVersion(next, update.version);
