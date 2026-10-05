@@ -274,25 +274,31 @@ describe('worker input coordinator', () => {
     expect(coordinator.error).toBeNull();
   });
 
-  test('discards old intents on replacement and ignores late readiness', async () => {
+  test('drains accepted intents before replacement and keeps new input in its generation', async () => {
     const { coordinator, draft, state, ready, log, previews } = harness();
     const oldPeer = state.peer;
     const commit = coordinator.submitAsync(draft('old'));
     const command = coordinator.runAfterPendingInput(() => log.push('old command'));
+    const draining = coordinator.drain();
+    expect(log).toEqual([]);
+    ready();
+    await draining;
+    await commit;
+    await command;
+    expect(log).toEqual(['write old', 'old command']);
     state.generation += 1;
     coordinator.reset();
-    expect(await errorOf(commit)).toBe('document-replaced');
-    expect(await errorOf(command)).toBe('document-replaced');
     expect(coordinator.unapplied).toEqual([]);
     expect(coordinator.draft).toBeNull();
     expect(coordinator.pending).toBe(false);
+    state.ready = false;
     state.peer = deferred<void>();
     const next = coordinator.submitAsync(draft('new'));
     oldPeer.resolve();
     ready();
     await next;
-    expect(log).toEqual(['write new']);
-    expect(previews.map((entry) => entry.value)).toEqual(['new']);
+    expect(log).toEqual(['write old', 'old command', 'write new']);
+    expect(previews.map((entry) => entry.value)).toEqual(['old', 'new']);
   });
 
   test('prevents synchronous host mutations from overtaking queued work', async () => {
@@ -523,20 +529,24 @@ describe('worker input coordinator', () => {
     expect(log).toEqual(['retained clipboard']);
   });
 
-  test('cancels a write when replacement occurs during its preview', async () => {
+  test('drains an accepted write across its preview before replacement', async () => {
     const { coordinator, draft, ready, state, log } = harness();
     const paint = deferred<void>();
     state.paint = paint.promise;
     const commit = coordinator.submitAsync(draft('old'));
     ready();
     await state.previewEntered.promise;
+    const draining = coordinator.drain();
+    expect(log).toEqual([]);
+    paint.resolve();
+    await draining;
+    await commit;
+    expect(log).toEqual(['write old']);
     state.generation += 1;
     coordinator.reset();
-    expect(await errorOf(commit)).toBe('document-replaced');
-    paint.resolve();
     state.paint = null;
     await coordinator.submitAsync(draft('new'));
-    expect(log).toEqual(['write new']);
+    expect(log).toEqual(['write old', 'write new']);
   });
 
   test('requests hydration only through explicit flush, request and recovery calls', async () => {
@@ -552,13 +562,16 @@ describe('worker input coordinator', () => {
     expect(hydration).toEqual(['flush', 'on-demand', 'recovery']);
   });
 
-  test('discards queued work if the generation changes without an explicit reset', async () => {
+  test('drains accepted work before changing generations without an explicit reset', async () => {
     const { coordinator, draft, state, ready, log } = harness();
     const commit = coordinator.submitAsync(draft('old'));
-    state.generation += 1;
+    const draining = coordinator.drain();
     ready();
-    expect(await errorOf(commit)).toBe('document-replaced');
-    expect(log).toEqual([]);
+    await draining;
+    await commit;
+    state.generation += 1;
+    await coordinator.submitAsync(draft('new'));
+    expect(log).toEqual(['write old', 'write new']);
     expect(coordinator.unapplied).toEqual([]);
   });
 
@@ -646,18 +659,22 @@ describe('worker input coordinator', () => {
     expect(coordinator.unapplied).toEqual([]);
   });
 
-  test('rejects a flush promptly when replacement interrupts hydration', async () => {
-    const { coordinator, draft, state, log } = harness();
+  test('drains accepted flush input through hydration before replacement', async () => {
+    const { coordinator, draft, state, ready, log } = harness();
     const hydration = deferred<void>();
     state.onHydration = () => hydration.promise;
     coordinator.setDraft(draft('old'));
     const flush = coordinator.flush();
+    const draining = coordinator.drain();
+    expect(log).toEqual([]);
+    ready();
+    hydration.resolve();
+    await flush;
+    await draining;
     state.generation += 1;
     coordinator.reset();
-    expect(await errorOf(flush)).toBe('document-replaced');
     expect(coordinator.unapplied).toEqual([]);
-    expect(log).toEqual([]);
-    hydration.resolve();
+    expect(log).toEqual(['write old']);
   });
 
   test('captures clipboard access before sealing and waits for final composition text', async () => {

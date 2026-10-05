@@ -322,16 +322,23 @@ describe('workbook worker editor', () => {
     }
   });
 
-  it('shows DOM text across two frames before sync mutation, peer publication and the worker frame', async () => {
+  it('shows the preview across two frames before mutation and retains it until worker adoption', async () => {
     const host = harness();
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
     await opened();
     host.log.length = 0; painted.length = 0;
+    const worker = deferred<xlsx.WorkbookFrame>();
+    host.sessionMethods.frame.mockImplementation(async () => {
+      host.log.push('frame:worker');
+      return worker.promise;
+    });
+    const write = host.editMethods.editCell.getMockImplementation()!;
     host.editMethods.editCell.mockImplementation((sheet, row, col, input) => {
       expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed');
-      expect(painted).toHaveLength(0);
-      host.log.push('sync'); host.cells.set(`${sheet}:${row}:${col}`, input);
-      return { applied: true, sheetInfo: host.peer.sheetInfo() };
+      expect(painted.some((list) => list.commands.some((command) =>
+        command.op === 'text' && command.text === 'preview:typed'))).toBe(true);
+      host.log.push('sync');
+      return write(sheet, row, col, input);
     });
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
     fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'typed' } });
@@ -341,12 +348,21 @@ describe('workbook worker editor', () => {
     await tick();
     expect(host.editMethods.editCell).not.toHaveBeenCalled();
     await tick();
-    expect(host.log.indexOf('sync')).toBeLessThan(host.log.indexOf('display:peer'));
-    expect(painted[0].commands.some((command) => command.op === 'text' && command.text === 'peer:typed')).toBe(true);
-    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'typed']]);
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed');
     expect(host.log).not.toContain('frame:worker');
     await tick();
-    expect(host.log.indexOf('display:peer')).toBeLessThan(host.log.indexOf('frame:worker'));
+    expect(host.log.indexOf('sync')).toBeLessThan(host.log.indexOf('frame:worker'));
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed');
+    const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+    await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
+      displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:typed', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
+    await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    expect(painted.every((list) => list.commands.every((command) =>
+      command.op !== 'text' || !command.text.startsWith('peer:')))).toBe(true);
     expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'worker:typed')).toBe(true);
   });
 
@@ -358,6 +374,8 @@ describe('workbook worker editor', () => {
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
       onReady={(value) => { api = value; }} />);
     await opened();
+    const worker = deferred<xlsx.WorkbookFrame>();
+    host.sessionMethods.frame.mockReturnValue(worker.promise);
     expect(host.hydrate).toHaveBeenCalledTimes(1);
     expect(api.hydrated).toBe(false);
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
@@ -372,16 +390,23 @@ describe('workbook worker editor', () => {
     expect(host.log).not.toContain('display:peer');
     await act(async () => hydration.resolve(host.peer));
     expect(api.hydrated).toBe(true);
-    await tick();
-    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
-    expect(host.editMethods.editCell).not.toHaveBeenCalled();
-    await tick();
+    await advance();
     expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'typed before hydration']]);
-    expect(host.log.indexOf('edit:0:0:0:typed before hydration')).toBeLessThan(host.log.indexOf('display:peer'));
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
     expect(host.cells.get('0:0:0')).toBe('typed before hydration');
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
+    await advance();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
+    const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+    await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
+      displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:typed before hydration', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
+    await advance();
     expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    expect(painted.every((list) => list.commands.every((command) =>
+      command.op !== 'text' || !command.text.startsWith('peer:')))).toBe(true);
     expect(painted[painted.length - 1].commands.some((command) =>
-      command.op === 'text' && command.text === 'peer:typed before hydration')).toBe(true);
+      command.op === 'text' && command.text === 'worker:typed before hydration')).toBe(true);
   });
 
   it('keeps typing, caret and accepted commits while eager hydration waits', async () => {
@@ -748,7 +773,7 @@ describe('workbook worker editor', () => {
     expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
   });
 
-  it('rejects the pending cut payload and clipboard write when the document is replaced', async () => {
+  it('drains an accepted cut payload and mutation before the replaced document is disposed', async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
     host.hydrate.mockReturnValue(hydration.promise);
@@ -759,10 +784,19 @@ describe('workbook worker editor', () => {
     fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
     expect(clipboard.write).toHaveBeenCalledTimes(1);
     expect(clipboard.copied).toEqual([]);
+    host.open.mockReturnValueOnce(new Promise<WorkbookSession>(() => {}));
     view.rerender(<XlsxEditor file={new Uint8Array([4])} experimentalWorkerOpen showToolbar={false} onError={errors} />);
-    await expect(clipboard.payloads[0]).rejects.toMatchObject({ code: 'document-replaced' });
-    await expect(clipboard.writes[0]).rejects.toMatchObject({ code: 'document-replaced' });
-    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.session.dispose).not.toHaveBeenCalled();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(await (await clipboard.payloads[0]).text()).toBe('initial');
+    await clipboard.writes[0];
+    expect(clipboard.copied).toEqual(['initial']);
+    expect(host.editMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 0, input: '' }]]]);
+    await waitFor(() => expect(host.session.dispose).toHaveBeenCalledTimes(1));
+    expect(host.log.indexOf('batch')).toBeLessThan(host.log.indexOf('dispose:facade'));
+    expect(host.editMethods.editCells).toHaveBeenCalledTimes(1);
+    expect(host.cells.get('0:0:0')).toBe('');
     expect(errors).not.toHaveBeenCalled();
   });
 
@@ -904,7 +938,7 @@ describe('workbook worker editor', () => {
     expect(host.editMethods.editCells).not.toHaveBeenCalled();
   });
 
-  it('rejects stale worker frames without erasing pending text or peer pixels', async () => {
+  it('rejects stale worker frames without erasing the preview before matching worker adoption', async () => {
     const host = harness();
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
     await opened();
@@ -920,11 +954,18 @@ describe('workbook worker editor', () => {
     await tick();
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('new');
     await tick();
-    expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'peer:new')).toBe(true);
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'new']]);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('new');
+    expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'preview:new')).toBe(true);
     const count = painted.length;
     await act(async () => pending.resolve(stale));
     expect(painted).toHaveLength(count);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('new');
     await advance();
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    expect(painted.every((list) => list.commands.every((command) =>
+      command.op !== 'text' || !command.text.startsWith('peer:')))).toBe(true);
     expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'worker:new')).toBe(true);
   });
 
@@ -1017,10 +1058,13 @@ describe('workbook worker editor', () => {
     let api!: XlsxWorkerEditorApi;
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
     await opened();
+    const worker = deferred<xlsx.WorkbookFrame>();
+    host.sessionMethods.frame.mockReturnValue(worker.promise);
     fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: '=24' } });
     host.editMethods.save.mockImplementation(async () => {
       expect(host.cells.get('0:0:0')).toBe('=24');
-      expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'peer:=24')).toBe(true);
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=24');
       return new Uint8Array([8, 9]).buffer;
     });
     let saving!: Promise<Uint8Array | null>;
@@ -1029,6 +1073,14 @@ describe('workbook worker editor', () => {
     expect(await saving).toEqual(new Uint8Array([8, 9]));
     expect(host.editMethods.save).toHaveBeenCalledTimes(1);
     expect(host.peerMethods.save).not.toHaveBeenCalled();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=24');
+    const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+    await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
+      displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:=24', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
+    await advance();
+    expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'worker:=24')).toBe(true);
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
     expect(api.commands.getState('exportPng')).toMatchObject({ enabled: false, disabledReason: { code: 'png-unavailable' } });
   });
 
@@ -1036,7 +1088,9 @@ describe('workbook worker editor', () => {
     const host = harness();
     const original = Object.getOwnPropertyDescriptor(window, 'print');
     const print = mock(() => {
-      expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text.endsWith(':print'))).toBe(true);
+      expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'worker:print')).toBe(true);
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
     });
     Object.defineProperty(window, 'print', { configurable: true, value: print });
     restorers.push(() => {
@@ -1094,7 +1148,9 @@ describe('workbook worker editor', () => {
     expect(host.log.filter((entry) => entry.startsWith('dispose:'))).toEqual([
       'dispose:ready', 'dispose:facade', 'dispose:peer', 'dispose:session',
     ]);
-    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'q']]);
+    expect(host.log.indexOf('edit:0:0:0:q')).toBeLessThan(host.log.indexOf('dispose:facade'));
+    expect(host.editMethods.flush).toHaveBeenCalledTimes(1);
   });
 
   it('reports throwing readiness cleanup while replacing the document and disposing its resources', async () => {

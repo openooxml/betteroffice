@@ -212,14 +212,17 @@ describe('editable session workbook', () => {
     expect(log).toEqual(['off', 'cleanup', 'facade', 'peer', 'session']);
   });
 
-  test('forwards failure to linked input once and discards it only on disposal', async () => {
-    const { value } = session();
+  test('forwards failure to linked input once and recovers accepted edits before disposal', async () => {
+    const log: string[] = [];
+    const { value } = session(log);
+    resources(log);
     const errors = mock((_error: Error) => {});
     const run = owner(value, { onError: errors });
+    const write = mock(() => { log.push('write'); return true; });
     const input = createWorkerInputCoordinator({
       generation: () => run.generation, capture: () => ({ sheet: 0, target: 'A1' }),
       isReady: () => run.ready, whenReady: () => run.whenHydrated(),
-      seal: () => ({}), sync: () => {}, preview: async () => {}, write: () => true,
+      seal: () => ({}), sync: () => {}, preview: async () => {}, write,
       requestHydration: (reason) => run.requestHydration(reason), flushEdits: async () => {},
       onError: (error) => run.fail(error),
     });
@@ -232,7 +235,16 @@ describe('editable session workbook', () => {
     expect(input.error).toBe(failure);
     expect(input.unapplied).toHaveLength(1);
     expect(errors).toHaveBeenCalledTimes(1);
+    run.recovering = true;
+    await run.requestHydration('recovery');
+    await input.recover();
+    expect(write.mock.calls).toEqual([[
+      { generation: 1, sheet: 0, row: 0, col: 0, source: 'cell', value: 'retained' }, expect.any(Function),
+    ]]);
+    expect(input.unapplied).toEqual([]);
     run.dispose();
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(log.indexOf('write')).toBeLessThan(log.indexOf('facade'));
     expect(input.unapplied).toEqual([]);
     expect(input.draft).toBeNull();
   });

@@ -4,7 +4,6 @@ import {
   WorkerPaintSource,
   type WorkerPaintRequest,
   type WorkerPaintResult,
-  type WorkerPeerPaint,
 } from './WorkerPaintSource';
 
 function deferred<T>() {
@@ -34,13 +33,6 @@ function frame(request: WorkerPaintRequest, sequence = 0): WorkbookFrame {
     sheet: request.sheet, viewport: { ...request.viewport }, sequence, epoch: 1,
     displayList: displayList(`worker ${sequence}`, request.viewport), version: `v${sequence}`,
     mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 0, col: 1 } }],
-  };
-}
-
-function peerPaint(request: WorkerPaintRequest, version = 'peer'): WorkerPeerPaint {
-  return {
-    displayList: displayList(version, request.viewport), version,
-    mergedRanges: [{ start: { row: 0, col: 0 }, end: { row: 1, col: 0 } }],
   };
 }
 
@@ -100,15 +92,18 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void) {
 }
 
 describe('WorkerPaintSource', () => {
-  test('rejects a stale sequence after a peer commit and accepts the worker once it catches up', async () => {
+  test('retains the adopted worker frame until a matching edit sequence arrives', async () => {
     const { source, state, requests, paints, errors, callbacks, tick, respond, surface } = harness();
     source.schedule();
     tick();
+    await respond(0, frame(requests[0].request));
+    const committed = source.painted;
+    source.schedule();
+    tick();
     state.sentSequence = 1;
-    const committed = source.commit(state.request, peerPaint(state.request));
     const committedSurface = surface();
 
-    await respond(0, frame(requests[0].request, 0));
+    await respond(1, frame(requests[1].request, 0));
     expect(source.painted).toBe(committed);
     expect(surface()).toBe(committedSurface);
     expect(paints).toHaveLength(1);
@@ -116,8 +111,8 @@ describe('WorkerPaintSource', () => {
     expect(errors).toEqual([]);
 
     tick();
-    await respond(1, frame(requests[1].request, 1));
-    expect(paints.map((painted) => painted.source)).toEqual(['peer', 'worker']);
+    await respond(2, frame(requests[2].request, 1));
+    expect(paints.map((painted) => painted.source)).toEqual(['worker', 'worker']);
     expect(source.painted?.sequence).toBe(1);
     expect(callbacks.size).toBe(0);
   });
@@ -151,32 +146,40 @@ describe('WorkerPaintSource', () => {
     });
   }
 
-  test('publishes a commit synchronously and invalidates an older in-flight frame even at the same sequence', async () => {
+  test('waits for worker adoption and rejects an older in-flight frame even at the same sequence', async () => {
     const { source, state, requests, paints, callbacks, tick, respond, surface } = harness();
+    source.schedule();
+    tick();
+    await respond(0, frame(requests[0].request));
+    const committed = source.painted;
+    const committedSurface = surface();
     source.schedule();
     tick();
     source.schedule();
     state.sentSequence = 2;
-    const paint = peerPaint(state.request);
-    const committed = source.commit(state.request, paint);
-    if (!committed) throw new Error('Missing peer paint');
-    const committedSurface = surface();
 
     expect(paints).toEqual([committed]);
-    expect(committed?.source).toBe('peer');
-    expect(committed?.displayList).toBe(paint.displayList);
-    expect(committed?.geometry).toBe(paint.displayList.grid);
-    expect(committed?.mergedRanges).toBe(paint.mergedRanges);
-    expect(committed?.version).toBe(paint.version);
-    expect(committed?.sequence).toBe(2);
+    expect(committed?.source).toBe('worker');
+    expect(committed?.sequence).toBe(0);
     expect(source.painted).toBe(committed);
-    expect(callbacks.size).toBe(0);
+    expect(callbacks.size).toBe(1);
 
-    await respond(0, frame(requests[0].request, 2));
+    await respond(1, frame(requests[1].request, 2));
     expect(source.painted).toBe(committed);
     expect(surface()).toBe(committedSurface);
     expect(paints).toHaveLength(1);
     expect(callbacks.size).toBe(1);
+    tick();
+    const worker = frame(requests[2].request, 2);
+    await respond(2, worker);
+    expect(paints.map((painted) => painted.source)).toEqual(['worker', 'worker']);
+    expect(source.painted?.displayList).toBe(worker.displayList);
+    expect(source.painted?.geometry).toBe(worker.displayList.grid);
+    expect(source.painted?.mergedRanges).toBe(worker.mergedRanges);
+    expect(source.painted?.version).toBe(worker.version);
+    expect(source.painted?.sequence).toBe(2);
+    expect(surface()?.pixels).toBe(worker.displayList);
+    expect(callbacks.size).toBe(0);
   });
 
   test('coalesces many viewport reasons into one in-flight request and one follow-up', async () => {
@@ -223,13 +226,16 @@ describe('WorkerPaintSource', () => {
   for (const [name, change] of mismatches) {
     test(`rejects a frame when ${name} changes before the next scheduled request`, async () => {
       const { source, state, requests, paints, errors, callbacks, tick, respond, surface } = harness();
-      const committed = source.commit(state.request, peerPaint(state.request));
+      source.schedule();
+      tick();
+      await respond(0, frame(requests[0].request));
+      const committed = source.painted;
       const committedSurface = surface();
       source.schedule();
       tick();
       state.request = { ...state.request, ...change };
 
-      await respond(0, frame(requests[0].request));
+      await respond(1, frame(requests[1].request));
       expect(source.painted).toBe(committed);
       expect(surface()).toBe(committedSurface);
       expect(paints).toHaveLength(1);
@@ -239,39 +245,44 @@ describe('WorkerPaintSource', () => {
         expect(callbacks.size).toBe(0);
         source.schedule();
         tick();
-        expect(requests).toHaveLength(1);
+        expect(requests).toHaveLength(2);
       } else {
         expect(callbacks.size).toBe(1);
         tick();
-        expect(requests[1].request).toEqual(state.request);
-        await respond(1, frame(requests[1].request));
+        expect(requests[2].request).toEqual(state.request);
+        await respond(2, frame(requests[2].request));
         expect(source.painted?.request).toEqual(state.request);
         expect(paints).toHaveLength(2);
       }
+      expect(paints.every((painted) => painted.source === 'worker')).toBe(true);
     });
   }
 
   for (const mismatch of ['sheet', 'viewport'] as const) {
     test(`rejects a worker reply with an unexpected ${mismatch} and retries`, async () => {
-      const { source, state, requests, paints, errors, callbacks, tick, respond, surface } = harness();
-      const committed = source.commit(state.request, peerPaint(state.request));
+      const { source, requests, paints, errors, callbacks, tick, respond, surface } = harness();
+      source.schedule();
+      tick();
+      await respond(0, frame(requests[0].request));
+      const committed = source.painted;
       const committedSurface = surface();
       source.schedule();
       tick();
-      const rejected = frame(requests[0].request);
+      const rejected = frame(requests[1].request);
       if (mismatch === 'sheet') rejected.sheet = 1;
       else rejected.viewport.x = 100;
 
-      await respond(0, rejected);
+      await respond(1, rejected);
       expect(source.painted).toBe(committed);
       expect(surface()).toBe(committedSurface);
       expect(paints).toHaveLength(1);
       expect(errors).toEqual([]);
       expect(callbacks.size).toBe(1);
       tick();
-      await respond(1, frame(requests[1].request));
+      await respond(2, frame(requests[2].request));
       expect(paints).toHaveLength(2);
       expect(source.painted?.source).toBe('worker');
+      expect(paints.every((painted) => painted.source === 'worker')).toBe(true);
     });
   }
 
@@ -293,17 +304,13 @@ describe('WorkerPaintSource', () => {
     expect(source.painted?.request.viewport.x).toBe(100);
   });
 
-  test('records source attribution and publishes matching geometry, merges and version for both sources', async () => {
+  test('publishes only worker frames with matching geometry, merges and version', async () => {
     const { source, state, requests, paints, tick, respond } = harness();
     state.sentSequence = 1;
-    const peer = peerPaint(state.request);
-    const committed = source.commit(state.request, peer);
-    expect(committed).toEqual({
-      ...peer, source: 'peer', request: state.request, sequence: 1, geometry: peer.displayList.grid,
-    });
-
     source.schedule();
     tick();
+    expect(source.painted).toBeNull();
+    expect(paints).toEqual([]);
     const worker = frame(requests[0].request, 1);
     await respond(0, worker);
     if (!worker.mergedRanges) throw new Error('Missing worker merged ranges');
@@ -314,7 +321,7 @@ describe('WorkerPaintSource', () => {
     expect(source.painted?.displayList).toBe(worker.displayList);
     expect(source.painted?.geometry).toBe(worker.displayList.grid);
     expect(source.painted?.mergedRanges).toBe(worker.mergedRanges);
-    expect(paints.map((painted) => painted.source)).toEqual(['peer', 'worker']);
+    expect(paints.map((painted) => painted.source)).toEqual(['worker']);
   });
 
   test('normalizes missing worker merges without inventing grid geometry', async () => {
@@ -329,38 +336,46 @@ describe('WorkerPaintSource', () => {
     expect(source.painted?.geometry).toBeUndefined();
   });
 
-  test('keeps a synchronous peer commit made inside the worker publication callback', async () => {
-    let commit = () => {};
+  test('retains worker pixels when a new edit is scheduled inside worker publication', async () => {
+    let schedule = () => {};
     const { source, state, requests, paints, tick, respond, surface } = harness((painted) => {
-      if (painted.source === 'worker') commit();
+      if (painted.sequence === 0) schedule();
     });
-    commit = () => {
+    schedule = () => {
       state.sentSequence = 1;
-      source.commit(state.request, peerPaint(state.request));
+      source.schedule();
     };
     source.schedule();
     tick();
     await respond(0, frame(requests[0].request));
-    expect(paints.map((painted) => painted.source)).toEqual(['worker', 'peer']);
+    expect(paints.map((painted) => painted.source)).toEqual(['worker']);
+    expect(source.painted).toBe(paints[0]);
+    expect(surface()?.pixels).toBe(source.painted?.displayList);
+    tick();
+    await respond(1, frame(requests[1].request, 1));
+    expect(paints.map((painted) => painted.source)).toEqual(['worker', 'worker']);
     expect(source.painted).toBe(paints[1]);
     expect(surface()?.pixels).toBe(source.painted?.displayList);
   });
 
-  test('rejects a peer publication captured for an older viewport without cancelling current work', async () => {
+  test('rejects an older worker viewport without cancelling current work', async () => {
     const { source, state, requests, paints, callbacks, tick, respond } = harness();
-    const old = request();
+    source.schedule();
+    tick();
     state.request.viewport.x = 100;
     source.schedule();
-    expect(source.commit(old, peerPaint(old))).toBeNull();
+    await respond(0, frame(requests[0].request));
+    expect(source.painted).toBeNull();
     expect(paints).toEqual([]);
     expect(callbacks.size).toBe(1);
     tick();
-    await respond(0, frame(requests[0].request));
+    await respond(1, frame(requests[1].request));
     expect(source.painted?.request.viewport.x).toBe(100);
+    expect(paints.map((painted) => painted.source)).toEqual(['worker']);
   });
 
   for (const lifecycle of ['disposed', 'replaced'] as const) {
-    test(`ignores pending worker frames and peer publications after the source is ${lifecycle}`, async () => {
+    test(`ignores pending worker frames after the source is ${lifecycle}`, async () => {
       const { source, state, requests, paints, errors, callbacks, tick, respond } = harness();
       source.schedule();
       tick();
@@ -370,7 +385,7 @@ describe('WorkerPaintSource', () => {
 
       await respond(0, frame(requests[0].request));
       source.schedule();
-      expect(source.commit(state.request, peerPaint(state.request))).toBeNull();
+      expect(source.painted).toBeNull();
       tick();
       expect(requests).toHaveLength(1);
       expect(paints).toEqual([]);
@@ -394,15 +409,18 @@ describe('WorkerPaintSource', () => {
     expect(source.painted?.source).toBe('worker');
   });
 
-  test('reports a worker failure once, retains the paint and permits peer recovery publication', async () => {
-    const { source, state, requests, paints, errors, callbacks, tick, surface } = harness();
-    const committed = source.commit(state.request, peerPaint(state.request));
+  test('reports a worker failure once and retains the adopted worker paint without peer recovery publication', async () => {
+    const { source, requests, paints, errors, callbacks, tick, respond, surface } = harness();
+    source.schedule();
+    tick();
+    await respond(0, frame(requests[0].request));
+    const committed = source.painted;
     const committedSurface = surface();
     source.schedule();
     tick();
     const error = new Error('Worker stopped');
-    requests[0].reply.reject(error);
-    await requests[0].reply.promise.catch(() => {});
+    requests[1].reply.reject(error);
+    await requests[1].reply.promise.catch(() => {});
     source.fail(new Error('Already failed'));
     source.schedule();
     tick();
@@ -410,12 +428,10 @@ describe('WorkerPaintSource', () => {
     expect(source.painted).toBe(committed);
     expect(surface()).toBe(committedSurface);
     expect(callbacks.size).toBe(0);
-    expect(requests).toHaveLength(1);
-
-    const recovered = source.commit(state.request, peerPaint(state.request, 'recovery'));
-    expect(recovered?.source).toBe('peer');
-    expect(source.painted?.version).toBe('recovery');
-    expect(paints).toHaveLength(2);
+    expect(requests).toHaveLength(2);
+    expect(source.painted?.version).toBe('v0');
+    expect(paints.map((painted) => painted.source)).toEqual(['worker']);
+    expect(paints).toHaveLength(1);
     expect(errors).toHaveLength(1);
   });
 });

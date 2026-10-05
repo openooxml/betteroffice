@@ -247,8 +247,8 @@ describe('worker editor API', () => {
     expect(edits.editCell).not.toHaveBeenCalled();
   });
 
-  test('snapshots queued requests and cancels them on generation replacement', async () => {
-    const { api, state, coordinator, hydrate, peer } = harness(false);
+  test('snapshots queued requests and drains accepted save input before generation replacement', async () => {
+    const { api, state, coordinator, hydrate, peer, edits, log } = harness(false);
     const request: XlsxReadRequest = { ranges: [] };
     const reading = api.readCells(request);
     request.ranges = [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'B2' } }];
@@ -260,11 +260,18 @@ describe('worker editor API', () => {
     state.preview = gate.promise;
     coordinator.setDraft({ generation: 1, sheet: 0, row: 0, col: 0, source: 'cell', value: 'old' });
     const saving = api.saveAsync();
+    const draining = coordinator.drain();
+    expect(edits.editCell).not.toHaveBeenCalled();
+    hydrate();
+    gate.resolve();
+    expect(await saving).toEqual(new Uint8Array([8, 9]));
+    await draining;
+    expect(edits.editCell.mock.calls).toEqual([[0, 0, 0, 'old']]);
+    expect(log.indexOf('edit:old')).toBeLessThan(log.indexOf('save:old'));
     state.current = false;
     state.generation += 1;
     coordinator.reset();
-    await expect(saving).rejects.toMatchObject({ code: 'document-replaced' });
-    gate.resolve();
+    expect(edits.editCell).toHaveBeenCalledTimes(1);
     expect(await api.readCells({ ranges: [] })).toBeNull();
     expect(await api.save()).toBeNull();
   });
