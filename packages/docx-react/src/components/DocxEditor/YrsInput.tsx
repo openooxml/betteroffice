@@ -202,9 +202,15 @@ type HeldInput = (
   | { kind: 'split' }
   | { kind: 'delete'; direction: 'backward' | 'forward' }
   | { kind: 'delete-selection' }
-  | { kind: 'select-all' }
+  | { kind: 'select-all'; keyboard: boolean }
+  | { kind: 'copy'; apply: (session: YrsSession) => void | Promise<void>; onDropped: () => void }
   | { kind: 'undo-boundary' }
 ) & { inputTime?: number };
+
+function isOpeningHeldInput(entry: HeldInput): boolean {
+  return entry.kind !== 'selection' && entry.kind !== 'copy' &&
+    (entry.kind !== 'select-all' || entry.keyboard);
+}
 
 interface HeldReplayBatch {
   operations: Promise<void>[];
@@ -322,6 +328,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (compositionHeldRef.current && (composingRef.current || compositionPendingRef.current)) {
       discardedCompositionRef.current = true;
     }
+    for (const entry of heldInputRef.current.entries) if (entry.kind === 'copy') entry.onDropped();
     heldInputRef.current = { scope: inputScope, entries: [] };
     pendingSelectionsRef.current = [];
   }
@@ -348,7 +355,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (!readOnly) {
         entry.inputTime ??= performance.now();
         heldInputRef.current.entries.push(entry);
-        if (entry.kind !== 'selection') requestOpeningPeer();
+        if (isOpeningHeldInput(entry)) requestOpeningPeer();
         onPendingInputChangeRef.current?.(true);
       }
       return true;
@@ -1216,8 +1223,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     ]
   );
 
-  const selectAll = useCallback((): void => {
-    if (holdOperation({ kind: 'select-all' })) return;
+  const selectAll = useCallback((keyboard = false): void => {
+    if (holdOperation({ kind: 'select-all', keyboard })) return;
     enqueueInputOperation(() => {
       verticalCaretGoalRef.current.reset();
       const current = ensureSelection();
@@ -1231,7 +1238,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         { story: activeStory, paraId: first.paraId, offset: 0 },
         { story: activeStory, paraId: last.paraId, offset: last.length }
       );
-    }, 'selection', undefined, undefined, true);
+    }, 'selection', undefined, undefined, keyboard);
   }, [enqueueInputOperation, ensureSelection, holdOperation, inputPositionMap, readOnly, session, setSelection, story]);
 
   const deleteSelection = useCallback(
@@ -1331,8 +1338,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     return true;
   }, [enqueueInputOperation, holdInput, holdOperation, moveTableCell, readOnly, readSelection, replicaReadyRef]);
 
-  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab });
-  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab };
+  const inputHandlersRef = useRef({ insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab, enqueueInputOperation, session });
+  inputHandlersRef.current = { insertText, splitParagraph, deleteDirection, deleteSelection, selectAll, replaySelection, moveSelection, handleTab, enqueueInputOperation, session };
   const replayHeldEntry = useCallback((entry: HeldInput, handlers = inputHandlersRef.current): void => {
     if (entry.kind === 'selection') handlers.replaySelection(entry);
     else if (entry.kind === 'navigation') handlers.moveSelection(entry.direction, entry.extend, entry.wholeDocument, entry.byWord, true);
@@ -1341,7 +1348,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     else if (entry.kind === 'split') handlers.splitParagraph();
     else if (entry.kind === 'delete') handlers.deleteDirection(entry.direction);
     else if (entry.kind === 'delete-selection') handlers.deleteSelection(true);
-    else if (entry.kind === 'select-all') handlers.selectAll();
+    else if (entry.kind === 'select-all') handlers.selectAll(entry.keyboard);
+    else if (entry.kind === 'copy') handlers.enqueueInputOperation(
+      () => handlers.session ? entry.apply(handlers.session) : undefined,
+      'selection', entry.onDropped, undefined, false
+    );
   }, []);
   const replayHeldBatch = useCallback((entries: HeldInput[]): void => {
     const handlers = inputHandlersRef.current;
@@ -1394,7 +1405,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
       await Promise.all(batch.operations);
       if (prepareFailure) throw prepareFailure.error;
-    }, 'mutation', undefined, last?.inTable, entries.some((entry) => entry.kind !== 'selection'));
+    }, 'mutation', undefined, last?.inTable, entries.some(isOpeningHeldInput));
   }, [emitSelection, enqueueInputOperation, ensureSelection, onCaretInput, readOnly, replayHeldEntry, replicaReadyRef, session]);
   const heldReplayHandlersRef = useRef({ replayHeldBatch, replayHeldEntry, enqueueInputOperation });
   heldReplayHandlersRef.current = { replayHeldBatch, replayHeldEntry, enqueueInputOperation };
@@ -1402,6 +1413,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     const { replayHeldBatch, replayHeldEntry, enqueueInputOperation } = heldReplayHandlersRef.current;
     if ((readOnly || !enabled || (!holdInput && !session)) &&
       (heldInputRef.current.entries.length > 0 || pendingSelectionsRef.current.length > 0 || compositionHeldRef.current)) {
+      for (const entry of heldInputRef.current.entries) if (entry.kind === 'copy') entry.onDropped();
       heldInputRef.current = { scope: inputScope, entries: [] };
       pendingSelectionsRef.current = [];
       if (compositionHeldRef.current) {
@@ -1421,6 +1433,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       let batch: HeldInput[] = [];
       for (const entry of entries) {
         if (!replicaReadyRef) {
+          replayHeldEntry(entry);
+        } else if (entry.kind === 'copy') {
+          if (batch.length) replayHeldBatch(batch);
+          batch = [];
           replayHeldEntry(entry);
         } else if (entry.kind === 'navigation' && (entry.direction === 'up' || entry.direction === 'down')) {
           if (batch.length) replayHeldBatch(batch);
@@ -1482,34 +1498,36 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [session]);
 
   // A copy asked before the edit peer loads writes the selection it then has.
-  const copyAfterReplica = useCallback((): boolean => {
+  const copyAfterReplica = useCallback((cut = false): boolean => {
     const clipboard = typeof navigator === 'undefined' ? undefined : navigator.clipboard;
-    if (!session || replicaReadyRef?.current !== false || !clipboard) {
+    if (!session || (!(cut && holdInput) && replicaReadyRef?.current !== false) || !clipboard) {
       return false;
     }
     const copied = session;
+    let written: Promise<void>;
     const text = new Promise<Blob>((resolve, reject) => {
-      enqueueInputOperation(
-        () => {
-          const selected = yrsSelectionPlainText(copied);
-          if (selected) resolve(new Blob([selected], { type: 'text/plain' }));
-          else reject(new Error('Nothing is selected to copy'));
-        },
-        'selection',
-        () => reject(new Error('Newer input replaced the copy'))
-      );
+      const apply = (source: YrsSession): void | Promise<void> => {
+        const selected = yrsSelectionPlainText(source);
+        if (selected) resolve(new Blob([selected], { type: 'text/plain' }));
+        else reject(new Error('Nothing is selected to copy'));
+        if (cut) return written;
+      };
+      const onDropped = () => reject(new Error('Newer input replaced the copy'));
+      if (!cut || !holdOperation({ kind: 'copy', apply, onDropped })) {
+        enqueueInputOperation(() => apply(copied), 'selection', onDropped, undefined, false);
+      }
     });
     void text.catch(() => {});
     if (typeof ClipboardItem === 'function' && clipboard.write) {
-      void clipboard.write([new ClipboardItem({ 'text/plain': text })]).catch(() => {});
+      written = clipboard.write([new ClipboardItem({ 'text/plain': text })]).catch(() => {});
     } else {
-      void text
+      written = text
         .then((blob) => blob.text())
         .then((value) => clipboard.writeText(value))
         .catch(() => {});
     }
     return true;
-  }, [enqueueInputOperation, replicaReadyRef, session]);
+  }, [enqueueInputOperation, holdInput, holdOperation, replicaReadyRef, session]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
@@ -1521,7 +1539,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const key = event.key.toLowerCase();
       if (mod && key === 'a') {
         event.preventDefault();
-        selectAll();
+        selectAll(true);
       } else if (mod && key === 'c' && !event.shiftKey && !event.altKey) {
         if (copyAfterReplica()) event.preventDefault();
         else primeCopy();
@@ -1670,7 +1688,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       if (readOnly || (!holdInput && replicaReadyRef?.current !== false)) return;
       event.preventDefault();
-      if (!holdInput) copyAfterReplica();
+      copyAfterReplica(true);
       deleteSelection(true);
     },
     [copyAfterReplica, deleteSelection, holdInput, readOnly, replicaReadyRef]
@@ -1780,6 +1798,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     inputLifetimeRef.current.mounted = true;
     return () => {
       inputLifetimeRef.current.mounted = false;
+      for (const entry of heldInputRef.current.entries) if (entry.kind === 'copy') entry.onDropped();
       heldInputRef.current.entries = [];
       pendingSelectionsRef.current = [];
       for (const notify of heldInputWaitersRef.current) notify();

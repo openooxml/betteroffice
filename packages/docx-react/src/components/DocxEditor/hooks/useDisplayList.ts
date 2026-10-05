@@ -520,6 +520,9 @@ export function useRustDisplayList(
   const layoutPreviewKeyRef = useRef<string | null>(null);
   const workerPreviewKeysRef = useRef(new Map<number, string>());
   const settledEpochRef = useRef<number | null>(null);
+  const layoutPassesRef = useRef(new WeakMap<RustDisplayListEngine, object>());
+  const workerLayoutPassesRef = useRef(new WeakMap<Layout, object>());
+  const frameLayoutPassRef = useRef<object | undefined>(undefined);
   const [layoutCompleteSession, setLayoutCompleteSession] = useState<RustDisplayListEngine | null>(null);
   const settleErrorRef = useRef<Error | null>(null);
   const settleWaitersRef = useRef(new Map<() => void, {
@@ -564,6 +567,7 @@ export function useRustDisplayList(
       setLayoutCompleteSession(
         !failure && epoch !== null && settledEpochRef.current === contentEpochRef.current &&
           frameEngineRef.current === engineRef.current && !provisionalPageFrameRef.current &&
+          frameLayoutPassRef.current === (engineRef.current ? layoutPassesRef.current.get(engineRef.current) : undefined) &&
           !isLayoutQueued(engineRef.current)
           ? engineRef.current ?? null : null
       );
@@ -2620,6 +2624,8 @@ export function useRustDisplayList(
     (hostEngine, request) => {
       if (hostEngine === engineRef.current) setLayoutCompleteSession(null);
       if (handedOverPreview(hostEngine)) return workerPreviewPassesRef.current.get(hostEngine) ?? null;
+      const layoutPass = {};
+      layoutPassesRef.current.set(hostEngine, layoutPass);
       const terminal = workerFailureRef.current.get(hostEngine);
       if (terminal && isViewerSession(hostEngine)) return rejectedWorkerLayout(terminal);
       if (isViewerSession(hostEngine) && holdsCommittedWorkerProposals(hostEngine) &&
@@ -2860,6 +2866,7 @@ export function useRustDisplayList(
           hostEngine.residentWorkerProbe()?.layoutRevision === adoptedRevision) {
           notifyWorkerOpenLayoutProgress(hostEngine, result.layoutProvisional ? 'provisional' : 'complete');
         }
+        workerLayoutPassesRef.current.set(computation.layout, layoutPass);
         if (base === undefined) return computation;
         workerLayoutFramesRef.current.set(computation.layout, {
           result,
@@ -3078,6 +3085,8 @@ export function useRustDisplayList(
     }
     if (previewKey !== null) layoutPreviewKeyRef.current = previewKey;
     const contentEpoch = contentEpochRef.current;
+    const layoutPass = workerLayoutPassesRef.current.get(layout) ??
+      (engine ? layoutPassesRef.current.get(engine) : undefined);
     const line = sourceLine(engine);
     const sourceVersion = sourceVersionOf(layout);
     const inputs = (overrides?.getInputs ?? getLayoutKernelInputs)(layout);
@@ -3555,6 +3564,7 @@ export function useRustDisplayList(
         );
         snapshotRef.current = nextSnapshot;
         provisionalPageFrameRef.current = result.provisional === true;
+        frameLayoutPassRef.current = layoutPass;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
         frameEngineRef.current = residentEngine ?? engine ?? null;
@@ -3791,6 +3801,7 @@ export function useRustDisplayList(
     workerSurfacesActive,
     pendingCompletion: pendingCompletion?.engine ?? null,
     layoutCompleteSession: layoutCompleteSession === engine &&
+      frameLayoutPassRef.current === (engine ? layoutPassesRef.current.get(engine) : undefined) &&
       settledEpochRef.current === contentEpochRef.current && !isLayoutQueued(engine)
       ? layoutCompleteSession : null,
     workerPresentationActive,

@@ -7882,6 +7882,64 @@ test('a keystroke during completion slices starts the peer and replays once afte
   }
 });
 
+test.each(['ctrlKey', 'metaKey'] as const)('programmatic select-all during completion slices waits for keyboard select-all with %s', async (modifier) => {
+  const opened = await openingEditor(true, false, { holdFullLayout: true });
+  const tasks = holdHydrationTasks();
+  try {
+    act(() => opened.editor.current!.selectAll());
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    const full = await opened.switchToFull();
+    await opened.presentFull(full, false);
+    expect(opened.harness.renderer.layoutCompleteSession).toBeNull();
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    act(() => opened.editor.current!.selectAll());
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(false);
+    expect(opened.posted.some((request) => request.type === 'encodeState')).toBe(false);
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    fireEvent.keyDown(textarea, { key: 'a', [modifier]: true });
+    expect(replicaHelpers.workerOpenReplicaStarted(full)).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await finishHeldHydration(opened, tasks);
+    const completion = await opened.received('completeLayout');
+    await act(async () => {
+      opened.reply(completion);
+      await awaitWorkerOpenReplica(full);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const paragraphs = full.paragraphs('body');
+    expect(full.selection()).toEqual({
+      anchor: { story: 'body', paraId: paragraphs[0].paraId, offset: 0 },
+      head: { story: 'body', paraId: paragraphs.at(-1)!.paraId, offset: paragraphs.at(-1)!.text.length },
+    });
+    expect(document.activeElement).toBe(textarea);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    opened.close();
+    tasks.restore();
+  }
+});
+
+function openingClipboard(write: (text: string) => Promise<void> = async () => {}) {
+  const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  const item = Object.getOwnPropertyDescriptor(globalThis, 'ClipboardItem');
+  const writeText = mock(write);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  Object.defineProperty(globalThis, 'ClipboardItem', { configurable: true, value: undefined });
+  const restore = registerRestore(() => {
+    if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+    else Reflect.deleteProperty(navigator, 'clipboard');
+    if (item) Object.defineProperty(globalThis, 'ClipboardItem', item);
+    else Reflect.deleteProperty(globalThis, 'ClipboardItem');
+  });
+  return { writeText, restore };
+}
+
 async function editorWithoutLayoutCompleteSignal(holdInput = false) {
   const worker = installWorker({ holdState: true });
   const frames = holdFrames(true);
@@ -7937,6 +7995,15 @@ async function editorWithoutLayoutCompleteSignal(holdInput = false) {
   }
 }
 
+function selectOpeningText(opened: Awaited<ReturnType<typeof editorWithoutLayoutCompleteSignal>>) {
+  const point = (position: number) => {
+    const caret = opened.harness.renderer.queries!.caretRect(position)!;
+    return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+  };
+  fireEvent.mouseDown(opened.canvas, point(1));
+  fireEvent.mouseUp(window, point(6));
+}
+
 test.each([false, true])('a queued keystroke starts the peer before the layout signal and replays once with heldInput=%s', async (held) => {
   const opened = await editorWithoutLayoutCompleteSignal(held);
   const insert = spyOn(opened.session, 'insertText');
@@ -7979,20 +8046,119 @@ test.each([false, true])('a queued keystroke starts the peer before the layout s
 
 test.each(['navigation', 'paste', 'cut', 'composition'] as const)('queued %s starts the peer immediately without a layout waiter', async (kind) => {
   const opened = await editorWithoutLayoutCompleteSignal();
+  const insert = spyOn(opened.session, 'insertText');
+  const remove = spyOn(opened.session, 'deleteRange');
+  const select = spyOn(opened.session, 'setSelection');
+  const clipboard = openingClipboard();
   try {
     const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    if (kind === 'cut') selectOpeningText(opened);
     if (kind === 'navigation') fireEvent.keyDown(textarea, { key: 'ArrowRight' });
     else if (kind === 'paste') fireEvent.paste(textarea, { clipboardData: { getData: () => 'P' } });
     else if (kind === 'cut') fireEvent.cut(textarea);
     else fireEvent.compositionStart(textarea);
+    if (kind === 'composition') fireEvent.compositionEnd(textarea, { data: 'I' });
+    expect(document.activeElement).toBe(textarea);
+    expect(insert).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
     expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
     expect(opened.harness.core.replicaReady).toBe(false);
     expect(opened.onLayoutWait).not.toHaveBeenCalled();
     await opened.received('encodeState');
     expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     expect(opened.harness.mainOpens).toEqual([]);
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    const assertReplay = () => {
+      expect(opened.harness.core.replicaReady).toBe(true);
+      expect(insert).toHaveBeenCalledTimes(kind === 'paste' || kind === 'composition' ? 1 : 0);
+      expect(remove).toHaveBeenCalledTimes(kind === 'cut' ? 1 : 0);
+      if (kind === 'navigation') {
+        expect(select.mock.calls.filter(([anchor, head]) => (head ?? anchor).offset === 1)).toHaveLength(1);
+        expect(opened.session.selection()?.head.offset).toBe(1);
+      }
+      expect(opened.session.paragraphs('body')[0].text).toBe(
+        kind === 'paste' ? 'PFirst paragraph' : kind === 'composition' ? 'IFirst paragraph' :
+          kind === 'cut' ? ' paragraph' : 'First paragraph'
+      );
+      if (kind === 'cut') {
+        expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+        expect(clipboard.writeText).toHaveBeenCalledWith('First');
+      }
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+      expect(document.activeElement).toBe(textarea);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
   } finally {
+    insert.mockRestore();
+    remove.mockRestore();
+    select.mockRestore();
     opened.close();
+    clipboard.restore();
+  }
+});
+
+test.each([false, true])('a queued cut writes the selected text before deletion and replays once with heldInput=%s', async (held) => {
+  const opened = await editorWithoutLayoutCompleteSignal(held);
+  let releaseWrite!: () => void;
+  const writeReady = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let copied = '';
+  const clipboard = openingClipboard(async (text) => {
+    copied = text;
+    await writeReady;
+  });
+  const remove = spyOn(opened.session, 'deleteRange');
+  try {
+    const textarea = opened.view.getByTestId('yrs-input');
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(false);
+    fireEvent.cut(textarea);
+    expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(remove).not.toHaveBeenCalled();
+    await opened.received('encodeState');
+    act(() => opened.releaseHeldInput());
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+    });
+    await waitFor(() => expect(clipboard.writeText).toHaveBeenCalledWith('First'));
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(copied).toBe('First');
+    expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => {
+      releaseWrite();
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(opened.session.paragraphs('body')[0].text).toBe(' paragraph');
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    expect(document.activeElement).toBe(textarea);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+    expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseWrite();
+    remove.mockRestore();
+    opened.close();
+    clipboard.restore();
   }
 });
 

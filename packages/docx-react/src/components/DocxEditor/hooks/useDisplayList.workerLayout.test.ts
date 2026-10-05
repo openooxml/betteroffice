@@ -1840,6 +1840,49 @@ test.each([false, true])('layout-complete signal waits for the adopted final fra
   }
 });
 
+test('an older final frame cannot set the layout-complete signal during an overlapping pass on the same engine', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const hook = renderHook(
+    ({ layout }) => useRustDisplayList(layout, undefined, undefined, undefined, engine),
+    { initialProps: { layout: null as Layout | null } }
+  );
+  try {
+    const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson,
+    });
+    const stale = (await act(() => first))!;
+    let current!: ReturnType<typeof hook.result.current.layoutInWorker>;
+    act(() => { current = hook.result.current.layoutInWorker(engine, REQUEST); });
+    expect(engine.residentWorkerProbe()?.layoutRevision).toBe(2);
+    expect(hook.result.current.layoutCompleteSession).toBeNull();
+    await act(async () => hook.rerender({ layout: stale.layout }));
+    await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(1));
+    expect(hook.result.current.layoutCompleteSession).toBeNull();
+    const currentLayoutJson = native.layout_document_with_regions_retained_json(REQUEST);
+    const currentFrame = native.build_display_list_frame('{}', 0);
+    const epoch = decodeFrameDelta(currentFrame).frameEpoch;
+    expect(epoch).toBeGreaterThan(1);
+    worker.reply({
+      id: worker.requestAt(1).id, ok: true, frame: currentFrame.slice().buffer,
+      caret: { frameEpoch: epoch, caretRect: null }, selection: null,
+      layoutRevision: 2, layoutJson: currentLayoutJson,
+    });
+    const completed = (await act(() => current!))!;
+    expect(hook.result.current.layoutCompleteSession).toBeNull();
+    await act(async () => hook.rerender({ layout: completed.layout }));
+    await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(epoch));
+    expect(hook.result.current.layoutCompleteSession).toBe(engine);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
 test('a proposal layout is whole and reuses unchanged pages after an intervening visible build', async () => {
   let request = JSON.stringify({
     ...JSON.parse(REQUEST),
