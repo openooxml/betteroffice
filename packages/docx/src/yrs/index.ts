@@ -1025,6 +1025,13 @@ export interface YrsSession extends CollaborationReplica {
     goalX: number
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
     rId: string,

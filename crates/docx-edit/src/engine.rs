@@ -8433,6 +8433,21 @@ impl EngineSession {
             .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
     }
 
+    pub fn display_range_rects_on_pages_json(
+        &self,
+        from: i64,
+        to: i64,
+        first_page: usize,
+        last_page: usize,
+    ) -> Result<String, String> {
+        self.with_display_list(|list| {
+            let pages = first_page..last_page.saturating_add(1).min(list.pages.len());
+            docx_layout::hit::range_rects_on_pages(list, pages, from, to)
+        })
+        .ok_or_else(|| "resident display list is not built".to_owned())
+        .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
+    }
+
     /// Body, header/footer and note range geometry directly against the
     /// resident list.
     pub fn display_range_rects_region_json(

@@ -2354,6 +2354,20 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// @internal
+    pub fn display_range_rects_on_pages_json(
+        &self,
+        from: f64,
+        to: f64,
+        first_page: usize,
+        last_page: usize,
+    ) -> Result<String, JsValue> {
+        let _fonts = self.fonts.enter();
+        self.engine
+            .display_range_rects_on_pages_json(from as i64, to as i64, first_page, last_page)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Same rectangles as [`EditSession::display_range_rects_json`], scoped to
     /// a region. `region` is `"body"`, `"header"`, `"footer"`, `"footnote"` or
     /// `"endnote"`; `part_id` names one header/footer part (an empty string
