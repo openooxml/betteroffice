@@ -65,7 +65,7 @@ export interface XlsxCommandBinding {
   ordered(id: XlsxCommandId): boolean;
   /** Runs `operation` after input accepted before this call. */
   admit<T>(operation: () => T | Promise<T>, id?: XlsxCommandId): Promise<T>;
-  refuse?(reason: { code: XlsxCommandFailureCode; message: string }): void;
+  refuse?(reason: { code: string; message: string }): void;
   /** Performs a command whose gate passed against `env`. */
   perform<K extends XlsxCommandId>(
     id: K,

@@ -206,10 +206,12 @@ function harness(realFacade = false) {
     applyQueuedOp: (op) => {
       if (op.method === 'applyEdits') return editMethods.applyEdits(op.args[0]);
       if (op.method === 'editCell') return editMethods.editCell(...op.args);
+      if (op.method === 'editCells') return editMethods.editCells(...op.args);
       throw new Error('Unexpected mock operation');
     },
     applyRecoveryOp: (op) => {
       if (op.method === 'editCell') return xlsx.createWorkbookRecoveryMutators(edits).editCell(...op.args);
+      if (op.method === 'editCells') return peerMethods.editCells(...op.args);
       throw new Error('Unexpected mock recovery operation');
     },
   });
@@ -297,8 +299,9 @@ beforeEach(() => {
   restorers.push(() => context.mockRestore(), () => paint.mockRestore(), () => local.mockRestore(),
     () => init.mockRestore(), () => proposals.mockRestore());
 });
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await advance();
   for (const restore of restorers.reverse()) restore();
   restorers.length = 0;
 });
@@ -355,7 +358,7 @@ describe('workbook worker editor', () => {
     await tick();
     expect(host.log.indexOf('sync')).toBeLessThan(host.log.indexOf('frame:worker'));
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed');
-    const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+    const [viewport, options] = host.sessionMethods.frame.mock.calls[host.sessionMethods.frame.mock.calls.length - 1]!;
     await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
       displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:typed', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
     await advance();
@@ -397,7 +400,7 @@ describe('workbook worker editor', () => {
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
     await advance();
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
-    const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+    const [viewport, options] = host.sessionMethods.frame.mock.calls[host.sessionMethods.frame.mock.calls.length - 1]!;
     await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
       displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:typed before hydration', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
     await advance();
@@ -1074,7 +1077,7 @@ describe('workbook worker editor', () => {
     expect(host.editMethods.save).toHaveBeenCalledTimes(1);
     expect(host.peerMethods.save).not.toHaveBeenCalled();
     expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=24');
-    const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+    const [viewport, options] = host.sessionMethods.frame.mock.calls[host.sessionMethods.frame.mock.calls.length - 1]!;
     await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
       displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:=24', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
     await advance();
@@ -1444,15 +1447,18 @@ for (const wait of ['hydration', 'preview'] as const) {
 
 it('drains a buffered chart nudge before its timer expires on disposal', async () => {
   const host = harness();
-  host.charts.push({ id: 'chart', rect: { x: 192, y: 96, w: 192, h: 96 }, movable: true } as xlsx.ChartRegion);
+  host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true });
   const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
   await opened();
   fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+  expect(view.getByTestId('xlsx-chart-selection').getAttribute('data-chart-id')).toBe('chart');
   fireEvent.mouseUp(window, { clientX: 210, clientY: 110, button: 0 });
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
   view.unmount();
   await advance();
   expect(host.editMethods.moveChart).toHaveBeenCalledWith(0, 'chart', 1, 0);
+  expect(host.editMethods.moveChart).toHaveBeenCalledTimes(1);
   expect(host.log.indexOf('chart:chart:1:0')).toBeLessThan(host.log.indexOf('dispose:facade'));
 });
 
@@ -1469,7 +1475,7 @@ it('cancels the original pending cut before replaying it during recovery', async
   await opened();
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
   await advance();
-  await clipboard.payloads[0];
+  expect(await (await clipboard.payloads[0]).text()).toBe('initial');
   let newer!: Promise<EditResult | null>;
   act(() => { newer = api.editCellAsync(0, 0, 1, 'newer'); void newer.catch(() => {}); host.fail(); });
   await expect(newer).rejects.toBeInstanceOf(SessionFailure);
@@ -1478,6 +1484,8 @@ it('cancels the original pending cut before replaying it during recovery', async
   await act(async () => completion.resolve());
   const saved = await recovered;
   expect(host.peerMethods.editCells).toHaveBeenCalledTimes(1);
+  expect(host.peerMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 0, input: '' }]]]);
+  expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 1, 'newer']]);
   expect(host.peerMethods.setCalculationContext).toHaveBeenCalledTimes(2);
   expect(JSON.parse(new TextDecoder().decode(saved.bytes))).toEqual([['0:0:0', ''], ['0:0:1', 'newer']]);
 });
@@ -1515,7 +1523,8 @@ for (const mode of ['unsupported-cut', 'construct-cut', 'throw-cut', 'deny-cut',
 
 it('renders target-changed and gesture-active command refusals', async () => {
   const host = harness();
-  host.charts.push({ id: 'chart', rect: { x: 192, y: 96, w: 192, h: 96 }, movable: true } as xlsx.ChartRegion);
+  host.charts.push({ id: 'chart', label: 'Chart', rect: { x: 192, y: 96, w: 192, h: 96 },
+    clip: { x: 192, y: 96, w: 192, h: 96 }, movable: true });
   let api!: XlsxWorkerEditorApi;
   const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
   await opened();
@@ -1525,6 +1534,7 @@ it('renders target-changed and gesture-active command refusals', async () => {
   expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/selection changed/i);
   expect(host.peerMethods.patchRangeStyle).not.toHaveBeenCalled();
   fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { clientX: 210, clientY: 110, button: 0 });
+  expect(view.getByTestId('xlsx-chart-selection').getAttribute('data-chart-id')).toBe('chart');
   fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 's', ctrlKey: true });
   await advance();
   expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/chart drag/i);
@@ -1724,7 +1734,7 @@ it('restores an accepted preview after a later host batch is refused', async () 
   expect(host.cells.get('0:0:0')).toBe('accepted preview');
   expect(host.attached!.sentSequence).toBe(1);
   expect(api.failure).toBeNull();
-  const [viewport] = host.sessionMethods.frame.mock.calls.at(-1)!;
+  const [viewport] = host.sessionMethods.frame.mock.calls[host.sessionMethods.frame.mock.calls.length - 1]!;
   await act(async () => worker.resolve({ sheet: 0, viewport, version: 'v2', epoch: 1, sequence: 1,
     displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:accepted preview',
       x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
@@ -1827,7 +1837,7 @@ it('resolves an untouched F2 preview before preparing a later host edit', async 
   await act(async () => snapshot.resolve('initial'));
   await advance();
   expect(host.preview.mock.calls[0][2]).toMatchObject([{ method: 'editCell', args: [0, 0, 0, 'initial'] }]);
-  expect(host.preview.mock.calls.at(-1)![2]).toMatchObject([{ method: 'editCell', args: [0, 0, 0, 'later'] }]);
+  expect(host.preview.mock.calls[host.preview.mock.calls.length - 1]![2]).toMatchObject([{ method: 'editCell', args: [0, 0, 0, 'later'] }]);
   expect(host.editMethods.editCell).not.toHaveBeenCalled();
   await act(async () => hydration.resolve(host.peer));
   await advance();
@@ -1849,13 +1859,13 @@ it('keeps the preview until worker adoption and never paints a peer frame', asyn
   expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('worker owned');
   expect(host.peerMethods.displayList).not.toHaveBeenCalled();
   expect(painted.every((list) => list.commands.every((cmd) => cmd.op !== 'text' || !cmd.text.startsWith('peer:')))).toBe(true);
-  const [viewport, options] = host.sessionMethods.frame.mock.calls.at(-1)!;
+  const [viewport, options] = host.sessionMethods.frame.mock.calls[host.sessionMethods.frame.mock.calls.length - 1]!;
   await act(async () => worker.resolve({ sheet: options?.sheet ?? 0, viewport, version: 'v2', epoch: 2, sequence: 1,
     displayList: { width: 800, height: 600, commands: [{ op: 'text', text: 'worker:worker owned', x: 8, y: 18, fontSize: 11, color: '#000000' }] } }));
   await advance();
   expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
   expect(host.peerMethods.displayList).not.toHaveBeenCalled();
-  expect(painted.at(-1)!.commands).toContainEqual({ op: 'text', text: 'worker:worker owned', x: 8, y: 18, fontSize: 11, color: '#000000' });
+  expect(painted[painted.length - 1]!.commands).toContainEqual({ op: 'text', text: 'worker:worker owned', x: 8, y: 18, fontSize: 11, color: '#000000' });
 });
 
 for (const route of ['save', 'saveAsync', 'command', 'shortcut', 'toolbar'] as const) {

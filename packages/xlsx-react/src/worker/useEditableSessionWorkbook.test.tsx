@@ -5,7 +5,7 @@ import type { WorkbookHandle, WorkbookSession } from '@betteroffice/xlsx';
 import { SessionFailure } from '../../../../shared/office-session';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
-import { createWorkerInputCoordinator } from '../commands/workerInputCoordinator';
+import { createWorkerInputCoordinator, type WorkerInputCoordinatorHooks } from '../commands/workerInputCoordinator';
 import type { WorkerEditorApiBridge, XlsxWorkerEditorApi } from './createWorkerEditorApi';
 import {
   EditableWorkbookSession, editableWorkbookSessionBackend, useEditableSessionWorkbook,
@@ -218,7 +218,9 @@ describe('editable session workbook', () => {
     resources(log);
     const errors = mock((_error: Error) => {});
     const run = owner(value, { onError: errors });
-    const write = mock(() => { log.push('write'); return true; });
+    const write = mock((..._args: Parameters<WorkerInputCoordinatorHooks['write']>) => {
+      log.push('write'); return true;
+    });
     const input = createWorkerInputCoordinator({
       generation: () => run.generation, capture: () => ({ sheet: 0, target: 'A1' }),
       isReady: () => run.ready, whenReady: () => run.whenHydrated(),

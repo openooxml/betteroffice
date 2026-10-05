@@ -471,6 +471,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const owner = runRef.current;
     if (!owner?.current || !owner.peer || !owner.editPeer) throw new XlsxCommandAdmissionError('editor-unavailable');
     const edits = owner.editPeer;
+    operationPeer.current = edits;
     let recoveryMutators: ReturnType<typeof createWorkbookRecoveryMutators>;
     try { recoveryMutators = createWorkbookRecoveryMutators(edits); }
     catch (error) {
@@ -825,7 +826,20 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }
     const captureClipboard = () => kind === 'paste' ? navigator.clipboard.readText() : '';
+    let mutation: Extract<WorkbookReplayOp, { method: 'editCells' }> | undefined;
     void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
+      if (kind !== 'copy' && !mutation) {
+        const edits: CellInputEdit[] = [];
+        if (kind === 'paste') {
+          fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
+            edits.push({ row: range.top + dr, col: range.left + dc, input })));
+        } else {
+          for (let row = range.top; row <= range.bottom; row++) {
+            for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
+          }
+        }
+        mutation = { method: 'editCells', args: [sheet, edits] };
+      }
       if (kind !== 'paste') {
         const copied = toTsv(owner.peer!.rangeCells(sheet, selectedRange(selected)));
         let written: boolean;
@@ -841,19 +855,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         if (!written) throw new WorkerInputRefusal('Clipboard write was refused', kind === 'cut');
         if (kind === 'copy') return;
       }
-      const edits: CellInputEdit[] = [];
-      if (kind === 'paste') {
-        fromTsv(text).forEach((row, dr) => row.forEach((input, dc) =>
-          edits.push({ row: range.top + dr, col: range.left + dc, input })));
-      } else {
-        for (let row = range.top; row <= range.bottom; row++) {
-          for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
-        }
-      }
+      const op = mutation!;
+      const edits = op.args[1];
       if (edits.length === 0) return;
       await preview({ generation: owner.generation, source: 'cell', sheet, row: edits[0].row, col: edits[0].col, value: edits[0].input });
       markApplied.check();
-      const result = owner.editPeer!.editCells(sheet, edits);
+      const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer!);
+      const result = (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied();
       apply(result);
       if (kind === 'paste' && selectionRef.current === selected && activeRef.current === sheet) {

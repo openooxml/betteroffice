@@ -224,7 +224,10 @@ for (const lifecycle of ['replacement', 'disposal', 'StrictMode']) {
     expect(entries.replays[0].sequence).toBe(1);
     if (lifecycle === 'replacement') {
       await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBeGreaterThan(retiring);
+      await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(true);
       expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('initial');
+      await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
+      expect(await page.evaluate(() => window.__xlsxWorkerEditor.peerEntries.filter((entry) => entry.generation !== retiring))).toEqual([]);
     }
   });
 }

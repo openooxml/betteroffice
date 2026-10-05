@@ -403,7 +403,10 @@ export function createWorkerInputCoordinator(
               entries = entries.filter((candidate) => candidate !== entry);
               continue;
             }
-            if (error.code === 'input-failed') inputFailed = true;
+            if (error.code === 'input-failed') {
+              inputFailed = true;
+              hooks.onRefusal?.(error);
+            }
           } else {
             fail(error);
             return;
@@ -575,6 +578,7 @@ export function createWorkerInputCoordinator(
       await write(sealed, entry.intent, activeLease, Object.assign(() => {}, { check: markApplied.check, refuse: markApplied.refuse }));
       check(entry.intent, activeLease);
       const result = operation(entry.intent as WorkerInputIntent<T>, markApplied);
+      if (!isPromise(result) && result !== false && !entry.refused) markApplied();
       return result;
     }, true, { ...options, prepare: async () => {
       if (saved.draft && !composed) {
@@ -661,7 +665,7 @@ export function createWorkerInputCoordinator(
         const writing = operation(entry.intent, markApplied);
         if (!isPromise(writing) && writing !== false) markApplied();
         const result = await wait(writing, lease);
-        if (result === false) throw new WorkerInputRefusal('Input could not be written');
+        if (result === false) throw new XlsxCommandAdmissionError('input-failed');
       });
     },
     clipboard(capture, operation, target, prepare, recover = true) {
@@ -688,7 +692,7 @@ export function createWorkerInputCoordinator(
           const writing = operation(intent.input as Awaited<typeof data>, intent, markApplied);
           if (!isPromise(writing) && writing !== false) markApplied();
           const result = await writing;
-          if (result === false) throw new WorkerInputRefusal('Input could not be written');
+          if (result === false) throw new XlsxCommandAdmissionError('input-failed');
           return result;
         },
         { kind: 'clipboard', target: origin, recover, prepare: prepare ? async () => prepare(await data) : undefined },
@@ -811,7 +815,7 @@ export function createWorkerInputCoordinator(
         if (error) throw error.error;
         if (entries.length > 0) throw new XlsxCommandAdmissionError('input-failed');
       };
-      const result = recovered().finally(() => {
+      const result = Promise.resolve().then(recovered).finally(() => {
         if (recovery === result) {
           recovery = null;
           void pump();

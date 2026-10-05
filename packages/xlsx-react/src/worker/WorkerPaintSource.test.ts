@@ -153,6 +153,8 @@ describe('WorkerPaintSource', () => {
     await respond(0, frame(requests[0].request));
     const committed = source.painted;
     const committedSurface = surface();
+    expect(committed).not.toBeNull();
+    if (!committed) throw new Error('Missing adopted worker frame');
     source.schedule();
     tick();
     source.schedule();
