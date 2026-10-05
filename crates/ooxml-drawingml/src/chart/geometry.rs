@@ -2474,6 +2474,11 @@ fn percent_range(family: PlotFamily<'_>) -> (f64, f64) {
 }
 
 fn plain_range(family: PlotFamily<'_>) -> (f64, f64) {
+    if matches!(family.chart_type, "scatter" | "bubble")
+        && let Some(range) = paired_range(family)
+    {
+        return range;
+    }
     let mut min = 0.0;
     let mut max = 0.0;
     let mut remaining = MAX_PLOT_DATA_SCAN;
@@ -2494,6 +2499,26 @@ fn plain_range(family: PlotFamily<'_>) -> (f64, f64) {
         }
     }
     (min, max)
+}
+
+/// The y range of a scatter or bubble family over the points it plots, or
+/// `None` when no point has both values.
+fn paired_range(family: PlotFamily<'_>) -> Option<(f64, f64)> {
+    let (mut min, mut max) = (0.0_f64, 0.0_f64);
+    let mut seen = false;
+    let mut remaining = MAX_PLOT_DATA_SCAN;
+    for series in family.series {
+        let samples = series.series.x_values.len().min(remaining);
+        remaining -= samples;
+        for index in 0..samples {
+            if let Some((_, value)) = series.xy_value(index) {
+                seen = true;
+                min = min.min(value);
+                max = max.max(value);
+            }
+        }
+    }
+    seen.then_some((min, max))
 }
 
 /// The smallest `{1, 2, 5} x 10^k` at or above `rough`.
@@ -3642,7 +3667,13 @@ fn scatter_x_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
         max = value;
     }
     if !(max - min).is_finite() || max <= min {
-        (min, max) = (min.min(0.0), min.min(0.0) + 1.0);
+        let low = if min.is_finite() { min.min(0.0) } else { 0.0 };
+        let high = if max.is_finite() { max.max(0.0) } else { 0.0 };
+        (min, max) = if high > low {
+            (low, high)
+        } else {
+            (low, low + 1.0)
+        };
     }
     let log_base = axis
         .and_then(|axis| axis.log_base)
@@ -5853,6 +5884,22 @@ mod tests {
             rect(),
         );
         assert_eq!(paths(&bubble), 1);
+    }
+
+    #[test]
+    fn scatter_auto_scales_follow_the_plotted_points() {
+        let x = [40.0, 40.0];
+        let plotted = |values: &[f64]| {
+            let data = source(values);
+            let mut xy = series("XY", &data);
+            xy.x_values = &x;
+            let ops = plot_chart(&grouped("scatter", group("scatter", vec![xy])), rect());
+            (marks(&ops), texts(&ops))
+        };
+        let (paired, labels) = plotted(&[5.0, 10.0]);
+        let (unpaired, _) = plotted(&[5.0, 10.0, 1e9]);
+        assert_eq!(unpaired, paired);
+        assert!(labels.contains(&"40".to_owned()), "{labels:?}");
     }
 
     #[test]
