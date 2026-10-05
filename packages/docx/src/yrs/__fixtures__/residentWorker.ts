@@ -148,9 +148,10 @@ export async function residentWorkerFactory(): Promise<(clientId?: number) => In
       (callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
         const timer = setTimeout(() => {
           timers.delete(timer);
-          callback(...args);
+          if (!terminated) callback(...args);
         }, delay);
-        timers.add(timer);
+        if (terminated) clearTimeout(timer);
+        else timers.add(timer);
         return timer;
       },
       (timer: ReturnType<typeof setTimeout>) => {
