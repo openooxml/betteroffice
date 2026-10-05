@@ -14964,7 +14964,10 @@ mod tests {
         engine.clear_region_retention();
         assert!(engine.preview_font_requirements.borrow().is_some());
         let before = engine.stats();
-        assert_eq!(engine.layout_font_requirements_json(request).unwrap(), first);
+        assert_eq!(
+            engine.layout_font_requirements_json(request).unwrap(),
+            first
+        );
         assert_eq!(
             engine.stats().lower_cache_misses,
             before.lower_cache_misses + 1
