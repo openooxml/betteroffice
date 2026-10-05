@@ -351,6 +351,16 @@ impl WorkbookSnapshotEncoder {
         if !self.lineage.matches(workbook)? {
             return Err(error("snapshot workbook lineage has changed"));
         }
+        if self.retained_package_facts
+            && !workbook
+                .snapshot_package_lineage
+                .as_ref()
+                .map(|lineage| lineage.matches(workbook))
+                .transpose()?
+                .unwrap_or(false)
+        {
+            return Err(error("snapshot retained package permission has changed"));
+        }
         if self.pending.is_none() {
             self.pending = self.next_logical(workbook)?;
         }
@@ -1120,6 +1130,13 @@ impl WorkbookSnapshotBuilder {
         {
             return Err(error("snapshot logical chunk exceeds advance byte budget"));
         }
+        if let Some(authority) = &mut self.authority
+            && authority.has_pending_base()
+        {
+            return authority
+                .advance_bounded(budget)
+                .map(|_| SnapshotProgress::pending());
+        }
         let calculation = self.header.is_some()
             && self
                 .queue
@@ -1149,6 +1166,7 @@ impl WorkbookSnapshotBuilder {
                 failure.to_string().as_str(),
                 "snapshot graph record exceeds advance byte budget"
                     | "Yrs snapshot record exceeds advance byte budget"
+                    | "snapshot storage exceeds advance byte budget"
             )
         });
         result
@@ -1156,13 +1174,50 @@ impl WorkbookSnapshotBuilder {
 
     fn advance_inner(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
         if let Some(chunk) = self.queue.front() {
-            let (kind, _, payload) = unframe(chunk)?;
+            let (kind, ordinal, payload) = unframe(chunk)?;
             if kind == ChunkKind::Yrs {
                 let authority = self
                     .authority
                     .as_mut()
                     .ok_or_else(|| error("snapshot header is missing"))?;
                 if authority.advance_yrs(payload, budget)?.is_ready() {
+                    self.queue.pop_front();
+                }
+                return Ok(SnapshotProgress::pending());
+            }
+            if matches!(kind, ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved) {
+                let progress = if kind == ChunkKind::Preserved {
+                    self.preserved
+                        .as_mut()
+                        .ok_or_else(|| error("snapshot header is missing"))?
+                        .advance_bounded(chunk, budget)?
+                } else {
+                    self.model
+                        .as_mut()
+                        .ok_or_else(|| error("snapshot header is missing"))?
+                        .advance_bounded(chunk, budget)?
+                };
+                if progress.is_ready() {
+                    let header = &self
+                        .header
+                        .as_ref()
+                        .ok_or_else(|| error("snapshot header is missing"))?
+                        .header;
+                    let next = ordinal
+                        .checked_add(1)
+                        .ok_or_else(|| error("snapshot ordinal overflows"))?;
+                    if kind == ChunkKind::Preserved {
+                        if next == header.chunk_count(ChunkKind::Preserved) {
+                            self.preserved.as_ref().unwrap().validate_complete()?;
+                        }
+                    } else if next
+                        == header
+                            .chunk_count(ChunkKind::Model)
+                            .checked_add(header.chunk_count(ChunkKind::Cells))
+                            .ok_or_else(|| error("snapshot model count overflows"))?
+                    {
+                        self.model.as_ref().unwrap().validate_complete()?;
+                    }
                     self.queue.pop_front();
                 }
                 return Ok(SnapshotProgress::pending());
@@ -1223,16 +1278,9 @@ impl WorkbookSnapshotBuilder {
                     crate::snapshot::step::bytes_at_least(payload.len());
                 }
                 ChunkKind::Yrs => return Err(error("unexpected queued Yrs chunk")),
-                ChunkKind::Model | ChunkKind::Cells => self
-                    .model
-                    .as_mut()
-                    .ok_or_else(|| error("snapshot header is missing"))?
-                    .push_bounded(&chunk, budget)?,
-                ChunkKind::Preserved => self
-                    .preserved
-                    .as_mut()
-                    .ok_or_else(|| error("snapshot header is missing"))?
-                    .push_bounded(&chunk, budget)?,
+                ChunkKind::Model | ChunkKind::Cells | ChunkKind::Preserved => {
+                    return Err(error("unexpected queued snapshot metadata chunk"));
+                }
                 ChunkKind::Facts => {
                     self.facts
                         .as_mut()

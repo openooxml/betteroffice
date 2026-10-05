@@ -1,13 +1,16 @@
-use std::collections::VecDeque;
+use std::collections::LinkedList;
 
 use xlsx_model::styles::{
     Alignment, Border, BorderEdge, BorderStyle, Color, Fill, Font, HAlign, Theme, VAlign, Xf,
 };
 use xlsx_model::{AnchorCell, ChartRefKind};
 
+use crate::snapshot::growth::Growth;
 use crate::snapshot::header::{SnapshotHeader, SnapshotMode};
-use crate::snapshot::wire::{ChunkKind, Reader, Writer, frame, reserve};
-use crate::snapshot::yrs_split::{SplitError, UpdateCursor, split_update_v1_bounded};
+use crate::snapshot::wire::{ChunkKind, Reader, Writer, frame};
+use crate::snapshot::yrs_split::{
+    CausalState, SplitError, UpdateCursor, split_fallback_v1_bounded, split_update_v1_bounded,
+};
 use crate::snapshot::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 
 use super::*;
@@ -585,7 +588,11 @@ struct BaseStreamDecoder {
 }
 
 impl BaseStreamDecoder {
-    fn push(&mut self, mut payload: &[u8], records: &mut VecDeque<Vec<u8>>) -> SnapshotResult<()> {
+    fn push(
+        &mut self,
+        mut payload: &[u8],
+        records: &mut LinkedList<Vec<u8>>,
+    ) -> SnapshotResult<()> {
         while !payload.is_empty() {
             if let Some(length) = self.length {
                 let count = (length - self.record.len()).min(payload.len());
@@ -654,7 +661,15 @@ impl AuthoritySnapshotEncoder {
         let (parts, split_fallback) =
             match split_update_v1_bounded(&update, budget.max_records(), budget.max_bytes()) {
                 Ok(parts) => (parts, None),
-                Err(reason) => (vec![update], Some(reason.reason().to_owned())),
+                Err(reason) => (
+                    split_fallback_v1_bounded(&update, budget.max_records(), budget.max_bytes())
+                        .map_err(|failure| {
+                            SnapshotError::new(format!(
+                                "invalid Yrs snapshot: {}", failure.reason(),
+                            ))
+                        })?,
+                    Some(reason.reason().to_owned()),
+                ),
             };
         let yrs_count = parts.len() as u64;
         Ok(Self {
@@ -696,6 +711,21 @@ impl AuthoritySnapshotEncoder {
 }
 
 impl WorkbookAuthority {
+    #[cfg(test)]
+    pub(crate) fn snapshot_deletion_history_for_test(&self, count: u32) {
+        let map = self.doc.get_or_insert_map("snapshot-deletions");
+        {
+            let mut txn = self.doc.transact_mut();
+            for index in 0..count {
+                map.insert(&mut txn, index.to_string(), index);
+            }
+        }
+        let mut txn = self.doc.transact_mut();
+        for index in 0..count {
+            map.remove(&mut txn, &index.to_string());
+        }
+    }
+
     pub(crate) fn snapshot_identity(&self) -> (u64, String, u64) {
         let Self {
             doc,
@@ -719,6 +749,7 @@ struct BaseBuilder {
     base: Option<WorkbookBase>,
     counts: [usize; BASE_SECTIONS],
     cursor: BaseCursor,
+    growth: Growth<WorkbookBase>,
 }
 
 impl BaseBuilder {
@@ -755,25 +786,6 @@ impl BaseBuilder {
                 styles,
                 tables: Vec::new(),
             });
-            let base = self
-                .base
-                .as_mut()
-                .ok_or_else(|| SnapshotError::new("authority base is missing"))?;
-            reserve(&mut base.defined_names, self.counts[0])?;
-            reserve(&mut base.freeze_panes, self.counts[2])?;
-            reserve(&mut base.formats, self.counts[3])?;
-            reserve(&mut base.col_styles, self.counts[4])?;
-            reserve(&mut base.hyperlinks, self.counts[5])?;
-            reserve(&mut base.charts, self.counts[6])?;
-            reserve(&mut base.hidden_dimensions, self.counts[7])?;
-            reserve(&mut base.shared_strings, self.counts[8])?;
-            reserve(&mut base.styles.fonts, self.counts[9])?;
-            reserve(&mut base.styles.fills, self.counts[10])?;
-            reserve(&mut base.styles.borders, self.counts[11])?;
-            reserve(&mut base.styles.cell_xfs, self.counts[12])?;
-            reserve(&mut base.styles.num_fmts, self.counts[13])?;
-            reserve(&mut base.styles.indexed_colors, self.counts[14])?;
-            reserve(&mut base.tables, self.counts[15])?;
             self.cursor.section = 1;
         } else {
             let base = self
@@ -817,10 +829,44 @@ impl BaseBuilder {
         r.finish()
     }
 
+    fn advance_capacity(&mut self, record: &[u8], budget: SnapshotBudget) -> SnapshotResult<bool> {
+        self.cursor.normalize(&self.counts);
+        let section = usize::from(Reader::new(record).u8()?);
+        if section != self.cursor.section || section > BASE_SECTIONS {
+            return Err(SnapshotError::new("unexpected authority base record"));
+        }
+        if section == 0 {
+            return Ok(true);
+        }
+        let base = self
+            .base
+            .as_mut()
+            .ok_or_else(|| SnapshotError::new("authority base manifest is missing"))?;
+        let g = &mut self.growth;
+        match section {
+            1 => g.ensure(base, |b| Ok(&mut b.defined_names), budget),
+            3 => g.ensure(base, |b| Ok(&mut b.freeze_panes), budget),
+            4 => g.ensure(base, |b| Ok(&mut b.formats), budget),
+            5 => g.ensure(base, |b| Ok(&mut b.col_styles), budget),
+            6 => g.ensure(base, |b| Ok(&mut b.hyperlinks), budget),
+            7 => g.ensure(base, |b| Ok(&mut b.charts), budget),
+            8 => g.ensure(base, |b| Ok(&mut b.hidden_dimensions), budget),
+            9 => g.ensure(base, |b| Ok(&mut b.shared_strings), budget),
+            10 => g.ensure(base, |b| Ok(&mut b.styles.fonts), budget),
+            11 => g.ensure(base, |b| Ok(&mut b.styles.fills), budget),
+            12 => g.ensure(base, |b| Ok(&mut b.styles.borders), budget),
+            13 => g.ensure(base, |b| Ok(&mut b.styles.cell_xfs), budget),
+            14 => g.ensure(base, |b| Ok(&mut b.styles.num_fmts), budget),
+            15 => g.ensure(base, |b| Ok(&mut b.styles.indexed_colors), budget),
+            16 => g.ensure(base, |b| Ok(&mut b.tables), budget),
+            _ => Ok(true),
+        }
+    }
+
     fn is_complete(&self) -> bool {
         let mut cursor = self.cursor.clone();
         cursor.normalize(&self.counts);
-        self.base.is_some() && cursor.section > BASE_SECTIONS
+        self.base.is_some() && cursor.section > BASE_SECTIONS && !self.growth.is_pending()
     }
 
     fn finish(self) -> SnapshotResult<WorkbookBase> {
@@ -836,7 +882,7 @@ pub(crate) struct AuthorityHydrator {
     doc: Doc,
     base: BaseBuilder,
     base_stream: BaseStreamDecoder,
-    pending_base: VecDeque<Vec<u8>>,
+    pending_base: LinkedList<Vec<u8>>,
     expected_base_chunks: u64,
     expected_yrs_chunks: u64,
     base_chunks: u64,
@@ -845,6 +891,7 @@ pub(crate) struct AuthorityHydrator {
     next_sheet_id: u64,
     failed: bool,
     yrs_cursor: Option<UpdateCursor>,
+    causal: CausalState,
 }
 
 fn hydrate_snapshot_doc(doc: &Doc, payload: &[u8]) -> Result<(), String> {
@@ -885,7 +932,7 @@ impl AuthorityHydrator {
             )),
             base: BaseBuilder::default(),
             base_stream: BaseStreamDecoder::default(),
-            pending_base: VecDeque::new(),
+            pending_base: LinkedList::new(),
             expected_base_chunks,
             expected_yrs_chunks,
             base_chunks: 0,
@@ -894,6 +941,7 @@ impl AuthorityHydrator {
             next_sheet_id: header.next_sheet_id,
             failed: false,
             yrs_cursor: None,
+            causal: CausalState::default(),
         })
     }
 
@@ -941,12 +989,28 @@ impl AuthorityHydrator {
             .map_err(|failure| {
                 if failure == SplitError::OversizedStruct {
                     SnapshotError::new("Yrs snapshot record exceeds advance byte budget")
+                } else if failure == SplitError::OversizedDeletion {
+                    SnapshotError::new("Yrs snapshot deletion exceeds advance record budget")
                 } else {
                     SnapshotError::new(format!("invalid Yrs snapshot: {}", failure.reason()))
                 }
             })?
         {
+            if has_pending(&self.doc) {
+                self.failed = true;
+                return Err(SnapshotError::new("authority snapshot has pending Yrs state"));
+            }
+            if let Err(failure) = self.causal.admit(&part.bytes) {
+                self.failed = true;
+                return Err(SnapshotError::new(format!(
+                    "invalid Yrs snapshot: {}", failure.reason(),
+                )));
+            }
             hydrate_snapshot_doc(&self.doc, &part.bytes).map_err(SnapshotError::new)?;
+            if has_pending(&self.doc) {
+                self.failed = true;
+                return Err(SnapshotError::new("authority snapshot has pending Yrs state"));
+            }
             #[cfg(test)]
             crate::snapshot::step::record(part.records, part.bytes.len());
             if !cursor
@@ -969,34 +1033,34 @@ impl AuthorityHydrator {
         if self.failed {
             return Err(SnapshotError::new("authority snapshot hydration failed"));
         }
-        let mut bytes = 0;
-        for index in 0..budget.max_records() {
-            let Some(record) = self.pending_base.front() else {
-                break;
-            };
-            if index > 0 && record.len() > budget.max_bytes().saturating_sub(bytes) {
-                break;
+        if let Some(record) = self.pending_base.front() {
+            if !self.base.advance_capacity(record, budget)? {
+                return Ok(SnapshotProgress::pending());
             }
             let record = self
                 .pending_base
                 .pop_front()
                 .ok_or_else(|| SnapshotError::new("authority base record is missing"))?;
-            bytes = bytes.saturating_add(record.len());
             #[cfg(test)]
             crate::snapshot::step::record(1, record.len());
             if let Err(error) = self.base.push(&record) {
                 self.failed = true;
                 return Err(error);
             }
-            if bytes >= budget.max_bytes() {
-                break;
-            }
         }
         if self.pending_base.is_empty() {
+            if self.base_chunks == self.expected_base_chunks && !self.base.is_complete() {
+                self.failed = true;
+                return Err(SnapshotError::new("authority base is incomplete"));
+            }
             Ok(SnapshotProgress::ready())
         } else {
             Ok(SnapshotProgress::pending())
         }
+    }
+
+    pub(crate) fn has_pending_base(&self) -> bool {
+        !self.pending_base.is_empty()
     }
 
     pub(crate) fn advance_bounded(
@@ -1153,6 +1217,200 @@ mod tests {
             records.push(record);
         }
         records
+    }
+
+    #[test]
+    fn huge_base_manifest_does_not_reserve_declared_strings() {
+        let a = source();
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
+        let mut header = header(&a, &encoder, budget);
+        header.chunk_counts[ChunkKind::AuthorityBase as usize - 1] = 2;
+        let mut manifest = Writer::new();
+        manifest.u8(0);
+        a.base.bootstrap_client_id.write(&mut manifest);
+        a.base.date_system.write(&mut manifest);
+        a.base.fingerprint.write(&mut manifest);
+        a.base.styles.theme.write(&mut manifest);
+        for section in 0..BASE_SECTIONS {
+            manifest.var_usize(if section == 8 { 50_000_000 } else { 0 });
+        }
+        let mut payload = Writer::new();
+        payload.bytes(&manifest.into_bytes());
+        let payload = payload.into_bytes();
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        hydrator.push_base(&payload).unwrap();
+        crate::snapshot::step::reset();
+        assert!(hydrator.advance_bounded(budget).unwrap().is_ready());
+        assert_eq!(hydrator.base.base.as_ref().unwrap().shared_strings.capacity(), 0);
+        let work = crate::snapshot::step::current();
+        assert_eq!(work.records, 1);
+        assert!(work.bytes <= budget.max_bytes());
+        let failure: SnapshotError = hydrator.finish().err().unwrap();
+        assert_eq!(failure.to_string(), "authority snapshot chunks are incomplete");
+
+        header.chunk_counts[ChunkKind::AuthorityBase as usize - 1] = 1;
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        hydrator.push_base(&payload).unwrap();
+        let failure: SnapshotError = hydrator.advance_bounded(budget).unwrap_err();
+        assert_eq!(failure.to_string(), "authority base is incomplete");
+        assert_eq!(hydrator.base.base.as_ref().unwrap().shared_strings.capacity(), 0);
+    }
+
+    #[test]
+    fn nested_base_count_is_refused_without_declared_allocation() {
+        let mut builder = BaseBuilder::default();
+        let a = source();
+        let mut base = (*a.base).clone();
+        base.col_styles = vec![Vec::new()];
+        let mut manifest = Writer::new();
+        manifest.u8(0);
+        write_manifest(&base, &mut manifest);
+        builder.push(&manifest.into_bytes()).unwrap();
+        let mut cursor = BaseCursor { section: 1, ..BaseCursor::default() };
+        let mut refused = false;
+        while let Some(record) = cursor.next(&base) {
+            if record[0] == 5 {
+                let mut record = Writer::new();
+                record.u8(5);
+                record.var_usize(50_000_000);
+                let record = record.into_bytes();
+                let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+                assert!(builder.advance_capacity(&record, budget).unwrap());
+                let failure: SnapshotError = builder.push(&record).unwrap_err();
+                assert_eq!(failure.to_string(), "snapshot payload is truncated");
+                assert!(builder.base.as_ref().unwrap().col_styles.capacity() <= 1);
+                assert!(builder.base.as_ref().unwrap().col_styles.is_empty());
+                refused = true;
+                break;
+            }
+            builder.push(&record).unwrap();
+        }
+        assert!(refused);
+    }
+
+    #[test]
+    fn base_storage_growth_moves_only_budgeted_admitted_records() {
+        let mut a = source();
+        Arc::make_mut(&mut a.base).shared_strings =
+            (0..300).map(|index| index.to_string()).collect();
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
+        let header = header(&a, &encoder, budget);
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        let mut steps = 0;
+        let mut base_chunks = 0;
+        while let Some(chunk) = encoder.next(budget).unwrap() {
+            let (kind, _, payload) = unframe(&chunk).unwrap();
+            if kind == ChunkKind::AuthorityBase {
+                base_chunks += 1;
+                hydrator.push_base(payload).unwrap();
+                loop {
+                    crate::snapshot::step::reset();
+                    let progress = hydrator.advance_bounded(budget).unwrap();
+                    let work = crate::snapshot::step::current();
+                    assert!(work.records <= budget.max_records());
+                    assert!(work.bytes <= budget.max_bytes());
+                    steps += 1;
+                    if progress.is_ready() {
+                        break;
+                    }
+                }
+            } else {
+                while !hydrator.advance_yrs(payload, budget).unwrap().is_ready() {}
+            }
+        }
+        assert!(steps > base_chunks);
+        let restored = hydrator.finish().unwrap();
+        assert_eq!(base_records(&a.base), base_records(&restored.base));
+        assert_eq!(restored.encode_state_as_update_v1(), a.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn advance_refuses_out_of_order_structs_and_deletes_before_integration() {
+        let foreign = Doc::with_client_id(99);
+        let map = foreign.get_or_insert_map("out-of-order");
+        map.insert(&mut foreign.transact_mut(), "first", 1);
+        let before = foreign.transact().state_vector();
+        map.insert(&mut foreign.transact_mut(), "second", 2);
+        let structs = foreign.transact().encode_diff_v1(&before);
+        let before = foreign.transact().state_vector();
+        map.remove(&mut foreign.transact_mut(), "first");
+        let deletes = foreign.transact().encode_diff_v1(&before);
+        let a = source();
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
+        let header = header(&a, &encoder, budget);
+        for payload in [structs, deletes] {
+            let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+            crate::snapshot::step::reset();
+            let failure: SnapshotError = hydrator.advance_yrs(&payload, budget).unwrap_err();
+            assert_eq!(failure.to_string(), "invalid Yrs snapshot: missing_dependency");
+            assert!(hydrator.doc.transact().state_vector().is_empty());
+            assert!(!has_pending(&hydrator.doc));
+            assert_eq!(crate::snapshot::step::current().records, 0);
+        }
+    }
+
+    #[test]
+    fn advance_refuses_recursive_type_deletion_before_integration() {
+        let foreign = Doc::with_client_id(99);
+        let root = foreign.get_or_insert_map("recursive-delete");
+        let nested = root.insert(&mut foreign.transact_mut(), "nested", MapPrelim::default());
+        {
+            let mut txn = foreign.transact_mut();
+            for index in 0..1_000 {
+                nested.insert(&mut txn, index.to_string(), index);
+            }
+        }
+        let update = foreign.transact().encode_state_as_update_v1(&StateVector::default());
+        let a = source();
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
+        let mut header = header(&a, &encoder, budget);
+        header.chunk_counts[ChunkKind::Yrs as usize - 1] = 2;
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        while !hydrator.advance_yrs(&update, budget).unwrap().is_ready() {}
+        let before = hydrator.doc.transact().encode_state_as_update_v1(&StateVector::default());
+        let mut payload = Writer::new();
+        payload.raw(&[0, 1]);
+        payload.var_u64(99);
+        payload.var_u32(1);
+        payload.var_u32(0);
+        payload.var_u32(1);
+        crate::snapshot::step::reset();
+        let failure: SnapshotError = hydrator
+            .advance_yrs(&payload.into_bytes(), budget)
+            .unwrap_err();
+        assert_eq!(failure.to_string(), "invalid Yrs snapshot: retained_deletion");
+        assert_eq!(crate::snapshot::step::current().records, 0);
+        assert_eq!(
+            hydrator.doc.transact().encode_state_as_update_v1(&StateVector::default()),
+            before,
+        );
+        assert!(!has_pending(&hydrator.doc));
+    }
+
+    #[test]
+    fn advance_refuses_delete_range_larger_than_record_budget() {
+        let a = source();
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
+        let header = header(&a, &encoder, budget);
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        let mut payload = Writer::new();
+        payload.raw(&[0, 1]);
+        payload.var_u64(99);
+        payload.var_u32(1);
+        payload.var_u32(0);
+        payload.var_u32(100_000);
+        crate::snapshot::step::reset();
+        let failure: SnapshotError = hydrator
+            .advance_yrs(&payload.into_bytes(), budget)
+            .unwrap_err();
+        assert_eq!(failure.to_string(), "Yrs snapshot deletion exceeds advance record budget");
+        assert_eq!(crate::snapshot::step::current().records, 0);
+        assert!(!has_pending(&hydrator.doc));
     }
 
     #[test]
@@ -1433,6 +1691,53 @@ mod tests {
     }
 
     #[test]
+    fn multi_key_map_fallback_hydrates_through_production_advance() {
+        let a = source();
+        let map = a.doc.get_or_insert_map("production-fallback");
+        let value = Any::Map(Arc::new(HashMap::from([
+            ("first".into(), Any::Number(1.25)),
+            ("second".into(), Any::from("kept")),
+        ])));
+        map.insert(&mut a.doc.transact_mut(), "value", value.clone());
+        let budget = SnapshotBudget::new(2, 16 * 1024).unwrap();
+        let mut encoder = AuthoritySnapshotEncoder::new(&a, budget).unwrap();
+        assert_eq!(encoder.split_fallback().as_deref(), Some("multi_key_map"));
+        let header = header(&a, &encoder, budget);
+        assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
+        let mut hydrator = AuthorityHydrator::new(&header).unwrap();
+        while let Some(chunk) = encoder.next(budget).unwrap() {
+            let (kind, _, payload) = unframe(&chunk).unwrap();
+            match kind {
+                ChunkKind::AuthorityBase => {
+                    hydrator.push_base(payload).unwrap();
+                    while !hydrator.advance_bounded(budget).unwrap().is_ready() {}
+                }
+                ChunkKind::Yrs => loop {
+                    crate::snapshot::step::reset();
+                    let progress = hydrator.advance_yrs(payload, budget).unwrap();
+                    let work = crate::snapshot::step::current();
+                    assert!(work.records <= budget.max_records(), "{work:?}");
+                    assert!(work.bytes <= budget.max_bytes(), "{work:?}");
+                    if progress.is_ready() {
+                        break;
+                    }
+                },
+                _ => panic!("unexpected authority chunk"),
+            }
+        }
+        let restored = hydrator.finish().unwrap();
+        assert_eq!(restored.snapshot_identity(), a.snapshot_identity());
+        assert_eq!(restored.encode_state_vector_v1(), a.encode_state_vector_v1());
+        assert_eq!(restored.materialize().unwrap(), a.materialize().unwrap());
+        let txn = restored.doc.transact();
+        assert_eq!(
+            txn.get_map("production-fallback").unwrap().get(&txn, "value"),
+            Some(Out::Any(value)),
+        );
+        assert!(!restored.has_pending_updates());
+    }
+
+    #[test]
     fn refused_split_falls_back_whole_and_reports() {
         let a = source();
         let map = a.doc.get_or_insert_map("snapshot-fallback");
@@ -1447,7 +1752,35 @@ mod tests {
         let header = header(&a, &encoder, budget);
         assert_eq!(header.chunk_count(ChunkKind::Yrs), 1);
         let mut hydrator = AuthorityHydrator::new(&header).unwrap();
-        push_all(&mut encoder, &mut hydrator, budget);
+        let advance_budget = SnapshotBudget::new(budget.max_records(), 16 * 1024).unwrap();
+        let mut ordinals = [0, 0];
+        while let Some(chunk) = encoder.next(budget).unwrap() {
+            let (kind, ordinal, payload) = unframe(&chunk).unwrap();
+            match kind {
+                ChunkKind::AuthorityBase => {
+                    assert_eq!(ordinal, ordinals[0]);
+                    ordinals[0] += 1;
+                    assert!(payload.len() <= budget.max_bytes());
+                    hydrator.push_base(payload).unwrap();
+                    while !hydrator.advance_bounded(advance_budget).unwrap().is_ready() {}
+                }
+                ChunkKind::Yrs => {
+                    assert_eq!(ordinal, ordinals[1]);
+                    ordinals[1] += 1;
+                    loop {
+                        crate::snapshot::step::reset();
+                        let progress = hydrator.advance_yrs(payload, advance_budget).unwrap();
+                        let work = crate::snapshot::step::current();
+                        assert!(work.records <= advance_budget.max_records());
+                        assert!(work.bytes <= advance_budget.max_bytes());
+                        if progress.is_ready() {
+                            break;
+                        }
+                    }
+                }
+                _ => panic!("unexpected authority chunk"),
+            }
+        }
         let restored = hydrator.finish().unwrap();
         assert_eq!(restored.snapshot_identity(), a.snapshot_identity());
         assert_eq!(

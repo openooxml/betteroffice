@@ -1,4 +1,5 @@
 pub(crate) mod cells;
+pub(crate) mod growth;
 pub(crate) mod header;
 pub(crate) mod model;
 pub(crate) mod package;

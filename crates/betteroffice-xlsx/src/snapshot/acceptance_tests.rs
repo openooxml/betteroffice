@@ -469,6 +469,60 @@ fn snapshot_active_sheet_change_recaptures_with_package_parse() {
 }
 
 #[test]
+fn snapshot_in_flight_encoder_refuses_restored_retained_permission() {
+    let budget = budgets()[0];
+    let worker = worker(&source(false, false));
+    let mut peer = hydrate(&worker, budget);
+    let mut encoder = WorkbookSnapshotEncoder::new(&peer, Some(context()), budget).unwrap();
+    assert!(encoder.retained_package_facts);
+    assert!(encoder.next(&peer).unwrap().is_some());
+    let sheet = peer.active_sheet();
+    peer.set_active_sheet(SheetId(0)).unwrap();
+    peer.set_active_sheet(sheet).unwrap();
+    assert!(encoder.lineage.matches(&peer).unwrap());
+    assert!(peer.snapshot_package_lineage.is_none());
+    let failure: SnapshotError = encoder.next(&peer).unwrap_err();
+    assert_eq!(
+        failure.to_string(),
+        "snapshot retained package permission has changed",
+    );
+    assert!(peer.source_package_is_unmaterialized_for_test());
+}
+
+#[test]
+fn snapshot_large_deletion_history_respects_step_budget_and_worker_identity() {
+    let worker = worker(&source(false, false));
+    worker.authority.snapshot_deletion_history_for_test(20_000);
+    for budget in [budgets()[0], budgets()[1]] {
+        let chunks = encode(&worker, budget);
+        let mut builder = WorkbookSnapshotBuilder::new();
+        for chunk in &chunks {
+            builder.push(chunk).unwrap();
+            assert_step_budget(budget);
+            builder.advance(budget).unwrap();
+            assert_step_budget(budget);
+        }
+        let mut ready = false;
+        for _ in 0..200_000 {
+            ready = builder.advance(budget).unwrap().is_ready();
+            assert_step_budget(budget);
+            if ready {
+                break;
+            }
+        }
+        assert!(ready);
+        let (peer, received_context) = builder.finish().unwrap().into_parts();
+        assert_eq!(received_context, Some(context()));
+        assert_current_identity(&worker, &peer);
+        assert_eq!(
+            worker.encode_state_as_update_v1(),
+            peer.encode_state_as_update_v1(),
+        );
+        assert_eq!(worker.save().unwrap(), peer.save().unwrap());
+    }
+}
+
+#[test]
 fn snapshot_cell_edit_recapture_parses_and_matches_worker_refusal() {
     for budget in budgets() {
         let mut worker = worker(&source(false, false));

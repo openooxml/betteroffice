@@ -4,6 +4,7 @@
 mod builder;
 mod snapshot;
 
+#[doc(hidden)]
 pub use builder::DepGraphBuilder;
 #[doc(hidden)]
 pub use snapshot::SnapshotGraphBuilder;

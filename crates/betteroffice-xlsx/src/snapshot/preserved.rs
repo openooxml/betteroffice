@@ -6,8 +6,9 @@ use xlsx_parse::{SharedStringCells, SheetAxes};
 
 use crate::workbook::PreservedSheetState;
 
-use super::wire::{ChunkKind, Reader, Writer, frame, reserve, unframe};
-use super::{SnapshotBudget, SnapshotError, SnapshotResult};
+use super::growth::Growth;
+use super::wire::{ChunkKind, Reader, Writer, frame, unframe};
+use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 
 const HEADER: u8 = 0;
 const ORIGIN: u8 = 1;
@@ -215,6 +216,8 @@ pub(crate) struct PreservedSnapshotBuilder {
     failed: bool,
     remaining: usize,
     runs: VecDeque<(u8, usize)>,
+    growth: Growth<PreservedSheetState>,
+    offset: usize,
 }
 
 impl PreservedSnapshotBuilder {
@@ -226,6 +229,8 @@ impl PreservedSnapshotBuilder {
             failed: false,
             remaining: 0,
             runs: VecDeque::new(),
+            growth: Growth::default(),
+            offset: 0,
         }
     }
 
@@ -234,6 +239,7 @@ impl PreservedSnapshotBuilder {
         self.push_bounded(payload, SnapshotBudget::new(usize::MAX, usize::MAX)?)
     }
 
+    #[cfg(test)]
     pub(crate) fn push_bounded(
         &mut self,
         payload: &[u8],
@@ -251,6 +257,74 @@ impl PreservedSnapshotBuilder {
         result
     }
 
+    pub(crate) fn advance_bounded(
+        &mut self,
+        chunk: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        if self.failed {
+            return Err(SnapshotError::new("snapshot preservation builder has failed"));
+        }
+        let result = self.advance_inner(chunk, budget);
+        self.failed |= result.as_ref().err().is_some_and(|failure| {
+            failure.to_string() != "snapshot storage exceeds advance byte budget"
+        });
+        result
+    }
+
+    fn advance_inner(
+        &mut self,
+        chunk: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        if chunk.len() > budget.max_bytes() {
+            return Err(SnapshotError::new("snapshot preservation exceeds advance byte budget"));
+        }
+        let (kind, ordinal, payload) = unframe(chunk)?;
+        if kind != ChunkKind::Preserved || ordinal != self.ordinal || payload.is_empty() {
+            return Err(SnapshotError::new("snapshot preservation chunk is missing or reordered"));
+        }
+        let mut r = Reader::new(&payload[self.offset..]);
+        let tag = r.u8()?;
+        if self.started {
+            if self.runs.front().map(|&(expected, _)| expected) != Some(tag)
+                || self.remaining == 0
+            {
+                return Err(SnapshotError::new("snapshot preservation records are reordered"));
+            }
+            let ready = match tag {
+                ORIGIN => self.growth.ensure(&mut self.state, |s| Ok(&mut s.origins), budget)?,
+                STRINGS => self.growth.ensure(&mut self.state, |s| {
+                    Arc::get_mut(&mut s.shared_string_cells)
+                        .ok_or_else(|| SnapshotError::new("snapshot SST cells are already shared"))
+                }, budget)?,
+                AXES => self.growth.ensure(&mut self.state, |s| Ok(&mut s.axes), budget)?,
+                CREATED => self.growth.ensure(&mut self.state, |s| Ok(&mut s.created), budget)?,
+                _ => true,
+            };
+            if !ready {
+                return Ok(SnapshotProgress::pending());
+            }
+            self.read_record(tag, &mut r)?;
+        } else {
+            if tag != HEADER {
+                return Err(SnapshotError::new("snapshot preservation header is missing"));
+            }
+            self.read_header(&mut r)?;
+        }
+        self.offset = payload.len() - r.rest().len();
+        #[cfg(test)]
+        super::step::record(1, chunk.len());
+        if r.is_empty() {
+            self.offset = 0;
+            self.ordinal += 1;
+            Ok(SnapshotProgress::ready())
+        } else {
+            Ok(SnapshotProgress::pending())
+        }
+    }
+
+    #[cfg(test)]
     fn push_inner(&mut self, chunk: &[u8], budget: SnapshotBudget) -> SnapshotResult<()> {
         if chunk.len() > budget.max_bytes() {
             return Err(SnapshotError::new(
@@ -300,17 +374,11 @@ impl PreservedSnapshotBuilder {
             .ok_or_else(|| SnapshotError::new("snapshot preservation count is zero"))?;
         for tag in [ORIGIN, STRINGS, AXES, CREATED] {
             let count = r.var_usize()?;
-            match tag {
-                ORIGIN => reserve(&mut self.state.origins, count)?,
-                STRINGS => reserve(self.shared_string_cells()?, count)?,
-                AXES => reserve(&mut self.state.axes, count)?,
-                CREATED => reserve(&mut self.state.created, count)?,
-                _ => return Err(SnapshotError::new("invalid snapshot preservation tag")),
-            }
             if count != 0 {
                 self.runs.push_back((tag, count));
             }
         }
+        self.validate_counts()?;
         if self.runs.is_empty() != (self.remaining == 0) {
             return Err(SnapshotError::new(
                 "snapshot preservation counts do not match",
@@ -365,6 +433,7 @@ impl PreservedSnapshotBuilder {
             CREATED => self.state.created.push(r.bool()?),
             _ => return Err(SnapshotError::new("invalid snapshot preservation tag")),
         }
+        self.validate_counts()?;
         if self.runs.is_empty() != (self.remaining == 0) {
             return Err(SnapshotError::new(
                 "snapshot preservation counts do not match",
@@ -373,8 +442,37 @@ impl PreservedSnapshotBuilder {
         Ok(())
     }
 
+    fn validate_counts(&self) -> SnapshotResult<()> {
+        let minimum = self.runs.iter().try_fold(0usize, |total, &(_, count)| {
+            total.checked_add(count)
+                .ok_or_else(|| SnapshotError::new("snapshot preservation count overflows usize"))
+        })?;
+        if minimum > self.remaining {
+            return Err(SnapshotError::new("snapshot preservation counts do not match"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_complete(&self) -> SnapshotResult<()> {
+        if !self.started
+            || self.remaining != 0
+            || !self.runs.is_empty()
+            || self.offset != 0
+            || self.growth.is_pending()
+        {
+            return Err(SnapshotError::new("snapshot preservation state is incomplete"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn finish(self) -> SnapshotResult<PreservedSheetState> {
-        if self.failed || !self.started || self.remaining != 0 || !self.runs.is_empty() {
+        if self.failed
+            || !self.started
+            || self.remaining != 0
+            || !self.runs.is_empty()
+            || self.offset != 0
+            || self.growth.is_pending()
+        {
             return Err(SnapshotError::new(
                 "snapshot preservation state is incomplete",
             ));
@@ -399,6 +497,81 @@ mod tests {
             chunks.push(chunk);
         }
         chunks
+    }
+
+    #[test]
+    fn huge_preservation_manifest_does_not_reserve_declared_sheets() {
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let mut w = Writer::new();
+        w.u8(HEADER);
+        w.var_usize(50_000_001);
+        for count in [50_000_000, 0, 0, 0] {
+            w.var_usize(count);
+        }
+        let chunk = frame(ChunkKind::Preserved, 0, &w.into_bytes());
+        let mut builder = PreservedSnapshotBuilder::new();
+        super::super::step::reset();
+        assert!(builder.advance_bounded(&chunk, budget).unwrap().is_ready());
+        assert_eq!(builder.state.origins.capacity(), 0);
+        assert_eq!(builder.state.shared_string_cells.capacity(), 0);
+        assert_eq!(builder.state.axes.capacity(), 0);
+        assert_eq!(builder.state.created.capacity(), 0);
+        let work = super::super::step::current();
+        assert_eq!(work.records, 1);
+        assert!(work.bytes <= budget.max_bytes());
+        let failure: SnapshotError = builder.finish().err().unwrap();
+        assert_eq!(failure.to_string(), "snapshot preservation state is incomplete");
+    }
+
+    #[test]
+    fn nested_preservation_count_is_refused_in_production_advance() {
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let mut w = Writer::new();
+        w.u8(HEADER);
+        w.var_usize(2);
+        for count in [0, 1, 0, 0] {
+            w.var_usize(count);
+        }
+        let mut builder = PreservedSnapshotBuilder::new();
+        builder.advance_bounded(&frame(ChunkKind::Preserved, 0, &w.into_bytes()), budget).unwrap();
+        assert_eq!(builder.state.shared_string_cells.capacity(), 0);
+        let mut w = Writer::new();
+        w.u8(STRINGS);
+        w.var_usize(50_000_000);
+        super::super::step::reset();
+        let failure: SnapshotError = builder.advance_bounded(
+            &frame(ChunkKind::Preserved, 1, &w.into_bytes()), budget,
+        ).unwrap_err();
+        assert_eq!(failure.to_string(), "snapshot preservation counts do not match");
+        assert!(builder.state.shared_string_cells.capacity() <= 1);
+        assert!(builder.state.shared_string_cells[0].is_empty());
+        assert!(super::super::step::current().records <= budget.max_records());
+    }
+
+    #[test]
+    fn preservation_storage_growth_moves_only_budgeted_admitted_records() {
+        let state = PreservedSheetState {
+            origins: vec![None; 300],
+            ..PreservedSheetState::default()
+        };
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let mut builder = PreservedSnapshotBuilder::new();
+        let mut steps = 0;
+        for chunk in encode(&state, budget) {
+            loop {
+                super::super::step::reset();
+                let progress = builder.advance_bounded(&chunk, budget).unwrap();
+                let work = super::super::step::current();
+                assert!(work.records <= budget.max_records());
+                assert!(work.bytes <= budget.max_bytes());
+                steps += 1;
+                if progress.is_ready() {
+                    break;
+                }
+            }
+        }
+        assert!(steps > 301);
+        assert_eq!(builder.finish().unwrap().origins, state.origins);
     }
 
     #[test]

@@ -1,11 +1,5 @@
 use super::{SnapshotError, SnapshotResult};
 
-pub(crate) fn reserve<T>(values: &mut Vec<T>, count: usize) -> SnapshotResult<()> {
-    values
-        .try_reserve_exact(count)
-        .map_err(|_| SnapshotError::new("cannot allocate snapshot records"))
-}
-
 pub(crate) const FORMAT_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

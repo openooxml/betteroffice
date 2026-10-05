@@ -5,6 +5,7 @@ use xlsx_model::{Cell, CellRange, CellRef, ColId, RowId, Sheet, SheetId, Workboo
 use super::{DepGraph, NodeKey};
 
 /// Builds a dependency graph in bounded visits without evaluating formulas.
+#[doc(hidden)]
 pub struct DepGraphBuilder {
     graph: DepGraph,
     phase: Phase,

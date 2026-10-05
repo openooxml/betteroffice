@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_BINARY_REF_NUMBER,
@@ -27,6 +27,7 @@ pub(crate) enum SplitError {
     MissingDependency,
     RetainedDeletion,
     OversizedStruct,
+    OversizedDeletion,
 }
 
 impl SplitError {
@@ -42,6 +43,7 @@ impl SplitError {
             Self::MissingDependency => "missing_dependency",
             Self::RetainedDeletion => "retained_deletion",
             Self::OversizedStruct => "oversized_struct",
+            Self::OversizedDeletion => "oversized_deletion",
         }
     }
 }
@@ -90,6 +92,83 @@ pub(crate) fn split_update_v1_bounded(
         bounded.push(vec![0, 0]);
     }
     Ok(bounded)
+}
+
+pub(crate) fn split_fallback_v1_bounded(
+    update: &[u8],
+    max_records: usize,
+    max_bytes: usize,
+) -> Result<Vec<Vec<u8>>, SplitError> {
+    let mut scanner = Scanner::new(update);
+    scanner.allow_maps = true;
+    let clients = scanner.count()?;
+    for _ in 0..clients {
+        let count = scanner.count()?;
+        scanner.client()?;
+        scanner.clock()?;
+        for _ in 0..count {
+            scanner.block()?;
+        }
+    }
+    let clients = scanner.count()?;
+    let mut oversized_deletion = false;
+    for _ in 0..clients {
+        scanner.client()?;
+        let count = scanner.count()?;
+        for _ in 0..count {
+            let (start, end) = scanner.delete_range()?;
+            oversized_deletion |= (end - start) as usize > max_records;
+        }
+    }
+    if scanner.pos != update.len() {
+        return Err(SplitError::Malformed);
+    }
+    if !oversized_deletion && CausalState::default().admit(update).is_ok() {
+        return Ok(vec![update.to_vec()]);
+    }
+    let mut cursor = UpdateCursor::default();
+    let mut clients: BTreeMap<u64, VecDeque<Vec<u8>>> = BTreeMap::new();
+    let mut deletes = Vec::new();
+    while let Some(part) = cursor.next_oversized(update, 1, max_bytes)? {
+        if part.bytes[0] == 0 {
+            deletes.push(part.bytes);
+        } else {
+            let mut scanner = Scanner::new(&part.bytes);
+            scanner.count()?;
+            scanner.count()?;
+            let client = scanner.client()?;
+            clients.entry(client).or_default().push_back(part.bytes);
+        }
+    }
+    let mut causal = CausalState::default();
+    let mut parts = Vec::new();
+    while !clients.is_empty() {
+        let mut progress = false;
+        for queue in clients.values_mut() {
+            if let Some(part) = queue.front() {
+                match causal.admit(part) {
+                    Ok(()) => {
+                        parts.push(queue.pop_front().ok_or(SplitError::Malformed)?);
+                        progress = true;
+                    }
+                    Err(SplitError::MissingDependency) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if !progress {
+            return Err(SplitError::MissingDependency);
+        }
+        clients.retain(|_, queue| !queue.is_empty());
+    }
+    for part in deletes {
+        causal.admit(&part)?;
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        parts.push(vec![0, 0]);
+    }
+    Ok(parts)
 }
 
 fn split_update_v1_parts(
@@ -252,6 +331,7 @@ pub(crate) struct UpdateCursor {
     phase: u8,
     clients: u32,
     client: Option<(u64, u32, u32)>,
+    delete: Option<(u32, u32)>,
 }
 
 pub(crate) struct UpdatePart {
@@ -291,6 +371,7 @@ impl UpdateCursor {
         }
         let mut next = *self;
         let mut scanner = Scanner::new(update);
+        scanner.allow_maps = true;
         scanner.pos = next.position;
         if next.phase == 0 {
             next.clients = scanner.count()?;
@@ -324,6 +405,33 @@ impl UpdateCursor {
             let (client, clock, remaining) = next.client.ok_or(SplitError::Malformed)?;
             if remaining == 0 {
                 return Err(SplitError::Malformed);
+            }
+            if next.phase == 2 {
+                let (start, end) = match next.delete.take() {
+                    Some(range) => range,
+                    None => scanner.delete_range()?,
+                };
+                let length = (end - start) as usize;
+                if length > max_records && !allow_oversized {
+                    return Err(SplitError::OversizedDeletion);
+                }
+                let records = length.min(max_records);
+                let mut bytes = vec![0, 1];
+                write_var(&mut bytes, client);
+                write_var(&mut bytes, 1);
+                write_var(&mut bytes, u64::from(start));
+                write_var(&mut bytes, records as u64);
+                if bytes.len() > max_bytes && !allow_oversized {
+                    return Err(SplitError::OversizedStruct);
+                }
+                next.position = scanner.pos;
+                if records < length {
+                    next.delete = Some((start + records as u32, end));
+                } else {
+                    next.client = (remaining > 1).then_some((client, 0, remaining - 1));
+                }
+                *self = next;
+                return Ok(Some(UpdatePart { bytes, records }));
             }
             let start = scanner.pos;
             let mut end = start;
@@ -380,7 +488,7 @@ impl UpdateCursor {
     }
 
     pub(crate) fn is_complete(&mut self, update: &[u8]) -> Result<bool, SplitError> {
-        if self.client.is_some() || self.clients != 0 || self.phase == 0 {
+        if self.client.is_some() || self.delete.is_some() || self.clients != 0 || self.phase == 0 {
             return Ok(false);
         }
         let mut scanner = Scanner::new(update);
@@ -397,6 +505,90 @@ impl UpdateCursor {
         self.phase = 2;
         self.position = scanner.pos;
         Ok(true)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct CausalState {
+    clocks: BTreeMap<u64, u32>,
+    kinds: BTreeMap<(u64, u32), (u32, u8)>,
+}
+
+impl CausalState {
+    pub(crate) fn admit(&mut self, update: &[u8]) -> Result<(), SplitError> {
+        let mut scanner = Scanner::new(update);
+        scanner.allow_maps = true;
+        let clients = scanner.count()?;
+        for _ in 0..clients {
+            let count = scanner.count()?;
+            let client = scanner.client()?;
+            let mut clock = scanner.clock()?;
+            if count == 0 || clock != self.clocks.get(&client).copied().unwrap_or_default() {
+                return Err(SplitError::MissingDependency);
+            }
+            for _ in 0..count {
+                let block = scanner.block()?;
+                if block.kind == BLOCK_SKIP_REF_NUMBER {
+                    return Err(SplitError::MissingDependency);
+                }
+                for (index, dependency) in block.dependencies.into_iter().enumerate() {
+                    let Some((dependency_client, dependency_clock)) = dependency else {
+                        continue;
+                    };
+                    if dependency_clock
+                        >= self.clocks.get(&dependency_client).copied().unwrap_or_default()
+                    {
+                        return Err(SplitError::MissingDependency);
+                    }
+                    let kind = self
+                        .kinds
+                        .range(..=(dependency_client, dependency_clock))
+                        .next_back()
+                        .filter(|((known_client, start), (len, _))| {
+                            *known_client == dependency_client && dependency_clock - *start < *len
+                        })
+                        .map(|(_, &(_, kind))| kind);
+                    if (index == 2 && kind != Some(BLOCK_ITEM_TYPE_REF_NUMBER))
+                        || (index < 2 && kind == Some(BLOCK_GC_REF_NUMBER))
+                    {
+                        return Err(SplitError::MissingDependency);
+                    }
+                }
+                if matches!(block.kind, BLOCK_GC_REF_NUMBER | BLOCK_ITEM_TYPE_REF_NUMBER) {
+                    self.kinds.insert((client, clock), (block.len, block.kind));
+                }
+                clock = clock
+                    .checked_add(block.len)
+                    .filter(|clock| *clock <= MAX_CLOCK)
+                    .ok_or(SplitError::Malformed)?;
+                self.clocks.insert(client, clock);
+            }
+        }
+        let clients = scanner.count()?;
+        for _ in 0..clients {
+            let client = scanner.client()?;
+            let count = scanner.count()?;
+            if count == 0 {
+                return Err(SplitError::Malformed);
+            }
+            for _ in 0..count {
+                let (start, end) = scanner.delete_range()?;
+                if end > self.clocks.get(&client).copied().unwrap_or_default() {
+                    return Err(SplitError::MissingDependency);
+                }
+                if self
+                    .kinds
+                    .range((client, start)..(client, end))
+                    .any(|(_, &(_, kind))| kind == BLOCK_ITEM_TYPE_REF_NUMBER)
+                {
+                    return Err(SplitError::RetainedDeletion);
+                }
+            }
+        }
+        if scanner.pos != update.len() {
+            return Err(SplitError::Malformed);
+        }
+        Ok(())
     }
 }
 
@@ -489,11 +681,16 @@ fn validate_deletions(update: &[u8], clients: &HashMap<u64, Client>) -> Result<(
 struct Scanner<'a> {
     bytes: &'a [u8],
     pos: usize,
+    allow_maps: bool,
 }
 
 impl<'a> Scanner<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            allow_maps: false,
+        }
     }
 
     fn byte(&mut self) -> Result<u8, SplitError> {
@@ -611,15 +808,16 @@ impl<'a> Scanner<'a> {
             }
             tag @ (118 | 117) => {
                 let count = usize::try_from(self.var()?).map_err(|_| SplitError::Malformed)?;
-                if tag == 118 && count > 1 {
+                if tag == 118 && count > 1 && !self.allow_maps {
                     return Err(SplitError::UnsupportedMap);
                 }
                 if count > self.bytes.len() - self.pos {
                     return Err(SplitError::Malformed);
                 }
+                let mut keys = BTreeSet::new();
                 for _ in 0..count {
-                    if tag == 118 {
-                        self.string()?;
+                    if tag == 118 && !keys.insert(self.string()?) {
+                        return Err(SplitError::Malformed);
                     }
                     self.any(depth + 1)?;
                 }
@@ -739,9 +937,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn json(&mut self) -> Result<(), SplitError> {
-        let mut json = Json {
-            scanner: Scanner::new(self.string()?.as_bytes()),
-        };
+        let mut scanner = Scanner::new(self.string()?.as_bytes());
+        scanner.allow_maps = self.allow_maps;
+        let mut json = Json { scanner };
         json.value(0)?;
         json.space();
         if json.scanner.pos != json.scanner.bytes.len() {
@@ -874,7 +1072,7 @@ impl Json<'_> {
                     return Ok(());
                 }
                 loop {
-                    if open == b'{' {
+                    if open == b'{' && !self.scanner.allow_maps {
                         self.quoted()?;
                         self.space();
                         if !self.consume(b':') {
@@ -1290,6 +1488,117 @@ mod tests {
     }
 
     #[test]
+    fn fallback_orders_cross_client_dependencies_before_emission() {
+        let first = Doc::with_client_id(7);
+        let map = first.get_or_insert_map("map");
+        map.insert(&mut first.transact_mut(), "nested", MapPrelim::default());
+        let second = Doc::with_client_id(99);
+        apply_raw_part(
+            &second,
+            &first.transact().encode_state_as_update_v1(&StateVector::default()),
+        );
+        let nested = {
+            let txn = second.transact();
+            let Some(Out::YMap(nested)) = txn.get_map("map").unwrap().get(&txn, "nested") else {
+                panic!("missing nested map");
+            };
+            nested
+        };
+        nested.insert(&mut second.transact_mut(), "value", 42);
+        let txn = second.transact();
+        let update = txn.encode_state_as_update_v1(&StateVector::default());
+        let vector = vector_bytes(&txn.state_vector());
+        drop(txn);
+        assert_eq!(
+            split_update_v1_bounded(&update, 1, 384),
+            Err(SplitError::MissingDependency),
+        );
+        let parts = split_fallback_v1_bounded(&update, 1, 384).unwrap();
+        let mut causal = CausalState::default();
+        for part in &parts {
+            causal.admit(part).unwrap();
+        }
+        assert_applied_parts(&update, &vector, 99, &parts, |doc, part| {
+            hydrate_snapshot_part(doc, part).unwrap();
+        });
+    }
+
+    #[test]
+    fn fallback_splits_oversized_deletions_with_multi_key_maps() {
+        let doc = Doc::with_client_id(7);
+        let map = doc.get_or_insert_map("map");
+        map.insert(
+            &mut doc.transact_mut(),
+            "value",
+            Any::Map(std::sync::Arc::new(HashMap::from([
+                ("first".into(), Any::Bool(true)),
+                ("second".into(), Any::Bool(false)),
+            ]))),
+        );
+        let array = doc.get_or_insert_array("deleted");
+        array.insert_range(&mut doc.transact_mut(), 0, 0..100);
+        array.remove_range(&mut doc.transact_mut(), 0, 100);
+        let update = doc.transact().encode_state_as_update_v1(&StateVector::default());
+        assert_eq!(
+            split_update_v1_bounded(&update, 1, 384),
+            Err(SplitError::UnsupportedMap),
+        );
+        let parts = split_fallback_v1_bounded(&update, 1, 384).unwrap();
+        let peer = Doc::with_client_id(7);
+        let mut causal = CausalState::default();
+        let mut deleted = 0;
+        for part in &parts {
+            let mut cursor = UpdateCursor::default();
+            let admitted = cursor.next(part, 1, 384).unwrap().unwrap();
+            assert_eq!(admitted.records, 1);
+            deleted += usize::from(admitted.bytes[0] == 0);
+            causal.admit(&admitted.bytes).unwrap();
+            hydrate_snapshot_part(&peer, &admitted.bytes).unwrap();
+            assert!(cursor.is_complete(part).unwrap());
+            let txn = peer.transact();
+            assert!(txn.store().pending_update().is_none());
+            assert!(txn.store().pending_ds().is_none());
+        }
+        assert_eq!(deleted, 100);
+        assert_eq!(peer.transact().state_vector(), doc.transact().state_vector());
+        assert_eq!(canonical_snapshot(&peer), canonical_snapshot(&doc));
+    }
+
+    #[test]
+    fn bounded_delete_ranges_charge_deleted_clocks_and_preserve_update() {
+        let doc = Doc::with_client_id(7);
+        let array = doc.get_or_insert_array("deleted");
+        array.insert_range(&mut doc.transact_mut(), 0, 0..20_000);
+        array.remove_range(&mut doc.transact_mut(), 0, 20_000);
+        let txn = doc.transact();
+        let update = txn.encode_state_as_update_v1(&StateVector::default());
+        let vector = vector_bytes(&txn.state_vector());
+        drop(txn);
+        for records in [1, 7, 256] {
+            let parts = split_update_v1_bounded(&update, records, 384).unwrap();
+            let mut deleted = 0;
+            let mut causal = CausalState::default();
+            for part in &parts {
+                let mut cursor = UpdateCursor::default();
+                let mut work = 0;
+                while let Some(admitted) = cursor.next(part, records, 384).unwrap() {
+                    causal.admit(&admitted.bytes).unwrap();
+                    if admitted.bytes[0] == 0 {
+                        deleted += admitted.records;
+                    }
+                    work += admitted.records;
+                }
+                assert!(work <= records);
+                assert!(part.len() <= 384);
+            }
+            assert_eq!(deleted, 20_000);
+            assert_applied_parts(&update, &vector, 7, &parts, |doc, part| {
+                hydrate_snapshot_part(doc, part).unwrap();
+            });
+        }
+    }
+
+    #[test]
     fn bounded_subupdates_preserve_structs_deletions_and_full_encode() {
         let doc = Doc::with_client_id(7);
         let map = doc.get_or_insert_map("map");
@@ -1574,6 +1883,20 @@ mod tests {
             }
         });
         assert_boundaries(&update, 4);
+    }
+
+    #[test]
+    fn production_cursor_refuses_duplicate_any_map_keys() {
+        let update = raw_update(1, |encoder| {
+            item(encoder, BLOCK_ITEM_ANY_REF_NUMBER);
+            encoder.write_len(1);
+            encoder.write_all(&[118, 2, 1, b'a', 126, 1, b'a', 126]);
+        });
+        let failure = UpdateCursor::default()
+            .next(&update, 1, 16 * 1024)
+            .err()
+            .unwrap();
+        assert_eq!(failure, SplitError::Malformed);
     }
 
     #[test]

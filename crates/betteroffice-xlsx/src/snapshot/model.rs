@@ -9,8 +9,9 @@ use xlsx_model::{
 };
 
 use super::cells::{CellCursor, read_cell, read_range, read_ref, write_range, write_ref};
-use super::wire::{ChunkKind, Reader, Writer, frame, reserve, unframe};
-use super::{SnapshotBudget, SnapshotError, SnapshotResult};
+use super::growth::Growth;
+use super::wire::{ChunkKind, Reader, Writer, frame, unframe};
+use super::{SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult};
 
 const HEADER: u8 = 0;
 const NAME: u8 = 1;
@@ -211,6 +212,7 @@ struct MetadataCursor {
     sheet: usize,
     sheet_phase: u8,
     map_key: Option<u32>,
+    array_key: Option<(u32, u32)>,
 }
 
 impl Default for MetadataCursor {
@@ -222,6 +224,7 @@ impl Default for MetadataCursor {
             sheet: 0,
             sheet_phase: SHEET,
             map_key: None,
+            array_key: None,
         }
     }
 }
@@ -326,6 +329,7 @@ impl MetadataCursor {
                 };
                 self.index = 0;
                 self.map_key = None;
+                self.array_key = None;
                 continue;
             }
             w.u8(if self.sheet_phase == CHART && self.child != 0 {
@@ -380,11 +384,12 @@ impl MetadataCursor {
                 }
                 ARRAY => {
                     let (at, range) = sheet
-                        .array_formulas()
-                        .nth(self.index)
+                        .array_formulas_after(self.array_key)
+                        .next()
                         .ok_or_else(|| SnapshotError::new("snapshot array cursor is stale"))?;
                     write_ref(w, &at);
                     write_range(w, &range);
+                    self.array_key = Some((at.row, at.col));
                 }
                 _ => unreachable!(),
             }
@@ -408,6 +413,8 @@ pub(crate) struct ModelSnapshotBuilder {
     cell_cursor: CellCursor,
     theme_index: usize,
     array_key: Option<(u32, u32)>,
+    growth: Growth<Workbook>,
+    offset: usize,
 }
 
 impl ModelSnapshotBuilder {
@@ -426,6 +433,8 @@ impl ModelSnapshotBuilder {
             cell_cursor: CellCursor::default(),
             theme_index: 0,
             array_key: None,
+            growth: Growth::default(),
+            offset: 0,
         }
     }
 
@@ -434,6 +443,111 @@ impl ModelSnapshotBuilder {
         self.push_bounded(payload, SnapshotBudget::new(usize::MAX, usize::MAX)?)
     }
 
+    pub(crate) fn advance_bounded(
+        &mut self,
+        chunk: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        if self.failed {
+            return Err(SnapshotError::new("snapshot model builder has failed"));
+        }
+        let result = self.advance_inner(chunk, budget);
+        self.failed |= result.as_ref().err().is_some_and(|failure| {
+            failure.to_string() != "snapshot storage exceeds advance byte budget"
+        });
+        result
+    }
+
+    fn advance_inner(
+        &mut self,
+        chunk: &[u8],
+        budget: SnapshotBudget,
+    ) -> SnapshotResult<SnapshotProgress> {
+        if chunk.len() > budget.max_bytes() {
+            return Err(SnapshotError::new(
+                "snapshot model exceeds advance byte budget",
+            ));
+        }
+        let (kind, ordinal, payload) = unframe(chunk)?;
+        if ordinal != self.ordinal || payload.is_empty() {
+            return Err(SnapshotError::new(
+                "snapshot model chunk is missing or reordered",
+            ));
+        }
+        if kind == ChunkKind::Cells {
+            self.push_inner(chunk, budget)?;
+            return Ok(SnapshotProgress::ready());
+        }
+        if kind != ChunkKind::Model {
+            return Err(SnapshotError::new("wrong snapshot model chunk kind"));
+        }
+        let mut r = Reader::new(&payload[self.offset..]);
+        let tag = r.u8()?;
+        if self.started {
+            if self.runs.front().map(|&(expected, _)| expected) != Some(tag)
+                || self.remaining_records == 0
+            {
+                return Err(SnapshotError::new(
+                    "snapshot metadata records are reordered",
+                ));
+            }
+            if !self.advance_capacity(tag, budget)? {
+                return Ok(SnapshotProgress::pending());
+            }
+            self.read_record(tag, &mut r)?;
+        } else {
+            if tag != HEADER {
+                return Err(SnapshotError::new("snapshot model header is missing"));
+            }
+            self.read_header(&mut r)?;
+        }
+        self.offset = payload.len() - r.rest().len();
+        #[cfg(test)]
+        super::step::record(1, chunk.len());
+        if r.is_empty() {
+            self.offset = 0;
+            self.ordinal += 1;
+            Ok(SnapshotProgress::ready())
+        } else {
+            Ok(SnapshotProgress::pending())
+        }
+    }
+
+    fn advance_capacity(&mut self, tag: u8, budget: SnapshotBudget) -> SnapshotResult<bool> {
+        let g = &mut self.growth;
+        let m = &mut self.model;
+        match tag {
+            NAME => g.ensure(m, |m| Ok(&mut m.defined_names), budget),
+            STRING => g.ensure(m, |m| Ok(&mut m.shared_strings), budget),
+            FONT => g.ensure(m, |m| Ok(&mut m.styles.fonts), budget),
+            FILL => g.ensure(m, |m| Ok(&mut m.styles.fills), budget),
+            BORDER => g.ensure(m, |m| Ok(&mut m.styles.borders), budget),
+            XF => g.ensure(m, |m| Ok(&mut m.styles.cell_xfs), budget),
+            NUM_FMT => g.ensure(m, |m| Ok(&mut m.styles.num_fmts), budget),
+            INDEXED => g.ensure(m, |m| Ok(&mut m.styles.indexed_colors), budget),
+            TABLE => g.ensure(m, |m| Ok(&mut m.tables), budget),
+            TABLE_COLUMN => g.ensure(
+                m, |m| Ok(&mut m.tables.last_mut().unwrap().columns), budget,
+            ),
+            SHEET => g.ensure(m, |m| Ok(&mut m.sheets), budget),
+            HYPERLINK => g.ensure(
+                m, |m| Ok(&mut m.sheets.last_mut().unwrap().hyperlinks), budget,
+            ),
+            MERGE => g.ensure(m, |m| Ok(&mut m.sheets.last_mut().unwrap().merges), budget),
+            COL_STYLE => g.ensure(
+                m, |m| Ok(&mut m.sheets.last_mut().unwrap().col_styles), budget,
+            ),
+            CHART => g.ensure(m, |m| Ok(&mut m.sheets.last_mut().unwrap().charts), budget),
+            CHART_REF => g.ensure(
+                m,
+                |m| Ok(&mut m.sheets.last_mut().unwrap().charts.last_mut().unwrap().refs),
+                budget,
+            ),
+            _ => Ok(true),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn push_bounded(
         &mut self,
         payload: &[u8],
@@ -521,16 +635,6 @@ impl ModelSnapshotBuilder {
             *count = r.var_usize()?;
         }
         self.expected_sheets = counts[9];
-        reserve(&mut self.model.defined_names, counts[0])?;
-        reserve(&mut self.model.shared_strings, counts[1])?;
-        reserve(&mut self.model.styles.fonts, counts[2])?;
-        reserve(&mut self.model.styles.fills, counts[3])?;
-        reserve(&mut self.model.styles.borders, counts[4])?;
-        reserve(&mut self.model.styles.cell_xfs, counts[5])?;
-        reserve(&mut self.model.styles.num_fmts, counts[6])?;
-        reserve(&mut self.model.styles.indexed_colors, counts[7])?;
-        reserve(&mut self.model.tables, counts[8])?;
-        reserve(&mut self.model.sheets, counts[9])?;
         for (tag, count) in [
             (NAME, counts[0]),
             (STRING, counts[1]),
@@ -548,6 +652,7 @@ impl ModelSnapshotBuilder {
                 self.runs.push_back((tag, count));
             }
         }
+        self.validate_counts()?;
         self.started = true;
         Ok(())
     }
@@ -584,8 +689,7 @@ impl ModelSnapshotBuilder {
             }
             INDEXED => self.model.styles.indexed_colors.push(r.str()?.to_owned()),
             TABLE => {
-                let (mut table, columns) = read_table(r)?;
-                reserve(&mut table.columns, columns)?;
+                let (table, columns) = read_table(r)?;
                 self.model.tables.push(table);
                 if columns != 0 {
                     self.runs.push_front((TABLE_COLUMN, columns));
@@ -601,6 +705,7 @@ impl ModelSnapshotBuilder {
             SHEET => self.read_sheet(r)?,
             _ => self.read_sheet_record(tag, r)?,
         }
+        self.validate_counts()?;
         if self.remaining_records == 0 {
             if !self.runs.is_empty()
                 || self.model.sheets.len() != self.expected_sheets
@@ -624,11 +729,10 @@ impl ModelSnapshotBuilder {
         for count in &mut counts {
             *count = r.var_usize()?;
         }
-        reserve(&mut sheet.hyperlinks, counts[0])?;
-        reserve(&mut sheet.merges, counts[1])?;
-        reserve(&mut sheet.col_styles, counts[4])?;
-        reserve(&mut sheet.charts, counts[5])?;
         add_count(&mut self.declared_cells, counts[7])?;
+        if self.declared_cells > self.remaining_cells {
+            return Err(SnapshotError::new("snapshot model cell counts do not match"));
+        }
         if counts[7] != 0 {
             self.sheet_cells
                 .push_back((self.model.sheets.len(), counts[7]));
@@ -682,8 +786,7 @@ impl ModelSnapshotBuilder {
                 xf: r.var_u32()?,
             }),
             CHART => {
-                let (mut chart, refs) = read_chart(r)?;
-                reserve(&mut chart.refs, refs)?;
+                let (chart, refs) = read_chart(r)?;
                 sheet.charts.push(chart);
                 if refs != 0 {
                     self.runs.push_front((CHART_REF, refs));
@@ -708,6 +811,31 @@ impl ModelSnapshotBuilder {
                 self.array_key = Some(key);
             }
             _ => return Err(SnapshotError::new("invalid snapshot metadata tag")),
+        }
+        Ok(())
+    }
+
+    fn validate_counts(&self) -> SnapshotResult<()> {
+        let mut minimum = 0;
+        for &(_, count) in &self.runs {
+            add_count(&mut minimum, count)?;
+        }
+        if minimum > self.remaining_records {
+            return Err(SnapshotError::new("snapshot model counts do not match"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_complete(&self) -> SnapshotResult<()> {
+        if !self.started
+            || self.remaining_records != 0
+            || self.remaining_cells != 0
+            || !self.runs.is_empty()
+            || !self.sheet_cells.is_empty()
+            || self.offset != 0
+            || self.growth.is_pending()
+        {
+            return Err(SnapshotError::new("snapshot model is incomplete"));
         }
         Ok(())
     }
@@ -798,6 +926,9 @@ impl ModelSnapshotBuilder {
     }
 
     pub(crate) fn finish(self) -> SnapshotResult<Workbook> {
+        if self.offset != 0 || self.growth.is_pending() {
+            return Err(SnapshotError::new("snapshot model storage is incomplete"));
+        }
         if self.failed
             || !self.started
             || self.remaining_records != 0
@@ -1296,6 +1427,166 @@ mod tests {
             builder.push(chunk).unwrap();
         }
         builder.finish().unwrap()
+    }
+
+    fn declared_header(records: usize, counts: [usize; 10]) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(HEADER);
+        w.u8(0);
+        w.var_usize(records);
+        w.var_usize(0);
+        for count in counts {
+            w.var_usize(count);
+        }
+        frame(ChunkKind::Model, 0, &w.into_bytes())
+    }
+
+    #[test]
+    fn huge_model_manifest_does_not_reserve_declared_strings() {
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let mut counts = [0; 10];
+        counts[1] = 50_000_000;
+        let mut builder = ModelSnapshotBuilder::new();
+        super::super::step::reset();
+        assert!(builder.advance_bounded(&declared_header(50_000_013, counts), budget)
+            .unwrap().is_ready());
+        assert_eq!(builder.model.shared_strings.capacity(), 0);
+        assert_eq!(builder.model.sheets.capacity(), 0);
+        let work = super::super::step::current();
+        assert_eq!(work.records, 1);
+        assert!(work.bytes <= budget.max_bytes());
+        let failure: SnapshotError = builder.finish().unwrap_err();
+        assert_eq!(failure.to_string(), "snapshot model is incomplete");
+
+        let mut builder = ModelSnapshotBuilder::new();
+        let failure: SnapshotError = builder.advance_bounded(&declared_header(13, counts), budget)
+            .unwrap_err();
+        assert_eq!(failure.to_string(), "snapshot model counts do not match");
+        assert_eq!(builder.model.shared_strings.capacity(), 0);
+    }
+
+    #[test]
+    fn nested_model_counts_are_refused_without_declared_allocation() {
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        for tag in [TABLE, SHEET, CHART] {
+            let mut counts = [0; 10];
+            counts[if tag == TABLE { 8 } else { 9 }] = 1;
+            let mut builder = ModelSnapshotBuilder::new();
+            builder
+                .advance_bounded(
+                    &declared_header(if tag == CHART { 15 } else { 14 }, counts),
+                    budget,
+                )
+                .unwrap();
+            for ordinal in 1..=12 {
+                let mut record = Writer::new();
+                record.u8(THEME);
+                record.str("");
+                builder
+                    .advance_bounded(
+                        &frame(ChunkKind::Model, ordinal, &record.into_bytes()),
+                        budget,
+                    )
+                    .unwrap();
+            }
+            let mut record = Writer::new();
+            if tag == TABLE {
+                record.u8(TABLE);
+                record.str("");
+                record.var_u32(0);
+                write_range(&mut record, &CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)));
+                record.var_u32(0);
+                record.var_u32(0);
+                record.var_usize(50_000_000);
+            } else {
+                record.u8(SHEET);
+                record.str("");
+                record.u8(0);
+                write_format(&mut record, &SheetFormat::default());
+                for index in 0..8 {
+                    record.var_usize(if tag == SHEET && index == 0 { 50_000_000 }
+                        else if tag == CHART && index == 5 { 1 } else { 0 });
+                }
+            }
+            let mut ordinal = 13;
+            if tag == CHART {
+                builder
+                    .advance_bounded(
+                        &frame(ChunkKind::Model, ordinal, &record.into_bytes()),
+                        budget,
+                    )
+                    .unwrap();
+                ordinal += 1;
+                record = Writer::new();
+                record.u8(CHART);
+                record.str("");
+                record.str("");
+                record.var_usize(0);
+                write_anchor(&mut record, &ChartAnchor::Absolute {
+                    pos: AnchorPos { x: 0, y: 0 },
+                    extent: AnchorExtent { cx: 0, cy: 0 },
+                });
+                record.var_usize(50_000_000);
+            }
+            super::super::step::reset();
+            let failure: SnapshotError = builder.advance_bounded(
+                &frame(ChunkKind::Model, ordinal, &record.into_bytes()), budget,
+            ).unwrap_err();
+            assert_eq!(failure.to_string(), "snapshot model counts do not match");
+            assert!(super::super::step::current().records <= budget.max_records());
+            match tag {
+                TABLE => assert_eq!(builder.model.tables[0].columns.capacity(), 0),
+                SHEET => assert_eq!(builder.model.sheets[0].hyperlinks.capacity(), 0),
+                CHART => assert_eq!(builder.model.sheets[0].charts[0].refs.capacity(), 0),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn model_storage_growth_moves_only_budgeted_admitted_records() {
+        let model = Workbook {
+            shared_strings: (0..300).map(|index| index.to_string()).collect(),
+            ..Workbook::default()
+        };
+        let budget = SnapshotBudget::new(1, 16 * 1024).unwrap();
+        let mut builder = ModelSnapshotBuilder::new();
+        let mut steps = 0;
+        for chunk in encode(&model, budget) {
+            loop {
+                super::super::step::reset();
+                let progress = builder.advance_bounded(&chunk, budget).unwrap();
+                let work = super::super::step::current();
+                assert!(work.records <= budget.max_records());
+                assert!(work.bytes <= budget.max_bytes());
+                steps += 1;
+                if progress.is_ready() {
+                    break;
+                }
+            }
+        }
+        assert!(steps > 313);
+        assert_eq!(builder.finish().unwrap(), model);
+    }
+
+    #[test]
+    fn array_anchor_cursor_preserves_order_and_record_bytes() {
+        let mut sheet = Sheet::new("Arrays");
+        for row in (0..50_000).rev() {
+            let at = CellRef::new(row, row % 20);
+            sheet.set_array_formula(at, CellRange::new(at, CellRef::new(row + 1, row % 20 + 1)));
+        }
+        let mut cursor = MetadataCursor { sheet_phase: ARRAY, ..MetadataCursor::default() };
+        for (at, range) in sheet.array_formulas() {
+            let mut actual = Writer::new();
+            assert!(cursor.write_sheet(&mut actual, &sheet).unwrap());
+            let mut expected = Writer::new();
+            expected.u8(ARRAY);
+            write_ref(&mut expected, &at);
+            write_range(&mut expected, &range);
+            assert_eq!(actual.into_bytes(), expected.into_bytes());
+        }
+        assert!(!cursor.write_sheet(&mut Writer::new(), &sheet).unwrap());
     }
 
     fn sample_model() -> Workbook {
