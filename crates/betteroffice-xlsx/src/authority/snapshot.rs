@@ -344,11 +344,12 @@ impl Codec for String {
     fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
         let key = (r.position, std::any::TypeId::of::<Self>());
         let (end, offset) = if let Some(value) = r.state.pending.get(&key) {
-            let (end, offset, _) = value
-                .downcast_ref::<(usize, usize, String)>()
-                .ok_or_else(|| {
-                    SnapshotError::new("authority base string cursor has the wrong type")
-                })?;
+            let (end, offset, _) =
+                value
+                    .downcast_ref::<(usize, usize, String)>()
+                    .ok_or_else(|| {
+                        SnapshotError::new("authority base string cursor has the wrong type")
+                    })?;
             (*end, *offset)
         } else {
             let mut reader = Reader::new(&r.payload[r.position..]);
@@ -448,7 +449,9 @@ impl<T: Codec> Codec for Vec<T> {
         if remaining != 0 {
             let mut child = DecodePreflight::new(r.payload, r.position, r.state);
             child.value::<T>()?;
-            r.cost = r.cost.max(std::mem::size_of::<T>().saturating_add(child.cost));
+            r.cost = r
+                .cost
+                .max(std::mem::size_of::<T>().saturating_add(child.cost));
             r.position = child.position;
             r.complete = child.complete && remaining == 1;
         }
@@ -526,9 +529,11 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
     fn preflight(r: &mut DecodePreflight<'_>) -> SnapshotResult<()> {
         let key = (r.position, std::any::TypeId::of::<Self>());
         let remaining = if let Some(value) = r.state.pending.get(&key) {
-            let state = value.downcast_ref::<(Self, usize, usize)>().ok_or_else(|| {
-                SnapshotError::new("authority base map cursor has the wrong type")
-            })?;
+            let state = value
+                .downcast_ref::<(Self, usize, usize)>()
+                .ok_or_else(|| {
+                    SnapshotError::new("authority base map cursor has the wrong type")
+                })?;
             r.position = state.2;
             state.1 - state.0.len()
         } else {
@@ -545,7 +550,9 @@ impl<K: Codec + Ord, V: Codec> Codec for BTreeMap<K, V> {
         if remaining != 0 {
             let mut child = DecodePreflight::new(r.payload, r.position, r.state);
             child.value::<(K, V)>()?;
-            r.cost = r.cost.max(map_entry_cost::<K, V>().saturating_add(child.cost));
+            r.cost = r
+                .cost
+                .max(map_entry_cost::<K, V>().saturating_add(child.cost));
             r.position = child.position;
             r.complete = child.complete && remaining == 1;
         }
