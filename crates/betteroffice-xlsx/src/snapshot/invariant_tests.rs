@@ -1313,7 +1313,8 @@ fn snapshot_anchor_reconstruction_visits_allocations_and_refusal_are_bounded() {
         builder.push(chunk).unwrap();
     }
     while !builder.authority_validated {
-        builder.advance(budget).unwrap();
+        crate::snapshot::step::reset();
+        builder.advance_unit(budget).unwrap();
         assert_step_budget(budget);
     }
     builder.restored.as_mut().unwrap().model.sheets[0].charts[0].drawing =
