@@ -279,7 +279,7 @@ fn snapshot_initial_peer_matches_sheet_edit_history_and_live_reorder_refusal() {
 }
 
 #[test]
-fn snapshot_initial_envelope_accepts_retained_sheet_maps_and_refuses_non_maps() {
+fn snapshot_initial_envelope_refuses_retained_sheet_maps_and_non_maps() {
     let worker = empty_worker();
     for retained_map in [false, true] {
         let (doc, baseline) = delta_doc(&worker);
@@ -297,13 +297,9 @@ fn snapshot_initial_envelope_accepts_retained_sheet_maps_and_refuses_non_maps() 
             let budget = SnapshotBudget::new(records, bytes).unwrap();
             let chunks = replace_yrs_with_delta(&worker, &doc, &baseline, budget);
             if retained_map {
-                let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
-                let (peer, _) = builder.finish().unwrap().into_parts();
-                assert_eq!(worker.model(), peer.model());
-                assert_eq!(worker.save().unwrap(), peer.save().unwrap());
                 assert_eq!(
-                    StateVector::decode_v1(&peer.encode_state_vector_v1()).unwrap(),
-                    doc.transact().state_vector(),
+                    assert_refuses_before_ready(&chunks, budget),
+                    "snapshot retained sheet map is outside the live sheet order",
                 );
             } else {
                 assert!(
@@ -679,7 +675,7 @@ fn replace_snapshot_model(
 }
 
 #[test]
-fn snapshot_initial_envelope_validates_style_prefixes_and_rejects_contradictions() {
+fn snapshot_initial_envelope_refuses_appended_styles_and_contradictions() {
     let worker = empty_worker();
     let mut model = worker.model().clone();
     let mut format = model.styles.cell_format(None);
@@ -718,9 +714,10 @@ fn snapshot_initial_envelope_validates_style_prefixes_and_rejects_contradictions
         let budget = SnapshotBudget::new(records, bytes).unwrap();
         let envelope = replace_yrs_with_delta(&worker, &doc, &baseline, budget);
         let chunks = replace_snapshot_model(&envelope, &model, budget);
-        let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
-        let (peer, _) = builder.finish().unwrap().into_parts();
-        assert_eq!(&model, peer.model());
+        assert_eq!(
+            assert_refuses_before_ready(&chunks, budget),
+            "snapshot authority and model disagree: style tables extend beyond the authority base",
+        );
         for unused in [false, true] {
             let mut contradictory = model.clone();
             if unused {
@@ -738,6 +735,49 @@ fn snapshot_initial_envelope_validates_style_prefixes_and_rejects_contradictions
                     .contains("authority and model disagree")
             );
         }
+        let mut default_equivalent = worker.model().clone();
+        let style = default_equivalent.styles.cell_xfs.len() as u32;
+        default_equivalent
+            .styles
+            .cell_xfs
+            .push(xlsx_model::styles::Xf {
+                num_fmt_id: Some(0),
+                ..xlsx_model::styles::Xf::default()
+            });
+        default_equivalent.sheets[0].set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                style: Some(style),
+                ..Cell::default()
+            },
+        );
+        let format = default_equivalent.styles.cell_format(Some(style));
+        assert_eq!(format, xlsx_model::styles::CellFormat::default());
+        let payload = serde_json::to_string(&format).unwrap();
+        let key = format!("{:x}", Sha256::digest(payload.as_bytes()));
+        let (doc, baseline) = delta_doc(&worker);
+        {
+            let mut txn = doc.transact_mut();
+            let sheet = txn
+                .get_map("xlsx:sheets")
+                .unwrap()
+                .get(&txn, "sheet:0")
+                .unwrap()
+                .cast::<yrs::MapRef>()
+                .unwrap();
+            sheet
+                .get(&txn, "styles")
+                .unwrap()
+                .cast::<yrs::MapRef>()
+                .unwrap()
+                .insert(&mut txn, "0:0", key);
+        }
+        let envelope = replace_yrs_with_delta(&worker, &doc, &baseline, budget);
+        let chunks = replace_snapshot_model(&envelope, &default_equivalent, budget);
+        assert_eq!(
+            assert_refuses_before_ready(&chunks, budget),
+            "snapshot authority and model disagree: style tables extend beyond the authority base",
+        );
     }
 }
 
