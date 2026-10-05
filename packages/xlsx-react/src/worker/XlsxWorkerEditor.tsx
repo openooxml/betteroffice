@@ -640,7 +640,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
       return read().then((cells) => navigator.clipboard.writeText(toTsv(cells)).then(() => ''));
     };
-    if (kind === 'copy') { void captureClipboard().catch(() => {}); return; }
+    if (kind === 'copy') { void Promise.resolve(captureClipboard()).catch(() => {}); return; }
     void coordinator.clipboard(captureClipboard, async (text, _, markApplied) => {
       if (kind === 'cut') {
         const copied = toTsv(owner.peer!.rangeCells(sheet, selectedRange(selected)));

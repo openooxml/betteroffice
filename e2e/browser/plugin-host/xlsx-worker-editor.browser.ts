@@ -7,8 +7,8 @@ declare global {
 
 test.setTimeout(120_000);
 
-async function open(page: Page) {
-  await page.goto('/xlsx-worker-editor.html');
+async function open(page: Page, holdHydration = false) {
+  await page.goto(holdHydration ? '/xlsx-worker-editor.html?holdHydration=1' : '/xlsx-worker-editor.html');
   await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
   await page.evaluate(() => window.__xlsxWorkerEditor.ready);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
@@ -29,22 +29,26 @@ async function edit(page: Page, value: string, capturePreview = false) {
   if (capturePreview) {
     const preview = page.getByTestId('xlsx-commit-preview');
     await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.previewHeld())).toBe(true);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(false);
     await expect(preview).toHaveText(value);
     await expect(preview).toBeVisible();
     expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([]);
     expect((await preview.screenshot()).byteLength).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.previewHeld())).toBe(true);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(false);
     expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([]);
     await page.evaluate((text) => window.__xlsxWorkerEditor.releasePreview(text), value);
   }
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe(value);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain(value);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.hydrated())).toBe(true);
   await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
 }
 
 test('xlsx worker editor echoes the caret, paints a commit preview and saves editable bytes for reopening', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  await open(page);
+  await open(page, true);
   await edit(page, 'worker edit', true);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([
     { kind: 'painted-preview', text: 'worker edit' },

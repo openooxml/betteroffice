@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test';
 import { selectionAt, StaleProposalError } from '@betteroffice/xlsx';
 import type { EditResult, WorkbookHandle } from '@betteroffice/xlsx';
 import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '@betteroffice/xlsx';

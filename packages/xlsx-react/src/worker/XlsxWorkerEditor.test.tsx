@@ -266,6 +266,40 @@ describe('workbook worker editor', () => {
     expect(painted[painted.length - 1].commands.some((command) => command.op === 'text' && command.text === 'worker:typed')).toBe(true);
   });
 
+  it('paints an accepted commit preview while eager hydration is held before mutation', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    expect(host.hydrate).toHaveBeenCalledTimes(1);
+    expect(api.hydrated).toBe(false);
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'typed before hydration' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
+    await advance(3);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
+    expect(api.hydrated).toBe(false);
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+    expect(host.log).not.toContain('display:peer');
+    await act(async () => hydration.resolve(host.peer));
+    expect(api.hydrated).toBe(true);
+    await tick();
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('typed before hydration');
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    await tick();
+    expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'typed before hydration']]);
+    expect(host.log.indexOf('edit:0:0:0:typed before hydration')).toBeLessThan(host.log.indexOf('display:peer'));
+    expect(host.cells.get('0:0:0')).toBe('typed before hydration');
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(painted[painted.length - 1].commands.some((command) =>
+      command.op === 'text' && command.text === 'peer:typed before hydration')).toBe(true);
+  });
+
   it('keeps typing, caret and accepted commits while eager hydration waits', async () => {
     const host = harness();
     const pending = deferred<WorkbookHandle>();
@@ -414,7 +448,7 @@ describe('workbook worker editor', () => {
     expect(host.cells.get('0:0:0')).toBe('initial');
     await act(async () => hydration.resolve(host.peer));
     await advance(12);
-    expect(copied).toBe('accepted');
+    expect<unknown>(copied).toBe('accepted');
     expect(host.cells.get('0:0:0')).toBe('');
     expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'accepted']]);
     expect(host.editMethods.editCells.mock.calls).toEqual([[0, [{ row: 0, col: 0, input: '' }]]]);

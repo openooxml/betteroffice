@@ -67,6 +67,18 @@ CanvasRenderingContext2D.prototype.fillText = function (this: CanvasRenderingCon
 const rootElement = document.getElementById('worker-editor-root')!;
 const root = createRoot(rootElement);
 const commitOrder: WorkerEditorProbe['commitOrder'] = [];
+let holdingHydration = new URLSearchParams(location.search).get('holdHydration') === '1';
+let hydrationWaiting = false;
+const hydrationRelease = deferred<void>();
+const hydrate = editableWorkbookSessionBackend.hydrate;
+editableWorkbookSessionBackend.hydrate = async (...args) => {
+  if (holdingHydration) {
+    hydrationWaiting = true;
+    await hydrationRelease.promise;
+    hydrationWaiting = false;
+  }
+  return hydrate(...args);
+};
 const attach = editableWorkbookSessionBackend.attach;
 editableWorkbookSessionBackend.attach = (options) => {
   const edit = options.peer.editCell;
@@ -76,22 +88,6 @@ editableWorkbookSessionBackend.attach = (options) => {
   };
   return attach(options);
 };
-const nativeFrame = globalThis.requestAnimationFrame.bind(globalThis);
-const nativeCancel = globalThis.cancelAnimationFrame.bind(globalThis);
-const heldFrames = new Map<number, FrameRequestCallback>();
-let holdingPreview = false;
-let previewFrame: number | null = null;
-globalThis.requestAnimationFrame = (callback) => {
-  const id = nativeFrame((time) => {
-    if (holdingPreview && rootElement.querySelector('[data-testid="xlsx-commit-preview"]')) {
-      if (previewFrame === null) previewFrame = time;
-      else if (previewFrame !== time) { heldFrames.set(id, callback); return; }
-    }
-    callback(time);
-  });
-  return id;
-};
-globalThis.cancelAnimationFrame = (id) => { heldFrames.delete(id); nativeCancel(id); };
 const errors: string[] = [];
 const previews: string[] = [];
 const previewFrames: string[] = [];
@@ -115,22 +111,33 @@ const ready = (async () => {
   await document.fonts.ready;
   open(await workbook());
   const editor = await current.promise;
-  await editor.whenHydrated();
+  if (!holdingHydration) await editor.whenHydrated();
 })();
 
 window.__xlsxWorkerEditor = {
   ready, errors, previews, previewFrames, commitOrder,
-  holdPreview() { commitOrder.length = 0; previewFrame = null; holdingPreview = true; },
-  previewHeld() { return heldFrames.size > 0; },
+  hydrated() { return api?.hydrated ?? false; },
+  holdPreview() {
+    if (!holdingHydration || !hydrationWaiting || api?.hydrated !== false) {
+      throw new Error('Hydration must be held before opening the editor');
+    }
+    commitOrder.length = 0;
+  },
+  previewHeld() {
+    return holdingHydration && hydrationWaiting && api?.hydrated === false &&
+      rootElement.querySelector('[data-testid="xlsx-commit-preview"]') !== null;
+  },
   releasePreview(text) {
+    if (!holdingHydration || !hydrationWaiting || api?.hydrated !== false) {
+      throw new Error('Hydration preceded the preview screenshot');
+    }
     if (commitOrder.length > 0) throw new Error('Mutation preceded the preview screenshot');
     if (rootElement.querySelector('[data-testid="xlsx-commit-preview"]')?.textContent !== text) {
       throw new Error('Pending text changed before the preview screenshot');
     }
     commitOrder.push({ kind: 'painted-preview', text });
-    holdingPreview = false;
-    for (const callback of heldFrames.values()) nativeFrame(callback);
-    heldFrames.clear();
+    holdingHydration = false;
+    hydrationRelease.resolve();
   },
   paintedTexts() {
     const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-testid="xlsx-scroll"] canvas');

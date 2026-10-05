@@ -4,6 +4,7 @@ export interface WorkerEditorProbe {
   previews: string[];
   previewFrames: string[];
   commitOrder: { kind: 'painted-preview' | 'mutator-entry'; text: string }[];
+  hydrated(): boolean;
   holdPreview(): void;
   previewHeld(): boolean;
   releasePreview(text: string): void;
