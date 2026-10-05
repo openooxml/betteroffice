@@ -4094,18 +4094,9 @@ fn table_cell_paragraph_formatting(
         field(rows.get(row_index), "formatting"),
         "gridBefore",
     ))
-    .unwrap_or(0.0)
-    .clamp(0.0, f64::from(u16::MAX)) as usize;
-    let bound = usize::from(u16::MAX);
-    let start_column = start_column
-        .min(bound)
-        .checked_add(grid_before)
-        .unwrap_or(bound);
-    let end_column = end_column
-        .min(bound)
-        .checked_add(grid_before)
-        .unwrap_or(bound);
-    let columns = columns.min(bound);
+    .unwrap_or(0.0) as usize;
+    let start_column = start_column + grid_before;
+    let end_column = end_column + grid_before;
     let at_first_row = first_row && row_index == 0;
     let at_last_row = last_row && row_index + 1 == rows.len();
     let at_first_column = first_column && start_column == 0;
