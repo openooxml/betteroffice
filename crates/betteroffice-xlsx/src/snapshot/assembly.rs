@@ -472,6 +472,7 @@ fn count_chunk(counts: &mut [u64; 9], chunk: &[u8]) -> SnapshotResult<()> {
         .checked_add(1)
         .ok_or_else(|| error("snapshot chunk count overflows"))?;
     Ok(())
+}
 
 struct Fragment {
     kind: ChunkKind,
