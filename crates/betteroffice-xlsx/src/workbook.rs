@@ -684,8 +684,14 @@ impl Workbook {
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
         validate_collaboration_state(migrated.len(), candidate.state_vector_entries())?;
-        let (graph, recalc) =
-            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
+        let (graph, recalc) = recalculate_model(
+            Some(&self.model),
+            &mut model,
+            None,
+            &[],
+            options.now_serial,
+            self.rand_seed,
+        );
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
@@ -842,8 +848,14 @@ impl Workbook {
         let mut model = staged.model;
         retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
-        let (graph, recalc) =
-            rebuild_and_recalc_all_with_seed(&mut model, options.now_serial, self.rand_seed);
+        let (graph, recalc) = recalculate_model(
+            Some(&self.model),
+            &mut model,
+            None,
+            &[],
+            options.now_serial,
+            self.rand_seed,
+        );
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
@@ -1394,6 +1406,12 @@ impl Workbook {
             at: cell,
             cell: state,
         }];
+        let mut current = self.is_collaborative().then(|| self.model.clone());
+        if let Some(current) = &mut current {
+            for op in &ops {
+                xlsx_ops::apply_in_place(current, op)?;
+            }
+        }
         let update = self.commit_user(&ops)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
@@ -1402,13 +1420,15 @@ impl Workbook {
         );
         mark(EditStage::Applied);
         let seeds = [(sheet, cell)];
-        let result = recalc_after_with_seed(
+        let (graph, result) = recalculate_model(
+            current.as_ref(),
             &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
+            self.graph.take(),
             &seeds,
             options.now_serial,
             self.rand_seed,
         );
+        self.graph = Some(graph);
         mark(EditStage::Recalculated);
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
@@ -1461,13 +1481,14 @@ impl Workbook {
             inverse.extend(chunk);
         }
         self.ensure_graph();
-        let prepared = self.prepare_commit(
+        let mut prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
             SyncOrigin::User,
             CommitHistory::Separate,
             None,
         )?;
+        let current = prepared.calculation_state.take();
         let update = self.commit_prepared(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
@@ -1480,13 +1501,15 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after_with_seed(
+        let (graph, result) = recalculate_model(
+            current.as_ref(),
             &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
+            self.graph.take(),
             &seeds,
             options.now_serial,
             self.rand_seed,
         );
+        self.graph = Some(graph);
         let result = self.mutation_result(true, result, &seeds);
         self.publish(update);
         Ok(result)
@@ -1547,20 +1570,21 @@ impl Workbook {
             inverse.extend(chunk);
         }
         let active_name = self.active_sheet_name();
-        let prepared = self.prepare_commit(
+        let mut prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
             SyncOrigin::User,
             CommitHistory::Separate,
             None,
         )?;
+        let current = prepared.calculation_state.take();
         let update = self.commit_prepared(prepared)?;
         self.restore_active_sheet(active_name.as_deref());
         if invalidates_proposals {
             self.proposals.clear();
         }
         mark(EditStage::Applied);
-        let result = self.rebuild_and_recalculate(options);
+        let result = self.rebuild_and_recalculate_preserving(options, current.as_ref());
         mark(EditStage::Recalculated);
         self.publish(update);
         Ok(MutationResult {
@@ -1762,6 +1786,14 @@ impl Workbook {
         let before = self.model.clone();
         let mut restored = history.model;
         retain_array_formulas(&self.model, &mut restored);
+        let (graph, result) = recalculate_model(
+            Some(&before),
+            &mut restored,
+            None,
+            &[],
+            options.now_serial,
+            self.rand_seed,
+        );
         self.install_model(restored)?;
         self.invalidate_sheet_info();
         self.edited_since_open = true;
@@ -1769,7 +1801,10 @@ impl Workbook {
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
         self.proposals.clear();
-        let result = self.rebuild_and_recalculate(options);
+        self.recalculated_since_open = true;
+        self.graph = Some(graph);
+        let result = calculation_result(&result);
+        self.last_calculation = result.clone();
         let changed = changed_cells_between(&before, &self.model);
         self.publish(Some(history.update));
         Ok(MutationResult {
@@ -1798,7 +1833,14 @@ impl Workbook {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
         }
-        rebuild_and_recalc_all_with_seed(&mut preview, options.now_serial, self.rand_seed);
+        recalculate_model(
+            None,
+            &mut preview,
+            None,
+            &[],
+            options.now_serial,
+            self.rand_seed,
+        );
 
         let mut edits = Vec::with_capacity(request.edits.len());
         for edit in request.edits {
@@ -1907,7 +1949,14 @@ impl Workbook {
         }
         if !force {
             let mut review = preview.clone();
-            rebuild_and_recalc_all_with_seed(&mut review, options.now_serial, self.rand_seed);
+            recalculate_model(
+                None,
+                &mut review,
+                None,
+                &[],
+                options.now_serial,
+                self.rand_seed,
+            );
             let mut refreshed = proposal.clone();
             for edit in &mut refreshed.edits {
                 edit.new_text = display_text_at(
@@ -1935,13 +1984,14 @@ impl Workbook {
             inverse.extend(chunk);
         }
         self.ensure_graph();
-        let prepared = self.prepare_commit(
+        let mut prepared = self.prepare_commit(
             ops,
             StagedApply::new(preview, inverse),
             SyncOrigin::Agent,
             CommitHistory::Separate,
             None,
         )?;
+        let current = prepared.calculation_state.take();
         let update = self.commit_prepared(prepared)?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
@@ -1954,13 +2004,15 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell, _)| (*sheet, *cell))
             .collect();
-        let result = recalc_after_with_seed(
+        let (graph, result) = recalculate_model(
+            current.as_ref(),
             &mut self.model,
-            self.graph.as_mut().expect("graph initialized"),
+            self.graph.take(),
             &seeds,
             options.now_serial,
             self.rand_seed,
         );
+        self.graph = Some(graph);
         let mutation = self.mutation_result(true, result, &seeds);
         self.proposals.remove(id);
         self.publish(update);
@@ -2391,7 +2443,7 @@ impl Workbook {
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
             let mut model = staged.model;
-            retain_formula_caches(&self.model, &mut model);
+            retain_formula_caches(&self.model, &mut model, false);
             retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
             self.update_sheet_info_cache(ops, &prior_styles);
@@ -2607,10 +2659,24 @@ impl Workbook {
     }
 
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
+        self.rebuild_and_recalculate_preserving(options, None)
+    }
+
+    fn rebuild_and_recalculate_preserving(
+        &mut self,
+        options: CalculationOptions,
+        current: Option<&WorkbookModel>,
+    ) -> CalculationResult {
         self.bump_model_epoch();
         self.recalculated_since_open = true;
-        let (graph, result) =
-            rebuild_and_recalc_all_with_seed(&mut self.model, options.now_serial, self.rand_seed);
+        let (graph, result) = recalculate_model(
+            current,
+            &mut self.model,
+            None,
+            &[],
+            options.now_serial,
+            self.rand_seed,
+        );
         self.graph = Some(graph);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
@@ -2948,12 +3014,40 @@ fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel)
     }
 }
 
-fn retain_formula_caches(current: &WorkbookModel, projected: &mut WorkbookModel) {
+fn recalculate_model(
+    current: Option<&WorkbookModel>,
+    model: &mut WorkbookModel,
+    graph: Option<DepGraph>,
+    seeds: &[(SheetId, CellRef)],
+    now_serial: Option<f64>,
+    rand_seed: Option<u32>,
+) -> (DepGraph, RecalcResult) {
+    let (graph, result) = match graph {
+        Some(mut graph) => {
+            let result = recalc_after_with_seed(model, &mut graph, seeds, now_serial, rand_seed);
+            (graph, result)
+        }
+        None => rebuild_and_recalc_all_with_seed(model, now_serial, rand_seed),
+    };
+    if graph.is_recalculation_pending()
+        && let Some(current) = current
+    {
+        retain_array_formulas(current, model);
+        retain_formula_caches(current, model, true);
+    }
+    (graph, result)
+}
+
+fn retain_formula_caches(
+    current: &WorkbookModel,
+    projected: &mut WorkbookModel,
+    retain_spills: bool,
+) {
     for (sheet_index, sheet) in projected.sheets.iter_mut().enumerate() {
         let Some(current_sheet) = current.sheets.get(sheet_index) else {
             continue;
         };
-        let caches = sheet
+        let mut caches = sheet
             .iter_cells()
             .filter_map(|(at, cell)| {
                 let formula = cell.formula.as_deref()?;
@@ -2962,8 +3056,25 @@ fn retain_formula_caches(current: &WorkbookModel, projected: &mut WorkbookModel)
                     .then(|| (at, current_cell.value.clone()))
             })
             .collect::<Vec<_>>();
+        if retain_spills {
+            for (_, range) in sheet.array_formulas() {
+                let cells = current_sheet
+                    .cells_in_range(range)
+                    .map(|(at, _)| (at.row, at.col))
+                    .chain(sheet.cells_in_range(range).map(|(at, _)| (at.row, at.col)))
+                    .collect::<BTreeSet<_>>();
+                for (row, col) in cells {
+                    let at = CellRef::new(row, col);
+                    let value = current_sheet
+                        .cell(at)
+                        .map(|cell| cell.value.clone())
+                        .unwrap_or_default();
+                    caches.push((at, value));
+                }
+            }
+        }
         for (at, value) in caches {
-            let mut cell = sheet.cell(at).cloned().expect("cache target exists");
+            let mut cell = sheet.cell(at).cloned().unwrap_or_default();
             cell.value = value;
             sheet.set_cell(at, cell);
         }

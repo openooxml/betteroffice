@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    CalculationOptions, Cell, CellRange, CellRef, CellValue, Sheet, SheetId, Workbook,
-    WorkbookModel,
+    CalculationOptions, Cell, CellAddress, CellInput, CellRange, CellRef, CellValue, Sheet,
+    SheetId, Workbook, WorkbookModel,
 };
 use serde_json::json;
 use xlsx_model::{DefinedName, ErrorValue};
@@ -214,6 +214,228 @@ fn clockless_full_recalculation_preserves_caches_and_arrays() {
     assert!(result.cycle_cells.is_empty());
     assert!(result.limited_cells.is_empty());
     assert_preserved_save(&workbook, &bytes);
+}
+
+fn clock(now: f64) -> CalculationOptions {
+    CalculationOptions {
+        now_serial: Some(now),
+    }
+}
+
+fn collaborative_calculation_values(workbook: &Workbook) -> Vec<CellValue> {
+    ["B1", "A3", "B3", "A5", "B5"]
+        .iter()
+        .map(|address| value(workbook, address))
+        .collect()
+}
+
+fn recalculate_and_save_peer(workbook: &mut Workbook) -> Vec<CellValue> {
+    workbook.recalculate_all(clock(46_000.25));
+    workbook.save().unwrap();
+    let values = collaborative_calculation_values(workbook);
+    assert_eq!(
+        values,
+        vec![
+            number(46_000.25),
+            number(46_001.0),
+            number(46_002.0),
+            number(46_001.0),
+            number(46_002.0),
+        ]
+    );
+    values
+}
+
+fn assert_collaborative_clocked_catch_up(workbook: &mut Workbook) {
+    let parts = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    assert!(
+        std::str::from_utf8(part(&parts, "xl/workbook.xml"))
+            .unwrap()
+            .contains("fullCalcOnLoad=\"1\"")
+    );
+    for (anchor, range) in [("A3", "A3:B3"), ("A5", "A5:B5")] {
+        assert_eq!(
+            workbook
+                .sheet(SheetId(1))
+                .unwrap()
+                .array_formula(cell(anchor)),
+            Some(CellRange::parse_a1(range).unwrap())
+        );
+    }
+    workbook.recalculate_all(clock(47_000.5));
+    assert_eq!(
+        collaborative_calculation_values(workbook),
+        vec![
+            number(47_000.5),
+            number(47_001.0),
+            number(47_002.0),
+            number(47_001.0),
+            number(47_002.0),
+        ]
+    );
+}
+
+#[test]
+fn clockless_remote_update_preserves_current_formula_and_spill_caches() {
+    let bytes = fixture();
+    let mut receiver = Workbook::open_collaborative(&bytes, 1).unwrap();
+    let mut sender = Workbook::open_collaborative(&bytes, 2).unwrap();
+    let before = recalculate_and_save_peer(&mut receiver);
+    let vector = receiver.encode_state_vector_v1();
+    sender
+        .edit_cell(SheetId(0), cell("Z1"), "7", CalculationOptions::default())
+        .unwrap();
+    let update = sender.encode_diff_v1(&vector).unwrap();
+    let result = receiver
+        .apply_update_v1(&update, CalculationOptions::default())
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(
+        result.changed,
+        vec![CellAddress {
+            sheet: SheetId(0),
+            cell: cell("Z1"),
+        }]
+    );
+    assert_eq!(collaborative_calculation_values(&receiver), before);
+    assert_eq!(
+        receiver
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("Z1"))
+            .unwrap()
+            .value,
+        number(7.0)
+    );
+    assert_collaborative_clocked_catch_up(&mut receiver);
+}
+
+#[test]
+fn clockless_collaborative_undo_preserves_current_formula_and_spill_caches() {
+    let mut workbook = Workbook::open_collaborative(&fixture(), 1).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("Z1"), "7", clock(46_000.25))
+        .unwrap();
+    let before = recalculate_and_save_peer(&mut workbook);
+    let result = workbook.undo(CalculationOptions::default()).unwrap();
+    assert!(result.applied);
+    assert_eq!(
+        result.changed,
+        vec![CellAddress {
+            sheet: SheetId(0),
+            cell: cell("Z1"),
+        }]
+    );
+    assert_eq!(collaborative_calculation_values(&workbook), before);
+    assert!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("Z1"))
+            .is_none()
+    );
+    assert_collaborative_clocked_catch_up(&mut workbook);
+}
+
+#[test]
+fn clockless_collaborative_redo_preserves_current_formula_and_spill_caches() {
+    let mut workbook = Workbook::open_collaborative(&fixture(), 1).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("Z1"), "7", clock(46_000.25))
+        .unwrap();
+    workbook.undo(clock(46_000.25)).unwrap();
+    let before = recalculate_and_save_peer(&mut workbook);
+    let result = workbook.redo(CalculationOptions::default()).unwrap();
+    assert!(result.applied);
+    assert_eq!(
+        result.changed,
+        vec![CellAddress {
+            sheet: SheetId(0),
+            cell: cell("Z1"),
+        }]
+    );
+    assert_eq!(collaborative_calculation_values(&workbook), before);
+    assert_collaborative_clocked_catch_up(&mut workbook);
+}
+
+#[test]
+fn clockless_collaborative_single_edit_preserves_current_formula_and_spill_caches() {
+    let mut workbook = Workbook::open_collaborative(&fixture(), 1).unwrap();
+    let before = recalculate_and_save_peer(&mut workbook);
+    let result = workbook
+        .edit_cell(SheetId(0), cell("Z1"), "7", CalculationOptions::default())
+        .unwrap();
+    assert!(result.applied);
+    assert!(result.changed.is_empty());
+    assert_eq!(collaborative_calculation_values(&workbook), before);
+    assert_eq!(
+        workbook
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("Z1"))
+            .unwrap()
+            .value,
+        number(7.0)
+    );
+    assert_collaborative_clocked_catch_up(&mut workbook);
+}
+
+#[test]
+fn clockless_collaborative_batch_preserves_current_formula_and_spill_caches() {
+    let mut workbook = Workbook::open_collaborative(&fixture(), 1).unwrap();
+    let before = recalculate_and_save_peer(&mut workbook);
+    let request = json!({
+        "expectVersion": workbook.version(),
+        "steps": [{
+            "op": "setCellInputs",
+            "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": "Z1:Z2" } },
+            "inputs": [["7"], ["8"]]
+        }]
+    });
+    let result: serde_json::Value =
+        serde_json::from_str(&workbook.apply_edits_json(&request.to_string()).unwrap()).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["applied"], true);
+    assert_eq!(result["calculation"]["changed"], json!([]));
+    assert_eq!(collaborative_calculation_values(&workbook), before);
+    for (address, expected) in [("Z1", 7.0), ("Z2", 8.0)] {
+        assert_eq!(
+            workbook
+                .sheet(SheetId(0))
+                .unwrap()
+                .cell(cell(address))
+                .unwrap()
+                .value,
+            number(expected)
+        );
+    }
+    assert_collaborative_clocked_catch_up(&mut workbook);
+}
+
+#[test]
+fn clockless_collaborative_edit_cells_preserves_current_formula_and_spill_caches() {
+    let mut workbook = Workbook::open_collaborative(&fixture(), 1).unwrap();
+    let before = recalculate_and_save_peer(&mut workbook);
+    let result = workbook
+        .edit_cells(
+            SheetId(0),
+            &[
+                CellInput {
+                    cell: cell("Z1"),
+                    input: "7".into(),
+                },
+                CellInput {
+                    cell: cell("Z2"),
+                    input: "8".into(),
+                },
+            ],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert!(result.changed.is_empty());
+    assert_eq!(collaborative_calculation_values(&workbook), before);
+    assert_collaborative_clocked_catch_up(&mut workbook);
 }
 
 #[test]

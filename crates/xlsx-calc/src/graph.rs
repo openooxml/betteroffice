@@ -186,6 +186,10 @@ impl DepGraph {
         self.pending_recalculation |= previous.pending_recalculation;
     }
 
+    pub fn is_recalculation_pending(&self) -> bool {
+        self.pending_recalculation
+    }
+
     pub(crate) fn begin_recalculation(&mut self, now_serial: Option<f64>) -> Option<bool> {
         if now_serial.is_none() && (!self.clock_formulas.is_empty() || self.clock_names != 0) {
             self.pending_recalculation = true;
