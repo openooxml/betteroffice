@@ -1690,27 +1690,30 @@ mod tests {
     }
 
     #[test]
-    fn scatter_auto_y_bounds_ignore_values_without_an_x() {
-        let mut paired = scatter_space();
-        for axis in paired.axis_list.as_mut().unwrap() {
-            axis.min = None;
-            axis.max = None;
-        }
-        paired.plot_groups[0].series[0].x_values = Some(vec![1.0, 9.0]);
-        paired.plot_groups[0].series[0].values = vec![5.0, 10.0];
-        let (expected, _) = render_scatter(&paired);
-        let expected = scatter_centers(&expected);
-        assert_eq!(expected.len(), 2);
+    fn scatter_auto_y_bounds_include_values_without_an_x_as_on_main() {
         for (x_values, values) in [
             (vec![1.0, 9.0], vec![5.0, 10.0, 1e9]),
             (vec![1.0, f64::NAN, 9.0], vec![5.0, 1e9, 10.0]),
         ] {
-            let mut space = paired.clone();
+            let mut space = scatter_space();
+            for axis in space.axis_list.as_mut().unwrap() {
+                axis.min = None;
+                axis.max = None;
+            }
             space.plot_groups[0].series[0].x_values = Some(x_values);
             space.plot_groups[0].series[0].values = values;
             let (commands, regions) = render_scatter(&space);
             assert!(!regions[0].placeholder);
-            assert_scatter_centers(&commands, &expected);
+            assert_scatter_centers(
+                &commands,
+                &[
+                    (80.0, (240.0 - 180.0 * (5.0 / 1.2e9)) as f32),
+                    (320.0, (240.0 - 180.0 * (10.0 / 1.2e9)) as f32),
+                ],
+            );
+            assert!(commands.iter().any(|command| {
+                matches!(command, DrawCmd::Text { text, .. } if text.as_ref() == "1200000000")
+            }));
         }
     }
 
