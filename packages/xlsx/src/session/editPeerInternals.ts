@@ -3,6 +3,7 @@ import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod, type WorkbookRepla
 
 export interface WorkbookEditPeerOperations {
   fail(error: unknown): void;
+  whenAcknowledged(): Promise<void>;
   applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
   applyRecoveryOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
 }

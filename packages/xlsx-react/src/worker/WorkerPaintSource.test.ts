@@ -93,183 +93,142 @@ function harness(onPublish?: (painted: WorkerPaintResult) => void) {
 
 describe('WorkerPaintSource', () => {
   for (const result of ['accepted', 'failed'] as const) {
-    test(`settles an outcome captured before its publication is issued when ${result}`, async () => {
+    test(`coalesces scheduled paints until RAF resumes (${result})`, async () => {
       const { source, requests, paints, errors, callbacks, tick, respond } = harness();
-      source.scheduleEdit();
-      const outcome = source.publicationOutcome!;
-      expect(outcome).not.toBeNull();
-      expect(source.issuedPublicationOutcome).toBeNull();
+      source.schedule();
       expect(requests).toHaveLength(0);
       expect(callbacks.size).toBe(1);
-      let settled = false;
-      void outcome.then(() => { settled = true; }, () => { settled = true; });
-      await Promise.resolve();
-      expect(settled).toBe(false);
       tick();
       expect(requests).toHaveLength(1);
-      expect(source.issuedPublicationOutcome).toBe(outcome);
       if (result === 'failed') {
-        const failure = new Error('Unissued predecessor publication failed');
+        const failure = new Error('Worker paint failed');
         requests[0].reply.reject(failure);
-        await expect(outcome).rejects.toBe(failure);
+        await requests[0].reply.promise.catch(() => {});
         expect(errors).toEqual([failure]);
         expect(paints).toEqual([]);
       } else {
         await respond(0, frame(requests[0].request));
-        await expect(outcome).resolves.toBeUndefined();
         expect(errors).toEqual([]);
         expect(paints).toHaveLength(1);
       }
-      expect(source.publicationOutcome).toBeNull();
     });
   }
 
-  test('settles every coalesced edit slot after one accepted publication', async () => {
+  test('coalesces edit paints into one latest sequence request', async () => {
     const { source, state, requests, callbacks, tick, respond } = harness();
     state.sentSequence = 1;
-    source.scheduleEdit();
-    const first = source.publicationOutcome!;
+    source.schedule();
     state.sentSequence = 2;
-    source.scheduleEdit();
-    const second = source.publicationOutcome!;
-    expect(second).not.toBe(first);
+    source.schedule();
     expect(callbacks.size).toBe(1);
     tick();
     expect(requests).toHaveLength(1);
     await respond(0, frame(requests[0].request, 2));
-    await expect(first).resolves.toBeUndefined();
-    await expect(second).resolves.toBeUndefined();
-    expect(source.publicationOutcome).toBeNull();
+    expect(source.painted?.sequence).toBe(2);
   });
 
   for (const result of ['accepted', 'failed'] as const) {
-    test(`rebinds an unissued edit slot after a stale viewport rejection until ${result}`, async () => {
+    test(`drops stale viewport failures and processes the latest frame (${result})`, async () => {
       const { source, state, requests, errors, callbacks, tick, respond } = harness();
-      source.scheduleEdit();
-      const outcome = source.publicationOutcome!;
-      let settled = false;
-      void outcome.then(() => { settled = true; }, () => { settled = true; });
+      source.schedule();
       tick();
       state.request.viewport.x = 100;
       source.schedule();
       requests[0].reply.reject(new Error('Old viewport failed'));
       await requests[0].reply.promise.catch(() => {});
-      expect(settled).toBe(false);
       expect(errors).toEqual([]);
-      expect(source.issuedPublicationOutcome).toBeNull();
-      expect(source.publicationOutcome).toBe(outcome);
       expect(callbacks.size).toBe(1);
       tick();
-      expect(source.issuedPublicationOutcome).toBe(outcome);
       if (result === 'failed') {
         const failure = new Error('Current viewport failed');
         requests[1].reply.reject(failure);
-        await expect(outcome).rejects.toBe(failure);
+        await requests[1].reply.promise.catch(() => {});
         expect(errors).toEqual([failure]);
       } else {
         await respond(1, frame(requests[1].request));
-        await expect(outcome).resolves.toBeUndefined();
         expect(source.painted?.request.viewport.x).toBe(100);
         expect(errors).toEqual([]);
       }
-      expect(source.publicationOutcome).toBeNull();
     });
   }
 
-  test('rejects every unissued edit slot on retirement without issuing a frame', async () => {
+  test('cancels every coalesced paint on retirement without issuing a frame', () => {
     const { source, requests, callbacks, errors, tick } = harness();
-    source.scheduleEdit();
-    const first = source.publicationOutcome!;
-    source.scheduleEdit();
-    const second = source.publicationOutcome!;
-    const retirement = new Error('Retired before publication');
-    source.dispose(retirement);
-    await expect(first).rejects.toBe(retirement);
-    await expect(second).rejects.toBe(retirement);
-    expect(source.publicationOutcome).toBeNull();
+    source.schedule();
+    source.schedule();
+    source.dispose();
     expect(callbacks.size).toBe(0);
     tick();
     expect(requests).toEqual([]);
     expect(errors).toEqual([]);
   });
 
-  test('does not create an edit slot for a repaint without a local change', () => {
+  test('cancels a repaint without a local change', () => {
     const { source, requests, callbacks, tick } = harness();
-    source.scheduleEdit(false);
-    expect(source.publicationOutcome).toBeNull();
+    source.schedule();
     expect(callbacks.size).toBe(1);
     source.dispose();
     tick();
     expect(requests).toEqual([]);
   });
 
-  test('shares an outcome that settles after publication despite a dependent edit schedule', async () => {
-    const { source, requests, paints, errors, tick, respond } = harness();
+  test('drops an in-flight frame when a dependent edit advances its sequence', async () => {
+    const { source, state, requests, paints, errors, tick, respond } = harness();
     source.schedule();
     tick();
-    const outcome = source.publicationOutcome!;
-    expect(source.publicationOutcome).toBe(outcome);
-    source.scheduleEdit();
-    expect(source.publicationOutcome).toBe(outcome);
+    state.sentSequence = 1;
+    source.schedule();
     await respond(0, frame(requests[0].request));
-    await expect(outcome).resolves.toBeUndefined();
-    expect(paints).toHaveLength(1);
+    expect(paints).toHaveLength(0);
     expect(errors).toEqual([]);
-    expect(source.publicationOutcome).toBeNull();
+    tick();
+    await respond(1, frame(requests[1].request, 1));
+    expect(paints).toHaveLength(1);
   });
 
-  test('rejects the shared outcome with a real canvas publication failure', async () => {
+  test('fails the session on a real canvas publication error', async () => {
     const failure = new Error('Canvas publication failed');
-    const { source, requests, errors, tick, respond } = harness(() => { throw failure; });
+    const { source, requests, errors, callbacks, tick, respond } = harness(() => { throw failure; });
     source.schedule();
     tick();
-    const outcome = source.publicationOutcome!;
     await respond(0, frame(requests[0].request));
-    await expect(outcome).rejects.toBe(failure);
     expect(errors).toEqual([failure]);
     expect(source.painted).toBeNull();
-    expect(source.publicationOutcome).toBeNull();
+    expect(callbacks.size).toBe(0);
   });
 
-  test('settles a discarded viewport rejection without failing its shared outcome', async () => {
+  test('discards an obsolete viewport error without failing the session', async () => {
     const { source, state, requests, errors, tick } = harness();
     source.schedule();
     tick();
-    const outcome = source.publicationOutcome!;
     state.request.viewport.x = 100;
     source.schedule();
     requests[0].reply.reject(new Error('Old viewport failed'));
-    await expect(outcome).resolves.toBeUndefined();
+    await requests[0].reply.promise.catch(() => {});
     expect(errors).toEqual([]);
     expect(source.painted).toBeNull();
     expect(requests).toHaveLength(1);
   });
 
-  test('rejects a blocked outcome on disposal before its worker frame settles', async () => {
+  test('disposes a source before its blocked worker frame settles', async () => {
     const { source, requests, errors, tick, respond } = harness();
     source.schedule();
     tick();
-    const outcome = source.publicationOutcome!;
-    const retirement = new Error('Retired');
-    source.dispose(retirement);
-    await expect(outcome).rejects.toBe(retirement);
-    expect(source.publicationOutcome).toBeNull();
+    source.dispose();
     expect(errors).toEqual([]);
     await respond(0, frame(requests[0].request));
     expect(source.painted).toBeNull();
-    expect(source.publicationOutcome).toBeNull();
   });
 
-  test('keeps discarding obsolete viewport errors when scrolling exceeds the retry cap', async () => {
+  test('keeps discarding obsolete viewport errors as scrolling advances', async () => {
     const { source, state, requests, errors, tick, respond } = harness();
     source.schedule();
     for (let index = 0; index < 6; index++) {
       tick();
-      const outcome = source.publicationOutcome!;
       state.request.viewport.x += 100;
       source.schedule();
       requests[index].reply.reject(new Error('Old viewport failed'));
-      await expect(outcome).resolves.toBeUndefined();
+      await requests[index].reply.promise.catch(() => {});
     }
     expect(errors).toEqual([]);
     tick();
@@ -278,28 +237,45 @@ describe('WorkerPaintSource', () => {
   });
 
   for (const reply of ['stale', 'superseded'] as const) {
-    test(`bounds repeated ${reply} publication retries`, async () => {
+    test(`retries ${reply} replies without a budget while the edit sequence advances`, async () => {
       const { source, state, requests, errors, callbacks, tick, respond } = harness();
       const superseded = new Error('Frame superseded');
       superseded.name = 'SessionSuperseded';
-      state.sentSequence = 1;
       source.schedule();
-      for (let attempt = 0; attempt < 4; attempt++) {
+      for (let attempt = 0; attempt < 6; attempt++) {
         tick();
-        const outcome = source.publicationOutcome!;
-        if (reply === 'stale') await respond(attempt, frame(requests[attempt].request, 0));
+        state.sentSequence += 1;
+        if (reply === 'stale') await respond(attempt, frame(requests[attempt].request, attempt));
         else {
           requests[attempt].reply.reject(superseded);
           await requests[attempt].reply.promise.catch(() => {});
         }
-        if (attempt < 3) await expect(outcome).resolves.toBeUndefined();
-        else await expect(outcome).rejects.toBe(errors[0]);
+        expect(errors).toEqual([]);
+        expect(callbacks.size).toBe(1);
       }
-      expect(errors).toHaveLength(1);
-      expect(callbacks.size).toBe(0);
-      source.scheduleEdit();
       tick();
-      expect(requests).toHaveLength(4);
+      await respond(6, frame(requests[6].request, 6));
+      expect(source.painted?.sequence).toBe(6);
+      expect(errors).toEqual([]);
+      expect(callbacks.size).toBe(0);
+    });
+
+    test(`drops ${reply} replies without retrying an unchanged request`, async () => {
+      const { source, state, requests, errors, callbacks, tick, respond } = harness();
+      state.sentSequence = 1;
+      source.schedule();
+      tick();
+      if (reply === 'stale') await respond(0, frame(requests[0].request, 0));
+      else {
+        const error = new Error('Frame superseded');
+        error.name = 'SessionSuperseded';
+        requests[0].reply.reject(error);
+        await requests[0].reply.promise.catch(() => {});
+      }
+      expect(errors).toEqual([]);
+      expect(callbacks.size).toBe(0);
+      tick();
+      expect(requests).toHaveLength(1);
     });
   }
 
@@ -473,8 +449,8 @@ describe('WorkerPaintSource', () => {
   }
 
   for (const mismatch of ['sheet', 'viewport'] as const) {
-    test(`rejects a worker reply with an unexpected ${mismatch} and retries`, async () => {
-      const { source, requests, paints, errors, callbacks, tick, respond, surface } = harness();
+    test(`drops a worker reply with an unexpected ${mismatch} until the viewport moves`, async () => {
+      const { source, state, requests, paints, errors, callbacks, tick, respond, surface } = harness();
       source.schedule();
       tick();
       await respond(0, frame(requests[0].request));
@@ -491,7 +467,9 @@ describe('WorkerPaintSource', () => {
       expect(surface()).toBe(committedSurface);
       expect(paints).toHaveLength(1);
       expect(errors).toEqual([]);
-      expect(callbacks.size).toBe(1);
+      expect(callbacks.size).toBe(0);
+      state.request.viewport.x = 200;
+      source.schedule();
       tick();
       await respond(2, frame(requests[2].request));
       expect(paints).toHaveLength(2);
@@ -608,10 +586,11 @@ describe('WorkerPaintSource', () => {
     });
   }
 
-  test('retries superseded requests without reporting a failure', async () => {
-    const { source, requests, errors, callbacks, tick, respond } = harness();
+  test('retries superseded requests after the viewport moves without reporting a failure', async () => {
+    const { source, state, requests, errors, callbacks, tick, respond } = harness();
     source.schedule();
     tick();
+    state.request.viewport.x = 100;
     const error = new Error('Frame superseded');
     error.name = 'SessionSuperseded';
     requests[0].reply.reject(error);

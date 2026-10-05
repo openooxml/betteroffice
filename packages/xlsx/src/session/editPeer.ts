@@ -88,6 +88,9 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   let activeApplications = 0;
   const pending: { resolved: boolean; envelope?: Omit<WorkbookReplayEnvelope, 'sequence'> }[] = [];
   const drainWaiters: (() => void)[] = [];
+  const acknowledgements = new Set<{
+    sequence: number; resolve(): void; reject(error: unknown): void;
+  }>();
   let dispatching = false;
 
   function resolveDrains(): void {
@@ -98,6 +101,8 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     if (error) return;
     error = cause instanceof Error ? cause : new Error(String(cause));
     rejectFailure(new WorkbookEditPeerFailedError(error));
+    for (const waiter of acknowledgements) waiter.reject(new WorkbookEditPeerFailedError(error));
+    acknowledgements.clear();
     pending.length = 0;
     resolveDrains();
     offFailure();
@@ -123,6 +128,11 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
       }
       assertReady();
       acknowledgedSequence = reply.sequence;
+      for (const waiter of acknowledgements) {
+        if (waiter.sequence > acknowledgedSequence) continue;
+        acknowledgements.delete(waiter);
+        waiter.resolve();
+      }
     }).catch((cause: unknown) => { fail(cause); });
   }
 
@@ -291,6 +301,13 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   };
   workbookEditPeerInternals.set(edits, {
     fail,
+    whenAcknowledged() {
+      try { assertReady(); } catch (cause) { return Promise.reject(cause); }
+      if (acknowledgedSequence >= sentSequence) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        acknowledgements.add({ sequence: sentSequence, resolve, reject });
+      });
+    },
     applyQueuedOp,
     applyRecoveryOp(op) {
       assertRecovery();

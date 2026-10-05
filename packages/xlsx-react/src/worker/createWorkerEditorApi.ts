@@ -50,8 +50,6 @@ export interface WorkerEditorApiBridge {
   selectCells(sheet: number, selection: Selection): boolean;
   selectCellsAsync(sheet: number, selection: Selection): Promise<boolean>;
   previewEdits?(sheet: number, edits: readonly CellInputEdit[], op?: WorkbookReplayOp): Promise<void | (() => Promise<void>)>;
-  publicationOutcome?(): Promise<void> | null;
-  beforeNavigation?(): Promise<void>;
   canNavigateSync?(): boolean;
   apply(result: EditResult | XlsxEditResult, op?: WorkbookReplayOp): void;
 }
@@ -115,7 +113,6 @@ export function createWorkerEditorApi(
         markApplied.check();
         requirePeer();
         if (session.recovering && !mutation) { markApplied(); return null; }
-        const publication = mutation && prepare && !session.recovering && !session.retiring ? bridge().publicationOutcome?.() : null;
         let value: T;
         try { value = await operation(markApplied); }
         catch (error) {
@@ -127,7 +124,7 @@ export function createWorkerEditorApi(
           await discardPreview?.();
           markApplied.check();
           markApplied.refuse(new WorkerInputRefusal('Cell operation was refused'), mutation);
-        } else if (publication) await publication;
+        }
         return session.current ? value : null;
       }, { kind: 'host', recover: mutation, barrier: reason === 'save', prepare: prepare ? async () => {
         if (!session.retiring) {
@@ -238,7 +235,6 @@ export function createWorkerEditorApi(
       return ordered('select-cells', async (markApplied) => {
         const { peer, edits } = requirePeer();
         if (!validSelection(peer, sheet, target)) return false;
-        if (!session.retiring && !session.recovering) await bridge().beforeNavigation?.();
         markApplied.check();
         edits.setActiveSheet(sheet);
         markApplied();

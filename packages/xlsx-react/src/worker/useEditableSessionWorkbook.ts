@@ -49,10 +49,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   private readonly hydrated: Promise<void>;
   private resolveHydrated!: () => void;
   private rejectHydrated!: (error: unknown) => void;
-  private readonly cancelled: Promise<never>;
-  private rejectCancelled!: (error: unknown) => void;
-  private readonly failed: Promise<never>;
-  private rejectFailed!: (error: unknown) => void;
+  private readonly hydrationWaiters = new Set<{ recovery: boolean; reject(error: unknown): void }>();
   private offFailure = () => {};
   private cleanup: void | (() => void) = undefined;
   private input: WorkerInputCoordinator | null = null;
@@ -67,10 +64,6 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
       this.rejectHydrated = reject;
     });
     void this.hydrated.catch(() => {});
-    this.cancelled = new Promise((_, reject) => { this.rejectCancelled = reject; });
-    this.failed = new Promise((_, reject) => { this.rejectFailed = reject; });
-    void this.cancelled.catch(() => {});
-    void this.failed.catch(() => {});
     this.offFailure = session.onFailure((error) => this.fail(error));
     if (session.failure) this.fail(session.failure);
   }
@@ -147,7 +140,11 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     this.failure = asError(value);
     if (this.editPeer) failWorkbookEditPeer(this.editPeer, this.failure);
     this.rejectHydrated(this.failure);
-    this.rejectFailed(this.failure);
+    for (const waiter of this.hydrationWaiters) {
+      if (waiter.recovery) continue;
+      this.hydrationWaiters.delete(waiter);
+      waiter.reject(this.failure);
+    }
     this.input?.fail(this.failure);
     this.options.changed();
     try { this.options.onError(this.failure); } catch {}
@@ -173,7 +170,8 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     this.alive = false;
     const error = new XlsxCommandAdmissionError('document-replaced');
     this.rejectHydrated(error);
-    this.rejectCancelled(error);
+    for (const waiter of this.hydrationWaiters) waiter.reject(error);
+    this.hydrationWaiters.clear();
     this.offFailure();
     this.input?.reset();
     this.input = null;
@@ -195,8 +193,19 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   }
 
   private waitForHydration(pending: Promise<void>, reason: string): Promise<void> {
-    return Promise.race(reason === 'recovery'
-      ? [pending, this.cancelled] : [pending, this.cancelled, this.failed]);
+    if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
+    if (this.failure && reason !== 'recovery') return Promise.reject(this.failure);
+    return new Promise<void>((resolve, reject) => {
+      const waiter = { recovery: reason === 'recovery', reject };
+      this.hydrationWaiters.add(waiter);
+      void pending.then(() => {
+        this.hydrationWaiters.delete(waiter);
+        resolve();
+      }, (error) => {
+        this.hydrationWaiters.delete(waiter);
+        reject(error);
+      });
+    });
   }
 }
 

@@ -64,6 +64,7 @@ export interface WorkerInputCoordinatorHooks
   write(draft: InputDraft, markApplied: WorkerInputLease): boolean;
   capture(): WorkerInputTarget;
   isReady(): boolean;
+  isAcknowledged?(): boolean;
   /** Waits passively for the edit peer. */
   whenReady(): Promise<void>;
   resolveDraft?(draft: InputDraft): Promise<InputDraft>;
@@ -71,6 +72,7 @@ export interface WorkerInputCoordinatorHooks
   preview(draft: InputDraft): Promise<void>;
   requestHydration(reason: string): void | Promise<void>;
   flushEdits(): Promise<void>;
+  acknowledgeEdits?(): Promise<void>;
   onError?(error: unknown): void;
   onRefusal?(error: unknown, draft?: InputDraft): void;
 }
@@ -121,18 +123,43 @@ export interface WorkerInputCoordinator {
   fail(error: unknown): void;
   recover(): Promise<void>;
   drain(): Promise<void>;
+  retire(): void;
   reset(): void;
 }
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (error: unknown) => void;
+  let rejectPromise!: (error: unknown) => void;
+  let rejection: { error: unknown } | null = null;
+  const cancellations = new Set<(error: unknown) => void>();
   const promise = new Promise<T>((done, failed) => {
     resolve = done;
-    reject = failed;
+    rejectPromise = failed;
   });
   void promise.catch(() => {});
-  return { promise, resolve, reject };
+  return {
+    promise, resolve,
+    reject(error: unknown) {
+      rejection = { error };
+      rejectPromise(error);
+      for (const cancel of cancellations) cancel(error);
+      cancellations.clear();
+    },
+    wait<R>(value: R | Promise<R>): Promise<R> {
+      if (rejection) {
+        void Promise.resolve(value).catch(() => {});
+        return Promise.reject(rejection.error);
+      }
+      return new Promise<R>((done, failed) => {
+        const cancel = (error: unknown) => { cancellations.delete(cancel); failed(error); };
+        cancellations.add(cancel);
+        void Promise.resolve(value).then((result) => {
+          cancellations.delete(cancel);
+          done(result);
+        }, cancel);
+      });
+    },
+  };
 }
 
 function sameCell(a: InputDraft, b: InputDraft): boolean {
@@ -239,7 +266,7 @@ export function createWorkerInputCoordinator(
   };
 
   const wait = <T>(promise: T | Promise<T>, lease: typeof cycle): Promise<T> =>
-    Promise.race([Promise.resolve(promise), lease.promise]);
+    lease.wait(promise);
 
   const settleRejected = (value: InputDraft) => {
     rejected = rejected.filter((entry) => !sameCell(entry, value));
@@ -358,6 +385,7 @@ export function createWorkerInputCoordinator(
           await wait(hooks.whenReady(), lease);
           check(entry.intent, lease);
           if (!hooks.isReady()) throw new WorkerInputNotReadyError();
+          if (!recovering && hooks.acknowledgeEdits) await wait(hooks.acknowledgeEdits(), lease);
           const markApplied: WorkerInputLease = Object.assign(() => {
             check(entry.intent, lease);
             entry.applied = true;
@@ -378,6 +406,7 @@ export function createWorkerInputCoordinator(
             }
           }
           const result = await wait(entry.run(markApplied), lease);
+          if (!recovering && hooks.acknowledgeEdits) await wait(hooks.acknowledgeEdits(), lease);
           check(entry.intent, lease);
           if (!entry.refused) entry.applied = true;
           entry.resolve(result);
@@ -594,7 +623,7 @@ export function createWorkerInputCoordinator(
     current();
     const acceptedEpoch = epoch;
     try {
-      await Promise.race([Promise.resolve(hooks.requestHydration(reason)), replaced.promise]);
+      await replaced.wait(Promise.resolve(hooks.requestHydration(reason)));
       if (acceptedEpoch !== epoch || generation !== hooks.generation()) {
         throw new XlsxCommandAdmissionError('document-replaced');
       }
@@ -606,7 +635,7 @@ export function createWorkerInputCoordinator(
 
   const assertReady = () => {
     if (failure) throw failure.error;
-    if (!hooks.isReady() || entries.length > 0 || recovery || syncRunning || draft) {
+    if (!hooks.isReady() || hooks.isAcknowledged?.() === false || entries.length > 0 || recovery || syncRunning || draft) {
       throw new WorkerInputNotReadyError();
     }
   };
@@ -833,6 +862,10 @@ export function createWorkerInputCoordinator(
         throw error;
       }
       await hooks.flushEdits();
+    },
+    retire() {
+      const error = new XlsxCommandAdmissionError('document-replaced');
+      for (const entry of entries) entry.reject(error);
     },
     reset,
   };
