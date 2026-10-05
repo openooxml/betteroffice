@@ -52,6 +52,7 @@ const chartKeys: Record<string, [number, number] | undefined> = {
 };
 
 type WorkerCellDraft = InputDraft & { prefill?: boolean; modified?: boolean; revision?: number; unchanged?: boolean };
+type PreviewPredecessor = { operation?: WorkbookReplayOp; input?: string; index: number };
 
 function address(cell: CellAddr): string {
   let column = '';
@@ -177,9 +178,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
   const draftOperations = useMemo(() => new WeakMap<InputDraft, WorkbookReplayOp>(), [run]);
-  const previewPredecessors = useMemo(() => new Map<WorkbookReplayOp, {
-    operation?: WorkbookReplayOp; input?: string; index: number;
-  }>(), [run]);
+  const previewPredecessors = useMemo(() => new Map<WorkbookReplayOp, PreviewPredecessor & { key: string }>(), [run]);
   const draftDiscards = useMemo(() => new WeakMap<InputDraft, () => void>(), [run]);
   const operationPeer = useMemo(() => ({ current: run?.editPeer ?? null }), [run]);
   if (run?.editPeer && !run.recovering) operationPeer.current = run.editPeer;
@@ -254,6 +253,17 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     });
   }, [run]);
 
+  const relinkPredecessors = useCallback((key: string, op: WorkbookReplayOp, previous?: PreviewPredecessor) => {
+    for (const predecessor of previewPredecessors.values()) {
+      if (predecessor.key === key && predecessor.operation === op) {
+        predecessor.operation = previous?.operation;
+        predecessor.input = previous?.input;
+        predecessor.index = previous?.index ?? -1;
+      }
+    }
+    if (previewPredecessors.get(op)?.key === key) previewPredecessors.delete(op);
+  }, [previewPredecessors]);
+
   const preview = useCallback(async (draft?: InputDraft, discardOnFailure = true): Promise<void> => {
     if (!run || run.failure || run.recovering || run.retiring) return;
     if (draft) {
@@ -269,7 +279,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       };
       draftOperations.set(draft, op);
       if (preceding !== op) previewPredecessors.set(op, {
-        operation: preceding, input: precedingInput, index: preceding ? previewJournal.indexOf(preceding) : -1,
+        key, operation: preceding, input: precedingInput, index: preceding ? previewJournal.indexOf(preceding) : -1,
       });
       if ((draft as WorkerCellDraft).unchanged) unchangedPreviews.add(op);
       if (preceding && preceding !== op && unchangedPreviews.has(preceding)) {
@@ -284,14 +294,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const previous = previewPredecessors.get(op);
         const index = previewJournal.indexOf(op);
         if (index >= 0) previewJournal.splice(index, 1);
-        for (const predecessor of previewPredecessors.values()) {
-          if (predecessor.operation === op) {
-            predecessor.operation = previous?.operation;
-            predecessor.input = previous?.input;
-            predecessor.index = previous?.index ?? -1;
-          }
-        }
-        previewPredecessors.delete(op);
+        relinkPredecessors(key, op, previous);
         const current = previewOps.get(key) === op;
         if (current) {
           if (previous?.operation) {
@@ -361,7 +364,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       }
     }
     await boundary();
-  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, draftDiscards, previewPredecessors, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
+  }, [run, capture, boundary, acceptedCells, previewOps, previewState, draftOperations, draftDiscards, previewPredecessors, relinkPredecessors, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
   const previewEdits = useCallback(async (sheet: number, edits: readonly CellInputEdit[], operation?: WorkbookReplayOp) => {
     if (operation?.method === 'applyEdits' && operation.args[0].steps.some((step) => step.op !== 'setCellInputs')) {
@@ -375,9 +378,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       nowSerial: Date.now() / 86400000 + 25569,
       randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
     };
-    const pendingDraft = previewJournal.some((pending) => pending !== operation);
     const preceding = new Map(previewOps);
     const precedingCells = new Map(acceptedCells);
+    const precedingIndices = new Map([...preceding].map(([key, op]) => [key, previewJournal.indexOf(op)]));
     const recorded = new Map<string, WorkbookReplayOp>();
     for (const edit of edits) {
       if (!Number.isInteger(sheet) || sheet < 0 || sheet >= (run?.session.state.sheets.length ?? 0) ||
@@ -403,9 +406,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       let changed = false;
       for (const edit of edits) {
         const key = `${sheet}:${edit.row}:${edit.col}`;
-        if (previewOps.get(key) !== recorded.get(key)) continue;
+        const op = recorded.get(key);
         const previous = preceding.get(key);
         const value = precedingCells.get(key);
+        if (op) relinkPredecessors(key, op, {
+          operation: previous, input: value, index: precedingIndices.get(key) ?? -1,
+        });
+        if (previewOps.get(key) !== op) continue;
         if (previous) previewOps.set(key, previous);
         else previewOps.delete(key);
         if (value !== undefined) acceptedCells.set(key, value);
@@ -444,13 +451,12 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         recorded.set(key, previewOps.get(key)!);
       }
       await prepared;
-      if (pendingDraft && run?.ready) await boundary();
     } catch (error) {
       await restore();
       throw error;
     }
     return restore;
-  }, [run, preview, boundary, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
+  }, [run, preview, relinkPredecessors, acceptedCells, previewOps, previewState, draftOperations, completedPreviews, unpreviewedOps, previewJournal, unchangedPreviews]);
 
   const refreshProposals = useCallback(() => {
     const owner = runRef.current;

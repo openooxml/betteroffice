@@ -1928,21 +1928,23 @@ for (const route of ['cell', 'formula', 'host'] as const) {
       expect(host.preview).not.toHaveBeenCalled();
       expect(applying).toHaveBeenCalledTimes(1);
       const op = applying.mock.calls[0][0];
-      expect(op).toMatchObject({ method: 'editCell', args: [0, 0, 0, input], calculation: {
-        nowSerial: 1_750_000_000_000 / 86400000 + 25569, randSeed: expect.any(Number),
-      } });
-      expect(Number.isInteger(op.calculation?.randSeed)).toBe(true);
       if (!op.calculation) throw new Error('Missing operation calculation context');
-      expect(op.calculation.randSeed).toBeGreaterThanOrEqual(0);
-      expect(op.calculation.randSeed).toBeLessThanOrEqual(0xffff_ffff);
+      const calculation = structuredClone(op.calculation);
+      const seed = op.calculation.randSeed;
+      const captured = structuredClone(op);
+      expect(op.method).toBe('editCell');
+      expect(op.args).toEqual([0, 0, 0, input]);
+      expect(op.calculation.nowSerial).toBe(1_750_000_000_000 / 86400000 + 25569);
+      expect(Number.isInteger(seed)).toBe(true);
+      expect(seed).toBeGreaterThanOrEqual(0);
+      expect(seed).toBeLessThanOrEqual(0xffff_ffff);
       expect(entropy).toHaveBeenCalledTimes(1);
       const words = entropy.mock.calls[0][0];
       if (!(words instanceof Uint32Array)) throw new Error('Missing u32 calculation seed');
-      expect(op.calculation.randSeed).toBe(words[0]);
-      const calculation = structuredClone(op.calculation);
+      expect(seed).toBe(words[0]);
       expect(host.replay).toHaveBeenCalledTimes(1);
       expect(host.replay.mock.calls[0][0]).toEqual({ sequence: 1, op, calculation });
-      expect(setting.mock.calls).toEqual([[op.calculation]]);
+      expect(setting.mock.calls).toEqual([[calculation]]);
       expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, input]]);
       expect(view.getByTestId('xlsx-commit-preview').textContent).toBe(input);
       expect(host.peerMethods.displayList).not.toHaveBeenCalled();
@@ -1958,7 +1960,11 @@ for (const route of ['cell', 'formula', 'host'] as const) {
       expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
       expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
       expect(host.preview).not.toHaveBeenCalled();
+      expect(applying).toHaveBeenCalledTimes(1);
+      expect(entropy).toHaveBeenCalledTimes(1);
+      expect(setting.mock.calls).toEqual([[calculation]]);
       expect(applying.mock.calls[0][0]).toBe(op);
+      expect(op).toEqual(captured);
       expect(op.calculation).toEqual(calculation);
       expect(host.replay.mock.calls[0][0].calculation).toEqual(calculation);
       expect(host.peerMethods.displayList).not.toHaveBeenCalled();
@@ -2047,6 +2053,152 @@ it('discards a refused ready draft and keeps the preceding draft until its worke
   } finally {
     await act(async () => adoption.resolve());
     await advance();
+  }
+});
+
+for (const route of ['host', 'clipboard'] as const) {
+  it(`repairs a refused bulk predecessor before a same-cell UI refusal (${route})`, async () => {
+    const host = harness(true);
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+      onReady={(value) => { api = value; }} />);
+    await opened();
+    const writes = deferred<void>();
+    const adoption = deferred<void>();
+    const frame = host.sessionMethods.frame.getMockImplementation()!;
+    host.sessionMethods.frame.mockImplementation(async (...args) => {
+      await adoption.promise;
+      return frame(...args);
+    });
+    const col = route === 'host' ? 0 : 1;
+    const originalRead = Object.getOwnPropertyDescriptor(navigator.clipboard, 'readText');
+    const reading = mock(async () => '=batchFirstRefused()\t=hostRefused()');
+    const flush = spyOn(host.attached!, 'flush');
+    let blocked: Promise<void> | undefined;
+    let refused: Promise<unknown> | undefined;
+    try {
+      await act(async () => { await api.editCellAsync(0, 0, col, 'accepted'); });
+      await advance();
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
+      flush.mockReturnValue(writes.promise);
+      act(() => { blocked = api.flush(); });
+      await act(async () => {});
+      expect(flush).toHaveBeenCalledTimes(1);
+      if (route === 'host') {
+        host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid host formula'); });
+        act(() => { refused = api.editCellAsync(0, 0, 0, '=hostRefused()').catch((error) => error); });
+      } else {
+        host.peerMethods.editCells.mockImplementationOnce(() => { throw new RangeError('Invalid clipboard formula'); });
+        Object.defineProperty(navigator.clipboard, 'readText', { configurable: true, value: reading });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      }
+      await act(async () => {});
+      expect(view.getByTestId('xlsx-commit-preview').textContent)
+        .toBe(route === 'host' ? '=hostRefused()' : '=batchFirstRefused()');
+      if (route === 'clipboard') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+      host.peerMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid UI formula'); });
+      reviewEdit(view, '=uiRefused()');
+      await act(async () => {});
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('=uiRefused()');
+      expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, col, 'accepted']]);
+      expect(host.peerMethods.editCells).not.toHaveBeenCalled();
+      await act(async () => writes.resolve());
+      await advance();
+      await blocked;
+      if (route === 'host') expect(await refused).toBeInstanceOf(RangeError);
+      else {
+        expect(reading).toHaveBeenCalledTimes(1);
+        expect(host.peerMethods.editCells.mock.calls).toEqual([[0, [
+          { row: 0, col: 0, input: '=batchFirstRefused()' },
+          { row: 0, col: 1, input: '=hostRefused()' },
+        ]]]);
+      }
+      expect(host.peerMethods.editCell.mock.calls).toEqual(route === 'host' ? [
+        [0, 0, 0, 'accepted'], [0, 0, 0, '=hostRefused()'], [0, 0, 0, '=uiRefused()'],
+      ] : [[0, 0, 1, 'accepted'], [0, 0, 1, '=uiRefused()']]);
+      expect(api.failure).toBeNull();
+      expect(view.getByTestId('xlsx-input-refusal').textContent).toContain('Invalid UI formula');
+      expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('=uiRefused()');
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
+      expect(host.cells.get(`0:0:${col}`)).toBe('accepted');
+      if (route === 'clipboard') expect(host.cells.get('0:0:0')).toBe('initial');
+      expect(host.replay).toHaveBeenCalledTimes(1);
+      expect(host.replay.mock.calls[0][0].op.args).toEqual([0, 0, col, 'accepted']);
+      expect(host.attached!.sentSequence).toBe(1);
+      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Escape' });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowUp' });
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'F2' });
+      expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('accepted');
+      fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+      await advance();
+      await act(async () => { await api.flush(); });
+      expect(host.peerMethods.editCell).toHaveBeenCalledTimes(route === 'host' ? 3 : 2);
+      expect(host.replay).toHaveBeenCalledTimes(1);
+      expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('accepted');
+      await act(async () => adoption.resolve());
+      await advance();
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(view.container.querySelector('[data-paint-source="worker"]')?.getAttribute('data-worker-sequence')).toBe('1');
+      expect(host.preview).not.toHaveBeenCalled();
+      expect(host.peerMethods.displayList).not.toHaveBeenCalled();
+    } finally {
+      try {
+        await act(async () => { writes.resolve(); adoption.resolve(); });
+        await advance();
+        await blocked;
+        await refused;
+      } finally {
+        flush.mockRestore();
+        host.sessionMethods.frame.mockImplementation(frame);
+        if (originalRead) Object.defineProperty(navigator.clipboard, 'readText', originalRead);
+        else Reflect.deleteProperty(navigator.clipboard, 'readText');
+      }
+    }
+  });
+}
+
+it('prepares dependent ready host edits and resolves flush and save with suspended animation frames', async () => {
+  const host = harness(true);
+  let api!: XlsxWorkerEditorApi;
+  const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false}
+    onReady={(value) => { api = value; }} />);
+  await opened();
+  const originalRaf = globalThis.requestAnimationFrame;
+  const suspended = spyOn(globalThis, 'requestAnimationFrame').mockImplementation(() => ++nextAnimation);
+  let first: Promise<EditResult | null> | undefined;
+  let second: Promise<EditResult | null> | undefined;
+  let flushing: Promise<void> | undefined;
+  let saving: Promise<Uint8Array | null> | undefined;
+  try {
+    expect(api.hydrated).toBe(true);
+    act(() => { first = api.editCellAsync(0, 0, 0, 'first'); });
+    await act(async () => { expect((await first)?.applied).toBe(true); });
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('first');
+    const count = painted.length;
+    act(() => { second = api.editCellAsync(0, 0, 0, 'second'); });
+    await act(async () => { expect((await second)?.applied).toBe(true); });
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('second');
+    act(() => { flushing = api.flush(); });
+    await act(async () => { await flushing; });
+    act(() => { saving = api.save(); });
+    await act(async () => { expect(await saving).toEqual(new Uint8Array([0])); });
+    expect(host.cells.get('0:0:0')).toBe('second');
+    expect(host.peerMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'first'], [0, 0, 0, 'second']]);
+    expect(host.replay).toHaveBeenCalledTimes(2);
+    expect(host.replay.mock.calls.map(([envelope]) => [envelope.sequence, envelope.op.args]))
+      .toEqual([[1, [0, 0, 0, 'first']], [2, [0, 0, 0, 'second']]]);
+    expect(host.session.save).toHaveBeenCalledTimes(1);
+    expect(host.peerMethods.save).not.toHaveBeenCalled();
+    expect(host.preview).not.toHaveBeenCalled();
+    expect(suspended).toHaveBeenCalled();
+    expect(painted).toHaveLength(count);
+    expect(view.getByTestId('xlsx-commit-preview').textContent).toBe('second');
+    expect(api.failure).toBeNull();
+  } finally {
+    suspended.mockRestore();
+    globalThis.requestAnimationFrame = originalRaf;
+    await advance();
+    await Promise.all([first, second, flushing, saving]);
   }
 });
 
