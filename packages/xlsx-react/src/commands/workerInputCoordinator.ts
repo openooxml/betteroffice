@@ -40,6 +40,7 @@ export interface WorkerInputCoordinatorHooks
   isReady(): boolean;
   /** Waits passively for the edit peer. */
   whenReady(): Promise<void>;
+  resolveDraft?(draft: InputDraft): Promise<InputDraft>;
   /** Resolves after the pending text has crossed a browser paint boundary. */
   preview(draft: InputDraft): Promise<void>;
   requestHydration(reason: string): void | Promise<void>;
@@ -223,10 +224,12 @@ export function createWorkerInputCoordinator(
     if (value.generation !== intent.generation) {
       throw new XlsxCommandAdmissionError('document-replaced');
     }
-    await wait(hooks.preview(value), lease);
+    const resolved = hooks.resolveDraft ? await wait(hooks.resolveDraft(value), lease) : value;
+    check(intent, lease);
+    await wait(hooks.preview(resolved), lease);
     check(intent, lease);
     if (!hooks.isReady()) throw new WorkerInputNotReadyError();
-    if (!hooks.write(value)) {
+    if (!hooks.write(resolved)) {
       inputFailed = true;
       const correction = entries.some(
         (entry) =>

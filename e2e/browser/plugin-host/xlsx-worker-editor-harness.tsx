@@ -1,21 +1,8 @@
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { XlsxEditor, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
-
-export interface WorkerEditorProbe {
-  ready: Promise<void>;
-  errors: string[];
-  previews: string[];
-  previewFrames: string[];
-  paintedTexts(): string[];
-  cell(): Promise<string | null>;
-  saveAndReopen(): Promise<number>;
-  undo(): Promise<boolean>;
-}
-
-declare global {
-  interface Window { __xlsxWorkerEditor: WorkerEditorProbe }
-}
+import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
+import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -79,6 +66,32 @@ CanvasRenderingContext2D.prototype.fillText = function (this: CanvasRenderingCon
 
 const rootElement = document.getElementById('worker-editor-root')!;
 const root = createRoot(rootElement);
+const commitOrder: WorkerEditorProbe['commitOrder'] = [];
+const attach = editableWorkbookSessionBackend.attach;
+editableWorkbookSessionBackend.attach = (options) => {
+  const edit = options.peer.editCell;
+  options.peer.editCell = (...args) => {
+    commitOrder.push({ kind: 'mutator-entry', text: args[3] });
+    return edit(...args);
+  };
+  return attach(options);
+};
+const nativeFrame = globalThis.requestAnimationFrame.bind(globalThis);
+const nativeCancel = globalThis.cancelAnimationFrame.bind(globalThis);
+const heldFrames = new Map<number, FrameRequestCallback>();
+let holdingPreview = false;
+let previewFrame: number | null = null;
+globalThis.requestAnimationFrame = (callback) => {
+  const id = nativeFrame((time) => {
+    if (holdingPreview && rootElement.querySelector('[data-testid="xlsx-commit-preview"]')) {
+      if (previewFrame === null) previewFrame = time;
+      else if (previewFrame !== time) { heldFrames.set(id, callback); return; }
+    }
+    callback(time);
+  });
+  return id;
+};
+globalThis.cancelAnimationFrame = (id) => { heldFrames.delete(id); nativeCancel(id); };
 const errors: string[] = [];
 const previews: string[] = [];
 const previewFrames: string[] = [];
@@ -106,7 +119,19 @@ const ready = (async () => {
 })();
 
 window.__xlsxWorkerEditor = {
-  ready, errors, previews, previewFrames,
+  ready, errors, previews, previewFrames, commitOrder,
+  holdPreview() { commitOrder.length = 0; previewFrame = null; holdingPreview = true; },
+  previewHeld() { return heldFrames.size > 0; },
+  releasePreview(text) {
+    if (commitOrder.length > 0) throw new Error('Mutation preceded the preview screenshot');
+    if (rootElement.querySelector('[data-testid="xlsx-commit-preview"]')?.textContent !== text) {
+      throw new Error('Pending text changed before the preview screenshot');
+    }
+    commitOrder.push({ kind: 'painted-preview', text });
+    holdingPreview = false;
+    for (const callback of heldFrames.values()) nativeFrame(callback);
+    heldFrames.clear();
+  },
   paintedTexts() {
     const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-testid="xlsx-scroll"] canvas');
     return canvas ? [...(paints.get(canvas) ?? [])] : [];

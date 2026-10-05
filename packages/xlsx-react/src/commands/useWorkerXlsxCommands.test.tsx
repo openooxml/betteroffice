@@ -168,7 +168,7 @@ describe('worker XLSX commands', () => {
 
   test('captures targets before a peer exists and preserves FIFO with accepted input', async () => {
     const { store, coordinator, binding, draft, hydrate, log, edits } = harness(false);
-    expect(binding.capture('bold')).toEqual({ generation: 1, target: '0:{"top":0,"left":0,"bottom":2,"right":1}' });
+    expect(binding.capture('bold')).toEqual({ generation: 1, target: '0:{"top":0,"bottom":2,"left":0,"right":1}' });
     const input = coordinator.submitAsync(draft('typed'));
     const bold = store.execute('bold', null);
     const italic = store.execute('italic', null);
@@ -267,8 +267,13 @@ describe('worker XLSX commands', () => {
   });
 
   test('prints only after the matching accepted paint and refuses replacement', async () => {
-    const print = spyOn(window, 'print').mockImplementation(() => {});
-    restorers.push(() => print.mockRestore());
+    const original = Object.getOwnPropertyDescriptor(window, 'print');
+    const print = mock(() => {});
+    Object.defineProperty(window, 'print', { configurable: true, value: print });
+    restorers.push(() => {
+      if (original) Object.defineProperty(window, 'print', original);
+      else Reflect.deleteProperty(window, 'print');
+    });
     const first = harness();
     const paint = deferred<boolean>();
     first.state.paint = paint.promise;

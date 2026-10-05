@@ -1,5 +1,5 @@
 import {
-  createWorkbookEditPeer, hydratePeer, openWorkbookSession,
+  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, openWorkbookSession,
   type WorkbookHandle, type WorkbookSession, type WorkbookEditPeer,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -52,7 +52,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   private readonly failed: Promise<never>;
   private rejectFailed!: (error: unknown) => void;
   private offFailure = () => {};
-  private cleanup: void | (() => void);
+  private cleanup: void | (() => void) = undefined;
   private input: WorkerInputCoordinator | null = null;
 
   constructor(
@@ -124,6 +124,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
         }
         this.peer = peer;
         this.editPeer = edits;
+        if (this.failure) failWorkbookEditPeer(edits, this.failure);
         peer = null;
         if (!this.failure) this.resolveHydrated();
         this.options.changed();
@@ -143,6 +144,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   fail(value: unknown): void {
     if (!this.current || this.failure) return;
     this.failure = asError(value);
+    if (this.editPeer) failWorkbookEditPeer(this.editPeer, this.failure);
     this.rejectHydrated(this.failure);
     this.rejectFailed(this.failure);
     this.input?.fail(this.failure);
@@ -160,6 +162,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     this.input?.reset();
     this.input = null;
     try { if (typeof this.cleanup === 'function') this.cleanup(); }
+    catch {}
     finally {
       try { this.editPeer?.dispose(); }
       finally {
@@ -198,7 +201,7 @@ export function useEditableSessionWorkbook(
   const reportError = useCallback((value: unknown) => {
     const error = asError(value);
     setError(error);
-    latest.current.props.onError?.(error);
+    try { latest.current.props.onError?.(error); } catch {}
   }, []);
 
   useEffect(() => {
@@ -232,7 +235,8 @@ export function useEditableSessionWorkbook(
         if (!current()) return;
         if (opened) opened.fail(error);
         else reportError(error);
-        setLoading(false);
+      } finally {
+        if (current()) setLoading(false);
       }
     })();
     return () => {

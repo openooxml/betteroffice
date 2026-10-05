@@ -279,6 +279,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     },
   };
   workbookEditPeerInternals.set(edits, {
+    fail,
     applyQueuedOp,
     applyRecoveryOp(op) {
       assertRecovery();

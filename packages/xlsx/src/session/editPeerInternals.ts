@@ -2,11 +2,17 @@ import type { WorkbookEditPeer } from './editPeer';
 import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod, type WorkbookReplayOp, type WorkbookReplayReply } from './replay';
 
 export interface WorkbookEditPeerOperations {
+  fail(error: unknown): void;
   applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
   applyRecoveryOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
 }
 
 export const workbookEditPeerInternals = new WeakMap<WorkbookEditPeer, WorkbookEditPeerOperations>();
+
+/** @internal */
+export function failWorkbookEditPeer(peer: WorkbookEditPeer, error: unknown): void {
+  workbookEditPeerInternals.get(peer)?.fail(error);
+}
 
 export function workbookEditPeerOperations(peer: WorkbookEditPeer): WorkbookEditPeerOperations {
   const operations = workbookEditPeerInternals.get(peer);

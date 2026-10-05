@@ -1,5 +1,5 @@
 import { test, expect, type Page } from 'playwright/test';
-import type { WorkerEditorProbe } from './xlsx-worker-editor-harness';
+import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
 
 declare global {
   interface Window { __xlsxWorkerEditor: WorkerEditorProbe }
@@ -14,7 +14,7 @@ async function open(page: Page) {
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
 }
 
-async function edit(page: Page, value: string) {
+async function edit(page: Page, value: string, capturePreview = false) {
   const scroll = page.getByTestId('xlsx-scroll');
   await scroll.focus();
   await scroll.press('F2');
@@ -24,7 +24,18 @@ async function edit(page: Page, value: string) {
   await expect(input).toHaveValue(value);
   await expect(input).toBeFocused();
   expect(await input.evaluate((element) => (element as HTMLInputElement).selectionStart)).toBe(value.length);
+  if (capturePreview) await page.evaluate(() => window.__xlsxWorkerEditor.holdPreview());
   await input.press('Enter');
+  if (capturePreview) {
+    const preview = page.getByTestId('xlsx-commit-preview');
+    await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.previewHeld())).toBe(true);
+    await expect(preview).toHaveText(value);
+    await expect(preview).toBeVisible();
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([]);
+    expect((await preview.screenshot()).byteLength).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([]);
+    await page.evaluate((text) => window.__xlsxWorkerEditor.releasePreview(text), value);
+  }
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe(value);
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain(value);
   await expect(page.getByTestId('xlsx-commit-preview')).toHaveCount(0);
@@ -34,7 +45,11 @@ test('xlsx worker editor echoes the caret, paints a commit preview and saves edi
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
   await open(page);
-  await edit(page, 'worker edit');
+  await edit(page, 'worker edit', true);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([
+    { kind: 'painted-preview', text: 'worker edit' },
+    { kind: 'mutator-entry', text: 'worker edit' },
+  ]);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.previews)).toContain('worker edit');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.previewFrames)).toContain('worker edit');
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.saveAndReopen())).toBeGreaterThan(0);

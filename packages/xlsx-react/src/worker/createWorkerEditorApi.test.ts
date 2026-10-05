@@ -184,6 +184,30 @@ describe('worker editor API', () => {
     expect(api.editCell(0, 1, 0, 'later').applied).toBe(true);
   });
 
+  test('withholds synchronous reads until accepted input crosses preview paint', async () => {
+    const { api, coordinator, draft, state, peer } = harness();
+    const paint = deferred<void>();
+    state.preview = paint.promise;
+    const pending = coordinator.submitAsync(draft('pending'));
+    expect(api.cell(0, 0, 0)).toBeNull();
+    expect(api.rangeCells(0, 'A1')).toEqual([]);
+    expect(api.readCellsSync({ ranges: [] })).toBeNull();
+    expect(peer.cell).not.toHaveBeenCalled();
+    expect(peer.rangeCells).not.toHaveBeenCalled();
+    expect(peer.readCells).not.toHaveBeenCalled();
+    paint.resolve();
+    await pending;
+    expect(api.cell(0, 0, 0)?.input).toBe('pending');
+    expect(api.rangeCells(0, 'A1')[0][0].input).toBe('pending');
+    expect(api.readCellsSync({ ranges: [] })?.version).toBe('v1');
+    coordinator.setDraft(draft('live'));
+    expect(api.cell(0, 0, 0)).toBeNull();
+    expect(api.rangeCells(0, 'A1')).toEqual([]);
+    expect(api.readCellsSync({ ranges: [] })).toBeNull();
+    await api.flush();
+    expect(api.cell(0, 0, 0)?.input).toBe('live');
+  });
+
   test('saves through the facade after pending input and returns Uint8Array bytes', async () => {
     const { api, coordinator, draft, hydrate, log, edits, peer } = harness(false);
     coordinator.setDraft(draft('saved'));
@@ -212,7 +236,7 @@ describe('worker editor API', () => {
     const { api, state, peer, edits } = harness();
     state.readOnly = true;
     const request = { expectVersion: 'v1', steps: [] };
-    const refusal = { ok: false, version: 'v1', failure: { code: 'read-only', message: 'The editor is read-only' } };
+    const refusal = { ok: false, version: 'v1', failure: { code: 'read-only', message: 'The editor is read-only' } } as const;
     expect(await api.validateEdits(request)).toEqual(refusal);
     expect(await api.applyEdits(request)).toEqual(refusal);
     expect(() => api.editCell(0, 0, 0, 'blocked')).toThrow('The editor is read-only');

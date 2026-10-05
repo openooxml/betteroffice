@@ -94,7 +94,7 @@ export function createWorkerEditorApi(
     return { peer: session.peer, edits: session.editPeer };
   };
   const ordered = <T,>(
-    reason: string, operation: (markApplied: () => void) => T | Promise<T>
+    reason: string, operation: (markApplied: () => void) => T | Promise<T>, mutation = false
   ): Promise<T | null> => {
     if (!session.current) return Promise.resolve(null);
     if (session.failure) return Promise.reject(session.failure);
@@ -104,6 +104,7 @@ export function createWorkerEditorApi(
       return coordinator().runAfterPendingInput(async (_, markApplied) => {
         await (session.recovering ? session.requestHydration('recovery') : hydration);
         requirePeer();
+        if (session.recovering && !mutation) { markApplied(); return null; }
         const result = operation(markApplied);
         if (session.recovering && result !== null && typeof result === 'object' &&
           ('ok' in result && result.ok === false || 'error' in result && result.error)) {
@@ -137,6 +138,8 @@ export function createWorkerEditorApi(
     return result;
   };
   const save = () => ordered('save', async () => new Uint8Array(await requirePeer().edits.save()));
+  const readable = () => session.current && session.ready && !session.failure &&
+    !bridge().coordinator()?.unapplied.length && !bridge().coordinator()?.draft;
 
   return {
     handle: null, commands,
@@ -187,7 +190,7 @@ export function createWorkerEditorApi(
         edits.setActiveSheet(sheet);
         markApplied();
         return bridge().selectCellsAsync(sheet, target);
-      }).then((selected) => selected ?? false);
+      }, true).then((selected) => selected ?? false);
     },
     version: () => ordered('version', () => requirePeer().peer.version()),
     readCells: (request) => {
@@ -210,13 +213,13 @@ export function createWorkerEditorApi(
         markApplied();
         bridge().apply(result);
         return result;
-      });
+      }, true);
     },
-    cell: (sheet, row, col) => session.ready && !session.failure ? session.peer!.cell(sheet, row, col) : null,
+    cell: (sheet, row, col) => readable() ? session.peer!.cell(sheet, row, col) : null,
     cellAsync: (sheet, row, col) => ordered('cell', () => requirePeer().peer.cell(sheet, row, col)),
-    rangeCells: (sheet, range) => session.ready && !session.failure ? session.peer!.rangeCells(sheet, range) : [],
+    rangeCells: (sheet, range) => readable() ? session.peer!.rangeCells(sheet, range) : [],
     rangeCellsAsync: (sheet, range) => ordered('range-cells', () => requirePeer().peer.rangeCells(sheet, range)),
-    readCellsSync: (request) => session.ready && !session.failure ? session.peer!.readCells(request) : null,
+    readCellsSync: (request) => readable() ? session.peer!.readCells(request) : null,
     editCell(sheet, row, col, input) {
       requirePeer();
       if (bridge().readOnly()) throw new Error('The editor is read-only');
@@ -225,7 +228,7 @@ export function createWorkerEditorApi(
     editCellAsync: (sheet, row, col, input) => ordered('edit-cell', (markApplied) => {
       if (bridge().readOnly()) return { error: new Error('The editor is read-only') };
       return { result: editCell(sheet, row, col, input, markApplied) };
-    }).then((outcome) => {
+    }, true).then((outcome) => {
       if (outcome?.error) throw outcome.error;
       return outcome?.result ?? null;
     }),

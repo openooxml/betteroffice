@@ -2,7 +2,6 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import * as xlsx from '@betteroffice/xlsx';
 import type { WorkbookHandle, WorkbookSession } from '@betteroffice/xlsx';
-import { StrictMode } from 'react';
 import { SessionFailure } from '../../../../shared/office-session';
 import type { WorkbookEditPeer } from '@betteroffice/xlsx';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
@@ -284,6 +283,60 @@ describe('editable session workbook', () => {
     expect(next.value.dispose).toHaveBeenCalledTimes(1);
   });
 
+  test('contains throwing readiness cleanup when the hook replaces its document', async () => {
+    const log: string[] = [];
+    const old = session(log);
+    const next = session(log);
+    const opener = open(old.value);
+    const { peer, edits } = resources(log);
+    const readyCleanup = mock(() => { throw new Error('Cleanup failed'); });
+    const commands = createXlsxCommandController().store;
+    const controls = bridge();
+    const { result, rerender, unmount } = renderHook(
+      (props: EditableSessionWorkbookProps) => useEditableSessionWorkbook(props, commands, controls),
+      { initialProps: { file, onReady: () => readyCleanup } }
+    );
+    await waitFor(() => expect(result.current.run).not.toBeNull());
+    const first = result.current.run!;
+    await act(async () => { first.firstPaint(); await first.whenHydrated(); });
+    opener.mockResolvedValue(next.value);
+    expect(() => rerender({ file: new Uint8Array([4]), onReady: () => readyCleanup })).not.toThrow();
+    await waitFor(() => expect(result.current.run?.session).toBe(next.value));
+    expect(readyCleanup).toHaveBeenCalledTimes(1);
+    expect(edits.dispose).toHaveBeenCalledTimes(1);
+    expect(peer.dispose).toHaveBeenCalledTimes(1);
+    expect(old.value.dispose).toHaveBeenCalledTimes(1);
+    expect(first.current).toBe(false);
+    expect(result.current.error).toBeNull();
+    unmount();
+    expect(next.value.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test('contains a throwing open-error callback and clears loading before replacement', async () => {
+    const next = session();
+    const failure = new Error('Open failed');
+    const opener = open(next.value).mockRejectedValueOnce(failure);
+    const errors = mock((_error: Error) => { throw new Error('Callback failed'); });
+    const commands = createXlsxCommandController().store;
+    const controls = bridge();
+    const { result, rerender } = renderHook(
+      (props: EditableSessionWorkbookProps) => useEditableSessionWorkbook(props, commands, controls),
+      { initialProps: { file, onError: errors } }
+    );
+    await waitFor(() => {
+      expect(result.current.error).toBe(failure);
+      expect(result.current.loading).toBe(false);
+    });
+    expect(result.current.run).toBeNull();
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors).toHaveBeenCalledWith(failure);
+    rerender({ file: new Uint8Array([4]), onError: errors });
+    await waitFor(() => expect(result.current.run?.session).toBe(next.value));
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(opener).toHaveBeenCalledTimes(2);
+  });
+
   test('disposes stale StrictMode opens and publishes readiness once', async () => {
     const old = session();
     const next = session();
@@ -292,7 +345,7 @@ describe('editable session workbook', () => {
     const ready = mock((_api: XlsxWorkerEditorApi) => {});
     const commands = createXlsxCommandController().store;
     const { result } = renderHook(() => useEditableSessionWorkbook({ file, onReady: ready }, commands, bridge()), {
-      wrapper: ({ children }) => <StrictMode>{children}</StrictMode>,
+      reactStrictMode: true,
     });
     await waitFor(() => expect(result.current.run?.session).toBe(next.value));
     await act(async () => { result.current.run!.firstPaint(); result.current.run!.firstPaint(); });
@@ -309,7 +362,7 @@ describe('editable session workbook', () => {
     run.firstPaint();
     await run.whenHydrated();
     log.length = 0;
-    expect(() => run.dispose()).toThrow('Cleanup failed');
+    expect(() => run.dispose()).not.toThrow();
     expect(log).toEqual(['off', 'facade', 'peer', 'session']);
   });
 });
