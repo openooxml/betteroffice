@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import type { LayoutComputation } from '@betteroffice/docx/editor';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
@@ -13,12 +13,22 @@ import { DocxWorkerError } from '../internals/docxWorkerError';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { FontRequirementsInWorker, WorkerLayoutComputation } from './useDisplayList';
 import { SupersededPreviewError } from '../internals/supersededPreview';
+import { useLayoutTriggers } from './useLayoutTriggers';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, renderHook } = await import('@testing-library/react');
 const { useLayoutPipeline } = await import('./useLayoutPipeline');
 const restoreFrames: Array<() => void> = [];
+
+beforeAll(() => {
+  if (!window.document.fonts) {
+    Object.defineProperty(window.document, 'fonts', {
+      value: { addEventListener: () => {}, removeEventListener: () => {} },
+      configurable: true,
+    });
+  }
+});
 
 afterEach(() => {
   cleanup();
@@ -578,6 +588,36 @@ test('host batches and remote updates lay out in the worker, local edits here', 
   expect(errors).toEqual([]);
 });
 
+test('a passive render-env trigger publishes remote and a coalesced local edit publishes local', async () => {
+  const h = await opened();
+  const triggers = renderHook(({ renderEnv }) => useLayoutTriggers({
+    runLayoutPipeline: h.hook.result.current.runLayoutPipeline,
+    updateSelectionOverlay: () => {},
+    renderEnv,
+  }), { initialProps: { renderEnv: {} as YrsRenderEnv } });
+
+  const preview = { revisionPreview: { a: 'accepted' } } as YrsRenderEnv;
+  act(() => {
+    h.hook.rerender({ session: h.session, renderEnv: preview });
+    triggers.rerender({ renderEnv: preview });
+  });
+  expect(h.worker).toHaveLength(2);
+  await h.answer(1);
+  expect(h.hook.result.current.layoutUpdateOrigin).toBe('remote');
+
+  h.doc.version = 2;
+  const next = {} as YrsRenderEnv;
+  act(() => {
+    h.hook.result.current.scheduleLayout('local');
+    h.hook.rerender({ session: h.session, renderEnv: next });
+    triggers.rerender({ renderEnv: next });
+  });
+  await h.frame();
+  expect(h.doc.laidOutHere).toEqual([2]);
+  expect(h.hook.result.current.layoutUpdateOrigin).toBe('local');
+  expect(h.errors).toEqual([]);
+});
+
 test('a preview change that only adds font chains lays out in the worker', async () => {
   const { doc, session, worker, errors, hook, frame, answer } = await opened();
   doc.version = 2;
@@ -796,11 +836,13 @@ test('a pass no change asked to run here waits for the worker pass in flight', a
   await answer(1);
   expect(shown()).toBe('2');
   // The queued pass may change only the revision preview, so this one settles no wait.
+  expect(hook.result.current.layoutUpdateOrigin).toBe('local');
   expect(isSupersededLayout(hook.result.current.layout)).toBe(true);
   await frame();
   expect(worker.map((pass) => pass.at)).toEqual([1, 2, 2]);
   expect(isLayoutQueued(session)).toBe(false);
   await answer(2);
+  expect(hook.result.current.layoutUpdateOrigin).toBe('remote');
   expect(isSupersededLayout(hook.result.current.layout)).toBe(false);
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);

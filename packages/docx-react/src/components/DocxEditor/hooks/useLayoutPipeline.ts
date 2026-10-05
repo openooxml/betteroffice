@@ -311,7 +311,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     currentViewportAnchorRef.current = null;
   }
   const pendingLayoutOriginRef = useRef<LayoutUpdateOrigin | null>(null);
-  const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('local');
+  const layoutUpdateOriginRef = useRef<LayoutUpdateOrigin>('remote');
   const requestPass = useCallback(() => {
     if (schedulerRef.current != null || unmountedRef.current) return;
     schedulerRef.current = requestAnimationFrame(() => {
@@ -423,13 +423,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       if (waits && session && inFlight?.session === session) {
         queuedBehindWorkerRef.current = true;
         markLayoutQueued(session, true);
-        pendingLayoutOriginRef.current ??= 'local';
+        pendingLayoutOriginRef.current ??= 'remote';
         return;
       }
       queuedBehindWorkerRef.current = false;
       pendingInWorkerRef.current = null;
       const pass = ++passRef.current;
-      const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
+      const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'remote';
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
       const pipelineStart = performance.now();

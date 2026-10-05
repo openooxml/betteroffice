@@ -1,19 +1,25 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createRef } from 'react';
+import { createRef, useEffect, useMemo } from 'react';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
+import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
+import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
   createYrsInputPositionMap,
   createYrsSession,
   displayPositionToYrsLoc,
   yrsLocToDisplayPosition,
+  type YrsRenderEnv,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { YrsInput, type YrsInputProps, type YrsInputRef } from './YrsInput';
 import { deferWorkerOpenReplica } from './internals/workerOpenReplica';
+import { useLayoutPipeline, type UseLayoutPipelineReturn } from './hooks/useLayoutPipeline';
+import { useLayoutTriggers } from './hooks/useLayoutTriggers';
+import { useRevisionPreview } from './hooks/useRevisionPreview';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -24,16 +30,24 @@ const bytes = new Uint8Array(
 );
 const sessions: YrsSession[] = [];
 const scrollers: HTMLDivElement[] = [];
+const restoreMocks: Array<() => void> = [];
 
-beforeAll(() =>
-  preloadEditWasm(
+beforeAll(() => {
+  if (!window.document.fonts) {
+    Object.defineProperty(window.document, 'fonts', {
+      value: { addEventListener: () => {}, removeEventListener: () => {} },
+      configurable: true,
+    });
+  }
+  return preloadEditWasm(
     new Uint8Array(
       readFileSync(resolve(ROOT, 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'))
     )
-  )
-);
+  );
+});
 afterEach(() => {
   cleanup();
+  for (const restore of restoreMocks.splice(0)) restore();
   for (const scroller of scrollers.splice(0)) scroller.remove();
   for (const session of sessions.splice(0)) session.destroy();
 });
@@ -88,15 +102,22 @@ async function mount(
   const queries = {
     isReady: () => replicaReadyRef.current,
     caretRect,
+    anchorRect: caretRect,
+    pageCount: () => 1,
     pageSize: () => ({ width: 800, height: 3000 }),
+    visualLines: () => [],
+    visualLinesOnPage: () => [],
+    visualLineExtent: () => null,
     verticalMove: () => null,
-  } satisfies Pick<DisplayListQueries, 'isReady' | 'caretRect' | 'pageSize' | 'verticalMove'>;
+  } satisfies Pick<DisplayListQueries,
+    'isReady' | 'caretRect' | 'anchorRect' | 'pageCount' | 'pageSize' |
+    'visualLines' | 'visualLinesOnPage' | 'visualLineExtent' | 'verticalMove'>;
   const map = () => createYrsInputPositionMap('body', session.paragraphSpans('body'));
   const displayPositionToLoc: YrsInputProps['displayPositionToLoc'] = (position) =>
     displayPositionToYrsLoc(map(), position);
   const locToDisplayPosition: YrsInputProps['locToDisplayPosition'] = (loc) =>
     yrsLocToDisplayPosition(map(), loc);
-  const inputFor = () => (
+  const inputFor = (layoutProps: Partial<YrsInputProps> = {}) => (
     <YrsInput
       ref={input}
       enabled
@@ -114,6 +135,7 @@ async function mount(
       onStateChange={onStateChange}
       onDirectInput={() => {}}
       {...props}
+      {...layoutProps}
     />
   );
   const view = render(inputFor());
@@ -125,8 +147,177 @@ async function mount(
   };
   return {
     session, input, scroller, scrollTop, replicaReadyRef, onStateChange, view, inputFor, expectCaret,
+    queries, canvasHostRef,
   };
 }
+
+async function mountWithPipeline(workerLayout: boolean) {
+  const mounted = await mount(false, true);
+  const { session, input, scroller, view, inputFor, queries, canvasHostRef, onStateChange } = mounted;
+  const computation = () => ({ layout: { pages: [] } as unknown as Layout, notesConverged: true });
+  const retainedLayout = spyOn(session, 'layoutDocumentWithRegionsRetainedJson')
+    .mockImplementation(() => JSON.stringify(computation()));
+  const probe = spyOn(session, 'residentWorkerProbe').mockReturnValue(
+    { layoutRevision: 1 } as ReturnType<YrsSession['residentWorkerProbe']>
+  );
+  restoreMocks.push(() => { retainedLayout.mockRestore(); probe.mockRestore(); });
+  const layoutInWorker = mock(() => workerLayout ? Promise.resolve(computation()) : null);
+  const syncCoordinator = new LayoutSelectionGate();
+  const measurement: ResidentMeasurementConfig = {
+    fontChains: {},
+    defaults: { fontSize: 22, fontFamily: 'Calibri' },
+    compat: { noLeading: false, doNotExpandShiftReturn: false },
+    authoritativeShaping: true,
+  };
+  let pipeline!: UseLayoutPipelineReturn;
+  let frameEpoch = 1;
+  const handleStateChange: YrsInputProps['onStateChange'] = (...args) => {
+    onStateChange(...args);
+    if (args[1] && !args[2]) {
+      syncCoordinator.incrementStateSeq();
+      syncCoordinator.requestRender();
+      pipeline.scheduleLayout('local');
+    }
+  };
+  function PipelineInput() {
+    const preview = useRevisionPreview(session);
+    const renderEnv = useMemo<YrsRenderEnv>(() => ({
+      ...(preview.revisionPreview ? { revisionPreview: preview.revisionPreview } : {}),
+    }), [preview]);
+    pipeline = useLayoutPipeline({
+      document: null,
+      session,
+      renderEnv,
+      pageGap: 24,
+      zoom: 1,
+      residentMeasurementConfig: () => measurement,
+      deferLayoutPass: () => false,
+      displayListQueries: queries as unknown as DisplayListQueries,
+      pagesContainerRef: canvasHostRef,
+      viewportLayoutRef: { current: null },
+      getSelectionHead: () => input.current?.displaySelection()?.head ?? 0,
+      syncCoordinator,
+      getScrollContainer: () => scroller,
+      layoutInWorker,
+    });
+    useLayoutTriggers({
+      runLayoutPipeline: pipeline.runLayoutPipeline,
+      updateSelectionOverlay: () => {},
+      renderEnv,
+    });
+    useEffect(() => pipeline.runLayoutPipeline(), [session]);
+    const displayListFrameEpoch = useMemo(() => ++frameEpoch, [pipeline.layout]);
+    return inputFor({
+      layoutUpdateOrigin: pipeline.layoutUpdateOrigin,
+      displayListFrameEpoch,
+      onStateChange: handleStateChange,
+    });
+  }
+  await act(async () => view.rerender(<PipelineInput />));
+  expect(pipeline.layout).not.toBeNull();
+  return { ...mounted, pipeline: () => pipeline, layoutInWorker, retainedLayout };
+}
+
+test.each([false, true])(
+  'proposal accept, reject and undo preserve scrollTop with an unchanged distant caret (worker layout=%s)',
+  async (workerLayout) => {
+    const t = await mountWithPipeline(workerLayout);
+    const last = t.session.paragraphs('body').at(-1)!;
+    const proposal = t.session.proposeChanges({
+      expectVersion: t.session.version(),
+      proposals: [{
+        id: 'distant',
+        paragraph: {
+          kind: 'session',
+          sessionId: t.session.paragraphIdentities().sessionId,
+          story: 'body',
+          paraId: last.paraId,
+        },
+        suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
+        op: 'insertText',
+        at: 'end',
+        text: ' proposal',
+      }],
+    });
+    expect(proposal.ok).toBe(true);
+    await act(async () => t.pipeline().runLayoutPipeline());
+    const selection = t.session.selection();
+    expect(selection).not.toBeNull();
+    expect(selection!.anchor).toEqual(selection!.head);
+    for (const state of ['accepted', 'proposed', 'rejected', 'proposed'] as const) {
+      t.scroller.scrollTop = t.scrollTop;
+      fireEvent.scroll(t.scroller);
+      const caret = t.queries.caretRect(t.input.current!.displaySelection()!.head);
+      expect(caret.y - t.scroller.scrollTop).toBeGreaterThan(t.scroller.clientHeight);
+      const layout = t.pipeline().layout;
+      const workerPasses = t.layoutInWorker.mock.calls.length;
+      const hostPasses = t.retainedLayout.mock.calls.length;
+      await act(async () => {
+        const result = t.session.setProposalStates({
+          expectVersion: t.session.version(),
+          expectPreviewVersion: t.session.getProposals().previewVersion,
+          changes: [{ id: 'distant', state }],
+        });
+        expect(result.ok).toBe(true);
+      });
+      expect(t.pipeline().layout).not.toBe(layout);
+      expect(t.layoutInWorker).toHaveBeenCalledTimes(workerPasses + 1);
+      expect(t.retainedLayout).toHaveBeenCalledTimes(hostPasses + (workerLayout ? 0 : 1));
+      expect(t.session.selection()).toEqual(selection);
+      expect(t.scroller.scrollTop).toBe(t.scrollTop);
+    }
+  }
+);
+
+test('a local Delete reveals a distant caret even when its collapsed selection is unchanged', async () => {
+  const t = await mountWithPipeline(true);
+  const selection = t.session.selection();
+  t.scroller.scrollTop = t.scrollTop;
+  fireEvent.scroll(t.scroller);
+  const text = t.session.paragraphs('body')[0]!.text;
+  const layout = t.pipeline().layout;
+  await act(async () => {
+    fireEvent.keyDown(t.view.getByTestId('yrs-input'), { key: 'Delete' });
+    await t.input.current!.flushPendingInput();
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
+  expect(t.session.paragraphs('body')[0]!.text).toBe(text.slice(1));
+  expect(t.session.selection()).toEqual(selection);
+  expect(t.pipeline().layout).not.toBe(layout);
+  expect(t.pipeline().layoutUpdateOrigin).toBe('local');
+  expect(t.scroller.scrollTop).toBeGreaterThan(t.scrollTop);
+});
+
+test('a resident Delete frame reveals an unchanged distant caret after a remote layout', async () => {
+  let session!: YrsSession;
+  const applyResidentDelete = mock(async () => {
+    const { head } = session.selection()!;
+    session.deleteRange({
+      story: head.story,
+      start: { paraId: head.paraId, offset: head.offset },
+      end: { paraId: head.paraId, offset: head.offset + 1 },
+    });
+    return { frameEpoch: 2, caretSynchronized: false, deletedUnits: 1 };
+  });
+  const t = await mount(false, true, true, { applyResidentDelete });
+  session = t.session;
+  const selection = session.selection();
+  const text = session.paragraphs('body')[0]!.text;
+  t.scroller.scrollTop = t.scrollTop;
+  await act(async () => {
+    fireEvent.keyDown(t.view.getByTestId('yrs-input'), { key: 'Delete' });
+    await t.input.current!.flushPendingInput();
+  });
+  expect(applyResidentDelete).toHaveBeenCalledWith('forward', 1);
+  expect(session.paragraphs('body')[0]!.text).toBe(text.slice(1));
+  expect(session.selection()).toEqual(selection);
+  expect(t.scroller.scrollTop).toBe(t.scrollTop);
+  act(() => t.view.rerender(t.inputFor({ displayListFrameEpoch: 2 })));
+  expect(t.scroller.scrollTop).toBeGreaterThan(t.scrollTop);
+  t.scroller.scrollTop = t.scrollTop;
+  act(() => t.view.rerender(t.inputFor({ displayListFrameEpoch: 3 })));
+  expect(t.scroller.scrollTop).toBe(t.scrollTop);
+});
 
 test('a read-only replica lands without a selection or scrolling when seeding is disabled', async () => {
   const { session, input, scroller, scrollTop, replicaReadyRef, onStateChange, view, inputFor } =

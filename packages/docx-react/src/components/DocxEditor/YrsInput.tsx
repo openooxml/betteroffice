@@ -318,6 +318,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     count: number;
   } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
+  const pendingLocalCaretRevealRef = useRef(false);
   const verticalCaretGoalRef = useRef(new VerticalCaretGoal());
   const displayListQueriesRef = useRef(displayListQueries);
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
@@ -509,6 +510,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       dirtyStories?: string | readonly string[]
     ): void => {
       verticalCaretGoalRef.current.reset();
+      if (residentLayoutReady) pendingLocalCaretRevealRef.current = true;
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onCaretInput?.();
       onDirectInput(dirtyStories);
@@ -1512,6 +1514,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   useEffect(() => {
     verticalCaretGoalRef.current.reset();
     pendingResidentFrameEpochRef.current = null;
+    pendingLocalCaretRevealRef.current = false;
   }, [session, story]);
 
   useEffect(() => {
@@ -1581,9 +1584,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       (previousStickySelection === undefined ||
         !sameYrsSelection(previousStickySelection, stickySelection)) &&
       !(quiet && stickySelection && sameYrsSelection(quiet, stickySelection));
+    const caretRevealOrigin = pendingLocalCaretRevealRef.current ? 'local' : layoutUpdateOrigin;
+    pendingLocalCaretRevealRef.current = false;
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged, readOnly)
+      shouldScrollCaretIntoView(caretRevealOrigin, selectionChanged, readOnly)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const delta = scrollIntoViewDelta(scrollViewport(scroller), nextTop, nextTop + nextHeight, 24);
