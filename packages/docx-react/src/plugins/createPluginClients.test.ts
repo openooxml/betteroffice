@@ -500,8 +500,11 @@ describe('plugin read and navigation clients', () => {
       expect(values[1]).toMatchObject({ paragraphs: [
         expect.objectContaining({ text: 'Alpha' }),
         expect.objectContaining({ text: 'Tail' }),
-        expect.objectContaining({ text: 'Locked' }),
+        { story: 'body', paraId: 'body:p2', text: '', atoms: [] },
       ] });
+      expect(env.session.readParagraphs({ story: 'body:sdt0', view: 'accepted' })).toMatchObject({
+        ok: true, paragraphs: [expect.objectContaining({ text: 'Locked' })],
+      });
       expect(values[2]).toEqual(env.session.validateEdits(replace(env.session.version(), '00000001', 'Beta')));
       expect(values[2]).toMatchObject({ ok: true, wouldApply: true });
     });

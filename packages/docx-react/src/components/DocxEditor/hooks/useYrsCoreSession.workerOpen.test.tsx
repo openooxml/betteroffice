@@ -2800,7 +2800,7 @@ test('a successful worker-recovery main open permits pending reads, navigation a
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
     expect(ensure.mock.calls).toEqual([[session], [session]]);
     expect(api.findInDocument('paragraph')).toContainEqual({
-      paraId: '00000001', match: 'paragraph', before: 'First ', after: '',
+      paraId: 'body:p0', match: 'paragraph', before: 'First ', after: '',
     });
     expectReadyMutations(api, session, editor, result.current.searchReveals);
     expect(result.current.mainOpens).toEqual([true]);
@@ -7889,7 +7889,7 @@ async function openingPluginFallback() {
 
 async function expectPluginOwnerFallback(
   calls: (env: Awaited<ReturnType<typeof openingPluginFallback>>) => readonly Promise<unknown>[],
-  complete: (values: readonly unknown[], env: Awaited<ReturnType<typeof openingPluginFallback>>) => void
+  complete: (values: readonly unknown[], env: Awaited<ReturnType<typeof openingPluginFallback>>) => void | Promise<void>
 ) {
   const env = await openingPluginFallback();
   const { clock, replica, result, session, worker } = env;
@@ -7928,7 +7928,11 @@ async function expectPluginOwnerFallback(
     await flushPluginFallback(clock);
     expect(replica.hydrated).toBe(true);
     expect(replica.pending).toBe(true);
-    expect(session.version()).toBe(env.version);
+    const hydratedVersion = replica.readyVersion;
+    expect(hydratedVersion).toBeDefined();
+    expect(session.version()).toBe(hydratedVersion);
+    expect(hydratedVersion).toBe(replica.loadedVersion);
+    expect(hydratedVersion).not.toBe(env.version);
     expect(clock.now).toBe(10_001);
     expect(result.current.core.replicaReady).toBe(false);
     for (const outcome of outcomes) expect(outcome.settled).toBe(false);
@@ -7946,6 +7950,8 @@ async function expectPluginOwnerFallback(
     }
     expect(replica.pending).toBe(false);
     expect(result.current.core.replicaReady).toBe(true);
+    const applied = env.apply.mock.results.find((call) => call.value?.ok && call.value.applied)?.value;
+    expect(session.version()).toBe(applied?.version ?? hydratedVersion);
     expect(env.start).toHaveBeenCalledTimes(1);
     expect(env.requested.mock.calls).toEqual([[session]]);
     expect(env.load).toHaveBeenCalledTimes(1);
@@ -7953,7 +7959,7 @@ async function expectPluginOwnerFallback(
     expect(result.current.renderer.layoutCompleteSession).toBeNull();
     expect(result.current.errors).toEqual([]);
     expectPassiveCall();
-    complete(outcomes.map((outcome) => outcome.value), env);
+    await complete(outcomes.map((outcome) => outcome.value), env);
   } finally {
     env.unmount();
     env.visibility.restore();
@@ -7995,9 +8001,9 @@ test('reads and versions issued after worker open wait for the owner fallback an
     env.clients.read.version(),
     env.clients.read.readParagraphs({ view: 'accepted' }),
   ], (values, env) => {
-    expect(values[0]).toEqual({ ok: true, version: env.version });
+    expect(values[0]).toEqual({ ok: true, version: env.replica.readyVersion });
     expect(values[1]).toEqual(env.session.readParagraphs({ view: 'accepted' }));
-    expect(values[1]).toMatchObject({ ok: true, paragraphs: [
+    expect(values[1]).toMatchObject({ ok: true, version: env.replica.readyVersion, paragraphs: [
       expect.objectContaining({ text: 'First paragraph' }),
       expect.objectContaining({ text: 'Tail paragraph' }),
     ] });
@@ -8011,7 +8017,10 @@ test('text search issued after worker open waits for the owner fallback and comp
     expect(values[0]).toEqual(env.session.findText({
       text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
     }));
-    expect(values[0]).toMatchObject({ ok: true, matches: [expect.objectContaining({ text: 'Tail' })] });
+    expect(values[0]).toMatchObject({
+      ok: true, version: env.replica.readyVersion,
+      matches: [expect.objectContaining({ text: 'Tail' })],
+    });
   });
 });
 
@@ -8046,6 +8055,41 @@ test('mutations and commands issued after worker open wait for the owner fallbac
     expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
     expect(env.apply).toHaveBeenCalledTimes(1);
     expect(env.binding.calls).toEqual([{ id: 'reviewNext', args: null, ordered: true }]);
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(env.replica.readyVersion);
+  });
+});
+
+test('a pre-hydration worker version applies after unchanged owner hydration and becomes stale after an edit', async () => {
+  await expectPluginOwnerFallback(() => [], async (_values, env) => {
+    const request = {
+      expectVersion: env.version,
+      steps: [{
+        op: 'replaceText' as const,
+        target: { kind: 'paragraph' as const, story: 'body', paraId: env.paragraphs[0]!.paraId },
+        text: 'Owner-ready edit',
+      }],
+    };
+    expect(env.replica.handoverVersion).toBe(env.version);
+    expect(env.session.version()).toBe(env.replica.readyVersion);
+    const applied = await env.clients.edits!.applyEdits(request);
+    expect(applied).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(env.replica.readyVersion);
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    const editedVersion = env.session.version();
+    expect(editedVersion).not.toBe(env.replica.readyVersion);
+    expect(await env.clients.edits!.applyEdits({
+      ...request, steps: [{ ...request.steps[0]!, text: 'Stale edit' }],
+    })).toMatchObject({ ok: false, version: editedVersion, failure: { code: 'stale-version' } });
+    expect(env.apply.mock.calls[1]![0].expectVersion).toBe(env.version);
+    expect(env.session.version()).toBe(editedVersion);
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    expect(await env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: env.paragraphs[1]!.paraId },
+      { expectVersion: env.version, focus: true }
+    )).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    expect(env.selection).not.toHaveBeenCalled();
+    expect(env.focus).not.toHaveBeenCalled();
+    expect(env.result.current.searchReveals).toEqual([]);
   });
 });
 
@@ -8416,13 +8460,16 @@ test.each(['paste', 'cut', 'composition'] as const)('queued %s starts the peer i
   const remove = spyOn(opened.session, 'deleteRange');
   const clipboard = openingClipboard();
   try {
-    const textarea = opened.view.getByTestId('yrs-input');
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
     act(() => textarea.focus());
     if (kind === 'cut') selectOpeningText(opened);
     if (kind === 'paste') fireEvent.paste(textarea, { clipboardData: { getData: () => 'P' } });
     else if (kind === 'cut') fireEvent.cut(textarea);
     else fireEvent.compositionStart(textarea);
-    if (kind === 'composition') fireEvent.compositionEnd(textarea, { data: 'I' });
+    if (kind === 'composition') {
+      textarea.value = 'I';
+      fireEvent.compositionEnd(textarea, { data: 'I' });
+    }
     expect(document.activeElement).toBe(textarea);
     expect(insert).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
