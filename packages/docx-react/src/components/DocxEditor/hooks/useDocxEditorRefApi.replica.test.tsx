@@ -267,7 +267,7 @@ async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing') {
         proposals: proposalSetIdentity(snapshot), targets: {}, hidden: [],
       },
       updates: [],
-      stateVector: new Uint8Array(),
+      stateVector: worker.encodeStateVector(),
     };
   };
   const transport = {
@@ -870,7 +870,7 @@ test.each(SYNC_REPLICA_CALLS)(
     expect(transport.syncUpdate).toHaveBeenCalledTimes(1);
     expect(opens).toEqual([false]);
     expect(replica.pending).toBe(false);
-    expect(authority.holdsWorkerState()).toBe(true);
+    expect(authority.holdsWorkerState()).toBe(false);
     const rounds = transport.proposal.mock.calls.length;
     expect(await api.proposeChanges({ expectVersion: session.version(), proposals: [] })).toMatchObject({ ok: true });
     expect((await api.getProposals()).previewVersion).toBe(2);

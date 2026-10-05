@@ -45,7 +45,7 @@ function reply(version = 'worker-1', changedStories: string[] = []): ResidentPro
   };
 }
 
-function harness(laidOut = () => Promise.resolve(), editorPeer = false) {
+function harness(laidOut = () => Promise.resolve(), editorPeer = false, pendingReplica = true) {
   let mainVersion = 'main-1';
   let workerVersion = 'worker-1';
   let mirror: ResidentProposalReply['mirror'] | null = null;
@@ -96,7 +96,7 @@ function harness(laidOut = () => Promise.resolve(), editorPeer = false) {
       adopted: () => {},
     }
   );
-  deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
+  if (pendingReplica) deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
   return {
     session, worker, events, authority, proposalChange, relayout, contentChanged, projectionChanged, editorPeer,
     replace: () => { current = false; },
@@ -818,6 +818,50 @@ test('failed initialization rejects and is never posted twice', async () => {
   expect(h.contentChanged).not.toHaveBeenCalled();
 });
 
+test('a round queued after a failed initialization reuses its rejection', async () => {
+  const h = harness();
+  const error = new Error('initialization failed');
+  h.worker.proposal.mockRejectedValue(error);
+  await expect(h.authority.initialize()).rejects.toBe(error);
+  await expect(h.authority.propose(request, unusedMain)).rejects.toBe(error);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+});
+
+test('equivalent state vectors retain the pre-hydration worker token', async () => {
+  const h = harness(undefined, true);
+  await h.authority.initialize();
+  h.session.encodeStateVector = () => Uint8Array.of(2, 1, 3, 2, 4);
+  h.worker.syncUpdate.mockResolvedValue({ version: 'worker-1', stateVector: Uint8Array.of(2, 2, 4, 1, 3), repair: null });
+  h.worker.proposal.mockResolvedValue({ ...reply(), stateVector: Uint8Array.of(2, 2, 4, 1, 3) });
+  await h.authority.catchUp();
+  expect(handedOverRequest(h.session, request).expectVersion).toBe('main-1');
+  expect(h.authority.workerCoversPeer('main-1')).toBe(true);
+});
+
+test('a worker-only successful empty decision keeps the base ownership hold', async () => {
+  const h = harness();
+  await h.authority.initialize();
+  await h.authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, unusedMain);
+  expect(h.authority.holdsWorkerState()).toBe(true);
+});
+
+test('owner catch-up releases an ordinary paragraph read waiting for layout', async () => {
+  const layout = deferred<void>();
+  const waiting = deferred<void>();
+  const h = harness(() => { waiting.resolve(); return layout.promise; });
+  const main = mock(async () => ({ ok: true as const, version: 'main-2', view: 'accepted' as const, paragraphs: [] }));
+  const read = h.authority.readParagraphs({ view: 'accepted' }, main);
+  await waiting.promise;
+  deferPeer(h, async () => () => { h.mainVersion('main-2'); },
+    () => { throw new Error('unexpected fallback'); }, () => {});
+  await requestWorkerOpenReplica(h.session);
+  expect(await read).toEqual({ ok: true, version: 'main-2', view: 'accepted', paragraphs: [] });
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(h.worker.documentRead).not.toHaveBeenCalled();
+  expect(h.authority.initialized).toBe(false);
+});
+
 test('anchor and navigation reads retain the worker version and input order', async () => {
   const h = harness();
   const anchors = [
@@ -1232,7 +1276,8 @@ test('replacement initialization keeps an admitted round ahead of a later save',
 });
 
 test('an unchanged empty state round does not latch worker state', async () => {
-  const h = harness();
+  const h = harness(undefined, true, false);
+  h.mainVersion('worker-1');
   await h.authority.initialize();
   expect(await h.authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, unusedMain))
     .toMatchObject({ ok: true });

@@ -660,20 +660,16 @@ export function useYrsCoreSession(
             const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
-              save: (comments, peer) => {
-                const task = () => saveInOrder(async (stories) => {
-                  if (stale()) throw new Error('The document changed while saving');
-                  if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
-                  const currentHost = documentRef.current ?? host?.document;
-                  return worker.save({
-                    comments,
-                    ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
-                    ...(peer ? { stories } : {}),
-                  }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
-                });
-                const authority = registeredWorkerProposalAuthority(next);
-                return authority ? authority.save(task) : task();
-              },
+              save: (comments, peer) => saveInOrder(async (stories) => {
+                if (stale()) throw new Error('The document changed while saving');
+                if (!worker.canSave()) throw new ResidentWorkerSaveUnavailableError('No document worker');
+                const currentHost = documentRef.current ?? host?.document;
+                return worker.save({
+                  comments,
+                  ...(currentHost ? { host: hostSaveMetadata(currentHost) } : {}),
+                  ...(peer ? { stories } : {}),
+                }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
+              }),
             });
             let revisionsQueried = false;
             const queryRevisions = (): void => {

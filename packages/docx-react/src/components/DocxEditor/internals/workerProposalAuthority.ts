@@ -30,6 +30,7 @@ import type {
   resolveNavigationTarget,
 } from '@betteroffice/docx/yrs';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
+import { stateVectorAhead } from './stateVector';
 import { proposalRevisionPreview, resolveMirroredNavigationTarget } from '@betteroffice/docx/yrs';
 import {
   awaitWorkerOpenReplica,
@@ -177,6 +178,11 @@ function retryKey(input: DocxProposalInput): string {
 
 const authorities = new WeakMap<YrsSession, RegisteredAuthority>();
 
+function sameVector(a: Uint8Array, b: Uint8Array): boolean {
+  return (a.length === b.length && a.every((byte, index) => byte === b[index])) ||
+    (a.length > 0 && b.length > 0 && !stateVectorAhead(a, b) && !stateVectorAhead(b, a));
+}
+
 export function registerWorkerProposalAuthority(
   session: YrsSession,
   worker: Pick<WorkerOpenedDocument, 'proposal' | 'documentRead' | 'handOver'> &
@@ -198,6 +204,7 @@ export function registerWorkerProposalAuthority(
 ): WorkerProposalAuthority {
   let tail: Promise<unknown> = Promise.resolve();
   let initializing: Promise<void> | null = null;
+  let initializationFailure: { error: unknown } | null = null;
   let failWaiting!: (error: unknown) => void;
   const stopped = new Promise<void>((_resolve, reject) => {
     failWaiting = reject;
@@ -213,6 +220,8 @@ export function registerWorkerProposalAuthority(
   let mutating = 0;
   let admittedRounds = 0;
   let peerHydrated = false;
+  let releaseHydration!: () => void;
+  const hydrated = new Promise<void>((resolve) => { releaseHydration = resolve; });
   let retirementReason: 'source-fallback' | null = null;
   let releaseRetirement!: () => void;
   const retired = new Promise<void>((resolve) => { releaseRetirement = resolve; });
@@ -246,8 +255,11 @@ export function registerWorkerProposalAuthority(
     return result;
   };
   const store = (reply: ResidentProposalReply): void => {
-    // Listeners the mirror notifies read the geometry that goes with it.
-    geometry = peerReady() ? { ...reply.geometry, version: session.version() } : reply.geometry;
+    geometry = peerReady()
+      ? sameVector(session.encodeStateVector(), reply.stateVector)
+        ? { ...reply.geometry, version: session.version() }
+        : null
+      : reply.geometry;
     if (correspondence?.worker !== reply.mirror.version) correspondence = null;
     mirror = reply.mirror;
     if (!peerReady()) session.mirrorWorkerDocument(mirror, !editorPeer());
@@ -269,8 +281,13 @@ export function registerWorkerProposalAuthority(
       return call();
     });
     if (initialized) return execute(true);
-    const workerRead = ready.then(() => execute(true));
-    const loaded = workerOpenDocumentHeld(session) ? undefined : awaitWorkerOpenReplica(session);
+    const workerRead = ready.then(async () => {
+      if (!initialized) await awaitWorkerOpenReplica(session);
+      return execute(initialized);
+    });
+    const loaded = workerOpenDocumentHeld(session) ? undefined :
+      Promise.race([awaitWorkerOpenReplica(session) ?? hydrated, hydrated])
+        .then(() => awaitWorkerOpenReplica(session));
     return loaded ? Promise.race([workerRead, loaded.then(() => execute(false))]) : workerRead;
   };
   const round = <T>(
@@ -326,8 +343,7 @@ export function registerWorkerProposalAuthority(
   };
   const recordCorrespondence = (workerVersion: string, unchanged: boolean, vector: Uint8Array): void => {
     const peerVector = session.encodeStateVector();
-    correspondence = unchanged && peerVector.length === vector.length &&
-      peerVector.every((byte, index) => byte === vector[index])
+    correspondence = unchanged && sameVector(peerVector, vector)
       ? { worker: workerVersion, peer: session.version(), revision: worker.stateRevision?.() }
       : null;
   };
@@ -360,6 +376,7 @@ export function registerWorkerProposalAuthority(
     }
     assertCurrent();
     if (
+      (!editorPeer() && op.kind === 'setStates' && reply.result?.ok === true) ||
       reply.changedStories.length > 0 ||
       JSON.stringify(previous.proposals) !== JSON.stringify(reply.mirror.proposals)
     ) holdsState = true;
@@ -390,7 +407,7 @@ export function registerWorkerProposalAuthority(
       const version = peerReady() ? session.version() : mirror!.version;
       const token = op.request.expectVersion;
       const retry = op.kind === 'propose' && Array.isArray(op.request.proposals) &&
-        op.request.proposals.length > 0 && op.request.proposals.every((input) => mirror?.proposals.entries.some((entry) =>
+        op.request.proposals.every((input) => mirror?.proposals.entries.some((entry) =>
           entry.record.id === input.id && entry.key === retryKey(input)));
       if (!retry && token !== version && !(correspondence?.peer === version && correspondence.worker === token)) {
         throw new StaleProposalVersionError(version);
@@ -414,9 +431,11 @@ export function registerWorkerProposalAuthority(
     if (retirementReason) return;
     assertCurrent();
     if (initialized || retirementReason) return;
+    if (initializationFailure) throw initializationFailure.error;
     const revision = layoutRevision;
     const reply = await Promise.race([worker.proposal({ kind: 'snapshot' }), retired.then(() => null)]).catch((error: unknown) => {
       if (retirementReason) return null;
+      if (revision === layoutRevision) initializationFailure = { error };
       throw error;
     });
     assertCurrent();
@@ -454,6 +473,7 @@ export function registerWorkerProposalAuthority(
       holdsState = false;
     }
     complete?.();
+    releaseHydration();
   };
   const authority: RegisteredAuthority = {
     registryState: () => mirror?.proposals ?? null,
@@ -498,6 +518,7 @@ export function registerWorkerProposalAuthority(
       initialized = false;
       layoutRevision += 1;
       initializing = null;
+      initializationFailure = null;
       hooks.relayout();
       notify();
     },
@@ -517,7 +538,11 @@ export function registerWorkerProposalAuthority(
       if (failure) return Promise.reject(failure.error);
       if (retirementReason) return Promise.resolve();
       if (initializing) return initializing;
-      initializing = Promise.race([hooks.laidOut(), stopped, retired]).then(() => enqueue(initializeNow));
+      const waitingForPeer = !peerReady() && !workerOpenDocumentHeld(session);
+      initializing = Promise.race([
+        hooks.laidOut(), stopped, retired,
+        ...(waitingForPeer ? [hydrated] : []),
+      ]).then(() => waitingForPeer && peerHydrated && !initialized ? undefined : enqueue(initializeNow));
       return initializing;
     },
     geometry: () => geometry,

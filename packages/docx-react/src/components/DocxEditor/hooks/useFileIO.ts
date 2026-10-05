@@ -22,6 +22,7 @@ import {
 } from '../internals/workerOpenReplica';
 import { workerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave';
 import { isWorkerViewer } from '../internals/workerViewer';
+import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
@@ -203,30 +204,40 @@ export function useFileIO({
             throw new Error('The document changed while saving');
           }
         };
-        if (initialSession) {
-          const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
-          const inWorker = pending && (await pending);
-          if (inWorker) {
-            onSave?.(inWorker);
-            return inWorker;
-          }
-          if (!viewer && workerOpenSave(initialSession)) {
-            await requestWorkerOpenReplica(initialSession);
-            assertCurrent();
-          }
+        const saver = initialSession ? workerOpenSave(initialSession) : null;
+        if (initialSession && !viewer && saver &&
+          (workerOpenReplicaStarted(initialSession) || !saver.available())) {
+          await requestWorkerOpenReplica(initialSession);
+          assertCurrent();
         }
-        const { editor, session } = await flushedSession(pagedEditorRef);
-        assertCurrent();
-        if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
-        const projected = editor.getDocument();
-        if (!projected) return null;
-        const buffer = await saveEditorDocument(session, projected, comments);
-        if (pagedEditorRef.current?.getYrsSession() !== session) {
-          throw new Error('The document changed while saving');
-        }
-        projected.originalBuffer = buffer;
+        const task = async (): Promise<ArrayBuffer | null> => {
+          if (initialSession) {
+            const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent);
+            const inWorker = pending && (await pending);
+            if (inWorker) {
+              return inWorker;
+            }
+            if (!viewer && workerOpenSave(initialSession)) {
+              await requestWorkerOpenReplica(initialSession);
+              assertCurrent();
+            }
+          }
+          const { editor, session } = await flushedSession(pagedEditorRef);
+          assertCurrent();
+          if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
+          const projected = editor.getDocument();
+          if (!projected) return null;
+          const buffer = await saveEditorDocument(session, projected, comments);
+          if (pagedEditorRef.current?.getYrsSession() !== session) {
+            throw new Error('The document changed while saving');
+          }
+          projected.originalBuffer = buffer;
 
-        onSave?.(buffer);
+          return buffer;
+        };
+        const authority = initialSession ? registeredWorkerProposalAuthority(initialSession) : null;
+        const buffer = await (authority ? authority.save(task) : task());
+        if (buffer) onSave?.(buffer);
         return buffer;
       } catch (error) {
         onError?.(pagedEditorRef.current?.getYrsSession() !== initialSession

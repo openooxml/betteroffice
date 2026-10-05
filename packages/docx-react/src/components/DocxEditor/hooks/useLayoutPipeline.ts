@@ -27,7 +27,9 @@ import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import { documentPageCount } from './documentPageCount';
 import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
 import {
+  awaitWorkerOpenReplica,
   ensureWorkerOpenReplica,
+  requestWorkerOpenReplicaReadiness,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
@@ -508,6 +510,22 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           if (isViewerSession(session) && workerRequirements == null) {
             throw new Error('The document worker did not return font requirements');
           }
+          if (workerRequirements == null && workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
+            if (!onHost) ensureWorkerOpenReplica(session);
+            if (workerOpenReplicaPending(session)) {
+              requestWorkerOpenReplicaReadiness(session);
+              void awaitWorkerOpenReplica(session)?.then(() => {
+                if (pass === passRef.current && sessionRef.current === session) run(workerRequirements);
+              }, (error: unknown) => {
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                invalidateRetainedLayout();
+                markLayoutQueued(session, false);
+                reportLayoutError(session, error);
+                syncCoordinator.onLayoutComplete(currentEpoch);
+              });
+              return;
+            }
+          }
           const requirements = JSON.parse(
             workerRequirements ?? session.layoutFontRequirementsJson(input)
           ) as ResidentFontRequirement[];
@@ -676,6 +694,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           try {
             // An edit may have landed since the pass began.
             if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
+            if (workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
+              requestWorkerOpenReplicaReadiness(session);
+              void awaitWorkerOpenReplica(session)?.then(() => {
+                if (pass === passRef.current && sessionRef.current === session) layOutHere({ recovery });
+              }, (error: unknown) => {
+                if (pass !== passRef.current || sessionRef.current !== session) return;
+                reportLayoutError(session, error);
+              });
+              return;
+            }
             const version = readSourceVersion();
             const computation = computeLayout(computeInputs);
             applyComputation(computation, layoutUpdateOrigin, version);

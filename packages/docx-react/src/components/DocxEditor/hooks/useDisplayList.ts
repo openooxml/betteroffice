@@ -2737,7 +2737,8 @@ export function useRustDisplayList(
       };
       if (
         (isViewerSession(hostEngine) ||
-          (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine))) &&
+          (workerOpenEnabledRef.current && (workerOpenReplicaPending(hostEngine) ||
+            workerProposalRegistryState(hostEngine) !== null))) &&
         workerRef.current?.engine !== hostEngine &&
         workerOpenSourcesRef.current.has(hostEngine)
       ) {
@@ -3422,7 +3423,8 @@ export function useRustDisplayList(
       const requestWorkerFrame = (): Promise<BuiltDisplay> => {
         if (
           (isViewerSession(hostEngine) ||
-            (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine))) &&
+            (workerOpenEnabledRef.current && (workerOpenReplicaPending(hostEngine) ||
+              workerProposalRegistryState(hostEngine) !== null))) &&
           workerRef.current?.engine !== hostEngine &&
           workerOpenSourcesRef.current.has(hostEngine)
         ) {

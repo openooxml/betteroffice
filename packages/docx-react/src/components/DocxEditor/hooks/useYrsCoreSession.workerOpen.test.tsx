@@ -49,7 +49,7 @@ import { DocxWorkerError } from '../internals/docxWorkerError';
 import { SupersededPreviewError } from '../internals/supersededPreview';
 import { useViewerSession } from '../internals/viewerSession';
 import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf, stampSourceVersion } from '../internals/layoutProvenance';
-import { workerOpenSave } from '../internals/workerOpenSave';
+import { registerWorkerOpenSave, workerOpenSave } from '../internals/workerOpenSave';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
@@ -7413,16 +7413,15 @@ test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yiel
     if (boundary === 2) await act(async () => tasks.run());
     act(() => {
       ensureWorkerOpenReplica(session);
-      expect(session.hasStory('body')).toBe(boundary === 2);
+      expect(session.hasStory('body')).toBe(true);
       expect(result.current.core.replicaReadyRef?.current).toBe(false);
-      expect(load).toHaveBeenCalledTimes(boundary === 2 ? 1 : 0);
+      expect(load).toHaveBeenCalledTimes(1);
     });
     expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
     expect(replicas).toEqual([]);
     await act(async () => {
       await tasks.run();
-      if (boundary === 1) await tasks.run();
       await pending;
     });
     expect(session.hasStory('body')).toBe(true);
@@ -7443,6 +7442,121 @@ test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yiel
       globalThis.Worker = originalWorker;
     }
   }
+});
+
+test.each([1, 2])('a forced host pass at hydration yield %s waits for readiness before reading the peer', async (boundary) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const { result, unmount } = renderHook(useHarness, { initialProps: {
+    ...initialProps, source: await longFixture(2), holdReplica: true,
+  } });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const ready = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0]!.release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    if (boundary === 2) await act(async () => tasks.run());
+    const requirements = spyOn(session, 'layoutFontRequirementsJson');
+    const layout = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+    expect(session.hasStory('body')).toBe(true);
+    expect(requirements).not.toHaveBeenCalled();
+    expect(layout).not.toHaveBeenCalled();
+    await act(async () => { await tasks.run(); await ready; });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(requirements).toHaveBeenCalled();
+    expect(layout).toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.errors).toEqual([]);
+  } finally { unmount(); visibility.restore(); tasks.restore(); frames.restore(); }
+});
+
+test('a forced host pass before the hydration snapshot resumes only the current pass', async () => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const { result, unmount } = renderHook(useHarness, { initialProps: {
+    ...initialProps, source: await longFixture(2), holdReplica: true,
+  } });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const ready = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    const requirements = spyOn(session, 'layoutFontRequirementsJson');
+    const layout = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+    expect(requirements).not.toHaveBeenCalled();
+    expect(layout).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+    await act(async () => workers[0]!.release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    await act(async () => tasks.run());
+    await act(async () => { await tasks.run(); await ready; });
+    expect(requirements).toHaveBeenCalledTimes(1);
+    expect(layout).toHaveBeenCalledTimes(1);
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.errors).toEqual([]);
+  } finally { unmount(); visibility.restore(); tasks.restore(); frames.restore(); }
+});
+
+test.each([false, true])('a public save stays behind a round while the replacement worker open is held with peer fallback=%s', async (peerFallback) => {
+  const { workers, posted, sent } = installWorker({ holdRetryOpen: true });
+  const props = {
+    ...workerProposalProps, viewer: false, readOnly: false, styleResolver: true,
+    source: await longFixture(2),
+  };
+  const { result, rerender, unmount } = await openWorkerProposals(props);
+  const errors: Error[] = [];
+  let unregisterSave: (() => void) | undefined;
+  const io = renderHook(() => useFileIO({
+    pagedEditorRef: result.current.pagedEditorRef, viewerSession: false,
+    resolveImage: () => null, comments: [], documentName: undefined,
+    onSave: undefined, onOpen: undefined, onPrint: undefined, onDocumentNameChange: undefined,
+    downloadOnSave: false, onError: (error) => errors.push(error),
+    loadBuffer: async () => {}, focusActiveEditor: () => {},
+  }));
+  try {
+    act(() => rerender({ ...props, handleSave: async () => {
+      const buffer = await io.result.current.handleSave();
+      if (!buffer) throw new Error('Save failed');
+      return buffer;
+    } }));
+    const session = result.current.core.session!;
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    const api = result.current.ref.current!;
+    const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+    const lastOpen = posted.filter((request) => request.type === 'open').at(-1)!.id;
+    act(() => workers[0]!.onerror?.({ message: 'save replacement crash' } as ErrorEvent));
+    if (peerFallback) unregisterSave = registerWorkerOpenSave(session, {
+      available: () => false,
+      save: async () => { throw new Error('unexpected worker save'); },
+    });
+    const round = api.proposeChanges({ expectVersion: session.version(), proposals: [{
+      id: 'before-save', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      op: 'insertText', at: 'start', text: 'Saved round ',
+    }] });
+    expect(workerOpenSave(session)!.available()).toBe(false);
+    let settled = false;
+    const saving = api.save().then((buffer) => { settled = true; return buffer; });
+    await sent('open', lastOpen);
+    await act(async () => {});
+    expect(settled).toBe(false);
+    await act(async () => workers[1]!.release());
+    expect(await round).toMatchObject({ ok: true });
+    const buffer = await saving;
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    const zip = await JSZip.loadAsync(buffer!);
+    expect(await zip.file('word/document.xml')!.async('string')).toContain('Saved round ');
+    expect(errors).toEqual([]);
+  } finally { unregisterSave?.(); io.unmount(); unmount(); }
 });
 
 test.each([false, true])('a loadState error after yielding preserves replica fallback with failure=%s', async (fails) => {

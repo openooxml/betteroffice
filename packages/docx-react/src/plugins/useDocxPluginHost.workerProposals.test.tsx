@@ -47,6 +47,85 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
+test('an ordinary ready worker editor resolves paragraph and search geometry from its peer', async () => {
+  const paragraph = { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' };
+  const session = {
+    onUpdate: () => () => {}, onProposalChange: () => () => {}, selection: () => null,
+    workerDocumentMirrored: () => false,
+    version: () => 'peer-1', encodeStateVector: () => Uint8Array.of(0),
+    getProposals: () => ({ version: 'peer-1', previewVersion: 0, proposals: [] }),
+    hasStory: () => true,
+    resolveParagraphAnchor: () => ({ status: 'found', anchor: paragraph }),
+    paragraphSpans: () => [{ paraId: 'p1', length: 5 }],
+    storySegments: () => [
+      { kind: 'text', text: 'Alpha', attributes: {} },
+      { kind: 'pilcrow', paraId: 'p1', properties: {}, attributes: {} },
+    ],
+    listRevisions: () => [],
+    findText: () => ({ ok: true, version: 'peer-1', truncated: false, matches: [{
+      text: 'Alpha', range: { story: 'body', view: 'accepted',
+        start: { paraId: 'p1', offset: 0 }, end: { paraId: 'p1', offset: 5 } },
+    }] }),
+  } as unknown as YrsSession;
+  const authority = workerProposals.registerWorkerProposalAuthority(session, {
+    proposal: async () => ({
+      mirror: { version: 'worker-1', proposals: { previewVersion: 0, entries: [] } },
+      geometry: { version: 'worker-1', previewVersion: 0,
+        proposals: proposalSetIdentity(session.getProposals()), targets: {}, hidden: [] },
+      changedStories: [], updates: [], stateVector: Uint8Array.of(0),
+    }),
+    documentRead: async () => { throw new Error('unexpected worker read'); },
+    handOver: async () => { throw new Error('unexpected hydration'); },
+  }, { editorPeer: true, passiveEditor: true, current: () => true, laidOut: async () => {},
+    adopted: () => {}, relayout: () => {}, contentChanged: () => {} });
+  await authority.initialize();
+  const pages = document.createElement('div');
+  const canvas = document.createElement('canvas');
+  canvas.dataset.pageIndex = '0';
+  pages.append(canvas);
+  const layer = document.createElement('div');
+  const bounds = () => new DOMRect(0, 0, 100, 200);
+  for (const element of [pages, canvas, layer]) element.getBoundingClientRect = bounds;
+  const rect = { pageIndex: 0, x: 10, y: 20, width: 30, height: 12 };
+  const displayList = { pages: [{ pageIndex: 0, width: 100, height: 200 }] } as DisplayList;
+  const queries = {
+    displayList, sourceState: () => ({ status: 'ready' }),
+    pageCount: () => 1, pageSize: () => ({ width: 100, height: 200 }),
+    pageBounds: () => ({ pageIndex: 0, x: 0, y: 0, width: 100, height: 200 }),
+    rangeRects: () => [rect], caretRect: () => rect, anchorRect: () => rect,
+    hitTestRegions: () => null,
+  } as unknown as DisplayListQueries;
+  stampRevisionPreviewKey(queries, '');
+  stampSourceVersion(queries, 'peer-1');
+  const layout = { pages: [{}], partial: false };
+  stampSourceVersion(layout, 'peer-1');
+  const pagedEditorRef = { current: {
+    getYrsSession: () => session, getLayout: () => layout, getSelectionRange: () => null,
+    hasPendingInput: () => false, yrsLocToDisplayPosition: (loc: { offset: number }) => loc.offset,
+  } as unknown as PagedEditorRef };
+  document.body.append(pages, layer);
+  restores.push(() => { pages.remove(); layer.remove(); });
+  markPresented(pages, displayList);
+  const options: UseDocxPluginHostOptions = {
+    plugins: [defineDocxPlugin({ id: 'test.ready-geometry', createState: () => null })],
+    pagedEditorRef, writeModeRef: { current: 'editing' }, mode: 'editing', readOnly: false,
+    commands: createDocxCommandController(), session, loadGeneration: 0,
+    queries, layoutError: null, zoom: 1, canvasHostRef: { current: pages }, overlayTarget: layer,
+    selectionChangeSubscribersRef: { current: new Set<(state: SelectionState | null) => void>() },
+    i18n: undefined, onRenderedDomContextReady: undefined,
+  };
+  const { result } = renderHook(() => useDocxPluginHost(options));
+  await act(async () => {
+    result.current.overlayLayerRef(layer);
+    result.current.onRenderedDomContext(createRenderedDomContext(pages, 1), queries);
+  });
+  await waitFor(() => expect(result.current.activations[0]?.context.geometry).toBeTruthy());
+  const geometry = result.current.activations[0]!.context.geometry!;
+  expect(authority.geometry()).not.toBeNull();
+  expect(geometry.getAnchorGeometry({ kind: 'paragraph', paragraph })).toMatchObject({ ok: true });
+  expect(geometry.getAnchorGeometry({ kind: 'search', paragraph, text: 'Alpha' })).toMatchObject({ ok: true });
+});
+
 function stubSession() {
   const snapshot: DocxProposalSnapshot = { version: 'v1', previewVersion: 0, proposals: [] };
   return {
@@ -93,6 +172,9 @@ function fakeAuthority(session: YrsSession) {
 test('worker geometry arriving after a frame re-notifies plugins and subscriptions follow the session', async () => {
   const first = stubSession();
   const second = stubSession();
+  for (const session of [first, second]) {
+    deferWorkerOpenReplica(session, () => new Promise(() => {}), () => {}, () => {});
+  }
   const firstWorker = fakeAuthority(first);
   const secondWorker = fakeAuthority(second);
   const lookup = workerProposals.workerProposalAuthority;

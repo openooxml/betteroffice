@@ -270,7 +270,24 @@ export function deferWorkerOpenReplica(
       );
     },
     ensure(reason = 'failure') {
-      if (serializing) return;
+      if (serializing) {
+        readinessRequested = true;
+        if (steps && !finishing) {
+          try {
+            finishing = true;
+            try {
+              loadRemaining();
+              if (current()) replica.hydratingVersion = session.version();
+            } finally {
+              finishing = false;
+            }
+          } catch (error) {
+            finish(() => { throw error; }, true, true, reason);
+          }
+        }
+        if (failure !== undefined) throw failure;
+        return;
+      }
       finish(hydrated ? () => {} : steps ? loadRemaining : fallback, steps !== null, true, reason);
       if (failure !== undefined) throw failure;
     },

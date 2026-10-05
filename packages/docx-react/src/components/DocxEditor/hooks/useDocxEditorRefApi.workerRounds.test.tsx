@@ -395,6 +395,59 @@ test('an identical ref retry accepts its original token while a fresh edit refus
     .toMatchObject({ ok: false, failure: { code: 'stale-version' } });
 });
 
+test('an empty ref round accepts an old token after a peer edit', async () => {
+  const h = await editor();
+  const version = h.peer.version();
+  h.type();
+  const before = h.worker.requests.filter((type) => type === 'proposal').length;
+  expect(await h.api.proposeChanges({ expectVersion: version, proposals: [] }))
+    .toMatchObject({ ok: true, snapshot: { version: h.peer.version(), proposals: [] } });
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before + 1);
+  expect(text(h.peer)).toBe('Typed Alpha');
+});
+
+test('a round reply arriving after typing invalidates geometry until a caught-up snapshot', async () => {
+  const h = await editor();
+  const posted = deferred<void>();
+  const send = h.worker.postMessage.bind(h.worker);
+  spyOn(h.worker, 'postMessage').mockImplementation((message, transfer) => {
+    if (message.type === 'proposal' && message.operation.kind === 'propose') {
+      h.worker.hold();
+      posted.resolve();
+    }
+    send(message, transfer);
+  });
+  const round = h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('geometry')] });
+  await posted.promise;
+  h.type();
+  h.worker.release();
+  snapshot(await round);
+  expect(h.authority.geometry()).toBeNull();
+  await h.api.getProposals();
+  expect(h.authority.geometry()?.version).toBe(h.peer.version());
+  expect(text(h.peer)).toContain('Typed ');
+  expect(text(h.peer)).toContain('Worker ');
+});
+
+test('a ready replacement requested by layout first restores peer content and the worker registry', async () => {
+  const h = await editor();
+  h.type();
+  const expected = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('replacement')] }));
+  const before = h.peer.readParagraphs({ view: 'accepted' });
+  await act(async () => {
+    h.worker.onerror?.({ message: 'layout-first replacement' } as ErrorEvent);
+    expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).not.toBeNull();
+  });
+  const replacement = workers.at(-1)!;
+  expect(replacement).not.toBe(h.worker);
+  expect(replacement.requests).toContain('open');
+  expect(replacement.requests.indexOf('open')).toBeLessThan(replacement.requests.indexOf('bootstrap'));
+  expect(await h.api.getProposals()).toMatchObject({ proposals: expected.proposals });
+  expect(h.peer.readParagraphs({ view: 'accepted' })).toEqual(before);
+  expect(h.peer.getProposals().proposals).toEqual([]);
+  expect(h.renderer.result.current.error).toBeNull();
+});
+
 
 test('a permanent hydrated worker layout drop retires proposal rounds to the peer', async () => {
   const h = await editor();
