@@ -277,8 +277,8 @@ fn failed_font_pass_then_resident_edit_matches_per_block_oracle() {
             serde_json::from_value(pair.request["measurement"]["fontChains"].clone()).unwrap();
         let mut failed_request = pair.request.clone();
         failed_request["measurement"]["fontChains"]["requested|0|0"] = json!([other]);
-        failed_request["regions"]["sections"][0]["headerFooterRefs"] =
-            json!({"headerDefault": "missing-font-dependency-test"});
+        failed_request["regions"]["sections"][0]["properties"]["headerReferences"] =
+            json!([{"type": "default", "rId": "missing-font-dependency-test"}]);
         let failed_chains: BTreeMap<String, Vec<u32>> =
             serde_json::from_value(failed_request["measurement"]["fontChains"].clone()).unwrap();
         pair.reset_work();
