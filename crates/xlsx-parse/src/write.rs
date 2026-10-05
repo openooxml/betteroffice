@@ -881,6 +881,9 @@ fn sheet_body_matches(
     axes: Option<&SheetAxes>,
     styles: &StyleMatch<'_>,
 ) -> bool {
+    if axes.is_some_and(|axes| !axes.is_identity()) {
+        return false;
+    }
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
         && sheet.merges == original.merges
