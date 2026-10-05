@@ -36,6 +36,7 @@ import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
 import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
+import type { ResolveDisplayListQueries } from './displayListQueryEpochGate';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
 import { useYrsCoreSession } from './useYrsCoreSession';
@@ -6257,6 +6258,43 @@ test('a queued drag extends from its resolved anchor after an earlier insertion'
   }
 });
 
+test('a ready drag queued behind navigation replays its final range once', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  const select = spyOn(opened.session, 'setSelection');
+  try {
+    await startNavigation();
+    const before = opened.session.selection();
+    fireEvent.mouseDown(opened.canvas, pointAt(6));
+    fireEvent.mouseMove(window, pointAt(10));
+    fireEvent.mouseUp(window, pointAt(10));
+    expect(opened.session.selection()).toEqual(before);
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    const anchor = { story: 'body', paraId: opened.session.paragraphs('body')[0].paraId, offset: 5 };
+    const head = { ...anchor, offset: 9 };
+    const assertReplay = () => {
+      expect(opened.session.selection()).toEqual({ anchor, head });
+      expect(select.mock.calls.filter(([start, end]) => start.offset === 5 && end?.offset === 9)).toHaveLength(1);
+      expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    };
+    assertReplay();
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    assertReplay();
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
+    select.mockRestore();
+    opened.close();
+  }
+});
+
 test('a composition started during opening commits exactly once after the switch', async () => {
   const opened = await openingEditor();
   const insert = spyOn(opened.preview, 'insertText');
@@ -8359,7 +8397,7 @@ function openingClipboard(write: (text: string) => Promise<void> = async () => {
   return { writeText, restore };
 }
 
-async function editorWithoutLayoutCompleteSignal(holdInput = false) {
+async function editorWithoutLayoutCompleteSignal(holdInput = false, resolveDisplayListQueries?: ResolveDisplayListQueries) {
   const worker = installWorker({ holdState: true });
   const frames = holdFrames(true);
   const visibility = stubDocumentVisibility('visible');
@@ -8378,7 +8416,7 @@ async function editorWithoutLayoutCompleteSignal(holdInput = false) {
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
         canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
-        inputQueries={harness.renderer.inputQueries} />
+        inputQueries={harness.renderer.inputQueries} resolveDisplayListQueries={resolveDisplayListQueries} />
     </>;
   }
   if (!document.fonts) Object.defineProperty(document, 'fonts', {
@@ -8423,6 +8461,53 @@ function selectOpeningText(opened: Awaited<ReturnType<typeof editorWithoutLayout
   };
   fireEvent.mouseDown(opened.canvas, point(1));
   fireEvent.mouseUp(window, point(6));
+}
+
+async function readyEditorWithPendingNavigation() {
+  let releaseNavigation!: () => void;
+  const blocked = new Promise<null>((resolve) => { releaseNavigation = () => resolve(null); });
+  let started!: () => void;
+  const resolving = new Promise<void>((resolve) => { started = resolve; });
+  const resolveQueries = mock(() => {
+    started();
+    return blocked;
+  });
+  const opened = await editorWithoutLayoutCompleteSignal(false, resolveQueries);
+  try {
+    act(() => opened.releaseHeldInput(opened.session));
+    await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
+      .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
+    await act(async () => opened.frames.runIdle());
+    await opened.sent('encodeState');
+    await act(async () => {
+      opened.workers[0].release();
+      await awaitWorkerOpenReplica(opened.session);
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(opened.harness.core.replicaReady).toBe(true);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    return {
+      opened, releaseNavigation,
+      pointAt(position: number) {
+        const caret = opened.harness.renderer.queries!.caretRect(position)!;
+        return { clientX: caret.x, clientY: caret.y + caret.height / 2, button: 0, detail: 1 };
+      },
+      async startNavigation() {
+        await act(async () => {
+          fireEvent.keyDown(opened.view.getByTestId('yrs-input'), { key: 'ArrowDown' });
+          await resolving;
+        });
+        expect(resolveQueries).toHaveBeenCalledTimes(1);
+        expect(opened.harness.core.replicaReady).toBe(true);
+        expect(opened.harness.renderer.inputQueries!.isReady()).toBe(true);
+        expect(opened.editor.current!.hasPendingInput()).toBe(true);
+      },
+    };
+  } catch (error) {
+    releaseNavigation();
+    opened.close();
+    throw error;
+  }
 }
 
 test.each([false, true])('a queued keystroke starts the peer before the layout signal and replays once with heldInput=%s', async (held) => {
@@ -8741,6 +8826,56 @@ test('a held copy writes the held selection made before it', async () => {
     expect(opened.session.paragraphs('body')[0].text).toBe('First paragraph');
     expect(opened.harness.errors).toEqual([]);
   } finally {
+    opened.close();
+    clipboard.restore();
+  }
+});
+
+test('a ready copy queued behind navigation writes the new selection once and an idle copy stays synchronous', async () => {
+  const { opened, pointAt, startNavigation, releaseNavigation } = await readyEditorWithPendingNavigation();
+  const clipboard = openingClipboard();
+  try {
+    const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    act(() => textarea.focus());
+    selectOpeningText(opened);
+    await act(async () => opened.editor.current!.flushPendingInput());
+    expect(opened.session.selection()?.anchor.offset).toBe(0);
+    expect(opened.session.selection()?.head.offset).toBe(5);
+    await startNavigation();
+    const point = { ...pointAt(9), detail: 2 };
+    fireEvent.mouseDown(opened.canvas, point);
+    fireEvent.mouseUp(window, point);
+    fireEvent.click(opened.canvas, point);
+    fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true });
+    expect(opened.session.selection()?.anchor.offset).toBe(0);
+    expect(opened.session.selection()?.head.offset).toBe(5);
+    expect(clipboard.writeText).not.toHaveBeenCalled();
+    expect(opened.editor.current!.hasPendingInput()).toBe(true);
+    await act(async () => {
+      releaseNavigation();
+      await opened.editor.current!.flushPendingInput();
+    });
+    await waitFor(() => expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]));
+    expect(opened.session.selection()?.anchor.offset).toBe(6);
+    expect(opened.session.selection()?.head.offset).toBe(15);
+    await act(async () => {
+      opened.frames.run();
+      opened.frames.runIdle();
+      await opened.editor.current!.flushPendingInput();
+    });
+    expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]);
+    expect(opened.editor.current!.hasPendingInput()).toBe(false);
+    act(() => {
+      expect(fireEvent.keyDown(textarea, { key: 'c', ctrlKey: true })).toBe(true);
+      expect(textarea.value).toBe('paragraph');
+      expect(textarea.selectionStart).toBe(0);
+      expect(textarea.selectionEnd).toBe(9);
+    });
+    await act(async () => { await Promise.resolve(); });
+    expect(clipboard.writeText.mock.calls).toEqual([['paragraph']]);
+    expect(opened.harness.errors).toEqual([]);
+  } finally {
+    releaseNavigation();
     opened.close();
     clipboard.restore();
   }
