@@ -216,8 +216,11 @@ test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geomet
     ref={ref} documentBuffer={documentBuffer()} allowHostProposals experimentalWorkerOpen
     plugins={[plugin]} onPluginError={(error) => errors.push(error)}
   />, { container: host });
-  const scrollElement = host.querySelector<HTMLElement>('.docx-editor__scroll-container')!;
-  expect(scrollElement).not.toBeNull();
+  const scrollElement = await waitFor(() => {
+    const element = host.querySelector<HTMLElement>('.docx-editor__scroll-container');
+    expect(element).not.toBeNull();
+    return element!;
+  }, { timeout: 10_000 });
   scroller = scrollElement;
   scrollElement.style.overflowY = 'auto';
   scrollElement.style.height = '400px';
