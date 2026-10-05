@@ -28,10 +28,12 @@ import { documentPageCount } from './documentPageCount';
 import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
 import {
   ensureWorkerOpenReplica,
+  workerOpenDocumentHeld,
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
   workerOpenSourceVersion,
 } from '../internals/workerOpenReplica';
+import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
   registeredWorkerProposalAuthority,
   workerProposalAuthority,
@@ -369,13 +371,36 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Layout Pipeline
   // =========================================================================
 
+  const isViewerSession = useCallback(
+    (owner: YrsSession): boolean => workerOpenDocumentHeld(owner) ||
+      layoutInWorkerRef.current?.isViewerSession?.(owner) === true,
+    []
+  );
+  const reportLayoutError = useCallback((owner: YrsSession, cause: unknown): Error => {
+    const viewer = isViewerSession(owner);
+    const failure = viewer && layoutInWorkerRef.current?.fail
+      ? layoutInWorkerRef.current.fail(owner, cause)
+      : viewer && !(cause instanceof DocxWorkerError) && !(cause instanceof ResidentWorkerOutOfMemoryError)
+        ? new DocxWorkerError('layout', cause)
+        : cause instanceof Error ? cause : new Error(String(cause));
+    if (viewer) {
+      queuedBehindWorkerRef.current = false;
+      pendingLayoutOriginRef.current = null;
+      markLayoutQueued(owner, false);
+    }
+    if (viewer && failure instanceof SupersededPreviewError) return failure;
+    onErrorRef.current?.(failure, owner);
+    return failure;
+  }, [isViewerSession]);
+
   const workerHeld = useCallback(
     (owner: YrsSession): boolean =>
+      isViewerSession(owner) ||
       registeredWorkerProposalAuthority(owner)?.holdsWorkerState() === true ||
       (workerOpenEnabledRef.current &&
         (workerOpenReplicaPending(owner) ||
           layoutInWorkerRef.current?.ownsDocument?.(owner) === true)),
-    []
+    [isViewerSession]
   );
   const queueWorkerPass = useCallback((owner: YrsSession): void => {
     queuedBehindWorkerRef.current = true;
@@ -390,7 +415,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   const runLayoutPipeline = useCallback(
     (options?: { onHost?: boolean }) => {
       const workerRequired = session !== null &&
-        (registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true ||
+        (isViewerSession(session) ||
+          registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true ||
           (workerOpenEnabledRef.current && options?.onHost !== true && workerOpenReplicaPending(session)));
       const invalidateRetainedLayout = (): void => {
         if (laidOutRef.current?.session === session) laidOutRef.current.final = false;
@@ -452,7 +478,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
           const input = JSON.stringify(request);
           const pendingRequirements =
-            !onHost && (workerOpenEnabledRef.current ||
+            !onHost && (isViewerSession(session) || workerOpenEnabledRef.current ||
               registeredWorkerProposalAuthority(session)?.holdsWorkerState()) &&
               workerRequirements === undefined
               ? fontRequirementsInWorkerRef.current?.(session, input)
@@ -468,15 +494,18 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                 markLayoutQueued(session, false);
                 // A superseded preflight drops its pass; the pass that superseded it lays out.
                 if (!(error instanceof SupersededPreviewError)) {
-                  onErrorRef.current?.(
-                    error instanceof Error ? error : new Error(String(error)),
-                    session
-                  );
+                  reportLayoutError(session, error);
+                } else if (isViewerSession(session) && !session.isDisplayOnly?.()) {
+                  queueWorkerPass(session);
+                  requestPass();
                 }
                 syncCoordinator.onLayoutComplete(currentEpoch);
               }
             );
             return;
+          }
+          if (isViewerSession(session) && workerRequirements == null) {
+            throw new Error('The document worker did not return font requirements');
           }
           const requirements = JSON.parse(
             workerRequirements ?? session.layoutFontRequirementsJson(input)
@@ -484,10 +513,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           measurement = residentMeasurementConfig(requirements);
         } catch (error) {
           invalidateRetainedLayout();
-          console.error('[PagedEditor] Resident font preflight error:', error);
+          if (!isViewerSession(session)) console.error('[PagedEditor] Resident font preflight error:', error);
           markLayoutQueued(session, false);
           releaseWorkerPrewarm(session);
-          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+          reportLayoutError(session, error);
           syncCoordinator.onLayoutComplete(currentEpoch);
           return;
         }
@@ -629,6 +658,10 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         };
 
         const layOutHere = ({ recovery }: { recovery: boolean }): void => {
+          if (isViewerSession(session)) {
+            reportLayoutError(session, new Error('The document worker did not return a viewer layout'));
+            return;
+          }
           if (
             registeredWorkerProposalAuthority(session)?.holdsWorkerState() ||
             (!recovery && options?.onHost !== true && workerOpenEnabledRef.current &&
@@ -678,7 +711,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               addsFontChainsOnly(laidOut.measurement, computeInputs.measurement)));
         let workerPass: ReturnType<LayoutInWorker> = null;
         if (
-          registeredWorkerProposalAuthority(session)?.holdsWorkerState() ||
+          isViewerSession(session) || registeredWorkerProposalAuthority(session)?.holdsWorkerState() ||
           (!onHost &&
             ((workerOpenEnabledRef.current && workerOpenReplicaPending(session)) ||
               (sourceVersion !== null &&
@@ -693,13 +726,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             workerPass = layoutInWorkerRef.current?.(session, JSON.stringify(request)) ?? null;
           } catch (error) {
             invalidateRetainedLayout();
-            if (workerProposalFailure(session) === error) {
+            if (!isViewerSession(session) && workerProposalFailure(session) === error) {
               syncCoordinator.onLayoutComplete(currentEpoch);
               return;
             }
-            console.error('[PagedEditor] Resident worker layout could not start:', error);
-            if (registeredWorkerProposalAuthority(session)?.holdsWorkerState()) {
-              onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+            if (!isViewerSession(session)) console.error('[PagedEditor] Resident worker layout could not start:', error);
+            if (isViewerSession(session) || registeredWorkerProposalAuthority(session)?.holdsWorkerState()) {
+              reportLayoutError(session, error);
               syncCoordinator.onLayoutComplete(currentEpoch);
               return;
             }
@@ -763,7 +796,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     return;
                   } else if (
                     (complete && workerHeld(session)) ||
-                    (!complete && registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true)
+                    (!complete && !isViewerSession(session) &&
+                      registeredWorkerProposalAuthority(session)?.holdsWorkerState() === true)
                   ) {
                     queueWorkerPass(session);
                     requestPass();
@@ -782,10 +816,17 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
                     layOutHere({ recovery: !complete });
                   }
                 },
-                () => {
-                  if (pass === passRef.current && sessionRef.current === session) {
-                    invalidateRetainedLayout();
+                (error: unknown) => {
+                  if (pass !== passRef.current || sessionRef.current !== session) return;
+                  invalidateRetainedLayout();
+                  if (!isViewerSession(session) || error instanceof ResidentWorkerOutOfMemoryError) return;
+                  if (error instanceof SupersededPreviewError) {
+                    if (session.isDisplayOnly?.()) return;
+                    queueWorkerPass(session);
+                    requestPass();
+                    return;
                   }
+                  reportLayoutError(session, error);
                 }
               );
             },
@@ -794,10 +835,13 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
               invalidateRetainedLayout();
               // The display reports a worker out of memory; nothing lays out here.
               if (error instanceof ResidentWorkerOutOfMemoryError) return;
-              if (workerProposalFailure(session) === error) return;
-              if (error instanceof SupersededPreviewError) return;
-              console.error('[PagedEditor] Layout pipeline error:', error);
-              onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+              if (!isViewerSession(session) && workerProposalFailure(session) === error) return;
+              if (error instanceof SupersededPreviewError) {
+                if (isViewerSession(session) && !session.isDisplayOnly?.()) queueWorkerPass(session);
+                return;
+              }
+              if (!isViewerSession(session)) console.error('[PagedEditor] Layout pipeline error:', error);
+              reportLayoutError(session, error);
             }
           )
           .finally(() => {
@@ -829,6 +873,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       releaseWorkerPrewarm,
       workerHeld,
       queueWorkerPass,
+      isViewerSession,
+      reportLayoutError,
     ]
   );
 
@@ -988,6 +1034,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const getLayoutRequest = useCallback((): string | null => {
     if (!session) return null;
+    if (isViewerSession(session)) return null;
     const request = buildResidentRegionLayoutRequest(
       document,
       pageGap,
@@ -1001,7 +1048,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (!measurement) return null;
     request.measurement = measurement;
     return JSON.stringify(request);
-  }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
+  }, [document, isViewerSession, pageGap, renderEnv, residentMeasurementConfig, session]);
 
   const readLayoutRequest = useCallback(async (): Promise<string | null> => {
     if (!session) return null;
@@ -1012,12 +1059,17 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     );
     if (workerOpenEnabledRef.current) request.cachedPageTotals = true;
     const requirements = await fontRequirementsInWorkerRef.current?.(session, JSON.stringify(request));
-    if (requirements == null) return null;
+    if (requirements == null) {
+      if (isViewerSession(session)) {
+        throw reportLayoutError(session, new Error('The document worker did not return font requirements'));
+      }
+      return null;
+    }
     const measurement = residentMeasurementConfig(JSON.parse(requirements) as ResidentFontRequirement[]);
     if (!measurement) return null;
     request.measurement = measurement;
     return JSON.stringify(request);
-  }, [document, pageGap, renderEnv, residentMeasurementConfig, session]);
+  }, [document, isViewerSession, pageGap, renderEnv, residentMeasurementConfig, reportLayoutError, session]);
 
   const navigationEpoch = useCallback(() => navigationEpochRef.current, []);
 

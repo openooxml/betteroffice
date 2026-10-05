@@ -9,13 +9,20 @@
 export { openWorkbookSession } from './session/client';
 /** @experimental */
 export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
+/** @internal */
+export { createWorkbookEditPeer } from './session/editPeer';
 /** @experimental */
 export type {
+  WorkbookCellGeometry,
+  WorkbookCellInputs,
+  WorkbookFrame,
+  WorkbookFrameOptions,
   WorkbookSessionEvents,
   WorkbookSessionMethods,
   WorkbookSessionOpenOptions,
   WorkbookSessionState,
   WorkbookSheetSummary,
+  WorkbookSheetView,
 } from './session/methods';
 
 export type {
@@ -105,6 +112,7 @@ export {
 export type {
   WasmInitInput,
   OpenWorkbookOptions,
+  WorkbookCalculationContext,
   Viewport,
   PrintMetrics,
   SheetInfo,

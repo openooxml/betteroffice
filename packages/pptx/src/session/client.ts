@@ -1,23 +1,25 @@
 import {
-  createSessionClient,
-  createWorkerTransport,
-  type Promisified,
-  type SessionClient,
-  type SessionFailure,
-  type SessionTransport,
-} from '../../../../shared/office-session';
+  createSessionClient, requestWasmCompile, type SessionClient,
+} from '../../../../shared/office-session/client';
+import { createWorkerTransport, type SessionTransport } from '../../../../shared/office-session/transport';
+import type { Promisified, SessionFailure } from '../../../../shared/office-session/types';
 import type { PptxFontFace } from '../types';
+import { wasmAssetUrl } from '../wasm/asset';
 import type { OpenPresentationOptions } from '../wasm/loader';
+import { frameAssetIds } from './frame';
 import {
   PRESENTATION_SESSION_METHODS,
+  type PresentationFrame,
   type PresentationSessionEvents,
   type PresentationSessionFont,
   type PresentationSessionMethods,
   type PresentationSessionOpenOptions,
   type PresentationSessionState,
+  type PresentationWireFrame,
 } from './methods';
 
 type Events = { [K in keyof PresentationSessionEvents]: PresentationSessionEvents[K] };
+const wasmModules = new Map<string, WebAssembly.Module>();
 
 /**
  * Options for opening a presentation in a dedicated worker.
@@ -34,7 +36,13 @@ export interface OpenPresentationSessionOptions extends OpenPresentationOptions 
  */
 export interface PresentationSession {
   readonly state: PresentationSessionState;
-  readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose'>>;
+  readonly call: Promisified<Omit<PresentationSessionMethods, 'open' | 'dispose' | 'frame'>> & {
+    /**
+     * @experimental A newer frame call replaces a queued one, which rejects with an error
+     * named SessionSuperseded.
+     */
+    frame(slideIndex: number): Promise<PresentationFrame>;
+  };
   save(): Promise<Uint8Array>;
   on<K extends keyof PresentationSessionEvents>(
     name: K, listener: (payload: PresentationSessionEvents[K]) => void
@@ -48,6 +56,20 @@ function copyBytes(bytes: Uint8Array | ArrayBuffer): Uint8Array<ArrayBuffer> {
   return ArrayBuffer.isView(bytes)
     ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength).slice()
     : new Uint8Array(bytes).slice();
+}
+
+function decodeFrame(
+  frame: PresentationWireFrame, cache: Map<string, Uint8Array>
+): PresentationFrame {
+  for (const { assetId, bytes } of frame.media) cache.set(assetId, new Uint8Array(bytes));
+  const displayList = JSON.parse(new TextDecoder().decode(frame.displayList)) as
+    PresentationFrame['displayList'];
+  const media = new Map<string, Uint8Array>();
+  for (const assetId of frameAssetIds(displayList)) {
+    const bytes = cache.get(assetId);
+    if (bytes !== undefined) media.set(assetId, bytes);
+  }
+  return { ...frame, displayList, media };
 }
 
 function copyFonts(
@@ -79,6 +101,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenPresentationS
     input.wasm = options.wasm.slice(0);
     transfer.push(input.wasm);
   } else if (options.wasm !== undefined) input.wasm = options.wasm;
+  else if (!options.worker) input.wasm = wasmModules.get(wasmAssetUrl().href);
   return { document, input, transfer };
 }
 
@@ -94,6 +117,9 @@ export async function openPresentationSession(
     options.worker ? options.worker() :
       new Worker(new URL('./pptxSessionWorker.mjs', import.meta.url), { type: 'module' })
   );
+  if (!options.worker && options.wasm === undefined && !wasmModules.has(wasmAssetUrl().href)) {
+    requestWasmCompile(transport);
+  }
   return createPresentationSession(bytes, options, transport);
 }
 
@@ -111,6 +137,9 @@ export async function createPresentationSession(
     ({ document, input, transfer } = prepareOpen(bytes, options));
     client = createSessionClient<PresentationSessionMethods, Events>(transport, {
       methods: PRESENTATION_SESSION_METHODS,
+      onWasmModule: options.wasm === undefined && !options.worker ? (url, module) => {
+        if (url === wasmAssetUrl().href && !wasmModules.has(url)) wasmModules.set(url, module);
+      } : undefined,
     });
   } catch (error) {
     try { transport.close(); } catch {}
@@ -126,14 +155,22 @@ export async function createPresentationSession(
     throw error;
   }
 
-  const { version, readContent, findText, validateEdits, applyEdits, slides, slideSize, save } = client.call;
+  const media = new Map<string, Uint8Array>();
+  const {
+    version, readContent, findText, validateEdits, applyEdits, frame, slides, slideSize, save,
+  } = client.call;
   return {
     get state() { return state; },
-    call: { version, readContent, findText, validateEdits, applyEdits, slides, slideSize, save },
+    call: {
+      version, readContent, findText, validateEdits, applyEdits, slides, slideSize, save,
+      frame: async (slideIndex) => decodeFrame(await frame(slideIndex), media),
+    },
     save: async () => new Uint8Array(await save()),
     on: (name, listener) => client.on(name, listener),
     onFailure: (listener) => client.onFailure(listener),
     get failure() { return client.failure; },
-    dispose: () => client.dispose(),
+    dispose: async () => {
+      try { await client.dispose(); } finally { media.clear(); }
+    },
   };
 }

@@ -31,6 +31,7 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 export { DocxAsyncOnlyError, DocxReplicaNotReadyError } from './components/DocxEditor/hooks/useDocxEditorRefApi';
+export { DocxWorkerError, type DocxWorkerErrorStage } from './components/DocxEditor/internals/docxWorkerError';
 
 // Commands: one authority for built-in and host chrome
 export { DocxCommandProvider, type DocxCommandProviderProps } from './commands/DocxCommandProvider';

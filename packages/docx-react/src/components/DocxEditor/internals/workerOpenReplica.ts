@@ -1,18 +1,21 @@
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { yieldToMainThread } from './yieldToMainThread';
 
+export type WorkerOpenFallbackReason = 'failure' | { syncAccess: string };
+
 type LayoutProgress = 'page' | 'provisional' | 'complete';
 
 interface PendingReplica {
   ready: Promise<void>;
+  /** A viewer document held only in its worker: nothing loads it here until the hold is released. */
+  held?: true;
   start(): void;
-  ensure(): void;
+  ensure(reason?: WorkerOpenFallbackReason): void;
   requestReady(): void;
   layoutProgress(progress: LayoutProgress): void;
   fail(error: unknown): void;
   cancel(): void;
   pending: boolean;
-  onDemand?: WorkerOpenReplicaDemand;
   readonly started: boolean;
   readonly hydrated: boolean;
   initialVersion: string;
@@ -25,22 +28,85 @@ interface PendingReplica {
   handoverVersion?: string;
 }
 
-/** Loads a replica only when asked: `request` starts it at the point its owner allows. */
-export interface WorkerOpenReplicaDemand {
-  active(): boolean;
-  request(): void;
+const replicas = new WeakMap<YrsSession, PendingReplica>();
+const releases = new WeakMap<YrsSession, () => PendingReplica>();
+
+/** A main-thread copy of a viewer document was asked for while the worker holds it. */
+export class WorkerOpenDocumentHeldError extends Error {
+  constructor(readonly access?: string) {
+    super(`${access ?? 'This call'} needs the document on the main thread, which a viewer session does not load`);
+    this.name = 'WorkerOpenDocumentHeldError';
+  }
 }
 
-const replicas = new WeakMap<YrsSession, PendingReplica>();
 const LAYOUT_STALL_MS = 3000;
 const LAYOUT_WAIT_LIMIT_MS = 30_000;
+
+/**
+ * Registers the document of a viewer session as held only in its worker. It reads as a replica still
+ * pending, so worker routing and version bookkeeping work as before, but nothing loads it here:
+ * starting, awaiting or ensuring it throws {@link WorkerOpenDocumentHeldError}. `release` registers the
+ * editor replica with {@link deferWorkerOpenReplica}; {@link releaseWorkerOpenDocument} calls it once
+ * the session leaves viewer kind.
+ */
+export function holdWorkerOpenDocument(session: YrsSession, release: () => PendingReplica): void {
+  let reject!: (error: unknown) => void;
+  const ready = new Promise<void>((_, no) => {
+    reject = no;
+  });
+  void ready.catch(() => {});
+  const held: PendingReplica = {
+    ready,
+    held: true,
+    pending: true,
+    started: false,
+    hydrated: false,
+    requestReady() {},
+    layoutProgress() {},
+    initialVersion: session.version(),
+    start() {},
+    ensure(reason = 'failure') {
+      throw new WorkerOpenDocumentHeldError(reason === 'failure' ? undefined : reason.syncAccess);
+    },
+    cancel() {
+      held.fail(new Error('The document changed while opening the replica'));
+    },
+    fail(error) {
+      if (!held.pending) return;
+      held.pending = false;
+      reject(error);
+    },
+  };
+  replicas.set(session, held);
+  releases.set(session, release);
+}
+
+/** Whether `session` is a viewer document held in its worker; a failed hold still never loads here. */
+export function workerOpenDocumentHeld(session: YrsSession): boolean {
+  return replicas.get(session)?.held === true;
+}
+
+/**
+ * Ends the hold on `session`: registers its editor replica, carrying the versions the hold recorded,
+ * and returns it unstarted. Undefined when `session` is not held (or its hold failed).
+ */
+export function releaseWorkerOpenDocument(session: YrsSession): PendingReplica | undefined {
+  const held = replicas.get(session);
+  const release = releases.get(session);
+  if (!held?.held || !held.pending || !release) return undefined;
+  releases.delete(session);
+  const replica = release();
+  replica.initialVersion = held.initialVersion;
+  replica.mirrorVersion = held.mirrorVersion;
+  replica.handoverVersion = held.handoverVersion;
+  return replica;
+}
 
 export function deferWorkerOpenReplica(
   session: YrsSession,
   hydrate: () => Promise<(() => void) | readonly (() => void)[]>,
-  fallback: () => void,
+  fallback: (reason: WorkerOpenFallbackReason) => void,
   onReady: () => void,
-  onDemand?: WorkerOpenReplicaDemand,
   lifecycle?: { current(): boolean; cancel(): void; waitForLayout?: boolean }
 ): PendingReplica {
   let resolve!: () => void;
@@ -90,18 +156,23 @@ export function deferWorkerOpenReplica(
     if (stallTimer !== null) clearTimeout(stallTimer);
     stallTimer = setTimeout(commit, LAYOUT_STALL_MS);
   };
-  const finish = (load: () => void, handoff = false, force = false): void => {
+  const finish = (
+    load: (reason: WorkerOpenFallbackReason) => void,
+    handoff = false,
+    force = false,
+    reason: WorkerOpenFallbackReason = 'failure'
+  ): void => {
     if (!current() || finishing) return;
     finishing = true;
     try {
       try {
-        load();
+        load(reason);
         if (!current()) return;
         if (handoff) replica.readyVersion = session.version();
       } catch (error) {
         if (!handoff) throw error;
         if (!current()) return;
-        fallback();
+        fallback('failure');
         handoff = false;
       }
       if (!current()) return;
@@ -154,7 +225,6 @@ export function deferWorkerOpenReplica(
   const replica: PendingReplica = {
     ready,
     pending: true,
-    onDemand,
     get started() {
       return started || !replica.pending;
     },
@@ -170,8 +240,8 @@ export function deferWorkerOpenReplica(
         () => finish(fallback)
       );
     },
-    ensure() {
-      finish(hydrated ? () => {} : steps ? loadRemaining : fallback, steps !== null, true);
+    ensure(reason = 'failure') {
+      finish(hydrated ? () => {} : steps ? loadRemaining : fallback, steps !== null, true, reason);
       if (failure !== undefined) throw failure;
     },
     requestReady() {
@@ -222,32 +292,19 @@ export function workerOpenReplicaHydrating(session: YrsSession): boolean {
  */
 export function requestWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
   const replica = replicas.get(session);
+  if (replica?.held && replica.pending) return Promise.reject(new WorkerOpenDocumentHeldError());
   replica?.start();
   return replica?.ready;
 }
 
 export function awaitWorkerOpenReplica(session: YrsSession): Promise<void> | undefined {
   const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.active() === true) requestWorkerOpenReplicaReadiness(session);
+  if (replica?.held && replica.pending) return Promise.reject(new WorkerOpenDocumentHeldError());
   return replica?.ready;
 }
 
-export function workerOpenReplicaOnDemand(session: YrsSession): boolean {
-  const replica = replicas.get(session);
-  return replica?.pending === true && replica.onDemand?.active() === true;
-}
-
-/** Asks an on-demand replica of `session` to load; see {@link WorkerOpenReplicaDemand}. */
-export function requestOnDemandWorkerOpenReplica(session: YrsSession): void {
-  const replica = replicas.get(session);
-  if (replica?.pending && replica.onDemand?.active() === true) requestWorkerOpenReplicaReadiness(session);
-}
-
 export function requestWorkerOpenReplicaReadiness(session: YrsSession): void {
-  const replica = replicas.get(session);
-  if (!replica?.pending) return;
-  replica.requestReady();
-  if (replica.pending && replica.onDemand?.active() === true) replica.onDemand.request();
+  replicas.get(session)?.requestReady();
 }
 
 export function notifyWorkerOpenLayoutProgress(session: YrsSession, progress: LayoutProgress): void {
@@ -259,8 +316,8 @@ export function workerOpenReplicaLoadedVersion(session: YrsSession): string | un
   return replicas.get(session)?.loadedVersion;
 }
 
-export function ensureWorkerOpenReplica(session: YrsSession): void {
-  replicas.get(session)?.ensure();
+export function ensureWorkerOpenReplica(session: YrsSession, syncAccess?: string): void {
+  replicas.get(session)?.ensure(syncAccess === undefined ? 'failure' : { syncAccess });
 }
 
 export function failWorkerOpenReplica(session: YrsSession, error: unknown): void {

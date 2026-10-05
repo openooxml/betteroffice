@@ -13,8 +13,9 @@ import initWasmModule, {
   renderXlsxMarkdownJson,
 } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import { wasmAssetUrl } from './asset';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
-import type { ChartRegion, DisplayList } from '../display-list/types';
+import type { ChartRegion, DisplayList, Rect } from '../display-list/types';
 import type {
   XlsxCellAddress,
   XlsxEditRequest,
@@ -229,11 +230,17 @@ export interface HistoryState {
 export type WorkbookUpdateOrigin = CollaborationUpdateOrigin;
 export type WorkbookUpdateListener = (update: Uint8Array, origin: WorkbookUpdateOrigin) => void;
 
+export interface WorkbookCalculationContext {
+  nowSerial: number;
+  randSeed: number;
+}
+
 export interface OpenWorkbookOptions {
   /** Open a Yrs-backed replica that can accept peer updates. */
   collaborative?: boolean;
   /** Peer-unique positive safe integer. Generated securely when omitted. */
   clientId?: number;
+  calculation?: WorkbookCalculationContext;
 }
 
 /**
@@ -357,6 +364,7 @@ function staleErrorFrom(message: string): StaleProposalError | null {
  */
 export interface WorkbookHandle extends CollaborationReplica {
   readonly clientId: number;
+  setCalculationContext(context: WorkbookCalculationContext | null): void;
   /** Available in both modes; encodes this handle's current Yrs state vector. */
   encodeStateVector(): Uint8Array;
   /** Available in both modes; pass a peer vector to encode only the missing state. */
@@ -366,6 +374,9 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Observe owned update bytes from local commits and accepted remote updates. */
   onUpdate(listener: WorkbookUpdateListener): () => void;
   sheetInfo(): SheetInfo;
+  sheetCount(): number;
+  /** Metadata for `sheet`, with that index in `activeSheet`; leaves the workbook unchanged. */
+  sheetInfoFor(sheet: number): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
   /** `displayList` with build and encode time measured inside the core. */
@@ -413,6 +424,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   /** Searches formatted text in sheet and row order. */
   searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
+  /** Absolute sheet rectangle in unzoomed pixels. */
+  cellRect(sheet: number, row: number, col: number): Rect;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
   patchRangeStyle(sheet: number, range: string, patch: RangeStylePatch): EditResult;
@@ -421,6 +434,7 @@ export interface WorkbookHandle extends CollaborationReplica {
   captureFormat(sheet: number, range: string): CapturedFormat;
   applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
   mergedRanges(sheet: number, range: string): MergedRange[];
+  visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[];
   historyState(): HistoryState;
   /**
    * render the current sheet viewport to png bytes via the native raster
@@ -488,12 +502,24 @@ export interface WorkbookHandle extends CollaborationReplica {
 
 let initialized = false;
 let initialization: Promise<void> | undefined;
+const displayListJsonReaders = new WeakMap<
+  WorkbookHandle, (viewport: Viewport, sheet?: number) => string
+>();
+
+/** @experimental */
+export function workbookDisplayListJson(
+  handle: WorkbookHandle, viewport: Viewport, sheet?: number
+): string {
+  const read = displayListJsonReaders.get(handle);
+  if (!read) throw new Error('Workbook display list is unavailable');
+  return read(viewport, sheet);
+}
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
 /** Initialize the workbook engine. Concurrent calls share the same attempt. */
 export function initWasm(
-  input: WasmInitInput = new URL('./generated/xlsx_wasm_bg.wasm', import.meta.url)
+  input: WasmInitInput = wasmAssetUrl()
 ): Promise<void> {
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
@@ -552,14 +578,25 @@ export function openWorkbook(
   bytes: Uint8Array,
   options: OpenWorkbookOptions = {}
 ): WorkbookHandle {
+  if (options.calculation !== undefined) {
+    validateCalculationContext(options.calculation);
+    if (options.collaborative === true) {
+      throw new TypeError('calculation context is unavailable for collaborative workbooks');
+    }
+  }
   requireInitialized();
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    doc =
-      collaborativeClientId === undefined
+    if (options.calculation !== undefined) {
+      doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
+        bytes, JSON.stringify(options.calculation)
+      );
+    } else {
+      doc = collaborativeClientId === undefined
         ? XlsxDocument.open(bytes)
         : XlsxDocument.openCollaborative(bytes, collaborativeClientId);
+    }
   } catch (e) {
     throw toError(e);
   }
@@ -568,6 +605,7 @@ export function openWorkbook(
   const pendingUpdates: Array<{ update: Uint8Array; origin: WorkbookUpdateOrigin }> = [];
   let nextListenerId = 0;
   let disposed = false;
+  let hasCalculationContext = options.calculation !== undefined;
   let observerInstalled = false;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
@@ -652,6 +690,11 @@ export function openWorkbook(
     return wasmCall(() => JSON.parse(operation()) as T, drainUpdates);
   }
 
+  function displayListJson(viewport: Viewport, sheet?: number): string {
+    const json = JSON.stringify(viewport);
+    return sheet === undefined ? doc.displayListJson(json) : doc.displayListForJson(sheet, json);
+  }
+
   function ensureUpdateObserver(): void {
     if (observerInstalled) return;
     wasmCall(() => doc.startUpdateObservation());
@@ -668,6 +711,17 @@ export function openWorkbook(
   const handle: WorkbookHandle = {
     get clientId(): number {
       return wasmCall(() => doc.clientId);
+    },
+    setCalculationContext(context: WorkbookCalculationContext | null): void {
+      assertAlive();
+      if (context !== null) {
+        validateCalculationContext(context);
+        if (collaborativeClientId !== undefined) {
+          throw new TypeError('calculation context is unavailable for collaborative workbooks');
+        }
+      }
+      wasmCall(() => (doc as CalculationDocument).setCalculationContextJson(JSON.stringify(context)));
+      hasCalculationContext = context !== null;
     },
     encodeStateVector(): Uint8Array {
       return wasmCall(() => doc.encodeStateVector());
@@ -704,6 +758,15 @@ export function openWorkbook(
     sheetInfo(): SheetInfo {
       return parseJson(() => doc.sheetInfoJson());
     },
+    sheetCount(): number {
+      return wasmCall(() => doc.sheetCount());
+    },
+    sheetInfoFor(sheet: number): SheetInfo {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      return parseJson(() => doc.sheetInfoForJson(sheet));
+    },
     calculationStatus(): CalculationStatus {
       return wasmCall(() => {
         const fn = (doc as { calculationStatusJson?: () => string }).calculationStatusJson;
@@ -712,7 +775,7 @@ export function openWorkbook(
       });
     },
     displayList(viewport: Viewport): DisplayList {
-      return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
+      return parseJson(() => displayListJson(viewport));
     },
     displayListProfiled(viewport: Viewport): ProfiledDisplayList {
       return parseJson(() => doc.displayListProfiledJson(JSON.stringify(viewport)));
@@ -780,6 +843,9 @@ export function openWorkbook(
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));
     },
+    cellRect(sheet: number, row: number, col: number): Rect {
+      return parseJson(() => doc.cellRectJson(JSON.stringify({ sheet, row, col })));
+    },
     rangeCells(sheet: number, range: string): CellEdit[][] {
       const parsed = parseJson<{ cells: CellEdit[][] }>(() =>
         doc.rangeCellsJson(JSON.stringify({ sheet, range }))
@@ -818,6 +884,15 @@ export function openWorkbook(
     mergedRanges(sheet: number, range: string): MergedRange[] {
       const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
         doc.mergedRangesJson(JSON.stringify({ sheet, range }))
+      );
+      return parsed.ranges;
+    },
+    visibleMergedRanges(sheet: number, viewport: Viewport): MergedRange[] {
+      if (!Number.isInteger(sheet) || sheet < 0 || sheet >= handle.sheetCount()) {
+        throw new RangeError('Sheet index is out of range');
+      }
+      const parsed = parseJson<{ ranges: MergedRange[] }>(() =>
+        doc.visibleMergedRangesJson(sheet, JSON.stringify(viewport))
       );
       return parsed.ranges;
     },
@@ -897,9 +972,15 @@ export function openWorkbook(
       return parseJson(() => doc.findTextJson(JSON.stringify(request)));
     },
     validateEdits(request: XlsxEditRequest): XlsxValidationResult {
+      if (hasCalculationContext && request.calculation !== undefined) {
+        validateCalculationOverride(request.calculation);
+      }
       return parseJson(() => doc.validateEditsJson(JSON.stringify(request)));
     },
     applyEdits(request: XlsxEditRequest): XlsxEditResult {
+      if (hasCalculationContext && request.calculation !== undefined) {
+        validateCalculationOverride(request.calculation);
+      }
       return parseJson(() => doc.applyEditsJson(JSON.stringify(request)), true);
     },
     exportStructured(options: XlsxExportOptions = {}): XlsxExportResult<XlsxStructuredContent> {
@@ -935,7 +1016,47 @@ export function openWorkbook(
       if (disposalError !== undefined) throw toError(disposalError);
     },
   };
+  displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
   return handle;
+}
+
+type CalculationDocument = XlsxDocument & {
+  setCalculationContextJson(context: string): void;
+};
+
+type CalculationDocumentConstructor = typeof XlsxDocument & {
+  openWithCalculationJson(bytes: Uint8Array, context: string): CalculationDocument;
+};
+
+function validateCalculationContext(context: unknown): void {
+  if (
+    typeof context !== 'object' || context === null || Array.isArray(context) ||
+    Object.keys(context).some((key) => key !== 'nowSerial' && key !== 'randSeed')
+  ) {
+    throw new TypeError('calculation must be an object with nowSerial and randSeed');
+  }
+  const { nowSerial, randSeed } = context as Partial<WorkbookCalculationContext>;
+  if (typeof nowSerial !== 'number' || !Number.isFinite(nowSerial)) {
+    throw new TypeError('nowSerial must be a finite number');
+  }
+  if (
+    typeof randSeed !== 'number' || !Number.isInteger(randSeed) || randSeed < 0 || randSeed > 0xffff_ffff
+  ) {
+    throw new TypeError('randSeed must be an integer from 0 to 4294967295');
+  }
+}
+
+function validateCalculationOverride(calculation: unknown): void {
+  if (
+    typeof calculation !== 'object' || calculation === null || Array.isArray(calculation) ||
+    Object.keys(calculation).some((key) => key !== 'nowSerial')
+  ) {
+    throw new TypeError('calculation must be an object with an optional nowSerial');
+  }
+  const { nowSerial } = calculation as { nowSerial?: number };
+  if (nowSerial !== undefined && (typeof nowSerial !== 'number' || !Number.isFinite(nowSerial))) {
+    throw new TypeError('nowSerial must be a finite number');
+  }
 }
 
 function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | undefined {

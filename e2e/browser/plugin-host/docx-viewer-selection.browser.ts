@@ -41,6 +41,7 @@ interface ViewerWindow {
     paragraphText(index: number): string;
     paragraphs: number;
     replica(): { started: boolean; loaded: boolean };
+    mainDocumentLoads(): { sessionsCaptured: number; total: number; sessions: Record<string, number>[] };
   };
   __wasmInstantiations: number;
 }
@@ -146,6 +147,14 @@ function wordAround(text: string, offset: number): string {
 }
 
 async function expectNoMainThreadDocument(page: Page, instantiations: number) {
+  const loads = await page.evaluate(() =>
+    (window as unknown as ViewerWindow).__viewerSelectionProbe.mainDocumentLoads()
+  );
+  expect(loads.sessionsCaptured).toBeGreaterThan(0);
+  expect(loads.total).toBe(0);
+  for (const counts of loads.sessions) {
+    expect(counts).toEqual({ openDocx: 0, openDocxPreview: 0, loadState: 0, applyUpdate: 0 });
+  }
   expect(await replica(page)).toEqual({ started: false, loaded: false });
   expect(await wasmInstantiations(page)).toBe(instantiations);
 }

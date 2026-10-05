@@ -8,6 +8,9 @@ import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
+  isLayoutMetaV1,
+  layoutMetaSummary,
+  type LayoutMetaV1,
   preloadDocxEngine,
   proposalSetIdentity,
   ResidentEngineWorkerClient,
@@ -23,9 +26,15 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
+import { documentPageCount } from './documentPageCount';
+import { viewportMinHeightPx } from '../internals/scrollUtils';
 import { markSupersededLayout } from '../internals/layoutProvenance';
 import { registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
-import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
+import { deferWorkerOpenReplica, holdWorkerOpenDocument } from '../internals/workerOpenReplica';
+import { DocxWorkerError } from '../internals/docxWorkerError';
+import { SupersededPreviewError } from '../internals/supersededPreview';
+import { useCanvasRenderer, useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 import { useLayoutPipeline, type UseLayoutPipelineOptions } from './useLayoutPipeline';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -534,6 +543,147 @@ test('a worker-opened document reuses its worker for the first layout', async ()
     expect(await count).toBe(1);
     unmount();
   } finally {
+    native.free();
+  }
+});
+
+test.each([true, false])('viewer layout recovery (%s) keeps main construction empty and shares terminal error identity', async (recover) => {
+  const source = setupLayoutPipeline();
+  const initialWorkers = FakeWorker.instances.length;
+  const viewer = { current: true };
+  const mainPreflight = spyOn(source.engine, 'layoutFontRequirementsJson');
+  const mainConstruction = mock(() => { throw new Error('unexpected main document construction'); });
+  Object.assign(source.engine, {
+    openDocx: mainConstruction,
+    openDocxPreview: mainConstruction,
+    loadState: mainConstruction,
+    applyUpdate: mainConstruction,
+    layoutDocumentWithRegionsRetainedJson: mainConstruction,
+    buildDisplayListFrame: mainConstruction,
+    buildDisplayListJson: mainConstruction,
+    resetFrameBase: mainConstruction,
+    setDisplayWindow: mainConstruction,
+  });
+  const release = mock(() => deferWorkerOpenReplica(
+    source.engine, () => new Promise(() => {}), mainConstruction, () => {}
+  ));
+  const onError = mock((_error: Error) => {});
+  const syncCoordinator = new LayoutSelectionGate();
+  const hook = renderHook(() => {
+    const renderer = useCanvasRenderer(undefined, undefined, undefined, undefined, undefined, true, viewer);
+    const pipeline = useLayoutPipeline({
+      document: null,
+      session: source.engine,
+      renderEnv: {} as YrsRenderEnv,
+      pageGap: 24,
+      zoom: 1,
+      experimentalWorkerOpen: true,
+      residentMeasurementConfig: () => ({} as ResidentMeasurementConfig),
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null },
+      viewportLayoutRef: { current: null },
+      syncCoordinator,
+      getScrollContainer: () => null,
+      onError,
+      onLayoutComputed: (layout) => renderer.onLayoutComputed(layout, source.engine),
+      layoutInWorker: renderer.layoutInWorker,
+      fontRequirementsInWorker: renderer.fontRequirementsInWorker,
+    });
+    return { renderer, pipeline };
+  });
+  try {
+    const opening = hook.result.current.renderer.openInWorker(source.engine, Uint8Array.of(1));
+    const first = FakeWorker.last!;
+    await act(async () => {
+      first.reply({ id: first.requestAt(0).id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer });
+      await opening;
+    });
+    holdWorkerOpenDocument(source.engine, release);
+    act(() => hook.result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(first.posted.at(-1)?.type).toBe('fontRequirements'));
+    await act(async () => {
+      first.reply({ id: first.requestAt(-1).id, ok: true, requirementsJson: '[]' });
+    });
+    await waitFor(() => expect(first.posted.at(-1)?.type).toBe('bootstrap'));
+    await act(async () => { first.onerror?.({ message: 'layout crashed' } as ErrorEvent); });
+    await waitFor(() => expect(FakeWorker.instances.length - initialWorkers).toBe(2));
+    const second = FakeWorker.last!;
+    expect(second.posted.at(-1)?.type).toBe('open');
+    await act(async () => {
+      second.reply({ id: second.requestAt(-1).id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(8).buffer });
+    });
+    await waitFor(() => expect(second.posted.at(-1)?.type).toBe('bootstrap'));
+    await act(async () => {
+      if (recover) second.reply({
+        id: second.requestAt(-1).id, ok: true, frame: source.frame.slice().buffer,
+        caret: { frameEpoch: 1, caretRect: null }, selection: null,
+        layoutRevision: source.adopted.length, layoutJson: source.layoutJson,
+      });
+      else second.reply({ id: second.requestAt(-1).id, ok: false, error: 'layout failed again', terminal: true });
+    });
+    if (recover) {
+      await waitFor(() => expect(hook.result.current.renderer.status).toBe('ready'));
+      expect(onError).not.toHaveBeenCalled();
+      expect(hook.result.current.renderer.frame).not.toBeNull();
+    } else {
+      await waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+      const failure = onError.mock.calls[0]![0];
+      expect(failure).toBeInstanceOf(DocxWorkerError);
+      expect((failure as DocxWorkerError).stage).toBe('layout');
+      expect(hook.result.current.renderer.error).toBe(failure);
+      expect(hook.result.current.renderer.status).toBe('error');
+      await expect(hook.result.current.renderer.settledDisplayList(null, null)).rejects.toBe(failure);
+    }
+    expect(mainPreflight).not.toHaveBeenCalled();
+    expect(mainConstruction).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    expect(FakeWorker.instances.length - initialWorkers).toBe(2);
+  } finally {
+    hook.unmount();
+    mainPreflight.mockRestore();
+    source.native.free();
+  }
+});
+
+test('sync recovery rejects a cached layout frame from the old owner of the same engine', async () => {
+  const { native, layoutJson, frame, engine } = setup();
+  const { result, rerender, unmount } = renderHook(
+    ({ layout, source }) => useRustDisplayList(
+      layout, undefined, undefined, undefined, source, undefined, undefined, undefined, true
+    ),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  try {
+    const opening = result.current.openInWorker(engine, Uint8Array.of(1));
+    const old = FakeWorker.last!;
+    old.reply({ id: old.requestAt(0).id, ok: true, hostJson: '{}', stateVector: new ArrayBuffer(0) });
+    const opened = await opening;
+    const first = result.current.layoutInWorker(engine, REQUEST);
+    old.reply({
+      id: old.requestAt(1).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
+    });
+    const cached = await first!;
+    act(() => {
+      const recover = opened!.fallback({ syncAccess: 'getEditorRef' });
+      expect(recover && recover()).toBe(true);
+    });
+    expect(old.terminated).toBe(true);
+    const next = result.current.layoutInWorker(engine, REQUEST);
+    const current = FakeWorker.last!;
+    expect(current).not.toBe(old);
+    expect(current.posted[0]).toMatchObject({ type: 'bootstrap' });
+    expect(current.posted[0]).not.toHaveProperty('opened');
+    current.reply({
+      id: current.requestAt(0).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 2, layoutJson,
+    });
+    await next;
+    await act(async () => { rerender({ layout: cached!.layout, source: engine }); });
+    await waitFor(() => expect(current.posted.at(-1)).toMatchObject({ type: 'buildFrame' }));
+    expect(result.current.frame).toBeNull();
+  } finally {
+    unmount();
     native.free();
   }
 });
@@ -2231,4 +2381,247 @@ test('a rejected completion after reload preserves the new session frame, querie
     errors.mockRestore();
     native.free();
   }
+});
+
+function metaForLayout(layoutJson: string, layoutRevision: number, headersFootersEpoch = 1): LayoutMetaV1 {
+  const output = JSON.parse(layoutJson) as { layout: Layout; notesConverged: boolean; provisional?: boolean };
+  return {
+    v: 1,
+    layoutRevision,
+    pageCount: output.layout.pages.length,
+    partial: output.layout.partial === true,
+    provisional: output.provisional === true,
+    notesConverged: output.notesConverged,
+    pageSizes: new Float64Array(output.layout.pages.flatMap((page) => [page.size.w, page.size.h])),
+    layoutShell: JSON.stringify({ ...output.layout, pages: output.layout.pages.map((page) => ({ ...page, fragments: [] })) }),
+    headersFootersEpoch,
+  };
+}
+
+test.each([true, false])('viewer=%s selects the reply mode across decisions and a font resend', async (viewer) => {
+  const font = new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+  )));
+  let request = JSON.stringify({ ...JSON.parse(REQUEST), regions: { sections: [{ properties: {
+    pageWidth: 4320, pageHeight: 2880,
+    marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+  } }] } });
+  const { native, engine } = setup(9401, 'Meta decision pages. '.repeat(600), request);
+  const fontId = native.register_measure_font(font);
+  request = JSON.stringify({ ...JSON.parse(request), measurement: {
+    ...JSON.parse(request).measurement,
+    fontChains: { 'calibri|0|0': [fontId] }, authoritativeShaping: true,
+  } });
+  const initialJson = native.layout_document_with_regions_retained_json(request);
+  native.reset_frame_base();
+  const initialFrame = native.build_display_list_frame('{}', 0);
+  let epoch = decodeFrameDelta(initialFrame).frameEpoch;
+  let fontsRevision = 0;
+  const snapshot = engine.residentWorkerSnapshot.bind(engine);
+  engine.residentWorkerSnapshot = (options) => ({
+    ...snapshot(options)!, workerAuthoritative: true, fontsRevision,
+    fonts: fontsRevision === 1 ? [font.slice()] : [],
+  });
+  const viewerRef = { current: viewer };
+  const hook = renderHook(
+    ({ layout, source }) => useRustDisplayList(
+      layout, undefined, undefined, undefined, source,
+      undefined, undefined, undefined, true, viewerRef
+    ),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  try {
+    const first = hook.result.current.layoutInWorker(engine, request)!;
+    const worker = FakeWorker.last!;
+    expect(worker.requestAt(0)).not.toHaveProperty('layoutReply');
+    worker.reply({
+      id: worker.requestAt(0).id, ok: true, frame: initialFrame.slice().buffer,
+      caret: { frameEpoch: epoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: initialJson,
+    });
+    const opened = (await act(() => first))!;
+    await act(async () => hook.rerender({ layout: opened.layout, source: engine }));
+    const pages = opened.layout.pages.length;
+    expect(pages).toBeGreaterThan(1);
+    native.clear_measure_fonts();
+    expect(native.register_measure_font(font)).toBe(fontId);
+    fontsRevision = 1;
+    let partialSettled = false;
+    for (const [index, state] of ['accepted', 'rejected', 'accepted', 'rejected', 'accepted'].entries()) {
+      const partial = index === 3;
+      native.set_partial_document(partial);
+      const decision = JSON.stringify({ ...JSON.parse(request), renderEnv: { revisionPreview: { p1: state } } });
+      const pass = hook.result.current.layoutInWorker(engine, decision)!;
+      const sent = worker.posted.at(-1) as Extract<ResidentEngineWorkerRequest, { type: 'sync' }>;
+      expect(sent.type).toBe('sync');
+      expect(sent.snapshot.fontsRevision).toBe(1);
+      expect(sent.provisionalPages).toBeUndefined();
+      expect(sent.layoutReply).toBe(viewer ? 'meta' : undefined);
+      if (viewer) expect(sent.headersFootersEpoch).toBe(index === 0 ? 0 : 1);
+      const json = native.layout_document_with_regions_retained_json(decision);
+      const built = native.build_display_list_frame('{}', epoch);
+      epoch = decodeFrameDelta(built).frameEpoch;
+      const meta = metaForLayout(json, index + 2);
+      worker.reply({
+        id: sent.id, ok: true, frame: built.slice().buffer,
+        caret: { frameEpoch: epoch, caretRect: null }, selection: null, layoutRevision: index + 2,
+        ...(viewer ? { layoutMeta: { ...meta, ...(index === 0 ? { headersFooters: '{"parts":[]}' } : {}) } }
+          : { layoutJson: json }),
+      });
+      const laidOut = (await act(() => pass))!;
+      expect(laidOut.complete).toBeUndefined();
+      expect(laidOut.notesConverged).toBe(meta.notesConverged);
+      expect(laidOut.layout.partial === true).toBe(partial);
+      expect(documentPageCount(laidOut.layout)).toBe(partial ? 0 : pages);
+      expect(laidOut.layout.pages.map((page) => page.size)).toEqual(
+        (JSON.parse(json) as { layout: Layout }).layout.pages.map((page) => page.size)
+      );
+      expect(viewportMinHeightPx(laidOut.layout, 24)).toBe(viewportMinHeightPx(JSON.parse(json).layout, 24));
+      expect(laidOut.layout.summaryOnly).toBe(viewer ? true : undefined);
+      if (viewer) {
+        expect(() => laidOut.layout.pages[0]!.fragments).toThrow('summary');
+        expect(getLayoutKernelInputs(laidOut.layout)?.headersFooters as unknown).toEqual({ parts: [] });
+      } else {
+        expect(laidOut.layout.pages[0]!.fragments.length).toBeGreaterThan(0);
+      }
+      await act(async () => hook.rerender({ layout: laidOut.layout, source: engine }));
+      await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(epoch));
+      if (partial) {
+        void hook.result.current.settledDisplayList(null, null).then(() => { partialSettled = true; });
+        await act(async () => {});
+        expect(partialSettled).toBe(false);
+      }
+      if (index === 4) await waitFor(() => expect(partialSettled).toBe(true));
+    }
+    expect(worker.posted.some((entry) => 'type' in entry && entry.type === 'completeLayout')).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
+test.each([
+  ['ok', 'an editor'], ['stale', 'an editor'], ['ok', 'a viewer'], ['stale', 'a viewer'],
+] as const)('an unknown meta version requests JSON and handles %s for %s', async (status, session) => {
+  const { native, engine, layoutJson, frame } = setup(9402);
+  const viewerRef = { current: session === 'a viewer' };
+  const hook = renderHook(
+    ({ layout, source }) => useRustDisplayList(
+      layout, undefined, undefined, undefined, source,
+      undefined, undefined, undefined, true, viewerRef
+    ),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  try {
+    const first = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null, layoutRevision: 1, layoutJson,
+    });
+    const opened = (await act(() => first))!;
+    await act(async () => hook.rerender({ layout: opened.layout, source: engine }));
+    const pass = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const built = native.build_display_list_frame('{}', 1);
+    worker.reply({
+      id: worker.requestAt(1).id, ok: true, frame: built.slice().buffer,
+      caret: { frameEpoch: 2, caretRect: null }, selection: null, layoutRevision: 2, layoutMeta: { v: 99 },
+    });
+    await waitFor(() => expect(worker.requestAt(2)).toMatchObject({ type: 'layoutJson', layoutRevision: 2 }));
+    worker.reply({
+      id: worker.requestAt(2).id, ok: true, layoutJsonStatus: status,
+      ...(status === 'ok' ? { layoutJson } : {}),
+    });
+    if (status === 'stale' && session === 'a viewer') {
+      await act(async () => {
+        await expect(pass).rejects.toBeInstanceOf(SupersededPreviewError);
+      });
+    } else if (status === 'stale') {
+      expect(await act(() => pass)).toBeNull();
+    } else {
+      const adopted = await act(() => pass);
+      expect(adopted!.layout.summaryOnly).toBeUndefined();
+      expect(adopted!.layout).toEqual(JSON.parse(layoutJson).layout);
+      expect(adopted!.layout.pages[0]!.fragments.length).toBeGreaterThan(0);
+      await act(async () => hook.rerender({ layout: adopted!.layout, source: engine }));
+      await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(2));
+    }
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
+function withoutPageFragments(layout: Layout) {
+  return {
+    ...layout,
+    pages: layout.pages.map((page) => Object.fromEntries(
+      Object.keys(page).filter((key) => key !== 'fragments').map((key) => [key, page[key as keyof typeof page]])
+    )),
+  };
+}
+
+test('meta summaries preserve every layout field except page fragments', () => {
+  const fragment = { kind: 'shape' as const, blockId: 'shape', x: 10, y: 20, width: 30, height: 40 };
+  const fullJson = JSON.stringify({
+    layout: {
+      contractVersion: 1,
+      pageSize: { w: 816.125, h: 1056.25 },
+      headers: { default: { height: 20, fragments: [fragment] } },
+      footers: { default: { height: 30, fragments: [fragment] } },
+      columns: { count: 2, gap: 24 },
+      pageGap: 24,
+      partial: true,
+      pages: [{ w: 816.125, h: 1056.25 }, { w: 900.5, h: 1100.75 }].map((size, index) => ({
+        number: index + 1,
+        size,
+        fragments: [fragment],
+        margins: { top: 72, right: 60, bottom: 72, left: 60, header: 20, footer: 30, gutter: 10 },
+        bodyMargins: { top: 80, right: 60, bottom: 90, left: 70 },
+        bodyAnchorMargins: { top: 72, right: 60, bottom: 72, left: 70 },
+        orientation: 'portrait' as const,
+        sectionIndex: index,
+        sectionId: `section-${index}`,
+        sectionPageIndex: 0,
+        sectionPageNumber: 4,
+        pageLabel: 'iv',
+        pageNumbering: { start: 4, format: 'lowerRoman' },
+        headerFooterRefs: { headerDefault: 'header', footerDefault: 'footer' },
+        headerDistance: 20,
+        footerDistance: 30,
+        pageBorders: { display: 'allPages' as const, offsetFrom: 'page' as const, zOrder: 'front' as const },
+        watermark: { kind: 'text' as const, text: 'Draft', font: 'Calibri', color: '#808080', semitransparent: true, layout: 'diagonal' as const },
+        verticalAlign: 'center' as const,
+        footnoteIds: [1],
+        footnoteReservedHeight: 40,
+        footnoteColumns: 2,
+        noteAreas: [{ kind: 'footnote' as const, placement: 'pageBottom' as const, y: 900, height: 40, notes: [{ id: 1, displayLabel: '1', height: 40 }] }],
+        columns: { count: 2, gap: 24, equalWidth: true, separator: true },
+        parityFiller: false,
+      })),
+    } satisfies Layout,
+    notesConverged: false,
+  });
+  const meta: LayoutMetaV1 = {
+    ...metaForLayout(fullJson, 1), headersFooters: 'null',
+  };
+  expect(isLayoutMetaV1(meta)).toBe(true);
+  expect(isLayoutMetaV1({ ...meta, v: 2 })).toBe(false);
+  expect(isLayoutMetaV1({ ...meta, pageCount: 3 })).toBe(false);
+  expect(isLayoutMetaV1({ ...meta, layoutShell: undefined })).toBe(false);
+  expect(isLayoutMetaV1({ ...meta, layoutShell: {} })).toBe(false);
+  const summary = layoutMetaSummary(meta);
+  const full = JSON.parse(fullJson).layout as Layout;
+  expect(withoutPageFragments(summary)).toEqual({ ...withoutPageFragments(full), summaryOnly: true });
+  expect(Object.keys(summary.pages[0]!)).toEqual(Object.keys(full.pages[0]!));
+  expect(documentPageCount(summary)).toBe(0);
+  expect(summary.pages.map((page) => page.size)).toEqual([
+    { w: 816.125, h: 1056.25 }, { w: 900.5, h: 1100.75 },
+  ]);
+  expect(() => summary.pages[0]!.fragments).toThrow(/fragments of a worker layout summary live in the worker/);
+  expect(documentPageCount(layoutMetaSummary(
+    metaForLayout(JSON.stringify({ layout: { ...full, partial: false }, notesConverged: false }), 1)
+  ))).toBe(2);
 });

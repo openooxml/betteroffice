@@ -14,7 +14,9 @@ import { DocxCommandAdmissionError } from '../../../commands/createDocxCommandSt
 import type { DocxCommandResult } from '../../../commands/types';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
-import { awaitWorkerOpenReplica, deferWorkerOpenReplica, workerOpenReplicaPending } from '../internals/workerOpenReplica';
+import type { YrsInputRef } from '../YrsInput';
+import * as workerOpenReplica from '../internals/workerOpenReplica';
+import { awaitWorkerOpenReplica, deferWorkerOpenReplica, holdWorkerOpenDocument, workerOpenReplicaPending, workerOpenReplicaStarted } from '../internals/workerOpenReplica';
 import { currentYrsToolbarSelection } from '../yrsToolbar';
 import {
   useDocxCommandBinding,
@@ -191,6 +193,22 @@ function mount(initial: YrsSession, overrides: Partial<DocxCommandInputs> = {}) 
   };
 }
 
+function heldReplica(
+  session: YrsSession,
+  hydrate: Parameters<typeof deferWorkerOpenReplica>[1],
+  fallback: Parameters<typeof deferWorkerOpenReplica>[2],
+  request: () => void
+) {
+  holdWorkerOpenDocument(session, () => {
+    request();
+    return deferWorkerOpenReplica(session, hydrate, fallback, () => {});
+  });
+  return {
+    get started() { return workerOpenReplicaStarted(session); },
+    cancel: () => workerOpenReplica.failWorkerOpenReplica(session, new Error('The document changed')),
+  };
+}
+
 describe('editor command binding', () => {
   for (const readOnly of [true, false]) {
     test(`worker viewer mutations refuse ${readOnly ? 'read-only' : 'viewing-mode'} without input admission`, async () => {
@@ -198,7 +216,7 @@ describe('editor command binding', () => {
       const hydrate = mock(async () => () => {});
       const request = mock(() => {});
       const fallback = mock(() => {});
-      const replica = deferWorkerOpenReplica(session, hydrate, fallback, () => {}, { active: () => true, request });
+      const replica = heldReplica(session, hydrate, fallback, request);
       const editor = mount(session, {
         readOnly, mode: 'viewing', experimentalWorkerOpen: true,
         pagedEditorRef: { current: { isWorkerViewer: () => true } as PagedEditorRef },
@@ -231,7 +249,7 @@ describe('editor command binding', () => {
     const { session } = await newSession();
     const request = mock(() => {});
     const hydrate = mock(async () => () => {});
-    const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, { active: () => true, request });
+    const replica = heldReplica(session, hydrate, () => {}, request);
     const editor = mount(session, {
       mode: 'viewing', experimentalWorkerOpen: true, viewerSession: true,
       pagedEditorRef: { current: { isWorkerViewer: () => false } as PagedEditorRef },
@@ -306,9 +324,7 @@ describe('editor command binding', () => {
     sessions.push(session);
     const hydrate = mock(async () => () => {});
     const request = mock(() => {});
-    const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, {
-      active: () => true, request,
-    });
+    const replica = heldReplica(session, hydrate, () => {}, request);
     const readSelectedText = mock(() => selectedText);
     const openFind = mock(() => {});
     const openReplace = mock(() => {});
@@ -501,12 +517,24 @@ describe('editor command binding', () => {
     expect(session.paragraphs('body')[0].text).toBe('Xbaz bar qux');
   });
 
-  for (const onDemand of [true, false]) {
-    test(`viewer print skips peer admission with ${onDemand ? 'an on-demand' : 'a regular'} pending replica`, async () => {
+  for (const held of [true, false]) {
+    test(`viewer print skips peer admission with ${held ? 'a held document' : 'a loaded replica'}`, async () => {
       const { session } = await newSession();
       const hydrate = mock(async () => () => {});
       const request = mock(() => {});
-      const replica = deferWorkerOpenReplica(session, hydrate, () => {}, () => {}, onDemand ? { active: () => true, request } : undefined);
+      const replica = held
+        ? heldReplica(session, hydrate, () => {}, request)
+        : deferWorkerOpenReplica(session, hydrate, () => {}, () => {});
+      if (!held) {
+        const loaded = replica as ReturnType<typeof deferWorkerOpenReplica>;
+        loaded.start();
+        await loaded.ready;
+      }
+      const helpers = [
+        spyOn(workerOpenReplica, 'requestWorkerOpenReplica'),
+        spyOn(workerOpenReplica, 'awaitWorkerOpenReplica'),
+        spyOn(workerOpenReplica, 'ensureWorkerOpenReplica'),
+      ];
       const displayList = { pages: [] } as unknown as DisplayList;
       const prepare = mock(async (_list: DisplayList) => {});
       const print = mock(() => true);
@@ -523,9 +551,10 @@ describe('editor command binding', () => {
       expect(prepare).toHaveBeenCalledWith(displayList);
       expect(print).toHaveBeenCalledTimes(1);
       expect(cancel).not.toHaveBeenCalled();
-      expect(replica.started).toBe(false);
+      expect(replica.started).toBe(!held);
       expect(request).not.toHaveBeenCalled();
-      expect(hydrate).not.toHaveBeenCalled();
+      expect(hydrate).toHaveBeenCalledTimes(held ? 0 : 1);
+      for (const helper of helpers) expect(helper).not.toHaveBeenCalled();
     });
   }
 
@@ -647,6 +676,49 @@ describe('editor command binding', () => {
 });
 
 describe('editor command bridge', () => {
+  test('viewer admission drains viewer input without replica waits or pending-replica state', async () => {
+    const { session } = await newSession();
+    const release = mock(() => { throw new Error('unexpected viewer release'); });
+    holdWorkerOpenDocument(session, release);
+    let drained!: () => void;
+    const pending = new Promise<void>((resolve) => { drained = resolve; });
+    let inputPending = true;
+    const input = {
+      hasPendingInput: () => inputPending,
+      runAfterPendingInput: mock(async (operation: () => unknown) => {
+        await pending;
+        inputPending = false;
+        return operation();
+      }),
+    };
+    const helpers = [
+      spyOn(workerOpenReplica, 'requestWorkerOpenReplica'),
+      spyOn(workerOpenReplica, 'awaitWorkerOpenReplica'),
+      spyOn(workerOpenReplica, 'ensureWorkerOpenReplica'),
+    ];
+    const bridgeRef: { current: PagedEditorCommandBridge | null } = { current: null };
+    const bump = mock(() => {});
+    renderHook(() => usePagedEditorCommandBridge({
+      bridgeRef, viewerSession: true, experimentalWorkerOpen: true, bumpInputEpoch: bump,
+      yrsInputRef: { current: input as unknown as YrsInputRef }, session, rootStory: 'body',
+      inputPositionMap: () => null, latestSelectionRef: { current: null }, listenersRef: { current: new Set() },
+      getPositionProjection: () => null, displayPositionToLoc: () => null,
+      format: () => false, command: () => false, syncYrsInputState: () => true,
+      yrsLocToDisplayPosition: () => null, scrollToPositionImpl: () => {},
+    }));
+    const operation = mock(() => 42);
+    expect(bridgeRef.current!.hasPendingInput()).toBe(true);
+    const admitted = bridgeRef.current!.runAfterPendingInput(operation);
+    expect(operation).not.toHaveBeenCalled();
+    drained();
+    expect(await admitted).toBe(42);
+    expect(bridgeRef.current!.hasPendingInput()).toBe(false);
+    expect(input.runAfterPendingInput).toHaveBeenCalledTimes(1);
+    expect(bump).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    for (const helper of helpers) expect(helper).not.toHaveBeenCalled();
+  });
+
   test('an image handle follows its own image among images sharing a relationship id', async () => {
     const { session, paraId } = await newSession('ABCDE');
     const image = { src: 'data:image/png;base64,', rId: 'rIdShared' };

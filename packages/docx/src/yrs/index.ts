@@ -14,6 +14,7 @@
  * from its offset space). Story-global indices never cross this boundary.
  */
 
+import type { RetainedLayoutMeta } from './layoutMeta';
 import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
 import type { CompatibilityFlags } from '../docx/settingsParser';
@@ -71,6 +72,7 @@ import type {
 import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
 export { decodeDocxHostJson } from './yrsSessionFacade';
 
+export * from './layoutMeta';
 export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
@@ -98,6 +100,7 @@ export type {
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
   ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
   preloadResidentEngineWorker,
@@ -148,9 +151,14 @@ export {
 } from './saveYrsDocx';
 export { sessionSourcePackage } from './sessionInternals';
 export {
+  DirtyProjectionStories,
   dirtyProjectionStory,
+  EditorDirtyStories,
+  hostSaveMetadata,
   mergeDocxHostMetadata,
+  proposalProjectionStories,
   saveEditorDocument,
+  serialWorkerSaves,
   type EditorSaveRecord,
 } from './editorSave';
 export { editorSaveKeys } from './editorSaveKeys';
@@ -937,6 +945,8 @@ export interface YrsSession extends CollaborationReplica {
   /** Same pass, but the reply omits the measured arena (fetch it on demand
    * through {@link YrsSession.retainedKernelInputsJson}). */
   layoutDocumentWithRegionsRetainedJson(input: string): string;
+  layoutDocumentWithRegionsRetainedMeta(input: string): RetainedLayoutMeta;
+  retainedLayoutJson(): string;
   /**
    * {@link YrsSession.layoutDocumentWithRegionsRetainedJson} a step at a time:
    * this lowers the body, and each {@link YrsSession.resumeRegionLayout}

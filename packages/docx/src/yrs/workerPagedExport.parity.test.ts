@@ -15,6 +15,8 @@ import {
   type DocxProposalSession,
 } from './proposals';
 import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import { ResidentEngineWorkerClient } from './residentEngineWorkerClient';
+import { residentWorkerFactory, type InProcessResidentWorker } from './__fixtures__/residentWorker';
 import type { DocxStorySelection } from './readTypes';
 import type { DocxExportResult } from './structuredExport';
 
@@ -39,7 +41,11 @@ const SUGGEST = { author: 'Reviewer', date: '2026-01-01T00:00:00Z' };
 const TIMEOUT = Number(process.env.PAGED_EXPORT_PARITY_TIMEOUT_MS ?? 60_000);
 type PagedExport = DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>;
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+let startWorker: (clientId?: number) => InProcessResidentWorker;
+beforeAll(async () => {
+  await preloadEditWasm(new Uint8Array(readFileSync(WASM)));
+  startWorker = await residentWorkerFactory();
+});
 
 function documents(): string[] {
   const roots = process.env.PAGED_EXPORT_PARITY_DOCS
@@ -153,34 +159,21 @@ function withoutSourcePlacement(value: unknown): unknown {
   return value;
 }
 
-/**
- * Whether `main` differs from `worker` only by source information a session that was not seeded
- * from the package lacks: comment authors and dates (null in `main`) and, where `main` reports
- * that it could not place them, source breaks and omitted inline source content. Everything
- * else in the stories, the pages and the occurrences must match.
- */
 function sourceProvenanceGap(worker: PagedExport, main: PagedExport): boolean {
   if (!worker.ok || !main.ok) return false;
   const reported = (reply: typeof main) => reply.content.structured.diagnostics.some(
     ({ code }) => code === 'provenance-unavailable'
   );
   if (reported(worker)) return false;
-  const filled = JSON.parse(JSON.stringify(main)) as typeof main;
-  filled.content.structured.stories.forEach((story, index) => {
-    const ours = worker.content.structured.stories[index]?.comment;
-    if (!story.comment || !ours) return;
-    if (story.comment.author === null) story.comment.author = ours.author;
-    if (story.comment.date === null) story.comment.date = ours.date;
-  });
   if (reported(main)) {
     const comparable = ({ content }: typeof main) => JSON.stringify({
       structured: withoutSourcePlacement({ ...content.structured, diagnostics: [] }),
       pages: content.layout.pages,
       occurrences: withoutSourcePlacement(content.layout.occurrences),
     });
-    return comparable(worker) === comparable(filled);
+    return comparable(worker) === comparable(main);
   }
-  return leaves(worker, filled).every(([path]) => path === '$.content.layout.exportFingerprint');
+  return leaves(worker, main).every(([path]) => path === '$.content.layout.exportFingerprint');
 }
 
 /**
@@ -328,7 +321,7 @@ async function parity(bytes: Uint8Array, afterProposal = false): Promise<number>
   }
 }
 
-function synthetic(): Uint8Array {
+function synthetic(sourceBreaks = false): Uint8Array {
   const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
   const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const parts = new Map<string, Uint8Array>();
@@ -354,13 +347,101 @@ function synthetic(): Uint8Array {
   const revisions = `<w:ins w:id="10" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Inserted </w:t></w:r></w:ins><w:del w:id="11" w:author="Reviewer" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>Deleted </w:delText></w:r></w:del>`;
   const image = '<w:r><w:drawing><wp:inline><wp:extent cx="9525" cy="9525"/><wp:docPr id="1" name="Pixel"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="Pixel"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="image"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9525" cy="9525"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
   const table = `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>${paragraph('Merged cell')}</w:tc></w:tr><w:tr><w:tc>${paragraph('Left cell')}</w:tc><w:tc>${paragraph('Right cell')}</w:tc></w:tr></w:tbl>`;
-  xml('word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${paragraph('First paragraph')}<w:p>${comments}${revisions}${image}</w:p>${table}<w:p><w:pPr><w:sectPr>${section(1)}</w:sectPr></w:pPr><w:r><w:t>Section boundary</w:t></w:r></w:p>${paragraph('Second section')}<w:sectPr>${section(2)}</w:sectPr></w:body></w:document>`);
+  const breaks = sourceBreaks ? `<w:p><w:r><w:t>Before source break</w:t><w:br w:type="page"/><w:t>After source break</w:t></w:r></w:p>${paragraph('Closing paragraph')}` : '';
+  xml('word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${paragraph('First paragraph')}<w:p>${comments}${revisions}${image}</w:p>${table}<w:p><w:pPr><w:sectPr>${section(1)}</w:sectPr></w:pPr><w:r><w:t>Section boundary</w:t></w:r></w:p>${paragraph('Second section')}${breaks}<w:sectPr>${section(2)}</w:sectPr></w:body></w:document>`);
   parts.set('word/media/pixel.png', new Uint8Array(Buffer.from(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD1sAAAAASUVORK5CYII=',
     'base64'
   )));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
+
+test('editor-style worker export after hydration and peer edits strictly preserves source page breaks', async () => {
+  const bytes = synthetic(true);
+  const clientId = nextClientId++;
+  const port = startWorker(clientId);
+  const client = new ResidentEngineWorkerClient(port);
+  const sessions: YrsSession[] = [];
+  try {
+    const opened = await client.open(bytes);
+    const host = decodeDocxHostJson(opened.hostJson, bytes);
+    const resident = port.sessions[0]!;
+    const request = laidOutRequest(resident, host.document);
+    resident.layoutDocumentWithRegionsRetainedJson(request);
+    const seeded = await seededOf(bytes, clientId, request);
+    const peer = await replicaOf(bytes, resident, request);
+    sessions.push(seeded, peer);
+    expect(compare(resident, peer, request, true)).toBeGreaterThan(0);
+    const first = peer.paragraphs('body')[0]!;
+    expect(first.text).toBe('First paragraph');
+    const edited = peer.applyEdits({ expectVersion: peer.version(), steps: [{
+      op: 'insertText', target: { kind: 'paragraph', story: 'body', paraId: first.paraId }, at: 'end', text: ' Peer edit',
+    }] });
+    if (!edited.ok) throw new Error(edited.failure.message);
+    expect(peer.paragraphs('body')[0]!.text).toBe('First paragraph Peer edit');
+    propose(peer, peer.paragraphIdentities(), peer.version(), (request) => peer.proposeChanges(request));
+    const update = peer.encodeStateAsUpdate(client.remoteStateVector()!);
+    const capturedVector = peer.encodeStateVector();
+    const acknowledged = await client.syncUpdate(update, capturedVector);
+    if (acknowledged.repair) peer.applyLocalUpdate(acknowledged.repair);
+    seeded.applyUpdate(update);
+    if (acknowledged.repair) seeded.applyUpdate(acknowledged.repair);
+    resident.layoutDocumentWithRegionsRetainedJson(request);
+    seeded.layoutDocumentWithRegionsRetainedJson(request);
+    for (const options of OPTIONS) {
+      const read = await client.documentReadAt({ kind: 'exportStructuredWithPages', options, currentRequest: request }, acknowledged.version);
+      if (read.status !== 'ok') throw new Error('The acknowledged export was superseded');
+      const exported = JSON.parse(read.value) as PagedExport;
+      const source = seeded.exportStructuredWithPagesFor(options, request);
+      expect(normalize(exported)).toEqual(normalize(source));
+      expect(exported.ok).toBe(options.revisionView === 'markup');
+      if (!exported.ok) {
+        expect(exported.failure.code).toBe('unsupported-revision-layout');
+        continue;
+      }
+      expect(JSON.stringify(exported.content.structured)).toContain('"breakType":"page"');
+      expect(exported.content.structured.diagnostics.some(({ code }) => code === 'provenance-unavailable')).toBe(false);
+      const comments = exported.content.structured.stories.filter(({ kind }) => kind === 'comment');
+      expect(comments).toHaveLength(2);
+      expect(comments.every(({ comment }) => comment?.author === 'Reviewer' && comment.date === '2026-01-01T00:00:00Z')).toBe(true);
+    }
+    expect(port.requests).toContain('syncUpdate');
+  } finally {
+    for (const session of sessions) session.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
+
+test('a deletion-only peer diff reaches the worker despite unchanged state vectors', async () => {
+  const bytes = synthetic(true);
+  const port = startWorker(nextClientId++);
+  const client = new ResidentEngineWorkerClient(port);
+  let peer: YrsSession | null = null;
+  try {
+    const opened = await client.open(bytes);
+    const resident = port.sessions[0]!;
+    const host = decodeDocxHostJson(opened.hostJson, bytes);
+    const request = laidOutRequest(resident, host.document);
+    peer = await replicaOf(bytes, resident, request);
+    const before = peer.encodeStateVector();
+    peer.applyRawOps('body', [{ op: 'delete', index: 0, len: 1 }]);
+    expect(peer.encodeStateVector()).toEqual(before);
+    const acknowledged = await client.syncUpdate(peer.encodeStateAsUpdate(client.remoteStateVector()!), before);
+    if (acknowledged.repair) peer.applyLocalUpdate(acknowledged.repair);
+    expect(resident.proposalEngine.readParagraphs({ story: 'body', paraIds: [peer.paragraphs('body')[0]!.paraId], view: 'accepted' })).toMatchObject({
+      ok: true, paragraphs: [{ text: 'irst paragraph' }],
+    });
+    resident.layoutDocumentWithRegionsRetainedJson(request);
+    const read = await client.documentReadAt({ kind: 'exportStructuredWithPages', options: OPTIONS[0]!, currentRequest: request }, acknowledged.version);
+    expect(read.status).toBe('ok');
+    if (read.status !== 'ok') throw new Error('The deletion was superseded');
+    expect(JSON.parse(read.value)).toMatchObject({ ok: true });
+    expect(read.value).toContain('"breakType":"page"');
+  } finally {
+    peer?.destroy();
+    client.destroy();
+  }
+}, TIMEOUT);
 
 describe("the worker's paged export equals a main-thread session's", () => {
   for (const file of documents()) {

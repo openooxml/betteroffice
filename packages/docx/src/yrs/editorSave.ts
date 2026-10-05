@@ -6,9 +6,18 @@ import type { Comment } from '../types/content';
 import type { Document, Endnote, Footnote, HeaderFooter, Section } from '../types/document';
 import { editorSaveKeys } from './editorSaveKeys';
 import type { YrsSession } from './index';
+import { dirtyProjectionStory } from './dirtyProjectionStories';
 import { captureSessionSave, writeSessionSave, type DocxSessionSave } from './saveYrsDocx';
 import { sessionSourcePackage } from './sessionInternals';
 import { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
+
+export {
+  DirtyProjectionStories,
+  dirtyProjectionStory,
+  EditorDirtyStories,
+  proposalProjectionStories,
+  serialWorkerSaves,
+} from './dirtyProjectionStories';
 
 /** What the editor's earlier saves of a session leave for its next save. @internal */
 export interface EditorSaveRecord {
@@ -97,11 +106,31 @@ export function mergeDocxHostMetadata(full: Document, host: Document): Document 
   };
 }
 
-/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
-export function dirtyProjectionStory(activeStory: string): string {
-  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
-    ? activeStory.split(':', 2).join(':')
-    : 'body';
+/** Host metadata read by `mergeDocxHostMetadata`. @internal */
+export function hostSaveMetadata(host: Document): Document {
+  const pkg = host.package;
+  return {
+    contractVersion: host.contractVersion,
+    warnings: host.warnings,
+    package: {
+      contractVersion: pkg.contractVersion,
+      styles: pkg.styles,
+      theme: pkg.theme,
+      settings: pkg.settings,
+      fontTable: pkg.fontTable,
+      relationships: pkg.relationships,
+      headers: pkg.headers,
+      footers: pkg.footers,
+      footnotes: pkg.footnotes,
+      endnotes: pkg.endnotes,
+      document: {
+        content: [],
+        sections: pkg.document.sections,
+        finalSectionProperties: pkg.document.finalSectionProperties,
+        comments: pkg.document.comments,
+      },
+    },
+  };
 }
 
 /** Writes the editor's document, through the session save when it has one. */

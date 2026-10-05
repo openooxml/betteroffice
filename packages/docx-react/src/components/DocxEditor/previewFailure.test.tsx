@@ -1,9 +1,14 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
 import type { YrsSession } from '@betteroffice/docx/yrs';
+import { DocxWorkerError } from './internals/docxWorkerError';
+import { workerOpenDocumentHeld } from './internals/workerOpenReplica';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -149,6 +154,7 @@ mock.module('./hooks/useYrsCoreSession', () => ({
   },
 }));
 const { DocxEditor } = await import('../../index');
+const { DocxAsyncOnlyError } = await import('./hooks/useDocxEditorRefApi');
 type Editor = import('../../index').DocxEditorRef;
 
 const WASM = resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm');
@@ -308,56 +314,52 @@ test('an untaken worker session whose render and open fail reports the error onc
   }
 }, 30_000);
 
-test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only while opening with %s', async (mode) => {
+test.each([false, true])('a terminal worker open reports one typed error and an alert with viewer=%s', async (viewer) => {
   created = 0;
   fullSession = null;
   shownPages = false;
   fullOpen = 'open';
   failRender = null;
+  const failure = new DocxWorkerError('open', new Error('worker open failed'));
   let release = () => {};
-  const held = new Promise<void>((resolve) => (release = resolve));
-  workerOpen = mock(async () => { await held; return null; });
-  const ref = createRef<Editor>();
+  const opening = new Promise<void>((done) => { release = done; });
+  const openInWorker = mock(async (_session: YrsSession) => {
+    await opening;
+    throw failure;
+  });
+  workerOpen = openInWorker;
   const errors: Error[] = [];
-  const view = render(<DocxEditor ref={ref} previewFirstPage experimentalWorkerOpen
-    readOnly={mode === 'readOnly'} mode={mode === 'viewing' ? 'viewing' : 'editing'}
-    documentBuffer={documentBuffer()} onError={(error) => errors.push(error)} />);
+  const buffer = documentBuffer();
+  const element = () => (
+    <DocxEditor
+      experimentalWorkerOpen
+      previewFirstPage={false}
+      readOnly={viewer}
+      documentBuffer={buffer}
+      onError={(error) => errors.push(error)}
+    />
+  );
+  const view = render(element());
   try {
-    await waitFor(() => {
-      expect(renderer!.displayList).not.toBeNull();
-      expect((renderer!.presentedEngine as YrsSession).isDisplayOnly()).toBe(true);
-      expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
-    }, { timeout: 10_000 });
-    const preview = renderer!.presentedEngine as YrsSession;
-    const version = preview.version();
-    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
-    expect(textarea.readOnly).toBe(true);
-    expect(ref.current!.getDocument()).toBeNull();
-    fireEvent.input(textarea, { target: { value: 'ignored' } });
-    fireEvent.keyDown(textarea, { key: 'Enter' });
-    fireEvent.keyDown(textarea, { key: 'Backspace' });
-    fireEvent.paste(textarea, { clipboardData: { getData: () => 'ignored paste' } });
-    await act(async () => {});
-    expect(ref.current!.getEditorRef()?.hasPendingInput() ?? false).toBe(false);
-    expect(preview.version()).toBe(version);
-    const before = preview.paragraphs('body').map((paragraph) => paragraph.text);
-    await act(async () => release());
-    await waitFor(() => {
-      expect(renderer!.presentedEngine).toBe(fullSession);
-      expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
-    }, { timeout: 10_000 });
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
-    expect((fullSession as YrsSession).paragraphs('body').slice(0, before.length)
-      .map((paragraph) => paragraph.text)).toEqual(before);
-    expect(ref.current!.getEditorRef()?.hasPendingInput() ?? false).toBe(false);
+    await waitFor(() => expect(openInWorker).toHaveBeenCalledTimes(1));
+    const pending = openInWorker.mock.calls[0][0];
+    workerFailure = { error: failure, errorEngine: pending };
+    await act(async () => view.rerender(element()));
     expect(errors).toEqual([]);
+    await act(async () => release());
+    await waitFor(() => expect(errors).toEqual([failure]));
+    expect(errors[0]).toBe(failure);
+    expect(view.getByRole('alert').textContent).toContain(failure.message);
+    expect(view.container.querySelector('.canvas-pages')).toBeNull();
+    await act(async () => view.rerender(element()));
+    expect(errors).toEqual([failure]);
+    expect(openInWorker).toHaveBeenCalledTimes(1);
   } finally {
-    view.unmount();
     release();
   }
-}, 30_000);
+});
 
-test('a stale worker open failure keeps the replacement preview accepting input', async () => {
+test('a stale worker open failure keeps the replacement preview read-only', async () => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -405,14 +407,14 @@ test('a stale worker open failure keeps the replacement preview accepting input'
     expect(openInWorker.mock.calls[1][0] as unknown).toBe(fullSession);
     expect(preview).not.toBe(fullSession);
     expect(preview.isDisplayOnly()).toBe(true);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(ref.current!.getDocument()).toBeNull();
 
     await act(async () => {
       releaseA();
       await new Promise((done) => setTimeout(done, 200));
     });
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(false);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(ref.current!.getDocument()).toBeNull();
     expect(errors).toEqual([]);
     expect(renderer!.layoutEngine).toBe(preview);
@@ -451,7 +453,7 @@ test('a load whose full session fails to render fails, and leaves no session beh
   await expectWaitRejects(ref);
 }, 30_000);
 
-test.each([false, true])('a full session whose canvas replay rejects during preview handover fails the load once with workerOpen=%s', async (experimentalWorkerOpen) => {
+test('a full session whose canvas replay rejects during preview handover fails the load once', async () => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -461,7 +463,7 @@ test.each([false, true])('a full session whose canvas replay rejects during prev
   const ref = createRef<Editor>();
   const errors: Error[] = [];
   const replayError = new Error('full canvas replay failed');
-  const view = render(load(documentBuffer(), (error) => errors.push(error), ref, experimentalWorkerOpen));
+  const view = render(load(documentBuffer(), (error) => errors.push(error), ref));
   const replay = await currentCanvasReplay();
 
   expect(created).toBe(2);
@@ -470,7 +472,7 @@ test.each([false, true])('a full session whose canvas replay rejects during prev
   expect(renderer!.presentedEngine).toBe(fullSession);
   expect(renderer!.displayList).toBe(replay.displayList);
   expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
-  expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
+  expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
   expect(ref.current!.getDocument()).toBeNull();
   expect(errors).toEqual([]);
 
@@ -495,7 +497,7 @@ test.each([false, true])('a full session whose canvas replay rejects during prev
   await expectWaitRejects(ref);
 }, 30_000);
 
-test.each([false, true])('a preview whose canvas replay rejects during full-session handover does not fail the load with workerOpen=%s', async (experimentalWorkerOpen) => {
+test('a preview whose canvas replay rejects during full-session handover does not fail the load', async () => {
   created = 0;
   fullSession = null;
   shownPages = false;
@@ -509,7 +511,7 @@ test.each([false, true])('a preview whose canvas replay rejects during full-sess
     const ref = createRef<Editor>();
     const errors: Error[] = [];
     const replayError = new Error('preview canvas replay failed');
-    const view = render(load(documentBuffer(), (error) => errors.push(error), ref, experimentalWorkerOpen));
+    const view = render(load(documentBuffer(), (error) => errors.push(error), ref));
     await waitFor(
       () => {
         expect(fullSession).not.toBeNull();
@@ -527,7 +529,7 @@ test.each([false, true])('a preview whose canvas replay rejects during full-sess
     expect(renderer!.layoutEngine).toBe(fullSession);
     expect(renderer!.displayList).toBe(replay.displayList);
     expect(isPresented(renderer!.canvasHostRef.current, replay.displayList)).toBe(false);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(ref.current!.getDocument()).toBeNull();
     expect(errors).toEqual([]);
 
@@ -544,7 +546,7 @@ test.each([false, true])('a preview whose canvas replay rejects during full-sess
     expect(renderer!.layoutEngine).toBe(fullSession);
     expect(renderer!.presentedEngine).toBe(previewEngine);
     expect(renderer!.displayList).toBe(replay.displayList);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(ref.current!.getDocument()).toBeNull();
 
     holdCanvasReplay = 'full';
@@ -555,7 +557,7 @@ test.each([false, true])('a preview whose canvas replay rejects during full-sess
     expect(fullReplay.displayList).not.toBe(replay.displayList);
     expect(renderer!.displayList).toBe(fullReplay.displayList);
     expect(isPresented(renderer!.canvasHostRef.current, fullReplay.displayList)).toBe(false);
-    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(!experimentalWorkerOpen);
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
     expect(ref.current!.getDocument()).toBeNull();
 
     await act(async () => {
@@ -775,5 +777,95 @@ test("a preview's layout error is reported and fails no wait for the document", 
     expect(outcome).toBe(renderer!.displayList!.pages.length);
   } finally {
     failPreviewLayout = false;
+  }
+}, 30_000);
+
+test.each(['readOnly', 'viewing'] as const)('viewer sessions stay read-only while opening with %s', async (mode) => {
+  created = 0;
+  fullSession = null;
+  shownPages = false;
+  fullOpen = 'open';
+  failRender = null;
+  const startWorker = await residentWorkerFactory();
+  const compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  const previousWorker = globalThis.Worker;
+  let release = () => {};
+  let session: YrsSession | null = null;
+  const create = real.createYrsSession;
+  const capture = spyOn(real, 'createYrsSession').mockImplementation(async (options) => {
+    const pending = await create(options);
+    session ??= pending;
+    return pending;
+  });
+  const posted: ResidentEngineWorkerRequest[] = [];
+  globalThis.Worker = class {
+    constructor() {
+      const worker = startWorker();
+      const send = worker.postMessage.bind(worker);
+      let listener: typeof worker.onmessage = null;
+      Object.defineProperty(worker, 'onmessage', {
+        get: () => (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+          const request = posted.find((request) => request.id === event.data.id);
+          if (request?.type === 'bootstrap') release = () => listener?.(event);
+          else listener?.(event);
+        },
+        set: (next: typeof worker.onmessage) => { listener = next; },
+      });
+      worker.postMessage = (request, transfer) => {
+        if (request.type !== 'editModule') posted.push(request);
+        send(request, transfer);
+      };
+      return worker;
+    }
+  } as unknown as typeof Worker;
+  const ref = createRef<Editor>();
+  const errors: Error[] = [];
+  const view = render(<DocxEditor ref={ref} previewFirstPage experimentalWorkerOpen
+    readOnly={mode === 'readOnly'} mode={mode === 'viewing' ? 'viewing' : 'editing'}
+    documentBuffer={documentBuffer()} onError={(error) => errors.push(error)} />);
+  try {
+    await waitFor(() => {
+      expect(posted.some((request) => request.type === 'bootstrap')).toBe(true);
+      expect(session!.isDisplayOnly()).toBe(false);
+      expect(renderer!.displayList).toBeNull();
+    }, { timeout: 10_000 });
+    const pending = session!;
+    const version = pending.version();
+    const textarea = view.getByTestId('yrs-input') as HTMLTextAreaElement;
+    expect(textarea.readOnly).toBe(true);
+    expect(() => ref.current!.getDocument()).toThrow(DocxAsyncOnlyError);
+    const before = await renderer!.readWorkerDocument({ kind: 'readParagraphs', request: { view: 'accepted' } });
+    if (!before.value.ok) throw new Error('The viewer worker could not read its document');
+    fireEvent.input(textarea, { target: { value: 'ignored' } });
+    fireEvent.keyDown(textarea, { key: 'Enter' });
+    fireEvent.keyDown(textarea, { key: 'Backspace' });
+    fireEvent.paste(textarea, { clipboardData: { getData: () => 'ignored paste' } });
+    await act(async () => {});
+    expect(ref.current!.getEditorRef()?.hasPendingInput() ?? false).toBe(false);
+    expect(pending.version()).toBe(version);
+    await act(async () => release());
+    await waitFor(() => {
+      expect(renderer!.presentedEngine).toBe(pending);
+      expect(isPresented(renderer!.canvasHostRef.current, renderer!.displayList!)).toBe(true);
+    }, { timeout: 10_000 });
+    expect((view.getByTestId('yrs-input') as HTMLTextAreaElement).readOnly).toBe(true);
+    const after = await renderer!.readWorkerDocument({ kind: 'readParagraphs', request: { view: 'accepted' } });
+    if (!after.value.ok) throw new Error('The viewer worker could not read its document');
+    expect(after.value.paragraphs.map((paragraph) => paragraph.text))
+      .toEqual(before.value.paragraphs.map((paragraph) => paragraph.text));
+    expect(ref.current!.getEditorRef()?.hasPendingInput() ?? false).toBe(false);
+    expect(errors).toEqual([]);
+    expect(workerOpenDocumentHeld(pending)).toBe(true);
+    expect(pending.storyIds()).toEqual([]);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(posted.some((request) => request.type === 'applyInput')).toBe(false);
+  } finally {
+    view.unmount();
+    release();
+    capture.mockRestore();
+    compileModule.mockRestore();
+    globalThis.Worker = previousWorker;
   }
 }, 30_000);

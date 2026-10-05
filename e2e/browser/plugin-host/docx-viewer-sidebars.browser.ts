@@ -24,6 +24,7 @@ interface ViewerSidebarsProbe {
   errors: string[];
   sidebarOpen: boolean;
   replica(): { started: boolean; loaded: boolean };
+  mainDocumentLoads(): { sessionsCaptured: number; total: number; sessions: Record<string, number>[] };
   sessionReads(): Record<string, number>;
   commentAnchors(id: string): Promise<unknown[] | null>;
 }
@@ -54,6 +55,7 @@ async function status(page: Page) {
       wasm: target.__wasmInstantiations,
       reads: target.__viewerSidebarsProbe.sessionReads(),
       replica: target.__viewerSidebarsProbe.replica(),
+      mainDocumentLoads: target.__viewerSidebarsProbe.mainDocumentLoads(),
       errors: target.__viewerSidebarsProbe.errors,
     };
   });
@@ -79,6 +81,11 @@ async function openSidebar(page: Page, firstCanvasAt: number) {
 }
 
 async function expectUnchanged(page: Page, before: Awaited<ReturnType<typeof status>>) {
+  expect(before.mainDocumentLoads.sessionsCaptured).toBeGreaterThan(0);
+  expect(before.mainDocumentLoads.total).toBe(0);
+  for (const counts of before.mainDocumentLoads.sessions) {
+    expect(counts).toEqual({ openDocx: 0, openDocxPreview: 0, loadState: 0, applyUpdate: 0 });
+  }
   const reads = Object.fromEntries(Object.keys(before.reads).map((method) => [method, 0]));
   // The open path checks the first frame's caret against the main selection once.
   reads.selection = before.reads.selection ?? 0;

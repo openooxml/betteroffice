@@ -1,10 +1,13 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { applyFrameDeltaOwned, decodeFrameDelta } from '../layout/render/frameDelta';
-import { createResidentEngineSession } from './residentEngineSession';
+import { createResidentEngineSession, type ResidentEngineSession } from './residentEngineSession';
+import type { ResidentSaveRecord } from './residentSave';
 import { syntheticDocx } from './__fixtures__/previewChain';
+import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
+import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview } from './proposals';
 import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
@@ -105,11 +108,13 @@ function worker() {
   let frameEpoch = 0;
   const replies = new Map<number, (reply: ResidentEngineWorkerResponse) => void>();
   const answered: number[] = [];
+  const transfers = new Map<number, Transferable[]>();
   const surfaces = new Map<string, Surface>();
   const scope = {
     onmessage: (_event: { data: ResidentEngineWorkerRequest | ResidentEngineWorkerHostModule }) => {},
     onmessageerror: null as (() => void) | null,
-    postMessage(reply: ResidentEngineWorkerResponse) {
+    postMessage(reply: ResidentEngineWorkerResponse, transfer: Transferable[] = []) {
+      transfers.set(reply.id, transfer);
       answered.push(reply.id);
       replies.get(reply.id)?.(reply);
       replies.delete(reply.id);
@@ -161,6 +166,7 @@ function worker() {
     memories: [{ label: 'docx-edit', bufferBytes: 65536, liveBytes: 100, peakBytes: 100, failedAllocationBytes: 0 }],
     session: {
       proposalEngine: { version: () => 'v' },
+      markProjectionStories(_stories: readonly string[]) {},
       loadState(state: Uint8Array) {
         harness.loadedStates.push(state);
       },
@@ -345,6 +351,7 @@ function worker() {
     harness,
     surfaces,
     answered,
+    transfers,
     send,
     delta,
     resetCalls() {
@@ -2737,7 +2744,7 @@ describe('worker proposals during sliced completion', () => {
     }
   });
 
-  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array) {
+  async function proposalWorker(extraBody = '', comments?: string, bytes?: Uint8Array, options: { clientId?: number; headersFooters?: boolean } = {}) {
     const parts: PartsMap = new Map();
     parts.set('[Content_Types].xml', toBytes(
       '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>'
@@ -2757,7 +2764,22 @@ describe('worker proposals during sliced completion', () => {
       parts.set('word/_rels/document.xml.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdComments" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>'));
       parts.set('word/comments.xml', toBytes(`<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${comments}</w:comments>`));
     }
-    const engine = await createResidentEngineSession();
+    if (options.headersFooters) {
+      const document = new TextDecoder().decode(parts.get('word/document.xml')!);
+      parts.set('word/document.xml', toBytes(document.replace('<w:sectPr/>',
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr>'
+      ).replace('<w:document ', '<w:document xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ')));
+      const types = new TextDecoder().decode(parts.get('[Content_Types].xml')!);
+      parts.set('[Content_Types].xml', toBytes(types.replace('</Types>',
+        '<Override PartName="/word/header.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/><Override PartName="/word/footer.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>'
+      )));
+      parts.set('word/_rels/document.xml.rels', toBytes(
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdHeader" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header.xml"/><Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer.xml"/></Relationships>'
+      ));
+      parts.set('word/header.xml', toBytes('<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Header</w:t></w:r></w:p></w:hdr>'));
+      parts.set('word/footer.xml', toBytes('<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>Footer</w:t></w:r></w:p></w:ftr>'));
+    }
+    const engine = await createResidentEngineSession(undefined, options.clientId);
     engine.openDocx(bytes ?? new Uint8Array(rezipPartsToArrayBuffer(parts)));
     const w = worker();
     const calls: string[] = [];
@@ -2984,6 +3006,103 @@ describe('worker proposals during sliced completion', () => {
       return { fontRequirements: reply.proposal.fontRequirements, preview: proposalRevisionPreview(result.snapshot) };
     };
   }
+
+  test('meta and JSON replies preserve decisions, frame bytes, sizes and header epochs', async () => {
+    const run = async (mode: 'json' | 'meta') => {
+      const { w, engine, proposal, snapshot, calls } = await proposalWorker('', undefined, undefined, {
+        clientId: 9501, headersFooters: true,
+      });
+      const frames: Uint8Array[] = [];
+      const layouts: string[] = [];
+      const metas: LayoutMetaV1[] = [];
+      let revision = snapshot.layoutRevision;
+      let epoch = w.harness.delta!.frameEpoch;
+      let input = layoutInput;
+      const sync = async () => {
+        const response = await w.send({
+          type: 'sync', expectedFrameEpoch: epoch, paintCaret: false, extras: '', layoutExtras: '{}',
+          ...(mode === 'meta' ? { layoutReply: 'meta' as const } : {}),
+          snapshot: { ...snapshot, fonts: [], layoutRevision: ++revision, layoutInput: input },
+        });
+        if (!response.ok || !response.frame) throw new Error('expected layout frame');
+        frames.push(new Uint8Array(response.frame));
+        epoch = response.caret!.frameEpoch;
+        const full = await w.send({ type: 'layoutJson', layoutRevision: revision });
+        if (!full.ok || full.layoutJsonStatus !== 'ok' || full.layoutJson === undefined) {
+          throw new Error('expected retained JSON');
+        }
+        layouts.push(full.layoutJson);
+        if (mode === 'json') {
+          expect(response.layoutJson).toBe(full.layoutJson);
+          expect(response.layoutMeta).toBeUndefined();
+        } else {
+          expect(response.layoutJson).toBeUndefined();
+          if (!isLayoutMetaV1(response.layoutMeta)) throw new Error('expected v1 meta');
+          const meta = response.layoutMeta;
+          metas.push(meta);
+          expect(w.transfers.get(response.id)).toContain(meta.pageSizes.buffer);
+          const output = JSON.parse(full.layoutJson) as { layout: Layout; notesConverged: boolean; provisional?: boolean };
+          expect(meta.pageCount).toBe(output.layout.pages.length);
+          expect(meta.pageCount).toBeGreaterThan(1);
+          expect(meta.partial).toBe(output.layout.partial === true);
+          expect(meta.provisional).toBe(output.provisional === true);
+          expect(meta.notesConverged).toBe(output.notesConverged);
+          const sizes = new Float64Array(output.layout.pages.flatMap((page) => [page.size.w, page.size.h]));
+          expect(new Uint8Array(meta.pageSizes.buffer)).toEqual(new Uint8Array(sizes.buffer));
+          expect(JSON.parse(meta.layoutShell)).toEqual({
+            ...output.layout,
+            pages: output.layout.pages.map((page) => ({ ...page, fragments: [] })),
+          });
+        }
+        expect(await w.send({ type: 'layoutJson', layoutRevision: revision - 1 })).toMatchObject({
+          ok: true, layoutJsonStatus: 'stale',
+        });
+      };
+      try {
+        const decide = await decided(w, engine, proposal);
+        for (const state of ['accepted', 'rejected', 'proposed', 'accepted'] as const) {
+          const decision = await decide(state);
+          input = JSON.stringify({ ...JSON.parse(layoutInput),
+            regions: { sections: [{ sectionId: 'main', headerFooterRefs: {
+              headerDefault: 'rIdHeader', footerDefault: 'rIdFooter',
+            } }] },
+            renderEnv: { revisionPreview: decision.preview },
+          });
+          await sync();
+        }
+        engine.applyRawOps('hf:rIdHeader', [{ op: 'insert', index: 0, text: 'Changed ' }]);
+        await sync();
+        await sync();
+        input = JSON.stringify({ ...JSON.parse(input), regions: { sections: [{ sectionId: 'main' }] } });
+        await sync();
+        await sync();
+        if (mode === 'meta') {
+          expect(calls).not.toContain('whole');
+          expect(metas[0]!.headersFooters).toContain('Header');
+          expect(metas[0]!.headersFooters).toContain('Footer');
+          for (const meta of metas.slice(1, 4)) {
+            expect(meta.headersFootersEpoch).toBe(metas[0]!.headersFootersEpoch);
+            expect(meta.headersFooters).toBeUndefined();
+          }
+          expect(metas[4]!.headersFootersEpoch).toBe(metas[0]!.headersFootersEpoch + 1);
+          expect(metas[4]!.headersFooters).toContain('Changed ');
+          expect(metas[5]!.headersFootersEpoch).toBe(metas[4]!.headersFootersEpoch);
+          expect(metas[5]!.headersFooters).toBeUndefined();
+          expect(metas[6]!.headersFootersEpoch).toBe(metas[4]!.headersFootersEpoch + 1);
+          expect(metas[6]!.headersFooters).toBe('null');
+          expect(metas[7]!.headersFootersEpoch).toBe(metas[6]!.headersFootersEpoch);
+          expect(metas[7]!.headersFooters).toBeUndefined();
+        }
+        return { frames, layouts };
+      } finally {
+        void w.send({ type: 'destroy' });
+      }
+    };
+    const full = await run('json');
+    const meta = await run('meta');
+    expect(meta.layouts).toEqual(full.layouts);
+    expect(meta.frames).toEqual(full.frames);
+  });
 
   test('a decision answers with the font requirements of the layout input the host builds next, and an undo reads cached ones', async () => {
     const { w, engine, proposal } = await proposalWorker();
@@ -3630,6 +3749,7 @@ describe('resident worker opening', () => {
         calls.push(`open:${bytes.join(',')}:${digest}:${generation}`);
         return '{"host":1}';
       },
+      storiesChangedSince: () => ({ revision: 0, stories: [] }),
       layoutFontRequirementsJson: (input: string) => {
         calls.push(`requirements:${input}`);
         return '[{"key":"a"}]';
@@ -3680,6 +3800,153 @@ describe('resident worker opening', () => {
     });
     return { w, calls };
   }
+
+  test('retains the opened source, keeps save history across an opened bootstrap and resets it on destroy/open', async () => {
+    const { w } = openingWorker();
+    const host = { package: { document: { content: [] } } };
+    let source = new Uint8Array([1, 2, 3]).buffer;
+    const records: ResidentSaveRecord[] = [];
+    const save: ResidentEngineSession['save'] = async (bytes, hostJson, metadata, comments, record) => {
+      expect(bytes.buffer).toBe(source);
+      expect(hostJson).toBe('{"host":1}');
+      expect(metadata).toBe(host);
+      expect(comments).toEqual([]);
+      if (records.at(-1) !== record) {
+        expect(record).toEqual({ full: false });
+        records.push(record);
+      } else {
+        expect(record.full).toBe(true);
+        expect(record.saved).toBeDefined();
+        expect(record.base).toBe(host);
+      }
+      const saved = new Uint8Array([4, 5, 6]).buffer;
+      record.full = true;
+      record.saved = saved;
+      record.base = host as unknown as NonNullable<ResidentSaveRecord['base']>;
+      return saved;
+    };
+    Object.assign(w.harness.session, { save });
+    expect((await w.send({ type: 'open', bytes: source })).ok).toBe(true);
+    const first = await w.send({ type: 'save', host, comments: [] });
+    expect(first.ok && first.saved).not.toBe(records[0]!.saved);
+    expect(first.ok && [...new Uint8Array(first.saved!)]).toEqual([4, 5, 6]);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect((await w.send({
+      type: 'bootstrap', opened: true, snapshot, extras: '', layoutExtras: '{}', expectedFrameEpoch: 0,
+    })).ok).toBe(true);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect(records).toHaveLength(1);
+    w.scope.onmessage({ data: { id: 999, type: 'destroy' } });
+    source = new Uint8Array([7, 8]).buffer;
+    expect((await w.send({ type: 'open', bytes: source })).ok).toBe(true);
+    expect((await w.send({ type: 'save', host, comments: [] })).ok).toBe(true);
+    expect(records).toHaveLength(2);
+    expect((await w.bootstrap()).ok).toBe(true);
+    expect(await w.send({ type: 'save', host, comments: [] })).toMatchObject({
+      ok: false, code: 'save-unavailable',
+    });
+  });
+
+  test('save returns exactly the peer diff only when given a state vector', async () => {
+    const { w } = openingWorker();
+    const diff = new Uint8Array([7, 8, 9]);
+    const encodeStateAsUpdate = mock((_stateVector: Uint8Array) => diff);
+    Object.assign(w.harness.session, {
+      save: async () => new ArrayBuffer(4),
+      encodeStateAsUpdate,
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    const stateVector = new Uint8Array([1, 2, 3]);
+    const saved = await w.send({ type: 'save', comments: [], stateVector });
+    expect(saved.ok && saved.updates).toEqual([diff.buffer]);
+    expect(encodeStateAsUpdate).toHaveBeenCalledTimes(1);
+    expect(encodeStateAsUpdate).toHaveBeenCalledWith(stateVector);
+    encodeStateAsUpdate.mockClear();
+    expect(await w.send({ type: 'save', comments: [] })).toMatchObject({ ok: true, updates: [] });
+    expect(encodeStateAsUpdate).not.toHaveBeenCalled();
+  });
+
+  test('syncUpdate applies in mutation order and acknowledges its version, vector and repairs', async () => {
+    const { w } = openingWorker();
+    const calls: string[] = [];
+    let version = 'opened';
+    const vector = new Uint8Array([1, 2]);
+    const repair = new Uint8Array([3, 4]);
+    Object.assign(w.harness.session, {
+      applyUpdate: (update: Uint8Array) => { version = String(update[0]); calls.push(`apply:${version}`); },
+      encodeStateAsUpdate: (captured: Uint8Array) => {
+        expect(captured).toEqual(vector);
+        calls.push(`repair:${version}`);
+        return repair;
+      },
+      encodeStateVector: () => vector,
+      proposalEngine: { version: () => version },
+      save: async () => { calls.push(`save:${version}`); return new ArrayBuffer(0); },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    const acknowledged = w.send({ type: 'syncUpdate', update: new Uint8Array([2]), stateVector: vector });
+    void w.send({ type: 'applyUpdate', update: new Uint8Array([3]), selection: null });
+    const saved = w.send({ type: 'save', comments: [] });
+    expect(await acknowledged).toMatchObject({ ok: true, version: '2', stateVector: vector.buffer, repair: repair.buffer });
+    expect((await saved).ok).toBe(true);
+    expect(calls).toEqual(['apply:1', 'apply:2', 'repair:2', 'apply:3', 'save:3']);
+  });
+
+  test('syncUpdate acknowledges an empty diff and a deletion with an unchanged state vector', async () => {
+    const { w } = openingWorker();
+    const vector = new Uint8Array([1, 2]);
+    let version = 'opened';
+    const applyUpdate = mock((update: Uint8Array) => { if (update.length > 0) version = 'deleted'; });
+    const encodeStateAsUpdate = mock(() => new Uint8Array([0, 0]));
+    Object.assign(w.harness.session, {
+      applyUpdate, encodeStateAsUpdate,
+      encodeStateVector: () => vector,
+      proposalEngine: { version: () => version },
+    });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array(), stateVector: vector })).toMatchObject({
+      ok: true, version: 'opened', stateVector: vector.buffer,
+    });
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([9]), stateVector: vector })).toMatchObject({
+      ok: true, version: 'deleted', stateVector: vector.buffer,
+    });
+    expect(applyUpdate).toHaveBeenCalledTimes(1);
+    expect(encodeStateAsUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  test('syncUpdate reports a worker trap as a terminal failure', async () => {
+    const { w } = openingWorker();
+    Object.assign(w.harness.session, { applyUpdate: () => { throw new WebAssembly.RuntimeError('unreachable'); } });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    expect(await w.send({ type: 'syncUpdate', update: new Uint8Array([1]), stateVector: new Uint8Array([0]) })).toMatchObject({
+      ok: false, terminal: true,
+    });
+  });
+
+  test('save forwards the peer story set, including an empty set, without reading revisions', async () => {
+    const { w } = openingWorker();
+    const save = mock(async (..._args: Parameters<ResidentEngineSession['save']>) => new ArrayBuffer(4));
+    const storiesChangedSince = mock(() => { throw new Error('save must not read revisions'); });
+    Object.assign(w.harness.session, { save, storiesChangedSince });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1) })).ok).toBe(true);
+    for (const stories of [['hf:rIdH1'], []]) {
+      expect((await w.send({ type: 'save', comments: [], stories })).ok).toBe(true);
+      expect(save.mock.calls.at(-1)![5]).toEqual(stories);
+    }
+    expect((await w.send({ type: 'save', comments: [] })).ok).toBe(true);
+    expect(save.mock.calls.at(-1)![5]).toBeUndefined();
+    expect(storiesChangedSince).not.toHaveBeenCalled();
+  });
+
+  test('a preview rejects save as still opening', async () => {
+    const { w } = openingWorker();
+    Object.assign(w.harness.session, { openDocxPreview: () => '{"host":"preview"}' });
+    expect((await w.send({ type: 'open', bytes: new ArrayBuffer(1), previewBlocks: 1 })).ok).toBe(true);
+    expect(await w.send({ type: 'save', comments: [] })).toMatchObject({
+      ok: false, code: 'save-unavailable', error: 'Resident engine worker is still opening',
+    });
+  });
 
   test('opens a package, lays it out without a state to load, and hands its state over', async () => {
     const { w, calls } = openingWorker();

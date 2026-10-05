@@ -612,17 +612,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       canvasOverlayTarget = null,
       commandBridgeRef,
     } = props;
-    // A viewer whose document fell back to this thread selects through the copy it holds here.
-    const viewerDocumentRead =
-      viewerDocumentReadProp &&
-      !(
-        displayListQueries &&
-        presentedWorkerVersion(displayListQueries) === null &&
-        yrsCore.session &&
-        !workerOpenReplicaPending(yrsCore.session)
-      )
-        ? viewerDocumentReadProp
-        : undefined;
+    const viewerDocumentRead = viewerDocumentReadProp;
     const yrsStyleResolver = useMemo(() => (styles ? createStyleResolver(styles) : null), [styles]);
 
     // Resolve the scroll container: prefer parent-provided ref, fallback to own container
@@ -1652,7 +1642,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly: readOnly && !holdInput,
       inputScope,
       inputQueries,
-      queueInput: !!yrsCore.experimentalWorkerOpen && !yrsCore.hydrateOnDemand && !viewerDocumentRead,
+      queueInput: !!yrsCore.experimentalWorkerOpen && !viewerDocumentRead,
       replicaPending: viewerDocumentRead
         ? undefined
         : () =>
@@ -2002,7 +1992,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       const session = core.session;
       return Boolean(
         core.experimentalWorkerOpen &&
-        !core.hydrateOnDemand &&
         !core.previewing &&
         !viewerRead &&
         session &&
@@ -2168,7 +2157,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       bumpInputEpoch,
       bridgeRef: commandBridgeRef,
       experimentalWorkerOpen: yrsCore.experimentalWorkerOpen,
-      hydrateOnDemand: yrsCore.hydrateOnDemand,
+      viewerSession: viewerDocumentRead !== undefined,
       yrsInputRef,
       session: yrsCore.session,
       rootStory: activeYrsRootStory,
@@ -2247,7 +2236,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             replicaReadyRef={yrsCore.experimentalWorkerOpen ? yrsCore.replicaReadyRef : undefined}
             inputEpoch={inputEpoch}
             applyPendingSelection={applyPendingSelection}
-            seedSelection={!yrsCore.hydrateOnDemand && !holdInput}
+            seedSelection={viewerDocumentRead === undefined && !holdInput}
             session={yrsCore.session}
             story={activeYrsRootStory}
             isSuggesting={isSuggesting}

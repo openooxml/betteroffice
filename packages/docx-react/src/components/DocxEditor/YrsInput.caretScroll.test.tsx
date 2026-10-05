@@ -225,6 +225,7 @@ async function mountPendingReplica() {
       replicaReadyRef.current = true;
     }
   );
+  replica.start();
   const finish = async (loaded: boolean) => {
     await act(async () => {
       replica.start();
