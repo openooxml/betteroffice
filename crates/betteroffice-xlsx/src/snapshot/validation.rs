@@ -124,7 +124,8 @@ impl ModelValidation {
                             budget,
                         )?;
                         check(validate_cell_ref(at))?;
-                        if matches!(cell.value, CellValue::Number { value } if !value.is_finite())
+                        if (cell.formula.is_none()
+                            && matches!(cell.value, CellValue::Number { value } if !value.is_finite()))
                             || matches!(&cell.value, CellValue::Text { value } if value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
                             || cell.formula.as_ref().is_some_and(|formula| {
                                 formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES

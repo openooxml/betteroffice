@@ -377,11 +377,19 @@ fn completed_builder_with_step_budget(
     chunks: &[Vec<u8>],
     budget: SnapshotBudget,
 ) -> (WorkbookSnapshotBuilder, usize) {
+    completed_builder_with_step_budgets(chunks, budget, budget)
+}
+
+fn completed_builder_with_step_budgets(
+    chunks: &[Vec<u8>],
+    transport: SnapshotBudget,
+    budget: SnapshotBudget,
+) -> (WorkbookSnapshotBuilder, usize) {
     let mut builder = WorkbookSnapshotBuilder::new();
     let mut deleted = 0;
     for chunk in chunks {
         builder.push(chunk).unwrap();
-        assert_step_budget(budget);
+        assert_step_budget(transport);
         deleted += crate::snapshot::step::deleted_clocks();
         builder.advance(budget).unwrap();
         assert_step_budget(budget);
@@ -1303,6 +1311,15 @@ fn short_formula_worker(rows: u32) -> Workbook {
 }
 
 fn measure_snapshot_steps(worker: &Workbook, label: &str) {
+    let peer = measure_snapshot_receiver(worker, label);
+    assert_current_identity(worker, &peer);
+    assert_eq!(
+        worker.encode_state_as_update_v1(),
+        peer.encode_state_as_update_v1()
+    );
+}
+
+fn measure_snapshot_receiver(worker: &Workbook, label: &str) -> Workbook {
     let budget = SnapshotBudget::new(1, 16_384).unwrap();
     let mut encoder = WorkbookSnapshotEncoder::new(worker, Some(context()), budget).unwrap();
     let mut builder = WorkbookSnapshotBuilder::new();
@@ -1341,11 +1358,7 @@ fn measure_snapshot_steps(worker: &Workbook, label: &str) {
         push_steps + advance_steps
     );
     let (peer, _) = builder.finish().unwrap().into_parts();
-    assert_current_identity(worker, &peer);
-    assert_eq!(
-        worker.encode_state_as_update_v1(),
-        peer.encode_state_as_update_v1()
-    );
+    peer
 }
 
 #[test]
@@ -1386,10 +1399,9 @@ fn snapshot_flat_conflict_history_steps_respect_budget() {
     use yrs::updates::decoder::Decode;
     use yrs::{Doc, Map, ReadTxn, StateVector, Transact, Update, WriteTxn};
 
-    assert!(
-        !cfg!(debug_assertions),
-        "run this measurement in release mode"
-    );
+    if cfg!(debug_assertions) {
+        panic!("run this measurement in release mode");
+    }
     let worker = Workbook::from_model(WorkbookModel {
         sheets: vec![crate::Sheet::new("Data")],
         ..WorkbookModel::default()
@@ -1419,11 +1431,80 @@ fn snapshot_flat_conflict_history_steps_respect_budget() {
 
 #[test]
 #[ignore]
-fn snapshot_many_short_formulas_steps_respect_budget() {
-    assert!(
-        !cfg!(debug_assertions),
-        "run this measurement in release mode"
+fn snapshot_ungc_conflict_history_steps_respect_budget() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, Map, ReadTxn, StateVector, Transact, Update, WriteTxn};
+
+    if cfg!(debug_assertions) {
+        panic!("run this measurement in release mode");
+    }
+    let mut worker = Workbook::from_model(WorkbookModel {
+        sheets: vec![crate::Sheet::new("Data")],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    worker.authority.snapshot_skip_gc_for_test();
+    for client in 1..=4_000 {
+        let writer = Doc::with_client_id(client);
+        {
+            let mut txn = writer.transact_mut();
+            txn.get_or_insert_map("snapshot-ungc-conflicts")
+                .insert(&mut txn, "scalar", client as i64);
+        }
+        let bytes = writer
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        let mut txn = worker.authority.snapshot_transaction_for_test();
+        assert!(txn.doc().skip_gc());
+        assert_eq!(txn.state_vector().get(&writer.client_id()), 0);
+        txn.apply_update(Update::decode_v1(&bytes).unwrap()).unwrap();
+    }
+    let budget = SnapshotBudget::new(1, 16_384).unwrap();
+    let chunks = encode(&worker, budget);
+    let mut retained = 0;
+    for (kind, _, payload) in decoded_snapshot(&chunks) {
+        if kind != ChunkKind::Yrs {
+            continue;
+        }
+        let mut cursor = crate::snapshot::yrs_split::UpdateCursor::default();
+        while let Some(part) = cursor
+            .next(&payload, budget.max_records(), budget.max_bytes())
+            .unwrap()
+        {
+            let mut reader = Reader::new(&part.bytes);
+            if reader.var_usize().unwrap() == 0 {
+                continue;
+            }
+            assert_eq!(reader.var_usize().unwrap(), 1);
+            let client = reader.var_u64().unwrap();
+            if (1..=4_000).contains(&client) {
+                assert_eq!(reader.var_u32().unwrap(), 0);
+                assert_eq!(
+                    reader.u8().unwrap() & 0x0f,
+                    yrs::block::BLOCK_ITEM_ANY_REF_NUMBER
+                );
+                retained += 1;
+            }
+        }
+    }
+    assert_eq!(retained, 4_000);
+    let peer = measure_snapshot_receiver(&worker, "4000 un-GC'd conflicts");
+    assert_current_identity(&worker, &peer);
+    let txn = peer.authority.snapshot_transaction_for_test();
+    assert_eq!(
+        txn.get_map("snapshot-ungc-conflicts")
+            .unwrap()
+            .get(&txn, "scalar"),
+        Some(yrs::Out::Any(yrs::Any::from(4_000_i64)))
     );
+}
+
+#[test]
+#[ignore]
+fn snapshot_many_short_formulas_steps_respect_budget() {
+    if cfg!(debug_assertions) {
+        panic!("run this measurement in release mode");
+    }
     let worker = short_formula_worker(50_000);
     measure_snapshot_steps(&worker, "50000 short formulas");
 }
@@ -2233,7 +2314,7 @@ fn snapshot_short_cells_accept_a_smaller_receiver_byte_budget() {
     assert!(decoded_snapshot(&chunks).iter().any(|(kind, _, payload)| {
         *kind == ChunkKind::Yrs && payload.len() > budget.max_bytes()
     }));
-    let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+    let (builder, _) = completed_builder_with_step_budgets(&chunks, transport, budget);
     let (peer, _) = builder.finish().unwrap().into_parts();
     assert_current_identity(&worker, &peer);
 }

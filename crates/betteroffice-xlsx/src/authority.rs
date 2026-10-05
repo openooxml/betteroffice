@@ -647,6 +647,17 @@ impl WorkbookAuthority {
     }
 
     #[cfg(test)]
+    pub(crate) fn snapshot_skip_gc_for_test(&mut self) {
+        let mut options = Options::with_guid_and_client_id(self.doc.guid(), self.doc.client_id());
+        options.skip_gc = true;
+        let doc = Doc::with_options(options);
+        hydrate_local_doc(&doc, &self.encode_state_as_update_v1()).unwrap();
+        self.doc = doc;
+        self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
+        self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+    }
+
+    #[cfg(test)]
     #[doc(hidden)]
     pub(crate) fn snapshot_checkpoint_for_test(&mut self) {
         let mut undo = build_undo_manager(

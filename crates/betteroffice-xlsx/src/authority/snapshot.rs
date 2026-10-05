@@ -1049,7 +1049,15 @@ impl AuthorityHydrator {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn advance(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
+        self.advance_base(SnapshotBudget::new(
+            budget.max_records(),
+            budget.max_bytes().max(std::mem::size_of::<WorkbookBase>()),
+        )?)
+    }
+
+    fn advance_base(&mut self, budget: SnapshotBudget) -> SnapshotResult<SnapshotProgress> {
         if self.failed {
             return Err(SnapshotError::new("authority snapshot hydration failed"));
         }
@@ -1096,7 +1104,7 @@ impl AuthorityHydrator {
                 "authority base record exceeds advance byte budget",
             ));
         }
-        self.advance(budget)
+        self.advance_base(budget)
     }
 
     pub(crate) fn finish_drained(self) -> SnapshotResult<WorkbookAuthority> {
