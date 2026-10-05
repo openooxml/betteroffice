@@ -4761,6 +4761,16 @@ pub(crate) fn validate_peer_blocks(blocks: &[Value]) -> Result<(), String> {
         match value {
             Value::Object(object) => {
                 if string(object.get("type")) == Some("table") {
+                    for row in array(object.get("rows")) {
+                        let mut column = 0usize;
+                        for cell in array(field(Some(row), "cells")) {
+                            let span = number(field(field(Some(cell), "formatting"), "gridSpan"))
+                                .unwrap_or(1.0) as usize;
+                            column = column
+                                .checked_add(span)
+                                .ok_or("source table column overflow")?;
+                        }
+                    }
                     table_layout(value, "peer", 0).validate_peer_metadata()?;
                 }
                 pending.extend(object.values());

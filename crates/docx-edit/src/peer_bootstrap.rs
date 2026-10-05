@@ -1427,6 +1427,18 @@ mod tests {
                     "done": false, "body": body
                 }]);
             }
+            if matches!(case, "oversized-span" | "nested-table" | "separator-table")
+                || (case == "width-overflow" && usize::BITS == 32)
+            {
+                assert_invalid_metadata_is_atomic(
+                    &worker,
+                    &source,
+                    &metadata,
+                    &bad,
+                    "source table column overflow",
+                );
+                continue;
+            }
             let accepted = frame(&serde_json::to_vec(&bad).unwrap(), blobs).unwrap();
             let peer = EditingDoc::new(19);
             let prepared = peer
