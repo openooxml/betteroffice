@@ -203,6 +203,7 @@ function installWorker(options: {
   const replies = new Map<number, () => void>();
   const received = new Set<ResidentEngineWorkerRequest>();
   const responses = new Map<ResidentEngineWorkerRequest, ResidentEngineWorkerResponse>();
+  const postWaiters = new Set<() => void>();
   const replyWaiters = new Set<() => void>();
   let proposalCrashed = false;
   let snapshotFailed = false;
@@ -241,6 +242,7 @@ function installWorker(options: {
         }
         posted.push(request);
         requests.set(request.id, request);
+        for (const waiter of postWaiters) waiter();
         if ((options.holdState && request.type === 'encodeState') ||
             (options.holdOpen && request.type === 'open') ||
             (options.holdBootstrap && request.type === 'bootstrap') ||
@@ -293,6 +295,18 @@ function installWorker(options: {
   } as unknown as typeof Worker;
   return {
     workers, posted, hostModules, replies, responses,
+    sent(type: ResidentEngineWorkerRequest['type'], afterId = 0): Promise<ResidentEngineWorkerRequest> {
+      return new Promise((resolve) => {
+        const check = () => {
+          const request = posted.find((request) => request.type === type && request.id > afterId);
+          if (!request) return;
+          postWaiters.delete(check);
+          resolve(request);
+        };
+        postWaiters.add(check);
+        check();
+      });
+    },
     received(type: ResidentEngineWorkerRequest['type'], afterId = 0, timeout?: number): Promise<ResidentEngineWorkerRequest> {
       let check!: () => void;
       const promise = new Promise<ResidentEngineWorkerRequest>((resolve) => {
@@ -983,6 +997,7 @@ test('eager worker open preserves input and command order after first paint unti
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={harness.renderer.onLayoutComputed}
         canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
         commandBridgeRef={bridge} />
     </>;
@@ -1304,6 +1319,7 @@ test('eager worker-open hydration failure rejects flush, command and save during
         measurementFontProvider={{ resolve: () => () => Promise.resolve(font.buffer as ArrayBuffer) }}
         fontRequirementsInWorker={harness.renderer.fontRequirementsInWorker}
         layoutInWorker={harness.renderer.layoutInWorker}
+        onLayoutComputed={harness.renderer.onLayoutComputed}
         canvasHostRef={canvasHost} displayListQueries={harness.renderer.queries}
         commandBridgeRef={bridge} />
     </>;
@@ -2782,7 +2798,7 @@ test('a successful worker-recovery main open permits pending reads, navigation a
     await frames.untilCommitted(ready);
     expect(result.current.core.replicaReady).toBe(true);
     expect(replicaHelpers.workerOpenReplicaPending(session)).toBe(false);
-    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(ensure.mock.calls).toEqual([[session], [session]]);
     expect(api.findInDocument('paragraph')).toContainEqual({
       paraId: '00000001', match: 'paragraph', before: 'First ', after: '',
     });
@@ -5669,7 +5685,7 @@ test('an eager worker-open editor peer becoming ready delivers only the initial 
 
 test.each(['held keys', 'held composition'] as const)(
   'flush during opening waits for %s to land in the full session', async (kind) => {
-    const opened = await openingEditor();
+    const opened = await openingEditor(true, false, { publishLayout: true });
     try {
       const textarea = opened.view.getByTestId('yrs-input') as HTMLTextAreaElement;
       opened.click(6);
@@ -8149,7 +8165,7 @@ test('completion slices do not register an editor waiter or prefetch before the 
     const session = result.current.core.session!;
     act(() => result.current.pipeline.runLayoutPipeline());
     await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
-    await worker.received('completeLayout');
+    await worker.sent('completeLayout');
     act(() => result.current.presentFrame());
     await act(async () => {
       frames.run();
@@ -8367,7 +8383,7 @@ test.each([false, true])('a queued keystroke starts the peer before the layout s
     expect(insert).not.toHaveBeenCalled();
     expect(load).not.toHaveBeenCalled();
     expect(opened.onLayoutWait).not.toHaveBeenCalled();
-    await opened.received('encodeState');
+    await opened.sent('encodeState');
     expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     act(() => opened.releaseHeldInput());
     await act(async () => {
@@ -8413,7 +8429,7 @@ test.each(['paste', 'cut', 'composition'] as const)('queued %s starts the peer i
     expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
     expect(opened.harness.core.replicaReady).toBe(false);
     expect(opened.onLayoutWait).not.toHaveBeenCalled();
-    await opened.received('encodeState');
+    await opened.sent('encodeState');
     expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     expect(opened.harness.mainOpens).toEqual([]);
     await act(async () => {
@@ -8483,7 +8499,7 @@ test.each([false, true].flatMap((held) =>
     await opened.frames.waitFor(() => expect([...opened.frames.idleCallbacks.values()]
       .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
     await act(async () => opened.frames.runIdle());
-    await opened.received('encodeState');
+    await opened.sent('encodeState');
     expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     await act(async () => {
       opened.workers[0].release();
@@ -8553,7 +8569,7 @@ test.each([false, true])('ArrowRight and PageDown wait for a typed character to 
     expect(load).not.toHaveBeenCalled();
     expect(opened.onLayoutWait).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(textarea);
-    await opened.received('encodeState');
+    await opened.sent('encodeState');
     expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     expect(opened.harness.mainOpens).toEqual([]);
     act(() => opened.releaseHeldInput());
@@ -8610,7 +8626,7 @@ test.each([false, true])('a queued cut writes the selected text before deletion 
     expect(opened.editor.current!.hasPendingInput()).toBe(true);
     expect(clipboard.writeText).not.toHaveBeenCalled();
     expect(remove).not.toHaveBeenCalled();
-    await opened.received('encodeState');
+    await opened.sent('encodeState');
     act(() => opened.releaseHeldInput());
     await act(async () => {
       opened.workers[0].release();
@@ -8681,7 +8697,7 @@ test('the ten-second fallback starts the peer when a presented frame has no layo
     act(() => fallback.advance(1));
     expect(replicaHelpers.workerOpenReplicaStarted(opened.session)).toBe(true);
     expect(opened.onLayoutWait).not.toHaveBeenCalled();
-    await opened.received('encodeState');
+    await opened.sent('encodeState');
     expect(opened.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
     expect(fallback.timers.size).toBe(0);
     await act(async () => {
@@ -8728,7 +8744,7 @@ test('a stale layout-complete signal cannot start the replacement session peer',
     expect(result.current.mainOpens).toEqual([]);
     act(() => rerender({ ...replacementProps, layoutCompleteSession: replacement }));
     await frames.waitFor(() => expect(onLayoutWait).toHaveBeenCalledTimes(1));
-    await worker.received('encodeState');
+    await worker.sent('encodeState');
     await frames.waitFor(() => expect([...frames.idleCallbacks.values()]
       .filter(({ options }) => options?.timeout === 2000)).toHaveLength(1));
     await act(async () => frames.runIdle());
