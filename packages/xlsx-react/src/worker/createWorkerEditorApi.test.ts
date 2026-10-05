@@ -4,7 +4,7 @@ import type {
   CellEdit, EditResult, WorkbookHandle, XlsxEditRequest, XlsxEditResult,
   XlsxFindRequest, XlsxReadRequest, XlsxReadResult, XlsxValidationResult,
 } from '@betteroffice/xlsx';
-import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
+import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '@betteroffice/xlsx';
 import { createXlsxCommandController } from '../commands/createXlsxCommandStore';
 import type { InputDraft } from '../commands/inputCoordinator';
 import { createWorkerInputCoordinator } from '../commands/workerInputCoordinator';

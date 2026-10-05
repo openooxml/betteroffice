@@ -5,8 +5,8 @@ import type {
   MergedRange,
   SelectionFormatting,
   WorkbookHandle,
+  WorkbookEditPeer,
 } from '@betteroffice/xlsx';
-import type { WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
 import type { MergeAction } from '../components/Toolbar';
 import {
   XlsxCommandAdmissionError, type XlsxCommandBinding, type XlsxCommandController,
@@ -33,6 +33,7 @@ export interface WorkerXlsxEditorBridge extends Omit<XlsxEditorBridge, 'handle' 
   editPeer(): WorkbookEditPeer | null;
   coordinator: WorkerInputCoordinator;
   preview(): Promise<void>;
+  recovering?(): boolean;
 }
 
 interface EngineRead {
@@ -398,6 +399,8 @@ export function createWorkerXlsxCommandBinding(
       markApplied = applied;
       try {
         const result = await operation();
+        if (current.recovering?.() && result !== null && typeof result === 'object' &&
+          'ok' in result && result.ok === false) throw new XlsxCommandAdmissionError('input-failed');
         applied();
         return result;
       } finally { markApplied = null; }

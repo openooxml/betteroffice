@@ -1,8 +1,7 @@
-import type { WorkbookHandle, WorkbookSession } from '@betteroffice/xlsx';
-import { hydratePeer, openWorkbookSession } from '../../../xlsx/src/session/client';
 import {
-  createWorkbookEditPeer, type WorkbookEditPeer,
-} from '../../../xlsx/src/session/editPeer';
+  createWorkbookEditPeer, hydratePeer, openWorkbookSession,
+  type WorkbookHandle, type WorkbookSession, type WorkbookEditPeer,
+} from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { XlsxEditorProps } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
@@ -10,7 +9,7 @@ import type { XlsxCommandStore } from '../commands/types';
 import type { WorkerInputCoordinator } from '../commands/workerInputCoordinator';
 import {
   createWorkerEditorApi, type WorkerEditorApiBridge, type WorkerEditorSessionAccess,
-  type XlsxWorkerEditorApi,
+  type XlsxWorkerEditorApi, XlsxWorkerEditorCollaborationError,
 } from './createWorkerEditorApi';
 
 export const editableWorkbookSessionBackend = {
@@ -29,7 +28,6 @@ export interface EditableWorkbookSessionOptions {
   onError(error: Error): void;
   onReady(): void | (() => void);
   isCurrent(): boolean;
-  hydration?: 'eager' | 'lazy';
 }
 
 function asError(value: unknown): Error {
@@ -43,6 +41,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   peer: WorkbookHandle | null = null;
   editPeer: WorkbookEditPeer | null = null;
   failure: Error | null = null;
+  recovering = false;
   private painted = false;
   private hydration: Promise<void> | null = null;
   private readonly hydrated: Promise<void>;
@@ -77,11 +76,13 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   get current(): boolean { return this.alive && this.options.isCurrent(); }
 
   get ready(): boolean {
-    return this.current && !this.failure && this.peer !== null && this.editPeer?.state === 'ready';
+    return this.current && (!this.failure || this.recovering) && this.peer !== null &&
+      (this.editPeer?.state === 'ready' || this.recovering && this.editPeer !== null);
   }
 
   whenHydrated(): Promise<void> {
     if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
+    if (this.recovering && this.peer && this.editPeer) return Promise.resolve();
     if (this.failure) return Promise.reject(this.failure);
     return this.hydrated;
   }
@@ -108,7 +109,6 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
     if (this.failure && reason !== 'recovery') return Promise.reject(this.failure);
     if (this.editPeer) return Promise.resolve();
-    if (reason === 'first-paint' && this.options.hydration === 'lazy') return this.hydrated;
     if (this.hydration) return this.waitForHydration(this.hydration, reason);
     const pending = (async () => {
       let peer: WorkbookHandle | null = null;
@@ -212,7 +212,7 @@ export function useEditableSessionWorkbook(
     setError(null);
     setLoading(Boolean(props.file));
     if (collaboration) {
-      reportError(new Error('Collaboration is unavailable in the worker editor'));
+      reportError(new XlsxWorkerEditorCollaborationError());
       setLoading(false);
     } else if (props.file) void (async () => {
       try {

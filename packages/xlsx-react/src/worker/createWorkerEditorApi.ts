@@ -1,7 +1,7 @@
 import type {
-  CellEdit, EditResult, Selection, WorkbookHandle, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
+  CellEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
 } from '@betteroffice/xlsx';
-import type { WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
+import { WorkbookEditPeerFailedError, WorkbookPeerHydrationError } from '@betteroffice/xlsx';
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
@@ -9,10 +9,20 @@ import {
   WorkerInputNotReadyError, type WorkerInputCoordinator,
 } from '../commands/workerInputCoordinator';
 
+/** @experimental */
 export class XlsxPeerNotReadyError extends WorkerInputNotReadyError {
   constructor() {
     super();
     this.name = 'XlsxPeerNotReadyError';
+  }
+}
+
+/** @experimental */
+export class XlsxWorkerEditorCollaborationError extends Error {
+  readonly code = 'collaboration-unavailable';
+  constructor() {
+    super('Collaboration is unavailable in the worker editor');
+    this.name = 'XlsxWorkerEditorCollaborationError';
   }
 }
 
@@ -22,6 +32,7 @@ export interface WorkerEditorSessionAccess {
   readonly peer: WorkbookHandle | null;
   readonly editPeer: WorkbookEditPeer | null;
   readonly failure: Error | null;
+  readonly recovering?: boolean;
   whenHydrated(): Promise<void>;
   requestHydration(reason: string): Promise<void>;
 }
@@ -38,6 +49,7 @@ export interface WorkerEditorApiBridge {
   apply(result: EditResult | XlsxEditResult): void;
 }
 
+/** @experimental */
 export interface XlsxWorkerEditorApi extends Omit<XlsxWorkerViewerApi, 'save' | 'selectCells'> {
   readonly hydrated: boolean;
   readonly failure: Error | null;
@@ -77,7 +89,7 @@ export function createWorkerEditorApi(
   };
   const requirePeer = () => {
     assertCurrent();
-    if (session.failure) throw session.failure;
+    if (session.failure && !session.recovering) throw session.failure;
     if (!session.ready || !session.peer || !session.editPeer) throw new XlsxPeerNotReadyError();
     return { peer: session.peer, edits: session.editPeer };
   };
@@ -85,13 +97,18 @@ export function createWorkerEditorApi(
     reason: string, operation: (markApplied: () => void) => T | Promise<T>
   ): Promise<T | null> => {
     if (!session.current) return Promise.resolve(null);
+    if (session.failure) return Promise.reject(session.failure);
     try {
       const hydration = session.requestHydration(reason);
       void hydration.catch(() => {});
       return coordinator().runAfterPendingInput(async (_, markApplied) => {
-        await hydration;
+        await (session.recovering ? session.requestHydration('recovery') : hydration);
         requirePeer();
         const result = operation(markApplied);
+        if (session.recovering && result !== null && typeof result === 'object' &&
+          ('ok' in result && result.ok === false || 'error' in result && result.error)) {
+          throw new XlsxCommandAdmissionError('input-failed');
+        }
         markApplied();
         const value = await result;
         return session.current ? value : null;
@@ -99,6 +116,7 @@ export function createWorkerEditorApi(
     } catch (error) { return Promise.reject(error); }
   };
   const synchronous = <T,>(operation: (markApplied: () => void) => T): T => {
+    if (session.failure) throw session.failure;
     requirePeer();
     try { return coordinator().runSync((_, markApplied) => operation(markApplied), { kind: 'host' }); }
     catch (error) {
@@ -122,7 +140,7 @@ export function createWorkerEditorApi(
 
   return {
     handle: null, commands,
-    get hydrated() { return session.ready; },
+    get hydrated() { return session.ready && !session.failure; },
     get failure() { return session.failure; },
     whenHydrated: () => session.whenHydrated(),
     async flush() {
@@ -136,19 +154,25 @@ export function createWorkerEditorApi(
       if (!session.failure && session.editPeer?.state !== 'failed') {
         throw new Error('Recovery requires a failed workbook edit peer');
       }
-      await session.requestHydration('recovery');
-      assertCurrent();
-      await bridge().recoverInput();
-      assertCurrent();
-      if (!session.editPeer) throw new XlsxPeerNotReadyError();
-      const result = session.editPeer.recoverySave();
-      return { bytes: new Uint8Array(result.bytes), recovery: true };
+      try {
+        await session.requestHydration('recovery');
+        assertCurrent();
+        await bridge().recoverInput();
+        assertCurrent();
+        if (!session.editPeer) throw new XlsxPeerNotReadyError();
+        const result = session.editPeer.recoverySave();
+        return { bytes: new Uint8Array(result.bytes), recovery: true };
+      } catch (error) {
+        if (error instanceof XlsxCommandAdmissionError || error instanceof XlsxPeerNotReadyError ||
+          error instanceof WorkbookPeerHydrationError || error instanceof WorkbookEditPeerFailedError) throw error;
+        throw new WorkbookEditPeerFailedError(error instanceof Error ? error : new Error(String(error)));
+      }
     },
     clearSelection: () => { if (session.current && !session.failure) bridge().clearSelection(); },
     focus: () => { if (session.current && !session.failure) bridge().focus(); },
     refreshProposals: () => { if (session.ready) bridge().refreshProposals(); },
     selectCells(sheet, selection) {
-      if (!session.ready || !session.peer || !validSelection(session.peer, sheet, selection)) return false;
+      if (session.failure || !session.ready || !session.peer || !validSelection(session.peer, sheet, selection)) return false;
       return synchronous((markApplied) => {
         requirePeer().edits.setActiveSheet(sheet);
         markApplied();
@@ -188,11 +212,11 @@ export function createWorkerEditorApi(
         return result;
       });
     },
-    cell: (sheet, row, col) => session.ready ? session.peer!.cell(sheet, row, col) : null,
+    cell: (sheet, row, col) => session.ready && !session.failure ? session.peer!.cell(sheet, row, col) : null,
     cellAsync: (sheet, row, col) => ordered('cell', () => requirePeer().peer.cell(sheet, row, col)),
-    rangeCells: (sheet, range) => session.ready ? session.peer!.rangeCells(sheet, range) : [],
+    rangeCells: (sheet, range) => session.ready && !session.failure ? session.peer!.rangeCells(sheet, range) : [],
     rangeCellsAsync: (sheet, range) => ordered('range-cells', () => requirePeer().peer.rangeCells(sheet, range)),
-    readCellsSync: (request) => session.ready ? session.peer!.readCells(request) : null,
+    readCellsSync: (request) => session.ready && !session.failure ? session.peer!.readCells(request) : null,
     editCell(sheet, row, col, input) {
       requirePeer();
       if (bridge().readOnly()) throw new Error('The editor is read-only');

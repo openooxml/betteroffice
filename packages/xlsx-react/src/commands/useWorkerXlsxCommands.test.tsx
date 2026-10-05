@@ -2,7 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
 import { selectionAt, StaleProposalError } from '@betteroffice/xlsx';
 import type { EditResult, WorkbookHandle } from '@betteroffice/xlsx';
-import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
+import { WorkbookEditPeerFailedError, type WorkbookEditPeer } from '@betteroffice/xlsx';
 import { createXlsxCommandController } from './createXlsxCommandStore';
 import type { XlsxCommandEnvironment } from './evaluate';
 import type { InputDraft } from './inputCoordinator';

@@ -4,7 +4,7 @@ import * as xlsx from '@betteroffice/xlsx';
 import type { WorkbookHandle, WorkbookSession } from '@betteroffice/xlsx';
 import { StrictMode } from 'react';
 import { SessionFailure } from '../../../../shared/office-session';
-import type { WorkbookEditPeer } from '../../../xlsx/src/session/editPeer';
+import type { WorkbookEditPeer } from '@betteroffice/xlsx';
 import { createXlsxCommandController, XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import { createWorkerInputCoordinator } from '../commands/workerInputCoordinator';
 import type { WorkerEditorApiBridge, XlsxWorkerEditorApi } from './createWorkerEditorApi';
@@ -134,18 +134,6 @@ describe('editable session workbook', () => {
     run.firstPaint();
     await waiting;
     expect(log).toEqual(['attach', 'released']);
-    run.dispose();
-  });
-
-  test('keeps readiness passive and coalesces lazy hydration demands', async () => {
-    const { value } = session();
-    const { hydrate } = resources();
-    const run = owner(value, { hydration: 'lazy' });
-    const waiting = run.whenHydrated();
-    run.firstPaint();
-    expect(hydrate).not.toHaveBeenCalled();
-    await Promise.all([run.requestHydration('edit-intent'), run.requestHydration('flush'), waiting]);
-    expect(hydrate).toHaveBeenCalledTimes(1);
     run.dispose();
   });
 
