@@ -1074,7 +1074,8 @@ export function useRustDisplayList(
         ensureRebuildableReplica(hostEngine);
       }
       try {
-        if (editorRounds && registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback')) {
+        const retired = registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback');
+        if (editorRounds && retired) {
           if (cause === undefined) {
             console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
           } else {
