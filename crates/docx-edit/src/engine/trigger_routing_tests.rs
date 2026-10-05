@@ -77,6 +77,127 @@ fn default_preview_and_open_use_plain_layout_while_bulk_uses_regions() {
 }
 
 #[test]
+fn preview_font_preflight_survives_plain_layout_and_region_entry() {
+    let _preview = PreviewSwitch::new(None);
+    let _open = OpenSwitch::new(None);
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(fixture::FONT).unwrap();
+    let bytes = split_document(40, 4, 20, true);
+    let engine = EngineSession::new(75313);
+    crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+    let mut request = split_request(&engine, &bytes, font);
+    let revision = engine.doc().list_revisions().unwrap()[0]
+        .change
+        .revision_id
+        .clone();
+    request["renderEnv"]["revisionPreview"] = json!({});
+    request["renderEnv"]["revisionPreview"][&revision] = json!("accepted");
+    let requirements = engine
+        .layout_font_requirements_json(&request.to_string())
+        .unwrap();
+    for trigger in [
+        RelayoutTrigger::Open,
+        RelayoutTrigger::Preview,
+        RelayoutTrigger::Interactive,
+        RelayoutTrigger::Bulk,
+    ] {
+        engine
+            .layout_regions_for_trigger(&request.to_string(), None, trigger)
+            .unwrap();
+        assert!(engine.preview_font_requirements.borrow().is_some());
+        let cold = EngineSession::new(75314);
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        cold.layout_document_with_regions_retained(&request.to_string())
+            .unwrap();
+        assert_eq!(cold.stats().incremental_pagination_calls, 0);
+        assert_eq!(
+            engine.retained_layout_json().unwrap(),
+            cold.retained_layout_json().unwrap()
+        );
+        assert_eq!(
+            engine.retained_kernel_inputs_json().unwrap(),
+            cold.retained_kernel_inputs_json().unwrap()
+        );
+        let before = engine.stats();
+        let decision = if request["renderEnv"]["revisionPreview"][&revision] == "accepted" {
+            "rejected"
+        } else {
+            "accepted"
+        };
+        request["renderEnv"]["revisionPreview"][&revision] = json!(decision);
+        assert_eq!(
+            engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap(),
+            requirements
+        );
+        assert_eq!(engine.stats().lower_cache_hits, before.lower_cache_hits);
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+    }
+}
+
+#[test]
+fn first_lowering_records_preview_units_only_for_region_paths() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(fixture::FONT).unwrap();
+    let bytes = split_document(40, 4, 20, true);
+    for (trigger, region) in [
+        (RelayoutTrigger::Open, false),
+        (RelayoutTrigger::Preview, false),
+        (RelayoutTrigger::Interactive, false),
+        (RelayoutTrigger::Bulk, true),
+        (RelayoutTrigger::Open, true),
+        (RelayoutTrigger::Preview, true),
+    ] {
+        let _open = OpenSwitch::new(Some(region));
+        let _preview = PreviewSwitch::new(Some(region));
+        let engine = EngineSession::new(75315);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let mut request = json!({
+            "bodyStory": "body",
+            "renderEnv": {},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font]},
+                "defaults": {"fontFamily": "Calibri", "fontSize": 11},
+                "authoritativeShaping": true,
+            },
+        });
+        for relower in [false, true] {
+            if relower {
+                request["renderEnv"]["showHiddenText"] = json!(true);
+            }
+            engine
+                .layout_regions_for_trigger(&request.to_string(), None, trigger)
+                .unwrap();
+            assert_eq!(
+                engine.render.borrow().stories["body"].preview.is_some(),
+                region || relower,
+                "{trigger:?}, relower={relower}"
+            );
+            let cold = EngineSession::new(75316);
+            cold.doc()
+                .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+                .unwrap();
+            cold.layout_document_with_regions_retained(&request.to_string())
+                .unwrap();
+            assert_eq!(cold.stats().incremental_pagination_calls, 0);
+            assert_eq!(
+                engine.retained_layout_json().unwrap(),
+                cold.retained_layout_json().unwrap()
+            );
+            assert_eq!(
+                engine.retained_kernel_inputs_json().unwrap(),
+                cold.retained_kernel_inputs_json().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn default_preview_accept_undo_reject_undo_matches_cold_full_layout() {
     let _preview = PreviewSwitch::new(None);
     let _open = OpenSwitch::new(None);

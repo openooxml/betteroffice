@@ -92,6 +92,7 @@ struct LoweredNoteSeparators {
 struct PreviewFontRequirements {
     doc_epoch: u64,
     request_fingerprint: u64,
+    source: std::sync::Weak<crate::seed::SourceMetadata>,
     /// `None` when the superset needs script fallbacks and each preview takes the exact path.
     json: Option<String>,
 }
@@ -3629,7 +3630,6 @@ impl EngineSession {
         pagination.region_placements = Vec::new();
         pagination.moved_blocks = BTreeSet::new();
         self.preview_locality.replace(None);
-        self.preview_font_requirements.borrow_mut().take();
         self.resumable.replace(None);
         if let Some(state) = self.regions.borrow_mut().as_mut() {
             state.region_request_fingerprint = None;
@@ -3643,7 +3643,6 @@ impl EngineSession {
         self.render.borrow_mut().stories = HashMap::new();
         self.measurement.borrow_mut().templates = HashMap::new();
         self.note_separators.borrow_mut().take();
-        self.preview_font_requirements.borrow_mut().take();
         self.preview_locality.borrow_mut().take();
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = None;
@@ -3943,7 +3942,8 @@ impl EngineSession {
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
         let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
-        let record = story == "body";
+        let record = self.render.borrow().stories.contains_key(story)
+            || (story == "body" && self.region_retention_valid.get());
         let (blocks, map, revealable_blocks, preview) =
             crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?;
         let mut render = self.render.borrow_mut();
@@ -4171,6 +4171,12 @@ impl EngineSession {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (input, regions, notes, measurement, render_env, body_story) = request.split();
+        let source = self
+            .doc
+            .source_metadata()
+            .as_ref()
+            .map(Arc::downgrade)
+            .unwrap_or_default();
         if use_preview_superset
             && !self.region_retention_valid.get()
             && !self.interactive_pending.get()
@@ -4206,7 +4212,9 @@ impl EngineSession {
                 .borrow()
                 .as_ref()
                 .filter(|cached| {
-                    cached.doc_epoch == epoch && cached.request_fingerprint == fingerprint
+                    cached.doc_epoch == epoch
+                        && cached.request_fingerprint == fingerprint
+                        && cached.source.ptr_eq(&source)
                 })
                 .map(|cached| cached.json.clone());
             match cached {
@@ -4338,6 +4346,7 @@ impl EngineSession {
                 .replace(Some(PreviewFontRequirements {
                     doc_epoch,
                     request_fingerprint,
+                    source,
                     json: None,
                 }));
             return self.layout_font_requirements(input_json, false);
@@ -4349,6 +4358,7 @@ impl EngineSession {
                 .replace(Some(PreviewFontRequirements {
                     doc_epoch,
                     request_fingerprint,
+                    source,
                     json: Some(json.clone()),
                 }));
         }
@@ -11409,11 +11419,20 @@ mod tests {
             assert_note_preview_toggle(&engine, &mut request, "accepted");
             assert_note_preview_toggle(&engine, &mut request, "rejected");
             engine
+                .layout_font_requirements_json(&request.to_string())
+                .unwrap();
+            engine
                 .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("x"), true)
                 .unwrap();
             assert_interactive_note_layout(&engine, &request, "after warm previews", resident);
             assert!(!engine.region_retention_valid.get());
-            assert!(engine.preview_font_requirements.borrow().is_none());
+            assert!(
+                engine
+                    .preview_font_requirements
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|cached| cached.doc_epoch != engine.doc_epoch())
+            );
             let before = engine.stats();
             let matches = engine.pagination.borrow().retain_match_calls;
             request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
@@ -14922,6 +14941,33 @@ mod tests {
             engine
                 .layout_font_requirements_json(&request.to_string())
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn preview_font_preflight_rechecks_replaced_source() {
+        let bytes = preview_fixture::breaks();
+        let engine = EngineSession::new(1369);
+        crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let request = r#"{"bodyStory":"body","renderEnv":{"revisionPreview":{"1":"accepted"}}}"#;
+        let first = engine.layout_font_requirements_json(request).unwrap();
+        let epoch = engine.doc_epoch();
+        let source = {
+            let replacement = EditingDoc::new(1370);
+            crate::seed_from_docx(&replacement, &bytes).unwrap();
+            replacement.source_metadata().unwrap()
+        };
+        engine
+            .doc()
+            .install_source(Arc::try_unwrap(source).ok().unwrap(), 0);
+        assert_eq!(engine.doc_epoch(), epoch);
+        engine.clear_region_retention();
+        assert!(engine.preview_font_requirements.borrow().is_some());
+        let before = engine.stats();
+        assert_eq!(engine.layout_font_requirements_json(request).unwrap(), first);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
         );
     }
 
@@ -20383,6 +20429,7 @@ mod tests {
         let engine = EngineSession::new(75211);
         crate::seed_from_docx(engine.doc(), &preview_fixture::plain()).unwrap();
         let id = preview_fixture::ids(&engine).remove(0);
+        engine.ensure_region_retention();
         preview_mapped_oracle(&engine, &RenderEnv::default());
         assert!(engine.render.borrow().stories["body"].preview.is_some());
         let before = engine.stats();
