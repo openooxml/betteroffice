@@ -66,6 +66,8 @@ fn take(left: &Cell<u64>, count: u64) -> bool {
     true
 }
 
+type DefinedNameMemo = HashMap<DefinedNameKey, (CellValue, bool, bool)>;
+
 /// evaluation environment: the cell source, the sheet unqualified refs resolve
 /// against, and the cell the formula belongs to.
 pub struct EvalContext<'a> {
@@ -89,7 +91,7 @@ pub struct EvalContext<'a> {
     unsupported_functions: Rc<Cell<u64>>,
     missing_clock: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool, bool)>>>,
+    defined_name_values: Rc<RefCell<DefinedNameMemo>>,
     bindings: Rc<RefCell<Vec<Binding>>>,
     lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,

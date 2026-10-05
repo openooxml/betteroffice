@@ -345,6 +345,7 @@ enum NodeValue {
 /// even though no cell reads itself. settle what the reads really allow: a
 /// cell whose evaluation touches nothing still unsettled was never in a
 /// cycle. what is left over is.
+#[allow(clippy::too_many_arguments)]
 fn settle_deferred(
     wb: &mut Workbook,
     cycle: &[Key],
