@@ -441,7 +441,7 @@ impl Workbook {
 
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
         if self.rand_seed != seed {
-            self.bump_model_epoch();
+            self.snapshot_package_lineage = None;
         }
         self.rand_seed = seed;
     }
@@ -1047,7 +1047,7 @@ impl Workbook {
     pub fn set_active_sheet(&mut self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
         if self.active_sheet != sheet {
-            self.bump_model_epoch();
+            self.snapshot_package_lineage = None;
         }
         self.active_sheet = sheet;
         self.invalidate_sheet_info();

@@ -490,7 +490,10 @@ fn snapshot_cell_edit_recapture_parses_and_matches_worker_refusal() {
             .err()
             .unwrap();
         assert_eq!(peer_error, worker_error);
-        assert_eq!(peer_error.to_string(), "snapshot requires an initial workbook");
+        assert_eq!(
+            peer_error.to_string(),
+            "snapshot requires an initial workbook"
+        );
         assert_current_identity(&worker, &peer);
     }
 }

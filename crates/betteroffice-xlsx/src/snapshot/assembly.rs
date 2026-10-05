@@ -210,9 +210,7 @@ impl WorkbookSnapshotEncoder {
             .map(|lineage| lineage.matches(workbook))
             .transpose()?
             .unwrap_or(false);
-        if !retained_package_facts
-            && let Some(package) = &workbook.source_package
-        {
+        if !retained_package_facts && let Some(package) = &workbook.source_package {
             package
                 .materialize()
                 .map_err(|failure| error(failure.to_string()))?;
