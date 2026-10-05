@@ -791,7 +791,8 @@ function displayRangeToYrsRange(
 /** Sidebar anchor keys of host proposals' revisions, which never open the sidebar themselves. */
 function proposalAnchorKeys(session: YrsSession | null): Set<string> {
   const keys = new Set<string>();
-  for (const proposal of session?.getProposals().proposals ?? []) {
+  const worker = session ? registeredWorkerProposalAuthority(session)?.snapshot() : null;
+  for (const proposal of [...(session?.getProposals().proposals ?? []), ...(worker?.proposals ?? [])]) {
     for (const revisionId of proposal.revisionIds) {
       keys.add(`revision-${yrsIdToNumericId(revisionId)}`);
     }
@@ -1280,6 +1281,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             pendingCompletion: canvasRenderer.pendingCompletion,
             layoutCompleteSession: canvasRenderer.layoutCompleteSession,
             onWorkerContentChange: () => workerContentChangeRef.current(),
+            onPeerUpdate: (stories) => pagedEditorRef.current?.syncYrsInputState(true, stories, { inWorker: true }),
             onWorkerRevisions: () => workerRevisionsRef.current(),
           }
         : undefined,

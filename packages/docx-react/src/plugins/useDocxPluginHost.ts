@@ -32,7 +32,7 @@ import {
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
-import { workerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { workerProposalRoundAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import type { ViewerSelectionChange } from '../components/DocxEditor/internals/viewerSelectionController';
@@ -201,7 +201,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     if (!options.session) return;
     host.open(options.session);
-    const unsubscribe = workerProposalAuthority(options.session)?.subscribe(() => {
+    const unsubscribe = workerProposalRoundAuthority(options.session)?.subscribe(() => {
       host.geometryChanged();
       if (layoutRef.current) host.layoutPresented(layoutRef.current);
     });
@@ -361,7 +361,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       () => {
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const proposalGeometry = session ? workerProposalAuthority(session)?.geometry() : null;
+        const proposalGeometry = session ? workerProposalRoundAuthority(session)?.geometry() : null;
         return editor && session
           ? {
               session,

@@ -35,7 +35,6 @@ import {
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
-  beginWorkerProposalHandover,
   registerWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
   workerProposalFailure,
@@ -121,6 +120,7 @@ interface WorkerOpenOptions {
   layoutCompleteSession?: unknown;
   /** A worker-held proposal changed document content. */
   onWorkerContentChange?: () => void;
+  onPeerUpdate?: (stories: readonly string[]) => void;
   /** The worker found tracked changes of its own in the opened document. */
   onWorkerRevisions?: () => void;
 }
@@ -683,6 +683,43 @@ export function useYrsCoreSession(
                 () => {}
               );
             };
+            const registerProposals = (): void => {
+              if (registeredWorkerProposalAuthority(next)) return;
+              let laidOut = renderedFrameRef.current && renderedFrameRef.current !== inheritedFrameRef.current
+                ? Promise.resolve()
+                : new Promise<void>((resolve) => {
+                    workerLaidOutRef.current = resolve;
+                  });
+              const authority = registerWorkerProposalAuthority(next, worker, {
+                editorPeer: true,
+                relayout: () => {
+                  if (!authority.initialized) {
+                    laidOut = new Promise<void>((resolve) => {
+                      workerLaidOutRef.current = resolve;
+                    });
+                  }
+                  markLayoutQueued(next, true);
+                  workerOpenRef.current?.refreshWorkerLayout?.();
+                },
+                current: () => !stale(),
+                laidOut: () => laidOut,
+                contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: (stories) => {
+                  inputPositionMapsRef.current.clear();
+                  markProjectionStories(stories);
+                },
+                peerUpdated: (stories) => {
+                  if (!workerOpenReplicaPending(next)) workerOpenRef.current?.onPeerUpdate?.(stories);
+                },
+                adopted: (version) => {
+                  adoptWorkerOpenMirrorVersion(next, version);
+                  worker.mirrorReady();
+                },
+              });
+              authority.subscribe(() => {
+                if (!stale()) setWorkerProposalsReady(authority.initialized);
+              });
+            };
             const deferEditorReplica = (): ReturnType<typeof deferWorkerOpenReplica> => {
               type StateRevision = NonNullable<ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>>;
               type StateSnapshot = Awaited<ReturnType<NonNullable<WorkerOpenedDocument['encodeVersionedState']>>>;
@@ -725,15 +762,12 @@ export function useYrsCoreSession(
               const pending = deferWorkerOpenReplica(
                 next,
                 async () => {
-                  const handover = beginWorkerProposalHandover(next);
-                  const handedOver = handover ? await handover : null;
-                  const update = handedOver ?? await encodeReplicaState();
+                  const update = await encodeReplicaState();
                   return [
                     () => { next.openDocx(source, false); },
                     () => next.loadState(update.state),
                     () => {
-                      if (handedOver) handedOver.complete();
-                      else if ('version' in update && update.version !== undefined) {
+                      if (update.version !== undefined) {
                         adoptWorkerOpenHandoverVersion(next, update.version);
                       }
                     },
@@ -745,6 +779,10 @@ export function useYrsCoreSession(
                     throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                   }
                   worker.fallback();
+                  /** Retirement is one-way for this session; the guard above rules out worker state needing catch-up. */
+                  if (registeredWorkerProposalAuthority(next)?.retire('source-fallback')) {
+                    console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
+                  }
                   next.openDocx(source, true);
                   if (registeredWorkerProposalAuthority(next)) next.mirrorWorkerDocument(null);
                 },
@@ -763,6 +801,8 @@ export function useYrsCoreSession(
                     worker.destroy();
                   },
                   waitForLayout: true,
+                  serializeHydration: (load, complete) =>
+                    registeredWorkerProposalAuthority(next)?.hydratePeer(load, complete) ?? null,
                 }
               );
               pendingReplicaRef.current = pending;
@@ -809,6 +849,7 @@ export function useYrsCoreSession(
                 }
               });
               revisionQueryRef.current = queryRevisions;
+              registerProposals();
               return pending;
             };
             if (workerOpenRef.current?.viewer) {
@@ -819,34 +860,7 @@ export function useYrsCoreSession(
             } else {
               deferEditorReplica();
             }
-            if (workerOpenRef.current?.workerProposals) {
-              let laidOut = new Promise<void>((resolve) => {
-                workerLaidOutRef.current = resolve;
-              });
-              const authority = registerWorkerProposalAuthority(next, worker, {
-                relayout: () => {
-                  if (!authority.initialized) {
-                    laidOut = new Promise<void>((resolve) => {
-                      workerLaidOutRef.current = resolve;
-                    });
-                  }
-                  markLayoutQueued(next, true);
-                  workerOpenRef.current?.refreshWorkerLayout?.();
-                },
-                current: () => !stale(),
-                laidOut: () => laidOut,
-                contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
-                projectionChanged: markProjectionStories,
-                adopted: (version) => {
-                  adoptWorkerOpenMirrorVersion(next, version);
-                  worker.mirrorReady();
-                },
-                handedOver: (version) => adoptWorkerOpenHandoverVersion(next, version),
-              });
-              authority.subscribe(() => {
-                if (!stale()) setWorkerProposalsReady(authority.initialized);
-              });
-            }
+            if (workerOpenRef.current?.workerProposals) registerProposals();
           } else {
             if (workerOpenRef.current?.viewer) {
               throw new DocxWorkerError('open', new Error('The document worker is unavailable'));

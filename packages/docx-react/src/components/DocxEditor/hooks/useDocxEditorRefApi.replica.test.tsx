@@ -23,7 +23,7 @@ import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { createCommentIdAllocator } from '../commentFactories';
 import * as workerOpenReplica from '../internals/workerOpenReplica';
 import { deferWorkerOpenReplica, holdWorkerOpenDocument, type WorkerOpenFallbackReason } from '../internals/workerOpenReplica';
-import { beginWorkerProposalHandover, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
+import { snapshotWorkerProposalPeer, registeredWorkerProposalAuthority, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { EditorMode } from '../internals/editing-modes';
 import { DOCX_REF_ASYNC_TWINS, DOCX_REF_REPLICA_ACCESS, DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 
@@ -165,13 +165,12 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
   const replica = deferWorkerOpenReplica(
     session,
     async () => {
-      const handover = await beginWorkerProposalHandover(session);
+      const handover = await snapshotWorkerProposalPeer(session);
       await held;
       return () => {
         opens.push(false);
         session.openDocx(bytes, false);
         session.loadState(handover?.state ?? state);
-        handover?.complete();
       };
     },
     (reason) => {
@@ -180,7 +179,10 @@ async function pendingReplica(mode: EditorMode = 'viewing', mountInput = false, 
       session.openDocx(bytes, true);
     },
     () => { readiness.current = true; },
-    { current: () => true, cancel: () => {}, waitForLayout }
+    {
+      current: () => true, cancel: () => {}, waitForLayout,
+      catchUp: (complete) => registeredWorkerProposalAuthority(session)?.catchUp(complete) ?? Promise.resolve(complete()),
+    }
   );
   const mounted = apiFor(session, document, mode, mountInput ? readiness : undefined);
   return { ...mounted, session, worker, replica, release, opens, fallbackReasons };
@@ -270,6 +272,10 @@ async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing') {
       return reply();
     }),
     documentRead: async () => { throw new Error('unexpected worker read'); },
+    syncUpdate: async (_update: Uint8Array, vector: Uint8Array) => ({
+      version: worker.version(), stateVector: worker.encodeStateVector(), repair: worker.encodeStateAsUpdate(vector),
+    }),
+    integrateProposalUpdate: (update: Uint8Array) => session.applyHostUpdate(update),
     handOver: mock(async () => ({
       state: worker.encodeState(), version: worker.version(), proposals: reply().mirror.proposals,
     })),
@@ -279,7 +285,6 @@ async function pendingWorkerProposalReplica(mode: EditorMode = 'viewing') {
     current: () => true,
     laidOut: async () => {},
     adopted: () => {},
-    handedOver: () => {},
     contentChanged: () => {},
   });
   await authority.propose({ expectVersion: worker.version(), proposals: [] }, async () => {

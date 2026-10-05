@@ -1309,13 +1309,16 @@ export function wrapSession(
         if (result.ok && result.applied) markDirty(result.changedStories);
         return result;
       }),
+    /** Editor peer proposals are peer-local, invisible to worker rounds and ref API results. */
     proposeChanges: (request) => mutate(() => proposals.propose(request)),
+    /** Editor peer proposals are peer-local, invisible to worker rounds and ref API results. */
     setProposalStates: (request) => proposals.setStates(request),
+    /** Editor peer proposals are peer-local, invisible to worker rounds and ref API results. */
     withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
-    mirrorWorkerDocument: (mirror) => {
+    mirrorWorkerDocument: (mirror, mirrorProposals = true) => {
       workerDocumentVersion = mirror?.version ?? null;
-      proposals.mirror(mirror);
+      if (mirrorProposals) proposals.mirror(mirror);
     },
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {

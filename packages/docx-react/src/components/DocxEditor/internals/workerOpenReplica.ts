@@ -107,12 +107,19 @@ export function deferWorkerOpenReplica(
   hydrate: () => Promise<(() => void) | readonly (() => void)[]>,
   fallback: (reason: WorkerOpenFallbackReason) => void,
   onReady: () => void,
-  lifecycle?: { current(): boolean; cancel(): void; waitForLayout?: boolean }
+  lifecycle?: {
+    current(): boolean;
+    cancel(): void;
+    waitForLayout?: boolean;
+    catchUp?(complete: () => void): Promise<void>;
+    serializeHydration?(load: () => Promise<void>, complete: () => void): Promise<void> | null;
+  }
 ): PendingReplica {
   let resolve!: () => void;
   let reject!: (error: unknown) => void;
   let started = false;
   let finishing = false;
+  let serializing = false;
   let hydrated = false;
   let layoutComplete = false;
   let readinessRequested = false;
@@ -160,7 +167,8 @@ export function deferWorkerOpenReplica(
     load: (reason: WorkerOpenFallbackReason) => void,
     handoff = false,
     force = false,
-    reason: WorkerOpenFallbackReason = 'failure'
+    reason: WorkerOpenFallbackReason = 'failure',
+    caughtUp = false
   ): void => {
     if (!current() || finishing) return;
     finishing = true;
@@ -176,6 +184,13 @@ export function deferWorkerOpenReplica(
         handoff = false;
       }
       if (!current()) return;
+      if (handoff && lifecycle?.catchUp && !caughtUp) {
+        void lifecycle.catchUp(() => {
+          finishing = false;
+          finish(() => {}, true, true, reason, true);
+        }).catch((error: unknown) => { replica.fail(error); });
+        return;
+      }
       replica.loadedVersion = session.version();
       hydrated = true;
       steps = null;
@@ -191,13 +206,16 @@ export function deferWorkerOpenReplica(
       controller.abort();
       reject(error);
     } finally {
-      finishing = false;
+      if (!handoff || !lifecycle?.catchUp || caughtUp || !replica.pending) finishing = false;
     }
   };
   const loadRemaining = (): void => {
     while (steps && nextStep < steps.length && current()) steps[nextStep++]!();
   };
-  const hydrateInTasks = async (load: (() => void) | readonly (() => void)[]): Promise<void> => {
+  const hydrateInTasks = async (
+    load: (() => void) | readonly (() => void)[],
+    serialized = false
+  ): Promise<void> => {
     if (!current()) return;
     const plan = typeof load === 'function' ? [load] : load;
     steps = plan;
@@ -217,8 +235,9 @@ export function deferWorkerOpenReplica(
           if (!current()) return;
         }
       }
-      finish(() => {}, true);
+      if (!serialized) finish(() => {}, true);
     } catch (error) {
+      if (serialized) throw error;
       finish(() => { throw error; }, true);
     }
   };
@@ -235,12 +254,23 @@ export function deferWorkerOpenReplica(
     start() {
       if (started || !replica.pending) return;
       started = true;
+      serializing = lifecycle?.serializeHydration !== undefined;
+      const serialized = lifecycle?.serializeHydration?.(
+        async () => { await hydrateInTasks(await hydrate(), true); },
+        () => { serializing = false; finish(() => {}, true, true, 'failure', true); }
+      );
+      if (serialized) {
+        void serialized.catch((error: unknown) => { serializing = false; replica.fail(error); });
+        return;
+      }
+      serializing = false;
       void hydrate().then(
         hydrateInTasks,
         () => finish(fallback)
       );
     },
     ensure(reason = 'failure') {
+      if (serializing) return;
       finish(hydrated ? () => {} : steps ? loadRemaining : fallback, steps !== null, true, reason);
       if (failure !== undefined) throw failure;
     },
@@ -275,6 +305,11 @@ export function deferWorkerOpenReplica(
 
 export function workerOpenReplicaStarted(session: YrsSession): boolean {
   return replicas.get(session)?.started === true;
+}
+
+export function workerOpenReplicaReady(session: YrsSession): boolean {
+  const replica = replicas.get(session);
+  return !replica || (!replica.pending && replica.hydrated);
 }
 
 export function workerOpenReplicaPending(session: YrsSession): boolean {

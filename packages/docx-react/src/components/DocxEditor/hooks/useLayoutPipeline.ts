@@ -163,8 +163,9 @@ function addsFontChainsOnly(
 }
 
 function workerProposalRenderEnv(session: YrsSession, renderEnv: YrsRenderEnv): YrsRenderEnv {
-  return workerProposalAuthority(session)?.initialized
-    ? { ...renderEnv, revisionPreview: proposalRevisionPreview(session.getProposals()) }
+  return registeredWorkerProposalAuthority(session)?.initialized
+    ? { ...renderEnv, revisionPreview: registeredWorkerProposalAuthority(session)!.revisionPreview() ??
+        proposalRevisionPreview(session.getProposals()) }
     : renderEnv;
 }
 
@@ -282,11 +283,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (
       layout &&
       session &&
-      workerProposalAuthority(session)?.initialized &&
+      registeredWorkerProposalAuthority(session)?.initialized &&
       !isSupersededLayout(layout) &&
       sourceVersionOf(layout) === session.version() &&
       revisionPreviewKeyOf(layout) ===
-        revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
+        revisionPreviewKey(registeredWorkerProposalAuthority(session)!.revisionPreview())
     ) markLayoutQueued(session, false);
     onLayoutComputedRef.current?.(layout);
     const total = documentPageCount(layout);

@@ -714,7 +714,7 @@ describe('plugin read and navigation clients', () => {
         handOver: async () => { throw new Error('unexpected hand-over'); },
       }, {
         laidOut: async () => {}, current: () => true, relayout: () => {}, contentChanged: () => {},
-        adopted: () => {}, handedOver: () => {},
+        adopted: () => {},
       });
       await authority.initialize();
       stampSourceVersion(env.queries, version);
@@ -904,12 +904,16 @@ describe('plugin read and navigation clients', () => {
       let release!: () => void;
       const transfer = new Promise<void>((resolve) => { release = resolve; });
       workerOpenReplica.deferWorkerOpenReplica(env.session, async () => {
-        const handover = await workerProposals.beginWorkerProposalHandover(env.session)!;
-        return () => { handover.complete(); };
-      }, () => { throw new Error('unexpected fallback'); }, () => {});
+        await workerProposals.snapshotWorkerProposalPeer(env.session)!;
+        return () => {};
+      }, () => { throw new Error('unexpected fallback'); }, () => {}, {
+        current: () => true, cancel: () => {}, catchUp: (complete) => authority.catchUp(complete),
+      });
       const authority = workerProposals.registerWorkerProposalAuthority(env.session, {
         proposal: async () => snapshot,
         documentRead: async () => { throw new Error('unexpected worker read'); },
+        syncUpdate: async () => ({ version, stateVector: env.session.encodeStateVector(), repair: null }),
+        integrateProposalUpdate: (update) => env.session.applyHostUpdate(update),
         handOver: async () => {
           await transfer;
           return { version, state: new Uint8Array(), proposals: snapshot.mirror.proposals };
@@ -917,7 +921,6 @@ describe('plugin read and navigation clients', () => {
       }, {
         laidOut: () => Promise.resolve(), current: () => true, relayout: () => {}, contentChanged: () => {},
         adopted: (token) => workerOpenReplica.adoptWorkerOpenMirrorVersion(env.session, token),
-        handedOver: (token) => workerOpenReplica.adoptWorkerOpenHandoverVersion(env.session, token),
       });
       await authority.initialize();
       stampSourceVersion(env.queries, version);

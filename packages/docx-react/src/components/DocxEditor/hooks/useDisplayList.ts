@@ -107,9 +107,14 @@ export interface WorkerOpenedDocument extends ResidentEngineWorkerOpened {
   encodeVersionedState?(prefetch?: boolean): ReturnType<ResidentEngineWorkerClient['encodeVersionedState']>;
   stateRevision?(): { owner: ResidentEngineWorkerClient; sequence: number } | null;
   revisionCount(): Promise<number>;
-  proposal: ResidentEngineWorkerClient['proposal'];
+  proposal(
+    op: Parameters<ResidentEngineWorkerClient['proposal']>[0],
+    prepare?: () => Parameters<ResidentEngineWorkerClient['proposal']>[0]
+  ): ReturnType<ResidentEngineWorkerClient['proposal']>;
   documentRead: ResidentEngineWorkerClient['documentRead'];
   handOver: ResidentEngineWorkerClient['handOver'];
+  syncUpdate: ResidentEngineWorkerClient['syncUpdate'];
+  integrateProposalUpdate(update: Uint8Array, stories: readonly string[]): void;
   canSave(): boolean;
   save(
     request: Parameters<ResidentEngineWorkerClient['save']>[0],
@@ -1766,7 +1771,7 @@ export function useRustDisplayList(
         if (reply.repair) {
           suppressWorkerInvalidationRef.current += 1;
           try {
-            peer.applyLocalUpdate(reply.repair);
+            peer.applyHostUpdate(reply.repair);
           } finally {
             suppressWorkerInvalidationRef.current -= 1;
           }
@@ -1814,10 +1819,10 @@ export function useRustDisplayList(
               : null;
           },
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
-          proposal: (op) =>
+          proposal: (op, prepare) =>
             requestOpenedWorker(hostEngine, async (owner) => {
               owner.proposalFontRequirements = undefined;
-              const reply = await owner.client.proposal(op);
+              const reply = await owner.client.proposal(prepare ? prepare() : op);
               owner.proposalFontRequirements = reply.fontRequirements;
               return reply;
             }),
@@ -1825,6 +1830,22 @@ export function useRustDisplayList(
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
+          syncUpdate: (update, stateVector) =>
+            requestOpenedWorker(hostEngine, (owner) => owner.client.syncUpdate(update, stateVector)),
+          integrateProposalUpdate: (update, stories) => {
+            const version = hostEngine.version();
+            suppressWorkerInvalidationRef.current += 1;
+            try {
+              hostEngine.applyHostUpdate(update, stories.length > 0 ? stories : undefined);
+            } finally {
+              suppressWorkerInvalidationRef.current -= 1;
+            }
+            if (hostEngine.version() !== version) {
+              contentEpochRef.current += 1;
+              setLayoutCompleteSession(null);
+              queryEpochGate.invalidate();
+            }
+          },
           canSave: () => {
             const owner = workerRef.current;
             return owner !== null && isCurrentWorker(hostEngine, owner) && !owner.client.hasFailed();
@@ -1945,7 +1966,7 @@ export function useRustDisplayList(
     },
     [
       dropWorker, failWorkerDocument, isCurrentWorker, isViewerSession, overrides?.build,
-      replaceOutOfMemoryWorker, requestOpenedWorker, sessionLoad,
+      queryEpochGate, replaceOutOfMemoryWorker, requestOpenedWorker, sessionLoad,
     ]
   );
 

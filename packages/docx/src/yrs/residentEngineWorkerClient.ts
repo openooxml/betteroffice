@@ -25,8 +25,9 @@ import { editWasmModule } from './wasm/index';
 
 /** @internal */
 export interface ResidentProposalReply
-  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector'> {
+  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector' | 'peerDiff'> {
   updates: Uint8Array[];
+  peerDiff?: Uint8Array;
   stateVector: Uint8Array;
 }
 
@@ -433,9 +434,13 @@ export class ResidentEngineWorkerClient {
     if (!response.proposal) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
     }
+    const { peerDiff, ...proposal } = response.proposal;
     return {
-      ...response.proposal,
+      ...proposal,
       updates: response.proposal.updates.map((update) => new Uint8Array(update)),
+      ...(peerDiff === undefined
+        ? {}
+        : { peerDiff: new Uint8Array(peerDiff) }),
       stateVector: new Uint8Array(response.proposal.stateVector),
     };
   }

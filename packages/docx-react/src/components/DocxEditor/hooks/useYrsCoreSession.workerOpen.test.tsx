@@ -59,7 +59,7 @@ import { createCommentIdAllocator } from '../commentFactories';
 import { DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
-import { flushEditorInput } from '../editorBatches';
+import { applyEditBatch, flushEditorInput } from '../editorBatches';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
 import { createPluginClients } from '../../../plugins/createPluginClients';
 import type { DocxPlugin, DocxPluginContext, DocxPluginEvent, DocxPluginSnapshot } from '../../../plugins/types';
@@ -2944,6 +2944,144 @@ test('main-thread layout fallback opens the pending replica before measuring it'
   expect(result.current.errors).toEqual([]);
 });
 
+test('forced onHost relayout retires the source fallback and routes queued and later rounds to the peer', async () => {
+  const { posted, workers } = installWorker();
+  const warning = spyOn(console, 'warn').mockImplementation(() => {});
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const api = result.current.ref.current!;
+  const initial = await api.getProposals();
+  const authority = registeredWorkerProposalAuthority(session)!;
+  expect(authority.retirementReason()).toBeNull();
+  expect(result.current.core.replicaReady).toBe(false);
+  expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+  const peerPropose = spyOn(session, 'proposeChanges');
+  const peerLoad = spyOn(session, 'loadState');
+  const terminate = spyOn(workers[0]!, 'terminate');
+  let release!: () => void;
+  let started!: () => void;
+  const blocker = new Promise<void>((resolve) => { release = resolve; });
+  const blocking = new Promise<void>((resolve) => { started = resolve; });
+  const held = authority.residentOperation(async () => { started(); await blocker; });
+  await blocking;
+  const queued = api.proposeChanges({ expectVersion: initial.version, proposals: [] });
+  const before = posted.filter((request) => request.type === 'proposal').length;
+  act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+  expect(result.current.core.replicaReady).toBe(true);
+  expect(authority.retirementReason()).toBe('source-fallback');
+  expect(authority.workerCoversPeer(session.version())).toBe(false);
+  expect(registeredWorkerProposalAuthority(session)).toBe(authority);
+  expect(workerProposalAuthority(session)).toBeNull();
+  expect(result.current.mainOpens).toEqual([true]);
+  expect(peerLoad).not.toHaveBeenCalled();
+  expect(terminate).toHaveBeenCalledTimes(1);
+  expect(warning.mock.calls.filter(([message]) =>
+    message === '[yrs] the source fallback retired worker proposal authority to the peer')).toHaveLength(1);
+  expect(session.version()).not.toBe(initial.version);
+  await act(async () => {
+    release();
+    await held;
+    expect(await queued).toMatchObject({ ok: false, version: session.version(), failure: { code: 'stale-version' } });
+  });
+  expect(peerPropose).toHaveBeenCalledTimes(1);
+  const paragraph = session.paragraphIdentities().paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+  await act(async () => {
+    expect(await api.proposeChanges({
+      expectVersion: session.version(), proposals: [{
+        id: 'peer-after-fallback', paragraph,
+        suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+        op: 'insertText', at: 'start', text: 'Peer ',
+      }],
+    })).toMatchObject({ ok: true, snapshot: { version: session.version() } });
+  });
+  expect(peerPropose).toHaveBeenCalledTimes(2);
+  expect(texts(session).body![0]).toBe('Peer First paragraph');
+  expect((await api.getProposals()).proposals.map(({ id }) => id)).toEqual(['peer-after-fallback']);
+  expect(authority.snapshot()).toEqual(session.getProposals());
+  const current = session.getProposals();
+  await act(async () => {
+    expect(await api.setProposalStates({ expectVersion: session.version(), expectPreviewVersion: current.previewVersion,
+      changes: [{ id: 'peer-after-fallback', state: 'accepted' }] })).toMatchObject({ ok: true });
+  });
+  expect(authority.revisionPreview()).toEqual(proposalRevisionPreview(session.getProposals()));
+  const step = { op: 'insertText', target: { kind: 'paragraph', story: paragraph.story, paraId: paragraph.paraId },
+    at: 'end', text: 'Plugin' } as const;
+  await act(async () => {
+    expect(await applyEditBatch(result.current.pagedEditorRef, () => 'editing', { expectVersion: initial.version, steps: [step] },
+      undefined, undefined, true)).toMatchObject({ result: { ok: false, failure: { code: 'stale-version' } } });
+    expect(await applyEditBatch(result.current.pagedEditorRef, () => 'editing', { expectVersion: session.version(), steps: [step] },
+      undefined, undefined, true)).toMatchObject({ result: { ok: true, applied: true } });
+    expect(await api.withdrawProposals({ expectVersion: session.version(), ids: ['peer-after-fallback'] })).toMatchObject({ ok: true });
+  });
+  expect((await api.getProposals()).proposals).toEqual([]);
+  expect(texts(session).body![0]).toContain('Plugin');
+  act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+  expect(authority.retire('source-fallback')).toBe(false);
+  authority.restart();
+  expect(authority.retirementReason()).toBe('source-fallback');
+  expect(authority.workerCoversPeer(session.version())).toBe(false);
+  expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(before);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(warning.mock.calls.filter(([message]) =>
+    message === '[yrs] the source fallback retired worker proposal authority to the peer')).toHaveLength(1);
+  expect(result.current.errors).toEqual([]);
+});
+
+test('onHost relayout during an in-flight worker round preserves authority and integrates its content into the peer', async () => {
+  const { posted, workers, received, reply } = installWorker({
+    holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
+  });
+  const { result } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true, allowHostProposals: true },
+  });
+  await waitFor(() => expect(result.current.host).not.toBeNull());
+  const session = result.current.core.session!;
+  const api = result.current.ref.current!;
+  const identities = await api.getParagraphIdentities();
+  const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+  const initial = await api.getProposals();
+  const initialized = await received('proposal');
+  const authority = registeredWorkerProposalAuthority(session)!;
+  const peerPropose = spyOn(session, 'proposeChanges');
+  const hostUpdate = spyOn(session, 'applyHostUpdate');
+  const terminate = spyOn(workers[0]!, 'terminate');
+  const round = api.proposeChanges({ expectVersion: initial.version, proposals: [{
+    id: 'in-flight-onHost', paragraph, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+    op: 'insertText', at: 'start', text: 'Worker ',
+  }] });
+  const request = await received('proposal', initialized.id);
+  expect(request).toMatchObject({ operation: { kind: 'propose' } });
+  expect(authority.holdsWorkerState()).toBe(true);
+  act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
+  expect(authority.retirementReason()).toBeNull();
+  expect(result.current.core.replicaReady).toBe(false);
+  expect(result.current.mainOpens).toEqual([]);
+  expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+  expect(terminate).not.toHaveBeenCalled();
+  await act(async () => {
+    const ready = requestWorkerOpenReplica(session)!;
+    reply(request);
+    expect(await round).toMatchObject({ ok: true });
+    await ready;
+  });
+  expect(peerPropose).not.toHaveBeenCalled();
+  expect(hostUpdate).toHaveBeenCalled();
+  expect(result.current.mainOpens).toEqual([false]);
+  expect(result.current.core.replicaReady).toBe(true);
+  expect(texts(session).body![0]).toBe('Worker First paragraph');
+  const workerRead = workers[0]!.sessions[0]!.proposalEngine.readParagraphs({ view: 'accepted' });
+  expect(workerRead.ok).toBe(true);
+  if (!workerRead.ok) throw new Error(workerRead.failure.message);
+  expect(workerRead.paragraphs.map(({ text }) => text)).toEqual(texts(session).body);
+  expect((await api.getProposals()).proposals.map(({ id }) => id)).toEqual(['in-flight-onHost']);
+  expect(authority.retirementReason()).toBeNull();
+  expect(terminate).not.toHaveBeenCalled();
+  expect(result.current.errors).toEqual([]);
+});
+
 test('a replaced worker open never publishes its host or revives its replica', async () => {
   const { workers, posted } = installWorker({ holdOpen: true });
   const { result, rerender } = renderHook(useHarness, { initialProps });
@@ -4304,16 +4442,18 @@ test('worker proposals reach the registry before hydration and survive hand-over
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     expect(result.current.mainOpens).toEqual([false]);
     expect(session.workerDocumentMirrored()).toBe(false);
-    expect(session.getProposals().proposals).toEqual(mirrored.proposals);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect((await api().getProposals()).proposals).toEqual(mirrored.proposals);
     const workerCalls = posted.filter((request) => request.type === 'proposal').length;
     const decided = await api().setProposalStates({
       expectVersion: session.version(),
-      expectPreviewVersion: session.getProposals().previewVersion,
+      expectPreviewVersion: mirrored.previewVersion,
       changes: [{ id: 'worker-proposal', state: 'accepted' }],
     });
     expect(decided.ok).toBe(true);
-    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
-    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls);
+    expect((await api().getProposals()).proposals[0]!.state).toBe('accepted');
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls + 2);
   } finally {
     unmount();
     frames.restore();
@@ -4428,6 +4568,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
     const identities = await api().getParagraphIdentities();
     const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
     const initial = await api().getProposals();
+    const peerSnapshot = session.getProposals();
     const snapshot = await received('proposal');
     const authority = workerProposalAuthority(session)!;
     expect(authority.holdsWorkerState()).toBe(false);
@@ -4453,7 +4594,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
         await expect(proposed).rejects.toThrow('proposal failed');
       });
       expect(authority.holdsWorkerState()).toBe(false);
-      expect(session.getProposals()).toEqual(initial);
+      expect(session.getProposals()).toEqual(peerSnapshot);
       expect(terminate).not.toHaveBeenCalled();
       expect(result.current.core.replicaReady).toBe(false);
       const request = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
@@ -4473,7 +4614,7 @@ test('a failed first proposal leaves the replica fallback available', async () =
       expect(session.workerDocumentMirrored()).toBe(false);
       expect(workerProposalAuthority(session)).toBeNull();
       expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
-      expect((await api().getProposals()).proposals).toEqual([]);
+      await expect(api().getProposals()).rejects.toThrow('Superseded by a newer layout, document load or worker owner');
       expect(result.current.errors).toEqual([]);
     } finally {
       terminate.mockRestore();
@@ -4737,7 +4878,8 @@ test('a hand-over queued behind a recovery snapshot that fails still hydrates th
     const [initialized, answered] = outcome as [unknown, unknown];
     expect(initialized).toBeInstanceOf(Error);
     expect((initialized as Error).message).toBe('snapshot failed');
-    expect(answered).toMatchObject({ proposals: [] });
+    expect(answered).toBeInstanceOf(Error);
+    expect((answered as Error).message).toBe('snapshot failed');
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     const current = await api().getProposals();
     const target = await bodyParagraph();
@@ -4759,27 +4901,39 @@ test('a hand-over queued behind a recovery snapshot that fails still hydrates th
   }
 }, 15_000);
 
-test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
+test('editor ref rounds stay in the worker when the viewer proposal flag is disabled', async () => {
   const { posted, workers } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true, holdReplica: true },
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
+  const initial = await result.current.ref.current!.getProposals();
+  const peerPropose = spyOn(session, 'proposeChanges');
   let settled = false;
-  const call = result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] });
+  const call = result.current.ref.current!.proposeChanges({ expectVersion: initial.version, proposals: [] });
   void call.then(() => { settled = true; });
-  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'proposal')).toBe(true);
   expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
   expect(result.current.mainOpens).toEqual([]);
   expect(settled).toBe(false);
+  await act(async () => { expect(await call).toMatchObject({ ok: true }); });
+  const proposals = posted.filter((request) => request.type === 'proposal');
+  expect(proposals.at(-1)?.operation.kind).toBe('propose');
+  expect(peerPropose).not.toHaveBeenCalled();
   act(() => { requestWorkerOpenReplica(session); });
   await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
-  expect(settled).toBe(false);
-  await act(async () => { workers[0].release(); await call; });
+  expect(result.current.core.replicaReady).toBe(false);
+  await act(async () => { workers[0].release(); await awaitWorkerOpenReplica(session); });
   expect(settled).toBe(true);
   expect(result.current.mainOpens).toEqual([false]);
-  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(posted.some((request) => request.type === 'proposal')).toBe(true);
+  await act(async () => {
+    expect(await result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] }))
+      .toMatchObject({ ok: true, snapshot: { version: session.version(), proposals: [] } });
+  });
+  expect(peerPropose).not.toHaveBeenCalled();
+  expect(posted.filter((request) => request.type === 'proposal').at(-1)?.operation.kind).toBe('propose');
 });
 
 test('the host proposal gate refuses before initializing the worker authority', async () => {
@@ -4840,13 +4994,14 @@ test('a failed empty hand-over releases the mirror before using the main replica
   await act(async () => { await result.current.ref.current!.getProposals(); });
   expect(session.workerDocumentMirrored()).toBe(true);
   act(() => rerender({ ...workerProposalProps, viewer: false }));
-  await act(async () => { await requestWorkerOpenReplica(session); });
-  expect(result.current.mainOpens).toEqual([true]);
-  expect(session.workerDocumentMirrored()).toBe(false);
-  expect(await result.current.ref.current!.setProposalStates({
+  await act(async () => { await expect(requestWorkerOpenReplica(session)!).rejects.toThrow('open failed'); });
+  expect(result.current.mainOpens).toEqual([]);
+  expect(session.workerDocumentMirrored()).toBe(true);
+  expect(result.current.core.replicaReady).toBe(false);
+  await expect(result.current.ref.current!.setProposalStates({
     expectVersion: session.version(), expectPreviewVersion: session.getProposals().previewVersion,
     changes: [],
-  })).toMatchObject({ ok: true });
+  })).rejects.toThrow('Superseded by a newer layout, document load or worker owner');
 });
 
 async function openingEditor(workerPreview = true, viewer = false, options: {
@@ -7170,17 +7325,21 @@ test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yiel
     if (boundary === 2) await act(async () => tasks.run());
     act(() => {
       ensureWorkerOpenReplica(session);
-      expect(session.hasStory('body')).toBe(true);
-      expect(result.current.core.replicaReadyRef?.current).toBe(true);
-      expect(load).toHaveBeenCalledTimes(1);
+      expect(session.hasStory('body')).toBe(boundary === 2);
+      expect(result.current.core.replicaReadyRef?.current).toBe(false);
+      expect(load).toHaveBeenCalledTimes(boundary === 2 ? 1 : 0);
     });
-    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReady).toBe(false);
     expect(result.current.mainOpens).toEqual([false]);
-    expect(replicas).toEqual([session]);
+    expect(replicas).toEqual([]);
     await act(async () => {
       await tasks.run();
+      if (boundary === 1) await tasks.run();
       await pending;
     });
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
     expect(load).toHaveBeenCalledTimes(1);
     expect(result.current.mainOpens).toEqual([false]);
     expect(replicas).toEqual([session]);
