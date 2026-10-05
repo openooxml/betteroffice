@@ -184,6 +184,22 @@ fn validate_numbers(value: &Value, field: &str) -> Result<(), PeerError> {
     Ok(())
 }
 
+fn canonical_numbers(value: &mut Value) {
+    match value {
+        Value::Number(number) if number.is_f64() => {
+            let float = number.as_f64().unwrap_or(f64::NAN);
+            if float.fract() == 0.0 && float >= -(2_f64.powi(63)) && float < 2_f64.powi(63) {
+                *value = Value::from(float as i64);
+            } else if float.fract() == 0.0 && float >= 0.0 && float < 2_f64.powi(64) {
+                *value = Value::from(float as u64);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(canonical_numbers),
+        Value::Object(object) => object.values_mut().for_each(canonical_numbers),
+        _ => {}
+    }
+}
+
 fn fields(value: &Value, allowed: &[&str]) -> Result<(), PeerError> {
     let object = value
         .as_object()
@@ -616,8 +632,9 @@ impl DeckSession {
         if input.len() > crate::MAX_REQUEST_BYTES {
             return Err(PeerError::new("arguments", "envelope exceeds engine limit"));
         }
-        let envelope: Envelope = serde_json::from_str(input)?;
-        if let Some(expected) = &envelope.expected_outcome {
+        let mut envelope: Envelope = serde_json::from_str(input)?;
+        if let Some(expected) = envelope.expected_outcome.as_mut() {
+            canonical_numbers(expected);
             fields(
                 expected,
                 &["result", "applied", "changedTargets", "canUndo", "canRedo"],
@@ -668,13 +685,14 @@ impl DeckSession {
         };
         let refused = result.get("ok") == Some(&Value::Bool(false));
         let applied = self.epoch() != before.0;
-        let outcome = json!({
+        let mut outcome = json!({
             "result": result,
             "applied": applied,
             "changedTargets": op.targets(&result, applied),
             "canUndo": self.can_undo(),
             "canRedo": self.can_redo(),
         });
+        canonical_numbers(&mut outcome);
         let mut state = self.replay_state.borrow_mut();
         if !refused {
             state.sequence = envelope.sequence;
