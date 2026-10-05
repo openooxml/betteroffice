@@ -465,7 +465,7 @@ describe('workbook edit peers', () => {
       const stale = { ...request(peer, 'B3', 'stale'), expectVersion: initialVersion };
       const refusal = edits.applyEdits(stale);
       expect(refusal).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
-      expect(await session.call.validateEdits(stale)).toEqual(refusal);
+      expect<unknown>(await session.call.validateEdits(stale)).toEqual(refusal);
       const workerVersion = await session.call.version();
       const workerDigest = await digest(await session.save());
       edits.dispose();

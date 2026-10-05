@@ -315,7 +315,8 @@ export async function createWorkbookSession(
     }
   } : undefined;
   workbookSessionInternals.set(session, {
-    replay, initialVersion: peerSource?.version ?? initialVersion, attachPeer, editPeerAttached: false,
+    replay, initialVersion: peerSource?.version ?? initialVersion, attachPeer,
+    detachPeer: source ? () => client.call.detachPeer() : undefined, editPeerAttached: false,
   });
   if (peerSource) peerSources.set(session, peerSource);
   return session;

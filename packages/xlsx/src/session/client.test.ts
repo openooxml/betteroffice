@@ -14,7 +14,7 @@ import { workbookEditPeerOperations } from './editPeerInternals';
 import { createWorkbookSessionHost } from './host';
 import { WORKBOOK_SESSION_POLICIES } from './methods';
 import { WorkbookPeerHydrationError } from './peerHydrationError';
-import { workbookSessionInternals, type WorkbookReplayOp } from './replay';
+import { workbookSessionInternals, type WorkbookReplayEnvelope, type WorkbookReplayOp } from './replay';
 import { createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
 let fixture: Uint8Array;
@@ -90,6 +90,13 @@ describe('workbook peer hydration', () => {
         expect(await reply).toMatchObject({
           ok: false, error: { name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-outside-replay' } },
         });
+        const internal = workbookSessionInternals.get(session);
+        if (!internal) throw new Error('Missing internal workbook replay helper');
+        const envelope: WorkbookReplayEnvelope = {
+          sequence: 1, calculation, op: { method: 'editCell', args: [0, 0, 0, 'refused replay'] },
+        };
+        await expect(internal.replay(envelope)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+        await expect(internal.replay(envelope)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
         expect(await session.call.version()).toBe(version);
         expect(await session.save()).toEqual(saved);
         expect(session.state).toMatchObject({ version: 0, dirty: false, stage: 'ready' });
@@ -215,6 +222,102 @@ describe('workbook peer hydration', () => {
     }
   });
 
+  test('refuses two queued retained replays after failed reattachment without worker mutation', async () => {
+    const requests: string[] = [];
+    const refusals: unknown[] = [];
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      listen: (listener) => transport.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call') requests.push(message.method);
+        listener(message);
+      }),
+      post(message, transfer) {
+        if (isHostMessage(message) && message.kind === 'reply' && !message.ok) {
+          refusals.push(message.error);
+        }
+        transport.post(message, transfer);
+      },
+    }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+    const peer = await hydratePeer(session);
+    const edits = createWorkbookEditPeer({ session, peer });
+    let reattached: WorkbookEditPeer | undefined;
+    try {
+      const version = await session.call.version();
+      await edits.flush();
+      edits.setActiveSheet(0);
+      await edits.flush();
+      expect(edits.acknowledgedSequence).toBe(1);
+      expect(peer.version()).toBe(version);
+      expect(await session.call.version()).toBe(version);
+      expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBe(1);
+      edits.dispose();
+      const saved = await session.save();
+      const cells = await session.call.cellInputs(0, 'A1:B1');
+      const state = structuredClone(session.state);
+      requests.length = 0;
+      reattached = createWorkbookEditPeer({ session, peer });
+      expect(reattached.editCell(0, 0, 0, 'first queued reattachment edit').applied).toBe(true);
+      expect(reattached.editCell(0, 0, 1, 'second queued reattachment edit').applied).toBe(true);
+      await expect(reattached.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      expect(await session.call.version()).toBe(version);
+      expect(requests.slice(0, 3)).toEqual(['attachPeer', 'replay', 'replay']);
+      expect(refusals).toHaveLength(3);
+      expect(refusals[0]).toMatchObject({
+        name: 'WorkbookPeerHydrationError', refusal: { code: 'version-mismatch' },
+      });
+      for (const refusal of refusals.slice(1)) {
+        expect(refusal).toMatchObject({
+          name: 'WorkbookPeerHydrationError', refusal: { code: 'mutation-outside-replay' },
+        });
+      }
+      expect(reattached.error).toBeInstanceOf(WorkbookPeerHydrationError);
+      expect(reattached.error).toMatchObject({ code: 'version-mismatch' });
+      expect(reattached.state).toBe('failed');
+      expect(reattached.sentSequence).toBe(2);
+      expect(reattached.acknowledgedSequence).toBe(0);
+      expect(peer.cell(0, 0, 0).input).toBe('first queued reattachment edit');
+      expect(peer.cell(0, 0, 1).input).toBe('second queued reattachment edit');
+      expect(await session.save()).toEqual(saved);
+      expect(await session.call.cellInputs(0, 'A1:B1')).toEqual(cells);
+      expect((await session.call.frame({ x: 0, y: 0, width: 800, height: 800 })).sequence).toBe(1);
+      expect(session.state).toEqual(state);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      reattached?.dispose();
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('clears retained attachment when a reattachment is refused while the edit peer stays live', async () => {
+    const pair = createInProcessPair();
+    createWorkbookSessionHost(pair.host);
+    const session = await createWorkbookSession(fixture, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    }, pair.client);
+    const peer = await hydratePeer(session);
+    const edits = createWorkbookEditPeer({ session, peer });
+    try {
+      await edits.flush();
+      const internal = workbookSessionInternals.get(session);
+      if (!internal?.attachPeer) throw new Error('Missing internal workbook attachment helper');
+      const version = await session.call.version();
+      const saved = await session.save();
+      await expect(internal.attachPeer('stale peer version')).rejects.toMatchObject({ code: 'version-mismatch' });
+      const envelope: WorkbookReplayEnvelope = {
+        sequence: edits.sentSequence + 1, calculation, op: { method: 'editCell', args: [0, 0, 0, 'refused replay'] },
+      };
+      await expect(internal.replay(envelope)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+      expect(await session.call.version()).toBe(version);
+      expect(await session.save()).toEqual(saved);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('keeps retained hydration opaque during open and consumes only wire version and sequence', async () => {
     const attachments: unknown[][] = [];
     const session = await createTestWorkbookSession(fixture, (transport) => ({
@@ -271,7 +374,7 @@ describe('workbook peer hydration', () => {
         }
         transport.post(message, transfer);
       },
-    }), { calculation });
+    }), { calculation, wasm: wasmBytes.buffer });
     try {
       expect(session.state.stage).toBe('ready');
       expect(await session.call.applyEdits({

@@ -275,6 +275,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
       fail(new SessionFailure('disposed', 'Workbook edit peer was disposed'), false);
       offFailure();
       internal.editPeerAttached = false;
+      void internal.detachPeer?.().catch(() => {});
     },
   };
   workbookEditPeerInternals.set(edits, {

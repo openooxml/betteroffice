@@ -70,11 +70,15 @@ export function createWorkbookSessionHost(
 
   const internalHandlers: MethodHandlers<WorkbookInternalSessionMethods, null> = {
     attachPeer(_, peerVersion, peerSequence) {
+      peerAttached = false;
       if (peerVersion !== workbook().version() || peerSequence !== sequence) {
         throw new WorkbookPeerHydrationError('version-mismatch',
           'Workbook worker state differs from retained peer hydration');
       }
       peerAttached = true;
+    },
+    detachPeer() {
+      peerAttached = false;
     },
     replay(_, envelope) {
       validateWorkbookReplayEnvelope(envelope);
