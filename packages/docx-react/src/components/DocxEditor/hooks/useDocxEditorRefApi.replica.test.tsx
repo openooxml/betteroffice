@@ -874,3 +874,21 @@ test.each(SYNC_REPLICA_CALLS)(
     expect(fallbackReasons).toEqual([]);
   }
 );
+
+test.each([
+  ['an editor replica load', () => pendingReplica('editing')],
+  ['worker proposals held in the worker', () => pendingWorkerProposalReplica('editing')],
+] as const)('missing comment and change ids navigate to nothing after %s', async (setup, createReplica) => {
+  const { api, opens, replica, release, fallbackReasons } = await createReplica();
+  expect(api.scrollToCommentId(-1)).toBe(false);
+  expect(api.scrollToChangeId(-1)).toBe(false);
+  const ready = setup === 'worker proposals held in the worker' ? api.flushPendingInput() : replica.ready;
+  await act(async () => {});
+  replica.start();
+  await act(async () => { release(); await ready; });
+  expect(api.scrollToCommentId(-1)).toBe(false);
+  expect(api.scrollToChangeId(-1)).toBe(false);
+  expect(opens).toEqual([false]);
+  expect(fallbackReasons).toEqual([]);
+  expect(replica.pending).toBe(false);
+});
