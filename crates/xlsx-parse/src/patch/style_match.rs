@@ -51,7 +51,8 @@ impl<'a> StyleMatch<'a> {
             return false;
         }
         let meant = self.original.resolved_format(Some(source));
-        meant == self.current.resolved_format(Some(current))
+        self.original.cell_xfs[source as usize] == self.current.cell_xfs[source as usize]
+            && meant == self.current.resolved_format(Some(current))
             && meant == self.current.resolved_format(Some(source))
     }
 
@@ -84,20 +85,18 @@ impl<'a> StyleMatch<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct SourceStyles<'a> {
     pub(crate) original: &'a Sheet,
-    pub(crate) axes: Option<&'a SheetAxes>,
+    pub(crate) axes: &'a SheetAxes,
     pub(crate) styles: &'a StyleMatch<'a>,
 }
 
 impl SourceStyles<'_> {
     pub(crate) fn style(&self, at: CellRef, cell: &Cell) -> Option<u32> {
-        let source = match self.axes {
-            Some(axes) => axes
-                .rows
-                .source(at.row)
-                .zip(axes.cols.source(at.col))
-                .map(|(row, col)| CellRef::new(row, col)),
-            None => Some(at),
-        };
+        let source = self
+            .axes
+            .rows
+            .source(at.row)
+            .zip(self.axes.cols.source(at.col))
+            .map(|(row, col)| CellRef::new(row, col));
         match source.and_then(|source| self.original.cell(source)) {
             Some(original) => self.styles.written(original.style, cell.style),
             None => cell.style,

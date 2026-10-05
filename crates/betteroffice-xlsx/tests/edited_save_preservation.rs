@@ -170,6 +170,25 @@ fn cells(xml: &str) -> BTreeMap<String, String> {
     out
 }
 
+fn style_index(span: &str) -> usize {
+    let tag = &span[..span.find('>').unwrap()];
+    tag.split(" s=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// The `index`th `cellXfs` entry's markup.
+fn cell_xf(styles: &str, index: usize) -> String {
+    let table = &styles[styles.find("<cellXfs").unwrap()..];
+    let table = &table[..table.find("</cellXfs>").unwrap()];
+    table.split("<xf ").nth(index + 1).unwrap().to_owned()
+}
+
 fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
 }
@@ -262,16 +281,20 @@ fn genuine_style_change_writes_the_new_index() {
             .unwrap();
         let after = parts(&workbook.save().unwrap());
 
-        assert_eq!(after["xl/styles.xml"], before["xl/styles.xml"], "{name}");
         assert_eq!(
             after["xl/worksheets/sheet2.xml"], before["xl/worksheets/sheet2.xml"],
             "{name}"
         );
         let saved_cells = cells(&text(&after, "xl/worksheets/sheet1.xml"));
         let restyled = &saved_cells["B1"];
+        let index = style_index(restyled);
+        let xf = cell_xf(&text(&after, "xl/styles.xml"), index);
         assert!(
-            restyled.contains(r#"s="3""#) && restyled.contains("<v>2</v>"),
-            "{name}: {restyled}"
+            index > 2
+                && xf.contains(r#"numFmtId="2""#)
+                && xf.contains(r#"fontId="1""#)
+                && restyled.contains("<v>2</v>"),
+            "{name}: {restyled} {xf}"
         );
         let edited = &saved_cells["B2"];
         assert!(

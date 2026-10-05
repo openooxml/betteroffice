@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use xlsx_model::styles::Xf;
-use xlsx_model::{SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, SheetId, Workbook};
 
 use super::StyleMatch;
 use crate::tests::{package, parse_workbook_with_package};
@@ -29,8 +29,18 @@ const SHEET: &str = concat!(
     r#"<c r="C2" s="2"><f t="shared" si="0"/><v>10</v></c></row></sheetData>"#,
 );
 
+const ARRAY_SHEET: &str = concat!(
+    r#"<sheetData><row r="1"><c r="A1" s="2"><f t="array" ref="A1:A2">1</f><v>1</v></c>"#,
+    r#"<c r="B1" s="2"><v>2.0</v></c><c r="C1" s="1"><v>3</v></c></row>"#,
+    r#"<row r="2"><c r="A2" s="2"><v>1.0</v></c></row></sheetData>"#,
+);
+
 fn parsed() -> ParsedWorkbook {
-    let mut parts = package(SHEET, &[], false);
+    parsed_sheet(SHEET)
+}
+
+fn parsed_sheet(sheet: &str) -> ParsedWorkbook {
+    let mut parts = package(sheet, &[], false);
     parts.push(("xl/styles.xml".to_owned(), STYLES.as_bytes().to_vec()));
     parse_workbook_with_package(&parts).unwrap()
 }
@@ -165,6 +175,99 @@ fn projected_indices_alone_leave_the_sheet_untouched() {
 }
 
 #[test]
+fn changed_source_xf_is_not_equivalent_even_when_its_resolved_format_matches() {
+    let parsed = parsed();
+    let mut workbook = projected(&parsed);
+    workbook.styles.cell_xfs[2].alignment = Some(Default::default());
+    assert_ne!(
+        parsed.workbook.styles.cell_xfs[2],
+        workbook.styles.cell_xfs[2]
+    );
+    assert_eq!(
+        parsed.workbook.styles.resolved_format(Some(2)),
+        workbook.styles.resolved_format(Some(2))
+    );
+    assert_eq!(
+        workbook.styles.resolved_format(Some(2)),
+        workbook.styles.resolved_format(Some(1))
+    );
+    let styles = StyleMatch::new(&parsed.workbook.styles, &workbook.styles);
+    assert!(!styles.equivalent(Some(2), Some(1)));
+
+    let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+
+    assert_eq!(saved["A1"], r#"<c r="A1" s="1"><v>1</v></c>"#);
+}
+
+#[test]
+fn moved_cells_do_not_borrow_equivalent_indices_from_the_same_position() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="A1" s="2"><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="A2" s="1"><v>1</v></c></row></sheetData>"#,
+    );
+    let parsed = parsed_sheet(source);
+    let mut workbook = projected(&parsed);
+    let a1 = CellRef::new(0, 0);
+    let a2 = CellRef::new(1, 0);
+    let inserted = workbook.sheets[0].cell(a1).cloned().unwrap();
+    let surviving = parsed.workbook.sheets[0].cell(a2).cloned().unwrap();
+    workbook.sheets[0].set_cell(a1, surviving);
+    workbook.sheets[0].set_cell(a2, inserted);
+    let mut axes = SheetAxes::default();
+    axes.rows.delete(0, 1);
+    axes.rows.insert(1, 1);
+    let styles = StyleMatch::new(&parsed.workbook.styles, &workbook.styles);
+    assert!(
+        workbook.sheets[0]
+            .iter_cells()
+            .zip(parsed.workbook.sheets[0].iter_cells())
+            .all(|((at, cell), (source, original))| {
+                at == source && styles.same_cell(original, cell)
+            })
+    );
+
+    let saved = save(&parsed, &workbook, Some(axes));
+
+    assert_ne!(saved, format!("<worksheet>{source}</worksheet>"));
+    assert_eq!(cells(&saved)["A1"], r#"<c r="A1" s="1"><v>1</v></c>"#);
+}
+
+#[test]
+fn array_rectangle_changes_alone_do_not_borrow_the_source_sheet() {
+    let parsed = parsed_sheet(ARRAY_SHEET);
+    let mut workbook = projected(&parsed);
+    let at = CellRef::new(0, 0);
+    workbook.sheets[0].set_array_formula(at, CellRange::new(at, at));
+
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+
+    assert!(saved.contains(r#"<f t="array" ref="A1">1</f>"#));
+    assert!(!saved.contains(r#"ref="A1:A2""#));
+}
+
+#[test]
+fn patched_array_master_uses_the_current_rectangle_and_preserves_untouched_cells() {
+    let parsed = parsed_sheet(ARRAY_SHEET);
+    let mut workbook = projected(&parsed);
+    let at = CellRef::new(0, 0);
+    workbook.sheets[0].set_array_formula(at, CellRange::new(at, at));
+    edit(&mut workbook, "C1", |cell| {
+        cell.value = xlsx_model::CellValue::Number { value: 9.0 }
+    });
+
+    let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+
+    assert!(saved.contains(r#"<f t="array" ref="A1">1</f>"#));
+    assert!(!saved.contains(r#"ref="A1:A2""#));
+    let saved = cells(&saved);
+    let source = cells(ARRAY_SHEET);
+    assert_eq!(saved["C1"], r#"<c r="C1" s="1"><v>9</v></c>"#);
+    for address in ["B1", "A2"] {
+        assert_eq!(saved[address], source[address], "{address}");
+    }
+}
+
+#[test]
 fn rewritten_cells_keep_their_equivalent_source_index() {
     let parsed = parsed();
     let mut workbook = projected(&parsed);
@@ -185,6 +288,36 @@ fn rewritten_cells_keep_their_equivalent_source_index() {
 
 #[test]
 fn regenerated_sheet_data_keeps_equivalent_source_indices() {
+    let source = SHEET.replace(r#"<row r="1">"#, "<row>");
+    assert!(super::scan_sheet_data(source.as_bytes()).unwrap().is_none());
+    let parsed = parsed_sheet(&source);
+    let mut workbook = projected(&parsed);
+    edit(&mut workbook, "A1", |cell| {
+        cell.value = xlsx_model::CellValue::Number { value: 9.0 }
+    });
+    edit(&mut workbook, "B1", |cell| cell.style = Some(3));
+
+    let saved = cells(&save(&parsed, &workbook, Some(SheetAxes::default())));
+
+    let styles = saved
+        .iter()
+        .map(|(address, span)| (address.as_str(), style_attribute(span)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        styles,
+        [
+            ("A1", Some("2")),
+            ("A2", Some("1")),
+            ("B1", Some("3")),
+            ("B2", Some("2")),
+            ("C1", Some("2")),
+            ("C2", Some("2")),
+        ]
+    );
+}
+
+#[test]
+fn regenerated_sheet_data_without_axes_uses_model_indices() {
     let parsed = parsed();
     let mut workbook = projected(&parsed);
     edit(&mut workbook, "A1", |cell| {
@@ -201,12 +334,12 @@ fn regenerated_sheet_data_keeps_equivalent_source_indices() {
     assert_eq!(
         styles,
         [
-            ("A1", Some("2")),
+            ("A1", Some("1")),
             ("A2", Some("1")),
             ("B1", Some("3")),
-            ("B2", Some("2")),
-            ("C1", Some("2")),
-            ("C2", Some("2")),
+            ("B2", Some("1")),
+            ("C1", Some("1")),
+            ("C2", Some("1")),
         ]
     );
 }

@@ -401,8 +401,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
         let output = match source {
             Some(source) if source.is_worksheet() => {
                 if shared_strings_stable
-                    && original
-                        .is_some_and(|original| sheet_body_matches(sheet, original, &style_match))
+                    && original.is_some_and(|original| {
+                        sheet_body_matches(sheet, original, axes, &style_match)
+                    })
                 {
                     continue;
                 }
@@ -874,19 +875,27 @@ impl HyperlinkPlan {
 
 /// Everything a worksheet part carries. The sheet name lives in the workbook
 /// part, so a rename leaves the worksheet bytes reusable.
-fn sheet_body_matches(sheet: &Sheet, original: &Sheet, styles: &StyleMatch<'_>) -> bool {
+fn sheet_body_matches(
+    sheet: &Sheet,
+    original: &Sheet,
+    axes: Option<&SheetAxes>,
+    styles: &StyleMatch<'_>,
+) -> bool {
     sheet.freeze_pane == original.freeze_pane
         && sheet.hyperlinks == original.hyperlinks
         && sheet.merges == original.merges
         && sheet.col_widths == original.col_widths
         && sheet.row_heights == original.row_heights
-        && {
+        && sheet.array_formulas().eq(original.array_formulas())
+        && if axes.is_some_and(SheetAxes::is_identity) {
             let mut sources = original.iter_cells();
             sheet.iter_cells().all(|(at, cell)| {
                 sources.next().is_some_and(|(source, original)| {
                     at == source && styles.same_cell(original, cell)
                 })
             }) && sources.next().is_none()
+        } else {
+            sheet.iter_cells().eq(original.iter_cells())
         }
 }
 
@@ -2528,7 +2537,7 @@ fn patched_grid(
                 shared_string_plan,
                 Some(SourceStyles {
                     original,
-                    axes: Some(axes),
+                    axes,
                     styles,
                 }),
             )
@@ -2579,11 +2588,13 @@ fn worksheet_xml_with_template(
                     wb,
                     shared_string_cells,
                     shared_string_plan,
-                    original.map(|original| SourceStyles {
-                        original,
-                        axes: sheet_axes,
-                        styles,
-                    }),
+                    original
+                        .zip(sheet_axes)
+                        .map(|(original, axes)| SourceStyles {
+                            original,
+                            axes,
+                            styles,
+                        }),
                 )
             })?),
         ),
