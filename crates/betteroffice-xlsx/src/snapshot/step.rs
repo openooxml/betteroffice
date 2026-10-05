@@ -63,12 +63,6 @@ pub(crate) fn initialize(bytes: usize) {
     WORK.set(work);
 }
 
-pub(crate) fn bytes_at_least(bytes: usize) {
-    let mut work = WORK.get();
-    work.bytes = work.bytes.max(bytes);
-    WORK.set(work);
-}
-
 pub(crate) fn current() -> StepWork {
     WORK.get()
 }

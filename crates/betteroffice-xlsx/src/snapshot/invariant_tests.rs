@@ -148,6 +148,415 @@ fn assert_refuses_before_ready(chunks: &[Vec<u8>], budget: SnapshotBudget) -> St
 }
 
 #[test]
+fn snapshot_edited_sheet_order_history_reaches_ready() {
+    let mut worker = empty_worker();
+    for index in 0..32 {
+        worker
+            .apply_ops(
+                vec![Op::AddSheet {
+                    index,
+                    name: format!("Added {index}"),
+                }],
+                context(),
+            )
+            .unwrap();
+    }
+    worker
+        .apply_ops(
+            vec![Op::RenameSheet {
+                sheet: SheetId(1),
+                name: "Renamed".to_owned(),
+            }],
+            context(),
+        )
+        .unwrap();
+    worker
+        .apply_ops(vec![Op::RemoveSheet { index: 0 }], context())
+        .unwrap();
+    for (records, bytes) in [(1, 1024), (256, 16_384)] {
+        let budget = SnapshotBudget::new(records, bytes).unwrap();
+        let chunks = encode(&worker, budget);
+        let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+        assert!(builder.ready.is_some());
+        let (peer, _) = builder.finish().unwrap().into_parts();
+        assert_current_identity(&worker, &peer);
+    }
+    assert!(worker.can_undo());
+    worker.undo(context()).unwrap();
+    assert!(worker.can_redo());
+    worker.redo(context()).unwrap();
+    assert_eq!(worker.model().sheets.len(), 32);
+    assert_eq!(worker.model().sheets[0].name, "Renamed");
+    assert!(deleted_clock_total(&worker) > 1);
+    for (records, bytes) in [(1, 1024), (256, 16_384)] {
+        let budget = SnapshotBudget::new(records, bytes).unwrap();
+        let chunks = encode(&worker, budget);
+        let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+        assert!(builder.ready.is_some());
+        let (peer, _) = builder.finish().unwrap().into_parts();
+        assert_current_identity(&worker, &peer);
+    }
+}
+
+#[test]
+fn snapshot_live_sheet_order_requires_strings_and_existing_sheets() {
+    for invalid_order in [
+        Any::BigInt(7),
+        Any::from("sheet:missing"),
+        Any::from("sheet:0"),
+    ] {
+        let worker = empty_worker();
+        let doc = Doc::new();
+        let duplicate = invalid_order == Any::from("sheet:0");
+        let non_string = !matches!(&invalid_order, Any::String(_));
+        {
+            let mut txn = doc.transact_mut();
+            txn.apply_update(Update::decode_v1(&worker.encode_state_as_update_v1()).unwrap())
+                .unwrap();
+            let order = txn.get_array("xlsx:sheet-order").unwrap();
+            order.remove_range(&mut txn, 0, 1);
+            order.insert(&mut txn, 0, invalid_order);
+            if duplicate {
+                order.insert(&mut txn, 1, "sheet:0");
+            }
+        }
+        let state = doc.transact().state_vector();
+        let mut entries = state
+            .iter()
+            .map(|(client, clock)| (client.get(), *clock))
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        let mut writer = Writer::new();
+        writer.var_usize(entries.len());
+        for (client, clock) in entries {
+            writer.var_u64(client);
+            writer.var_u32(clock);
+        }
+        let vector = writer.into_bytes();
+        for (records, bytes) in [(1, 1024), (256, 16_384)] {
+            let budget = SnapshotBudget::new(records, bytes).unwrap();
+            let chunks = replace_yrs(
+                &worker,
+                vec![doc.transact().encode_state_as_update_v1(&StateVector::default())],
+                vector.clone(),
+                budget,
+            );
+            let failure = assert_refuses_before_ready(&chunks, budget);
+            assert!(failure.contains(if non_string {
+                "unsupported_content"
+            } else {
+                "authority"
+            }));
+        }
+    }
+}
+
+fn sheet_order_history_update(client: u64, deleted_items: usize, deleted_len: u32) -> Vec<u8> {
+    let mut update = Writer::new();
+    update.var_usize(1);
+    update.var_usize(deleted_items + 1);
+    update.var_u64(client);
+    update.var_u32(0);
+    let mut clock = 0;
+    for index in 0..=deleted_items {
+        let kind = if index == deleted_items {
+            yrs::block::BLOCK_ITEM_ANY_REF_NUMBER
+        } else {
+            yrs::block::BLOCK_ITEM_DELETED_REF_NUMBER
+        };
+        if index == 0 {
+            update.u8(kind);
+            update.var_u32(1);
+            update.str("xlsx:sheet-order");
+        } else {
+            update.u8(yrs::block::HAS_ORIGIN | kind);
+            update.var_u64(client);
+            update.var_u32(clock - 1);
+        }
+        if index == deleted_items {
+            update.var_u32(1);
+            update.u8(119);
+            update.str("sheet:0");
+        } else {
+            update.var_u32(deleted_len);
+            clock += deleted_len;
+        }
+    }
+    if deleted_items == 0 {
+        update.var_usize(0);
+    } else {
+        update.var_usize(1);
+        update.var_u64(client);
+        update.var_usize(1);
+        update.var_u32(0);
+        update.var_u32(clock);
+    }
+    update.into_bytes()
+}
+
+#[test]
+fn snapshot_sheet_order_cap_refuses_before_integration() {
+    use crate::snapshot::yrs_split::{CausalState, SHEET_ORDER_MAX_ITEMS, SplitError};
+
+    let at_cap = sheet_order_history_update(1, SHEET_ORDER_MAX_ITEMS - 1, 1);
+    assert!(CausalState::default().admit(&at_cap).is_ok());
+    for update in [
+        sheet_order_history_update(1, SHEET_ORDER_MAX_ITEMS, 1),
+        sheet_order_history_update(1, 1, SHEET_ORDER_MAX_ITEMS as u32),
+    ] {
+        assert_eq!(
+            CausalState::default().admit(&update),
+            Err(SplitError::SheetOrderLimit)
+        );
+        let mut vector = Writer::new();
+        vector.var_usize(1);
+        vector.var_u64(1);
+        vector.var_usize(SHEET_ORDER_MAX_ITEMS + 1);
+        let vector = vector.into_bytes();
+        for (records, bytes) in [(1, 1024), (256, 16_384)] {
+            let budget = SnapshotBudget::new(records, bytes).unwrap();
+            let chunks = replace_yrs(
+                &empty_worker(),
+                vec![update.clone()],
+                vector.clone(),
+                budget,
+            );
+            assert!(assert_refuses_before_ready(&chunks, budget).contains("sheet_order"));
+        }
+    }
+}
+
+#[test]
+fn snapshot_refusal_leaves_the_non_snapshot_open_path_usable() {
+    for (records, bytes) in [(1, 1024), (256, 16_384)] {
+        let mut worker = Workbook::open(&empty_worker().save().unwrap()).unwrap();
+        worker.authority.snapshot_skip_gc_for_test();
+        {
+            let mut txn = worker.authority.snapshot_transaction_for_test();
+            let mut client = 1;
+            while txn.state_vector().contains_client(&yrs::block::ClientID::new(client)) {
+                client += 1;
+            }
+            txn.get_array("xlsx:sheet-order")
+                .unwrap()
+                .remove_range(&mut txn, 0, 1);
+            let update = sheet_order_history_update(
+                client,
+                crate::snapshot::yrs_split::SHEET_ORDER_MAX_ITEMS,
+                1,
+            );
+            txn.apply_update(Update::decode_v1(&update).unwrap()).unwrap();
+        }
+        assert_eq!(worker.authority.materialize().unwrap(), *worker.model());
+        let budget = SnapshotBudget::new(records, bytes).unwrap();
+        let chunks = encode(&worker, budget);
+        let mut builder = WorkbookSnapshotBuilder::new();
+        for chunk in &chunks {
+            builder.push(chunk).unwrap();
+            assert_step_budget(budget);
+        }
+        let mut refused = false;
+        for _ in 0..200_000 {
+            match builder.advance(budget) {
+                Ok(progress) => assert!(!progress.is_ready()),
+                Err(failure) => {
+                    assert!(failure.to_string().contains("sheet_order"));
+                    assert!(builder.failed);
+                    assert!(builder.ready.is_none());
+                    assert!(builder.restored.is_none());
+                    refused = true;
+                    break;
+                }
+            }
+            assert_step_budget(budget);
+        }
+        assert!(refused);
+        assert_step_budget(budget);
+        assert!(builder.finish().is_err());
+        let saved = worker.save().unwrap();
+        let mut peer = Workbook::open(&saved).unwrap();
+        assert_eq!(worker.model(), peer.model());
+        for operation in [
+            Op::SetCell {
+                sheet: SheetId(0),
+                at: CellRef::new(0, 0),
+                cell: CellState {
+                    value: CellValue::Number { value: 7.0 },
+                    ..CellState::default()
+                },
+            },
+            Op::RenameSheet {
+                sheet: SheetId(0),
+                name: "Fallback edit".to_owned(),
+            },
+        ] {
+            assert_eq!(
+                worker
+                    .apply_ops(vec![operation.clone()], context())
+                    .unwrap(),
+                peer.apply_ops(vec![operation], context()).unwrap(),
+            );
+            assert_eq!(worker.model(), peer.model());
+        }
+    }
+}
+
+#[test]
+fn snapshot_applied_edit_histories_reach_ready() {
+    let mut worker = worker(&source(false, false));
+    let sheet = SheetId(0);
+    let at = CellRef::new(20, 4);
+    let cell_range = crate::CellRange { start: at, end: at };
+    let merge = crate::CellRange {
+        start: CellRef::new(22, 4),
+        end: CellRef::new(22, 5),
+    };
+    let chart = worker.model().sheets[0].charts[0].clone();
+    let crate::ChartAnchor::OneCell { mut from, extent } = chart.anchor else {
+        panic!("expected a movable chart");
+    };
+    from.row += 1;
+    from.col += 1;
+    for operation in [
+        Op::SetCell {
+            sheet,
+            at,
+            cell: CellState {
+                value: CellValue::Number { value: 7.0 },
+                ..CellState::default()
+            },
+        },
+        Op::PatchRangeStyle {
+            sheet,
+            range: cell_range,
+            patch: crate::StylePatch {
+                bold: Some(true),
+                ..crate::StylePatch::default()
+            },
+        },
+        Op::SetRangeNumberFormat {
+            sheet,
+            range: cell_range,
+            format: crate::NumberFormatMutation::Custom {
+                pattern: "0.0000".to_owned(),
+            },
+        },
+        Op::SetHyperlinks {
+            sheet,
+            hyperlinks: vec![crate::Hyperlink {
+                range: cell_range,
+                external_target: Some("https://example.com".to_owned()),
+                location: None,
+                tooltip: Some("Edited link".to_owned()),
+                display: Some("Link".to_owned()),
+            }],
+        },
+        Op::MergeCells { sheet, range: merge },
+        Op::UnmergeCells { sheet, range: merge },
+        Op::SetCell {
+            sheet,
+            at,
+            cell: CellState::default(),
+        },
+        Op::SetChartAnchor {
+            sheet,
+            frame: chart.frame_id(),
+            part: chart.part.clone(),
+            from: chart.anchor,
+            to: crate::ChartAnchor::OneCell { from, extent },
+        },
+        Op::SetDefinedNames {
+            defined_names: vec![xlsx_model::DefinedName {
+                name: "EditedName".to_owned(),
+                formula: "Data!$A$1".to_owned(),
+                local_sheet: None,
+                hidden: false,
+            }],
+        },
+        Op::InsertRows {
+            sheet,
+            at: 0,
+            count: 1,
+        },
+        Op::RenameSheet {
+            sheet,
+            name: "Renamed".to_owned(),
+        },
+    ] {
+        let defined_names = worker.model().defined_names.clone();
+        let remaps_names = matches!(
+            &operation,
+            Op::InsertRows { .. } | Op::RenameSheet { .. }
+        );
+        worker.apply_ops(vec![operation], context()).unwrap();
+        if remaps_names {
+            assert_ne!(worker.model().defined_names, defined_names);
+        }
+        for stage in 0..3 {
+            if stage == 1 {
+                assert!(worker.can_undo());
+                worker.undo(context()).unwrap();
+            } else if stage == 2 {
+                assert!(worker.can_redo());
+                worker.redo(context()).unwrap();
+            }
+            for (records, bytes) in [(1, 1024), (256, 16_384)] {
+                let budget = SnapshotBudget::new(records, bytes).unwrap();
+                let chunks = encode(&worker, budget);
+                let (builder, _) = completed_builder_with_step_budget(&chunks, budget);
+                assert!(builder.ready.is_some());
+                let (peer, _) = builder.finish().unwrap().into_parts();
+                assert_current_identity(&worker, &peer);
+            }
+        }
+    }
+}
+
+#[test]
+fn snapshot_catalog_style_extensions_still_refuse_contradictions() {
+    for unused in [false, true] {
+        let mut worker = empty_worker();
+        worker
+            .apply_ops(
+                vec![Op::PatchRangeStyle {
+                    sheet: SheetId(0),
+                    range: crate::CellRange {
+                        start: CellRef::new(0, 0),
+                        end: CellRef::new(0, 0),
+                    },
+                    patch: crate::StylePatch {
+                        bold: Some(true),
+                        ..crate::StylePatch::default()
+                    },
+                }],
+                context(),
+            )
+            .unwrap();
+        if unused {
+            worker.model.styles.fonts.push(xlsx_model::styles::Font {
+                name: Some("Unlicensed".to_owned()),
+                ..xlsx_model::styles::Font::default()
+            });
+        } else {
+            let style = worker.model.sheets[0]
+                .cell(CellRef::new(0, 0))
+                .unwrap()
+                .style
+                .unwrap();
+            let font = worker.model.styles.cell_xfs[style as usize].font.unwrap();
+            worker.model.styles.fonts[font as usize].bold = false;
+        }
+        for (records, bytes) in [(1, 1024), (256, 16_384)] {
+            let budget = SnapshotBudget::new(records, bytes).unwrap();
+            assert!(
+                assert_refuses_before_ready(&encode(&worker, budget), budget)
+                    .contains("authority and model disagree")
+            );
+        }
+    }
+}
+
+#[test]
 fn snapshot_authority_schema_and_authored_model_agree_before_ready() {
     let budget = budgets()[0];
     let worker = empty_worker();

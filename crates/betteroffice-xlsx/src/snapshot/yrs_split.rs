@@ -15,6 +15,7 @@ use yrs::types::{
 const MAX_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 const MAX_CLOCK: u32 = i32::MAX as u32;
 const MAX_NESTING: u8 = 64;
+pub(crate) const SHEET_ORDER_MAX_ITEMS: usize = 16_384;
 
 #[cfg(test)]
 thread_local! {
@@ -34,6 +35,7 @@ pub(crate) enum SplitError {
     RetainedDeletion,
     OversizedStruct,
     SharedText,
+    SheetOrderLimit,
 }
 
 impl SplitError {
@@ -50,6 +52,7 @@ impl SplitError {
             Self::RetainedDeletion => "retained_deletion",
             Self::OversizedStruct => "oversized_struct",
             Self::SharedText => "shared_text_is_not_supported",
+            Self::SheetOrderLimit => "sheet_order_exceeds_item_or_clock_limit",
         }
     }
 }
@@ -68,6 +71,7 @@ struct Struct<'a> {
     dependencies: [Option<(u64, u32)>; 3],
     root: Option<&'a str>,
     key: Option<&'a str>,
+    sheet_keys: bool,
 }
 
 pub(crate) fn split_update_v1(
@@ -628,7 +632,8 @@ pub(crate) struct CausalState {
     kinds: BTreeMap<(u64, u32), (u32, u8)>,
     locations: SnapshotLocations,
     keys: SnapshotKeys,
-    order_seen: bool,
+    order_items: usize,
+    order_clocks: usize,
 }
 
 impl CausalState {
@@ -767,13 +772,24 @@ impl CausalState {
                 if let Some((parent, key)) = location {
                     if matches!(&parent, SnapshotParent::Root(name) if name.as_ref() == "xlsx:sheet-order")
                     {
-                        if self.order_seen
-                            || block.kind != BLOCK_ITEM_ANY_REF_NUMBER
-                            || key.is_some()
+                        if key.is_some()
+                            || !matches!(
+                                block.kind,
+                                BLOCK_ITEM_ANY_REF_NUMBER
+                                    | BLOCK_ITEM_DELETED_REF_NUMBER
+                                    | BLOCK_GC_REF_NUMBER
+                            )
+                            || (block.kind == BLOCK_ITEM_ANY_REF_NUMBER && !block.sheet_keys)
                         {
                             return Err(SplitError::UnsupportedContent(block.kind));
                         }
-                        self.order_seen = true;
+                        self.order_items += usize::from(block.kind != BLOCK_GC_REF_NUMBER);
+                        self.order_clocks = self.order_clocks.saturating_add(block.len as usize);
+                        if self.order_items > SHEET_ORDER_MAX_ITEMS
+                            || self.order_clocks > SHEET_ORDER_MAX_ITEMS
+                        {
+                            return Err(SplitError::SheetOrderLimit);
+                        }
                     }
                     if let Some(key) = &key {
                         self.keys.insert((parent.clone(), key.clone()));
@@ -1099,6 +1115,7 @@ impl<'a> Scanner<'a> {
         let mut dependencies = [None; 3];
         let mut root = None;
         let mut key = None;
+        let mut sheet_keys = true;
         let len = if info == BLOCK_GC_REF_NUMBER || info == BLOCK_SKIP_REF_NUMBER {
             self.var_u32()?
         } else {
@@ -1182,7 +1199,13 @@ impl<'a> Scanner<'a> {
                 BLOCK_ITEM_ANY_REF_NUMBER => {
                     let len = self.count()?;
                     for _ in 0..len {
-                        self.any(0)?;
+                        if self.bytes.get(self.pos) == Some(&119) {
+                            self.byte()?;
+                            sheet_keys &= self.string()?.len() <= 64;
+                        } else {
+                            sheet_keys = false;
+                            self.any(0)?;
+                        }
                     }
                     len
                 }
@@ -1203,6 +1226,7 @@ impl<'a> Scanner<'a> {
             dependencies,
             root,
             key,
+            sheet_keys,
         })
     }
 
