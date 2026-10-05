@@ -199,10 +199,9 @@ fn unrelated_edit_keeps_equivalent_style_indices_and_other_parts() {
         let source = package(variant);
         let before = parts(&source);
         let mut workbook = Workbook::open(&source).unwrap();
-        let source_format = workbook
-            .model()
-            .styles
-            .resolved_format(workbook.model().sheets[0].cell(cell("A1")).unwrap().style);
+        let source_styles = workbook.model().styles.clone();
+        let source_style = workbook.model().sheets[0].cell(cell("A1")).unwrap().style;
+        let source_format = source_styles.resolved_format(source_style);
         workbook
             .edit_cell(SheetId(0), cell("A1"), "5", CalculationOptions::default())
             .unwrap();
@@ -250,10 +249,9 @@ fn genuine_style_change_writes_the_new_index() {
         let source = package(variant);
         let before = parts(&source);
         let mut workbook = Workbook::open(&source).unwrap();
-        let source_format = workbook
-            .model()
-            .styles
-            .resolved_format(workbook.model().sheets[0].cell(cell("D1")).unwrap().style);
+        let source_styles = workbook.model().styles.clone();
+        let source_style = workbook.model().sheets[0].cell(cell("D1")).unwrap().style;
+        let source_format = source_styles.resolved_format(source_style);
         let source_xfs = workbook.model().styles.cell_xfs.len();
         let format = workbook
             .capture_format(SheetId(0), CellRange::new(cell("D1"), cell("D1")))
