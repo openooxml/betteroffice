@@ -1058,9 +1058,8 @@ describe('resident worker opening', () => {
   test('versioned state encoding requires the worker state', async () => {
     const { worker, client } = setup();
     const state = client.encodeVersionedState();
-    const rejected = expect(state).rejects.toThrow('Resident engine worker omitted its state');
     worker.reply({ id: worker.lastId(), ok: true, version: 'worker-version' });
-    await rejected;
+    await expect(state).rejects.toThrow('Resident engine worker omitted its state');
   });
 
   test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
