@@ -689,6 +689,7 @@ export function useYrsCoreSession(
             };
             const registerProposals = (): void => {
               if (registeredWorkerProposalAuthority(next)) return;
+              const openedProposalOwner = worker.stateRevision?.()?.owner;
               let laidOut = renderedFrameRef.current && renderedFrameRef.current !== inheritedFrameRef.current
                 ? Promise.resolve()
                 : new Promise<void>((resolve) => {
@@ -707,7 +708,12 @@ export function useYrsCoreSession(
                   workerOpenRef.current?.refreshWorkerLayout?.();
                 },
                 current: () => !stale(),
-                laidOut: () => laidOut,
+                laidOut: () => {
+                  const owner = worker.stateRevision?.()?.owner;
+                  return owner && owner !== openedProposalOwner
+                    ? Promise.race([laidOut, owner.whenBootstrapSent()])
+                    : laidOut;
+                },
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
                 projectionChanged: (stories) => {
                   inputPositionMapsRef.current.clear();

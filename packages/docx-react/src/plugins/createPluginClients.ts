@@ -213,6 +213,10 @@ export function createPluginClients(
           throw error;
         }
       }
+      if (session && workerProposalAuthority(session)) {
+        const refused = await replicaReady(session);
+        if (refused) return refused;
+      }
       return whenFlushed((session) => session.findText(request));
     },
     validateEdits: (request) =>

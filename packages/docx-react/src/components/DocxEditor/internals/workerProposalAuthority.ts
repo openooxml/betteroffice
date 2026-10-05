@@ -246,7 +246,7 @@ export function registerWorkerProposalAuthority(
     });
     if (initialized) return execute(true);
     const workerRead = ready.then(() => execute(true));
-    const loaded = awaitWorkerOpenReplica(session);
+    const loaded = workerOpenDocumentHeld(session) ? undefined : awaitWorkerOpenReplica(session);
     return loaded ? Promise.race([workerRead, loaded.then(() => execute(false))]) : workerRead;
   };
   const round = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {

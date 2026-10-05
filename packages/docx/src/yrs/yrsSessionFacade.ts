@@ -368,8 +368,16 @@ export function wrapSession(
 
   let workerDocumentVersion: string | null = null;
   const proposalListeners = new Set<Parameters<YrsSession['onProposalChange']>[0]>();
-  const notifyProposals = (): void => {
-    for (const listener of proposalListeners) listener(facade.getProposals());
+  const notifyProposals = (snapshot = facade.getProposals()): void => {
+    const delivered = JSON.stringify(snapshot);
+    for (const listener of [...proposalListeners]) {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        console.error('[yrs] a proposal listener threw', error);
+      }
+      if (JSON.stringify(facade.getProposals()) !== delivered) break;
+    }
   };
   const createRegistry = () => createProposalRegistry({
     version: () => session.version(),
@@ -690,9 +698,8 @@ export function wrapSession(
       mutate(() => session.apply_local_update(update));
     },
     applyHostUpdate: (update, stories) => {
-      const since = stories === undefined ? facade.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision : undefined;
+      markDirty(stories ?? 'all');
       mutate(() => session.apply_host_update(update));
-      markDirty(stories ?? facade.storiesChangedSince(since!).stories);
     },
     onUpdate: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');

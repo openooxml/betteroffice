@@ -2973,7 +2973,13 @@ test('forced onHost relayout retires the source fallback and routes queued and l
   const blocking = new Promise<void>((resolve) => { started = resolve; });
   const held = authority.residentOperation(async () => { started(); await blocker; });
   await blocking;
-  const queued = api.proposeChanges({ expectVersion: initial.version, proposals: [] });
+  const queuedParagraph = workers[0]!.sessions[0]!.paragraphIdentities().paragraphs.find((identity) =>
+    identity.session?.story === 'body')!.session!;
+  const queued = api.proposeChanges({ expectVersion: initial.version, proposals: [{
+    id: 'stale-after-fallback', paragraph: queuedParagraph,
+    suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+    op: 'insertText', at: 'start', text: 'Stale ',
+  }] });
   const before = posted.filter((request) => request.type === 'proposal').length;
   act(() => result.current.pipeline.runLayoutPipeline({ onHost: true }));
   expect(result.current.core.replicaReady).toBe(true);
@@ -3041,7 +3047,7 @@ test('onHost relayout during an in-flight worker round preserves authority and i
     holdReply: (request) => request.type === 'proposal' && request.operation.kind === 'propose',
   });
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true, allowHostProposals: true },
+    initialProps: { ...initialProps, source: longBytes, readOnly: true, holdReplica: true, allowHostProposals: true, workerProposals: true },
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
