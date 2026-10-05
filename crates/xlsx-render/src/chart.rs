@@ -774,7 +774,7 @@ fn has_primary_xy_axes(space: &ChartSpace) -> bool {
     {
         return false;
     }
-    !space.plot_groups.is_empty()
+    space.plot_groups.len() == 1
         && space.plot_groups.iter().all(|group| {
             matches!(
                 group.chart_type.as_deref().unwrap_or(&space.chart_type),
@@ -1663,24 +1663,78 @@ mod tests {
     }
 
     #[test]
-    fn scatter_groups_share_the_primary_pair_in_either_reference_order() {
+    fn scatter_pair_is_admitted_in_either_reference_order() {
         let mut space = scatter_space();
-        let mut second = space.plot_groups[0].clone();
-        second.axis_ids.reverse();
-        space.plot_groups.push(second);
+        space.plot_groups[0].axis_ids.reverse();
         let (commands, regions) = render_scatter(&space);
         assert!(!regions[0].placeholder);
-        assert_scatter_centers(
-            &commands,
-            &[
-                (104.0, 195.0),
-                (296.0, 150.0),
-                (176.0, 105.0),
-                (104.0, 195.0),
-                (296.0, 150.0),
-                (176.0, 105.0),
-            ],
-        );
+        assert_scatter_centers(&commands, &[(104.0, 195.0), (296.0, 150.0), (176.0, 105.0)]);
+    }
+
+    #[test]
+    fn scatter_groups_sharing_the_pair_are_still_refused() {
+        for chart_type in ["scatter", "bubble"] {
+            let mut space = scatter_space();
+            let mut second = space.plot_groups[0].clone();
+            second.chart_type = Some(chart_type.into());
+            second.axis_ids.reverse();
+            space.plot_groups.push(second);
+            assert_eq!(
+                unsupported_feature(&space),
+                Some("secondary-axis chart combinations"),
+                "{chart_type}"
+            );
+            let (_, regions) = render_scatter(&space);
+            assert!(regions[0].placeholder, "{chart_type}");
+        }
+    }
+
+    #[test]
+    fn scatter_auto_y_bounds_ignore_values_without_an_x() {
+        let mut paired = scatter_space();
+        for axis in paired.axis_list.as_mut().unwrap() {
+            axis.min = None;
+            axis.max = None;
+        }
+        paired.plot_groups[0].series[0].x_values = Some(vec![1.0, 9.0]);
+        paired.plot_groups[0].series[0].values = vec![5.0, 10.0];
+        let (expected, _) = render_scatter(&paired);
+        let expected = scatter_centers(&expected);
+        assert_eq!(expected.len(), 2);
+        for (x_values, values) in [
+            (vec![1.0, 9.0], vec![5.0, 10.0, 1e9]),
+            (vec![1.0, f64::NAN, 9.0], vec![5.0, 1e9, 10.0]),
+        ] {
+            let mut space = paired.clone();
+            space.plot_groups[0].series[0].x_values = Some(x_values);
+            space.plot_groups[0].series[0].values = values;
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            assert_scatter_centers(&commands, &expected);
+        }
+    }
+
+    #[test]
+    fn scatter_constant_auto_x_keeps_its_value_on_the_axis() {
+        for (x, label, center_x) in [(40.0, "40", 320.0), (-40.0, "-40", 80.0)] {
+            let mut space = scatter_space();
+            let axis = &mut space.axis_list.as_mut().unwrap()[0];
+            axis.min = None;
+            axis.max = None;
+            space.plot_groups[0].series[0].x_values = Some(vec![x; 3]);
+            let (commands, regions) = render_scatter(&space);
+            assert!(!regions[0].placeholder);
+            assert_scatter_centers(
+                &commands,
+                &[(center_x, 195.0), (center_x, 150.0), (center_x, 105.0)],
+            );
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| matches!(command, DrawCmd::Text { text, .. } if text.as_ref() == label)),
+                "{label}"
+            );
+        }
     }
 
     #[test]
