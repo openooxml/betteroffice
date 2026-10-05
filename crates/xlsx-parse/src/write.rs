@@ -2833,22 +2833,32 @@ pub(crate) fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<(
     }
     w.create_element("cols").write_inner_content(|w| {
         for (&col, &width) in &sheet.col_widths {
-            write_col(w, col, width)?;
+            write_col(w, col, width, sheet.hidden_col_widths.get(&col).copied())?;
         }
         Ok(())
     })?;
     Ok(())
 }
 
-pub(crate) fn write_col(w: &mut Writer<Vec<u8>>, col: ColId, width: f64) -> io::Result<()> {
+pub(crate) fn write_col(
+    w: &mut Writer<Vec<u8>>,
+    col: ColId,
+    width: f64,
+    hidden_width: Option<f64>,
+) -> io::Result<()> {
     let n = (u64::from(col) + 1).to_string();
-    let width = fmt_num(width);
+    let hidden = width == 0.0;
+    let width = fmt_num(if hidden {
+        hidden_width.unwrap_or(width)
+    } else {
+        width
+    });
     let mut element = BytesStart::new("col");
     element.push_attribute(("min", n.as_str()));
     element.push_attribute(("max", n.as_str()));
     element.push_attribute(("width", width.as_str()));
     element.push_attribute(("customWidth", "1"));
-    if width == "0" {
+    if hidden {
         element.push_attribute(("hidden", "1"));
     }
     w.write_event(Event::Empty(element))?;
@@ -2872,11 +2882,18 @@ where
     let r = (row as u64 + 1).to_string();
     let mut start = BytesStart::new("row");
     start.push_attribute(("r", r.as_str()));
-    let ht = sheet.row_heights.get(&row).map(|h| fmt_num(*h));
+    let hidden = sheet.row_heights.get(&row) == Some(&0.0);
+    let ht = sheet.row_heights.get(&row).map(|h| {
+        fmt_num(if hidden {
+            sheet.hidden_row_heights.get(&row).copied().unwrap_or(*h)
+        } else {
+            *h
+        })
+    });
     if let Some(h) = &ht {
         start.push_attribute(("ht", h.as_str()));
         start.push_attribute(("customHeight", "1"));
-        if h == "0" {
+        if hidden {
             start.push_attribute(("hidden", "1"));
         }
     }
