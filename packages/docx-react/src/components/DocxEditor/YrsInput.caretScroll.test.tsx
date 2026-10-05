@@ -589,15 +589,12 @@ test('read-only, the first keyboard move on a replica without a caret scrolls in
   expect(scroller.scrollTop).toBeGreaterThan(scrollTop);
 });
 
-// A read-only input on a replica that loads on demand; `record` stands in for a gesture the pages
-// recorded meanwhile, which the host applies before input that waited.
-async function mountOnDemand() {
+// Recorded gestures replay before the input that waited for the edit peer.
+async function mountPendingReplica() {
   let epoch = 0;
   let pending: [number, number] | null = null;
   const replayed: Array<[number, number]> = [];
-  const requestReplica = mock(() => {});
   const mounted = await mount(true, false, false, {
-    requestReplica,
     inputEpoch: () => epoch,
     applyPendingSelection: () => {
       if (!pending) return;
@@ -610,15 +607,17 @@ async function mountOnDemand() {
   });
   const { session, input, view, inputFor, replicaReadyRef } = mounted;
   let settle!: (loaded: boolean) => void;
+  const hydrate = mock(() =>
+    new Promise<() => void>((resolve, reject) => {
+      settle = (loaded) =>
+        loaded
+          ? resolve(() => session.openDocx(bytes, true))
+          : reject(new Error('The handoff failed'));
+    })
+  );
   const replica = deferWorkerOpenReplica(
     session,
-    () =>
-      new Promise<() => void>((resolve, reject) => {
-        settle = (loaded) =>
-          loaded
-            ? resolve(() => session.openDocx(bytes, true))
-            : reject(new Error('The handoff failed'));
-      }),
+    hydrate,
     () => {
       throw new Error('The fallback failed');
     },
@@ -626,9 +625,9 @@ async function mountOnDemand() {
       replicaReadyRef.current = true;
     }
   );
-  replica.start();
   const finish = async (loaded: boolean) => {
     await act(async () => {
+      replica.start();
       settle(loaded);
       await input.current!.flushPendingInput();
     });
@@ -636,7 +635,7 @@ async function mountOnDemand() {
   };
   return {
     ...mounted,
-    requestReplica,
+    hydrate,
     replayed,
     textarea: view.getByTestId('yrs-input'),
     record: (anchor: number, head = anchor) => {
@@ -653,13 +652,13 @@ async function mountOnDemand() {
 }
 
 test('keys pressed while the replica loads follow the recorded gesture once it has, in order', async () => {
-  const t = await mountOnDemand();
+  const t = await mountPendingReplica();
   t.record(3);
   act(() => {
     fireEvent.keyDown(t.textarea, { key: 'ArrowRight' });
     fireEvent.keyDown(t.textarea, { key: 'ArrowRight', shiftKey: true });
   });
-  expect(t.requestReplica).toHaveBeenCalled();
+  expect(t.hydrate).not.toHaveBeenCalled();
   expect(t.session.selection()).toBeNull();
   expect(t.input.current!.hasPendingInput()).toBe(true);
 
@@ -669,7 +668,7 @@ test('keys pressed while the replica loads follow the recorded gesture once it h
 });
 
 test('a line move pressed while the replica loads moves from the recorded caret', async () => {
-  const t = await mountOnDemand();
+  const t = await mountPendingReplica();
   t.record(3);
   act(() => {
     fireEvent.keyDown(t.textarea, { key: 'ArrowDown' });
@@ -681,7 +680,7 @@ test('a line move pressed while the replica loads moves from the recorded caret'
 });
 
 test('select all pressed after a click while the replica loads selects the whole story', async () => {
-  const t = await mountOnDemand();
+  const t = await mountPendingReplica();
   t.record(3);
   act(() => {
     fireEvent.keyDown(t.textarea, { key: 'a', ctrlKey: true });
@@ -715,7 +714,7 @@ test('a copy while the replica loads writes the text the replayed drag selects',
     constructor(readonly data: Record<string, Promise<Blob>>) {}
   };
   try {
-    const t = await mountOnDemand();
+    const t = await mountPendingReplica();
     t.record(2, 6);
     let notPrevented = true;
     act(() => {
@@ -723,6 +722,7 @@ test('a copy while the replica loads writes the text the replayed drag selects',
     });
     expect(notPrevented).toBe(false);
     expect(written).toHaveLength(1);
+    expect(t.hydrate).not.toHaveBeenCalled();
 
     await t.load();
     const text = t.session.paragraphs('body')[0]!.text.slice(1, 5);
@@ -736,7 +736,7 @@ test('a copy while the replica loads writes the text the replayed drag selects',
 });
 
 test('newer input drops keys still waiting for the replica', async () => {
-  const t = await mountOnDemand();
+  const t = await mountPendingReplica();
   t.record(3);
   act(() => {
     fireEvent.keyDown(t.textarea, { key: 'ArrowRight' });
@@ -755,7 +755,7 @@ test('newer input drops keys still waiting for the replica', async () => {
 test.each([false, true])(
   'a key that waited for the replica scrolls to its caret unless the reader scrolled since (%p)',
   async (scrolled) => {
-    const t = await mountOnDemand();
+    const t = await mountPendingReplica();
     act(() => {
       fireEvent.keyDown(t.textarea, { key: 'End', ctrlKey: true });
     });
@@ -773,7 +773,7 @@ test.each([false, true])(
 );
 
 test('a replica that fails to load drops the keys waiting for it', async () => {
-  const t = await mountOnDemand();
+  const t = await mountPendingReplica();
   t.record(3);
   act(() => {
     fireEvent.keyDown(t.textarea, { key: 'a', ctrlKey: true });

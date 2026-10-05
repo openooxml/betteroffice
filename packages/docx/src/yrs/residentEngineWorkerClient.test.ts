@@ -1046,6 +1046,22 @@ describe('resident worker opening', () => {
     expect(worker.posted).toHaveLength(1);
   });
 
+  test.each([undefined, '', 'worker-version'])('versioned state encoding accepts version %s without proposals', async (version) => {
+    const { worker, client } = setup();
+    const state = client.encodeVersionedState();
+    expect(worker.posted).toHaveLength(1);
+    expect(worker.posted[0]).toMatchObject({ type: 'encodeState' });
+    worker.reply({ id: worker.lastId(), ok: true, state: Uint8Array.of(4, 5).buffer, version });
+    expect(await state).toEqual({ state: Uint8Array.of(4, 5), version });
+  });
+
+  test('versioned state encoding requires the worker state', async () => {
+    const { worker, client } = setup();
+    const state = client.encodeVersionedState();
+    worker.reply({ id: worker.lastId(), ok: true, version: 'worker-version' });
+    await expect(state).rejects.toThrow('Resident engine worker omitted its state');
+  });
+
   test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
     const { worker, client } = setup();
     const bytes = new Uint8Array([1, 2, 3]);

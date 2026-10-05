@@ -72,6 +72,14 @@ impl Case {
         }
     }
 
+    fn projected(source: &str) -> Self {
+        let parsed = super::style_match_tests::parsed_sheet(source);
+        let workbook = super::style_match_tests::projected(&parsed);
+        let mut case = Self::from_parsed(parsed);
+        case.workbook = workbook;
+        case
+    }
+
     fn with_patch<R>(&self, planned: bool, run: impl FnOnce(&SheetPatch<'_>) -> R) -> R {
         let sst_index = self
             .workbook
@@ -89,6 +97,7 @@ impl Case {
             )
             .unwrap()
         });
+        let styles = StyleMatch::new(&self.original.styles, &self.workbook.styles);
         run(&SheetPatch {
             sheet: &self.workbook.sheets[0],
             original: &self.original.sheets[0],
@@ -97,6 +106,7 @@ impl Case {
             sst_index: &sst_index,
             retained: &self.retained,
             plan: plan.as_ref(),
+            styles: &styles,
         })
     }
 
@@ -183,6 +193,75 @@ fn number(value: f64) -> Cell {
     Cell {
         value: CellValue::Number { value },
         ..Cell::default()
+    }
+}
+
+#[test]
+fn projected_styles_and_value_edits_match_oracle_without_expanding_shared_groups() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="A1" s="2"><v>1</v></c>"#,
+        r#"<c r="B1" s="2"><f t="shared" ref="B1:B2" si="0">1</f><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="B2" s="2"><f t="shared" si="0"/><v>1</v></c></row></sheetData>"#,
+    );
+    let mut case = Case::projected(source);
+    assert_eq!(case.compare(), source.as_bytes());
+    case.edit("A1", |cell| cell.value = CellValue::Number { value: 2.0 });
+
+    assert_eq!(
+        case.compare(),
+        source
+            .replace("<v>1</v></c><c", "<v>2</v></c><c")
+            .as_bytes()
+    );
+}
+
+#[test]
+fn projected_array_rectangle_edits_match_oracle() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="A1" s="2"><f t="array" ref="A1:A2">1</f><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="A2" s="2"><v>1</v></c></row></sheetData>"#,
+    );
+    let mut case = Case::projected(source);
+    let at = CellRef::new(0, 0);
+    case.workbook.sheets[0].set_array_formula(at, CellRange::new(at, at));
+
+    assert_eq!(
+        case.compare(),
+        source.replace(r#"ref="A1:A2""#, r#"ref="A1""#).as_bytes()
+    );
+    case.workbook.sheets[0].clear_array_formula(at);
+    assert_eq!(
+        case.compare(),
+        source.replace(r#" t="array" ref="A1:A2""#, "").as_bytes()
+    );
+}
+
+#[test]
+fn projected_formula_promotions_match_oracle() {
+    let source = concat!(
+        r#"<sheetData><row r="1"><c r="A1" s="2"><f>1</f><v>1</v></c>"#,
+        r#"<c r="B1" s="2"><f t="shared" ref="B1:B2" si="0">1</f><v>1</v></c></row>"#,
+        r#"<row r="2"><c r="B2" s="2"><f t="shared" si="0"/><v>1</v></c></row></sheetData>"#,
+    );
+    for address in ["A1", "B1", "B2"] {
+        let mut case = Case::projected(source);
+        let at = CellRef::parse_a1(address).unwrap();
+        let range = CellRange::new(at, CellRef::new(at.row + 1, at.col));
+        case.workbook.sheets[0].set_array_formula(at, range);
+
+        let saved = String::from_utf8(case.compare()).unwrap();
+
+        assert!(saved.contains(&format!(
+            r#"<c r="{address}" s="2"><f t="array" ref="{}">1</f><v>1</v></c>"#,
+            range.to_a1()
+        )));
+        if address == "A1" {
+            assert!(saved.contains(r#"<f t="shared" ref="B1:B2" si="0">1</f>"#));
+            assert!(saved.contains(r#"<f t="shared" si="0"/>"#));
+        } else {
+            assert!(!saved.contains(r#"t="shared""#));
+            assert!(!saved.contains(r#"si=""#));
+        }
     }
 }
 

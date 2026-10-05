@@ -40,6 +40,7 @@ import {
 import type { DocxHostSearch } from './useHostSearch';
 import {
   awaitWorkerOpenReplica,
+  requestWorkerOpenReplicaReadiness,
   ensureWorkerOpenReplica,
   requestWorkerOpenReplica,
   workerOpenDocumentHeld,
@@ -143,17 +144,38 @@ export const DOCX_REF_REPLICA_ACCESS = {
   onDocumentChange: 'independent',
 } as const satisfies Record<keyof DocxEditorRef, 'await' | 'sync' | 'independent' | 'commands'>;
 
+/** What a synchronous member returns while the editor's document is still loading here. */
+export const DOCX_REF_REPLICA_LOADING_ANSWERS = {
+  getDocument: null,
+  getEditorRef: null,
+  getSelectionInfo: null,
+  getPageContent: null,
+  scrollToParaId: false,
+  scrollToCommentId: false,
+  scrollToChangeId: false,
+  findInDocument: [],
+} satisfies Partial<{
+  [Member in keyof DocxEditorRef]: DocxEditorRef[Member] extends (...args: never[]) => infer Result ? Result : never;
+}>;
+
+export const DOCX_REF_REPLICA_LOADING_MUTATIONS: ReadonlySet<keyof DocxEditorRef> = new Set([
+  'proposeChange', 'applyFormatting', 'setParagraphStyle', 'insertBreak', 'addComment',
+]);
+
 /**
- * Thrown by a synchronous editor ref member that needs the document on the main thread while a
- * read-only `experimentalWorkerOpen` editor still holds it, with host proposals, in its worker. The
- * document starts loading; await `flushPendingInput()` (or the member's async counterpart) and call
- * it again.
+ * Thrown by synchronous mutations proposeChange, applyFormatting, setParagraphStyle, insertBreak
+ * and addComment while the editor's main-thread copy is loading. Await flushPendingInput() and
+ * call it again, or use the member's async counterpart.
  */
 export class DocxReplicaNotReadyError extends Error {
   constructor(readonly member: string) {
+    const twin = member in DOCX_REF_ASYNC_TWINS
+      ? DOCX_REF_ASYNC_TWINS[member as keyof typeof DOCX_REF_ASYNC_TWINS]
+      : undefined;
     super(
       `${member} needs the document on the main thread, which is still loading; ` +
-        'await flushPendingInput() and call it again'
+        'await flushPendingInput() and call it again' +
+        (twin ? `, or use ${typeof twin === 'string' ? twin : twin.join(' or ')}` : '')
     );
     this.name = 'DocxReplicaNotReadyError';
   }
@@ -272,6 +294,7 @@ const WORKER_PROPOSAL_ACCESS: ReadonlySet<keyof DocxEditorRef> = new Set([
 function gateReplicaAccess(
   api: DocxEditorRef,
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  hostEditorRef: React.RefObject<PagedEditorRef | null>,
   enabled: boolean,
   viewer: () => boolean
 ): DocxEditorRef {
@@ -283,7 +306,8 @@ function gateReplicaAccess(
     if ((access !== 'await' && access !== 'sync') || typeof call !== 'function') continue;
     Object.defineProperty(gated, key, {
       value: (...args: unknown[]) => {
-        const session = pagedEditorRef.current?.getYrsSession();
+        const editor = DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key) ? hostEditorRef.current : pagedEditorRef.current;
+        const session = editor?.getYrsSession();
         if (viewer() || (session && workerOpenDocumentHeld(session))) {
           return Reflect.apply(call, api, args);
         }
@@ -295,6 +319,16 @@ function gateReplicaAccess(
             return Reflect.apply(call, api, args);
           }
           if (access === 'sync') {
+            if (!isWorkerViewer(editor) && workerOpenReplicaPending(session)) {
+              if (DOCX_REF_REPLICA_LOADING_MUTATIONS.has(key)) {
+                throw new DocxReplicaNotReadyError(key);
+              }
+              if (key in DOCX_REF_REPLICA_LOADING_ANSWERS) {
+                const answer = DOCX_REF_REPLICA_LOADING_ANSWERS[key as keyof typeof DOCX_REF_REPLICA_LOADING_ANSWERS];
+                return Array.isArray(answer) ? answer.slice() : answer;
+              }
+              return Reflect.apply(call, api, args);
+            }
             // Proposals only the worker holds cannot be rebuilt here: the replica takes them over.
             if (workerProposalAuthority(session)?.holdsWorkerState()) {
               void requestWorkerOpenReplica(session)?.catch(() => {});
@@ -302,6 +336,7 @@ function gateReplicaAccess(
             }
             ensureWorkerOpenReplica(session, key);
           } else {
+            if (key === 'flushPendingInput') requestWorkerOpenReplicaReadiness(session);
             const ready = awaitWorkerOpenReplica(session);
             if (ready) {
               const timeoutMs =
@@ -1132,7 +1167,7 @@ export function useDocxEditorRefApi({
       },
       ...hostSearch,
     };
-    const api = gateReplicaAccess(direct, pagedEditorRef, experimentalWorkerOpen, refusing);
+    const api = gateReplicaAccess(direct, pagedEditorRef, hostEditorRef, experimentalWorkerOpen, refusing);
     const editRefusal = (request: Parameters<DocxEditorRef['applyEdits']>[0]) => {
       const session = pagedEditorRef.current?.getYrsSession();
       return session ? modeRefusal(session, modeRef.current, request) : null;

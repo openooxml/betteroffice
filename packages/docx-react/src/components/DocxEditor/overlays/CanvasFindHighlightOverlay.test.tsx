@@ -118,6 +118,33 @@ function fixture() {
   };
 }
 
+test('passes the visible page window to range rect queries', () => {
+  const { host, target, queries, matches } = fixture();
+  const calls: number[][] = [];
+  queries.rangeRectsOnPages = (from, to, firstPage, lastPage) => {
+    calls.push([from, to, firstPage, lastPage]);
+    return [{ pageIndex: Math.floor(from / 100), x: 100, y: 200, width: 30, height: 12 }];
+  };
+  queries.rangeRects = () => {
+    throw new Error('unexpected unrestricted range query');
+  };
+  const view = render(
+    <CanvasFindHighlightOverlay
+      matches={matches}
+      currentIndex={1}
+      overlayTarget={target}
+      canvasHostRef={{ current: host }}
+      displayListQueries={queries}
+      sidebarOpen={false}
+      zoom={1}
+    />
+  );
+  expect(calls).toEqual([[10, 13, 0, 1], [110, 113, 0, 1]]);
+  expect(target.querySelectorAll('.docx-find-highlight')).toHaveLength(1);
+  expect(target.querySelectorAll('.docx-find-highlight-current')).toHaveLength(1);
+  view.unmount();
+});
+
 test('resolves only the matches on the pages in view, and follows scrolling', async () => {
   const { host, target, queries, matches, queried, mountPage, scrollTo } = fixture();
   const view = render(

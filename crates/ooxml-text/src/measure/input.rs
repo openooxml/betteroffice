@@ -38,6 +38,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use serde::Deserialize;
 
@@ -117,7 +118,7 @@ pub enum FontChains<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct FontChainDependencies {
-    chains: BTreeMap<String, Option<Vec<u32>>>,
+    chains: Arc<BTreeMap<String, Option<Vec<u32>>>>,
     unknown: bool,
 }
 
@@ -162,12 +163,17 @@ impl FontChainDependencies {
                 .all(|(key, ids)| chains.lookup(key) == ids.as_deref())
     }
 
+    /// @internal
+    #[doc(hidden)]
+    pub fn matches_unchanged(&self) -> bool {
+        !self.unknown
+    }
+
     pub fn extend(&mut self, other: &Self) {
         self.unknown |= other.unknown;
-        for (key, ids) in &other.chains {
-            self.chains
-                .entry(key.clone())
-                .or_insert_with(|| ids.clone());
+        let chains = Arc::make_mut(&mut self.chains);
+        for (key, ids) in other.chains.iter() {
+            chains.entry(key.clone()).or_insert_with(|| ids.clone());
         }
     }
 
@@ -200,8 +206,7 @@ impl FontChains<'_> {
             if let Some(dependencies) = reads.borrow_mut().last_mut()
                 && !dependencies.chains.contains_key(key)
             {
-                dependencies
-                    .chains
+                Arc::make_mut(&mut dependencies.chains)
                     .insert(key.to_owned(), ids.map(<[u32]>::to_vec));
             }
         });
@@ -716,6 +721,100 @@ pub(super) fn validate_pt_size(size_pt: f32, name: &str) -> Result<(), MeasureEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captured_dependencies_share_chains_until_extended() {
+        let map = BTreeMap::from([
+            ("requested|0|0".to_owned(), vec![0, 1]),
+            ("other|0|0".to_owned(), vec![2]),
+        ]);
+        let chains = FontChains::BTree(&map);
+        let (_, original) = FontChainDependencies::capture(|| {
+            chains.get("requested|0|0");
+            chains.get("missing|0|0");
+        });
+        let mut retained = original.clone();
+        assert!(Arc::ptr_eq(&original.chains, &retained.chains));
+        assert_eq!(Arc::strong_count(&original.chains), 2);
+        let reused = vec![original.clone(); 64];
+        assert_eq!(Arc::strong_count(&original.chains), reused.len() + 2);
+        assert!(
+            reused
+                .iter()
+                .all(|record| Arc::ptr_eq(&original.chains, &record.chains))
+        );
+        let (_, added) = FontChainDependencies::capture(|| chains.get("other|0|0"));
+        retained.extend(&added);
+        assert!(!Arc::ptr_eq(&original.chains, &retained.chains));
+        assert!(!original.chains.contains_key("other|0|0"));
+        assert!(retained.chains.contains_key("other|0|0"));
+        assert!(original.matches(chains));
+        assert!(retained.matches(chains));
+
+        let (_, recorded) = FontChainDependencies::capture(|| original.record());
+        assert_eq!(recorded.chains, original.chains);
+        assert!(recorded.matches(chains));
+        let mut changed = map;
+        changed.insert("missing|0|0".to_owned(), vec![3]);
+        assert!(!original.matches(FontChains::BTree(&changed)));
+        assert!(!retained.matches(FontChains::BTree(&changed)));
+        assert!(!FontChainDependencies::unknown().matches_unchanged());
+    }
+
+    #[test]
+    fn unchanged_dependency_decisions_match_the_lookup_oracle() {
+        let captured = BTreeMap::from([
+            ("requested|0|0".to_owned(), vec![0]),
+            ("stable|0|0".to_owned(), vec![0, 1]),
+        ]);
+        let records: Vec<_> = ["requested|0|0", "stable|0|0", "missing|0|0"]
+            .into_iter()
+            .map(|key| {
+                FontChainDependencies::capture(|| {
+                    FontChains::BTree(&captured).get(key);
+                })
+                .1
+            })
+            .chain([
+                FontChainDependencies::default(),
+                FontChainDependencies::unknown(),
+            ])
+            .collect();
+        let mut appended = captured.clone();
+        appended.insert("missing|0|0".to_owned(), vec![2]);
+        let mut replaced = captured.clone();
+        replaced.insert("requested|0|0".to_owned(), vec![2]);
+        let mut removed = captured.clone();
+        removed.remove("requested|0|0");
+        for map in [
+            captured.clone(),
+            appended,
+            replaced,
+            removed,
+            BTreeMap::new(),
+        ] {
+            let expected: Vec<_> = records
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| {
+                    record.matches(FontChains::BTree(&map)).then_some(index)
+                })
+                .collect();
+            let actual: Vec<_> = records
+                .iter()
+                .enumerate()
+                .filter_map(|(index, record)| {
+                    let matches = if map == captured {
+                        record.matches_unchanged()
+                    } else {
+                        record.matches(FontChains::BTree(&map))
+                    };
+                    matches.then_some(index)
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn unknown_font_dependencies_remain_unknown_when_extended_and_recorded() {

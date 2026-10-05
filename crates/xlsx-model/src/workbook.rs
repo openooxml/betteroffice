@@ -179,6 +179,18 @@ impl Sheet {
             .map(|(&(row, col), &spill)| (CellRef::new(row, col), spill))
     }
 
+    #[doc(hidden)]
+    pub fn array_formulas_after(
+        &self,
+        after: Option<(RowId, ColId)>,
+    ) -> impl Iterator<Item = (CellRef, CellRange)> + '_ {
+        use std::ops::Bound::{Excluded, Unbounded};
+
+        self.array_formulas
+            .range((after.map_or(Unbounded, Excluded), Unbounded))
+            .map(|(&(row, col), &spill)| (CellRef::new(row, col), spill))
+    }
+
     pub fn cell(&self, at: CellRef) -> Option<&Cell> {
         self.cells.get(&(at.row, at.col))
     }

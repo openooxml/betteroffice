@@ -92,6 +92,57 @@ pub struct FlowState {
     pub deferred_spacing: f64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct OpeningFragmentGeometry {
+    size: Size,
+    margins: PageMargins,
+    active_margins: PageMargins,
+    body_margins: PageMargins,
+    body_anchor_margins: PageMargins,
+    content_width: f64,
+    column_width: f64,
+    columns: Option<ColumnLayout>,
+    float_bands: Vec<PageFloatBand>,
+    footnote_reserved_height: Option<f64>,
+}
+
+impl OpeningFragmentGeometry {
+    fn capture(paginator: &Paginator, idx: usize) -> Self {
+        let page = &paginator.pages[paginator.states[idx].page_index];
+        Self {
+            size: page.size.clone(),
+            margins: page.margins.clone(),
+            active_margins: paginator.margins.clone(),
+            body_margins: page.body_margins.as_ref().unwrap_or(&page.margins).clone(),
+            body_anchor_margins: page
+                .body_anchor_margins
+                .as_ref()
+                .unwrap_or(&page.margins)
+                .clone(),
+            content_width: paginator.get_content_width(),
+            column_width: paginator.column_width(),
+            columns: page.columns.clone(),
+            float_bands: page.float_bands.clone(),
+            footnote_reserved_height: page.footnote_reserved_height,
+        }
+    }
+
+    fn matches(&self, paginator: &Paginator, idx: usize) -> bool {
+        let page = &paginator.pages[paginator.states[idx].page_index];
+        self.size == page.size
+            && self.margins == page.margins
+            && self.active_margins == paginator.margins
+            && &self.body_margins == page.body_margins.as_ref().unwrap_or(&page.margins)
+            && &self.body_anchor_margins
+                == page.body_anchor_margins.as_ref().unwrap_or(&page.margins)
+            && self.content_width == paginator.get_content_width()
+            && self.column_width == paginator.column_width()
+            && self.columns == page.columns
+            && self.float_bands == page.float_bands
+            && self.footnote_reserved_height == page.footnote_reserved_height
+    }
+}
+
 /// Splits the content width evenly after subtracting the inter-column gaps.
 fn calculate_column_width(
     page_width: f64,
@@ -686,6 +737,7 @@ impl Paginator {
             number: page_number,
             fragments: Vec::new(),
             float_bands,
+            opening_fragment_geometry: None,
             margins,
             body_margins,
             body_anchor_margins,
@@ -903,6 +955,8 @@ impl Paginator {
             .leading_spacing(space_before)
             .max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
+        let opening_geometry = (!self.fits(total_height, cur))
+            .then(|| Box::new(OpeningFragmentGeometry::capture(self, cur)));
 
         let idx = self.ensure_fits(total_height);
 
@@ -915,6 +969,10 @@ impl Paginator {
 
         fragment.set_xy(x, y);
         let page_index = self.states[idx].page_index;
+        if self.pages[page_index].fragments.is_empty() {
+            let opening_geometry = opening_geometry.filter(|geometry| !geometry.matches(self, idx));
+            self.pages[page_index].opening_fragment_geometry = opening_geometry;
+        }
         self.pages[page_index].fragments.push(fragment);
         if self.pages[page_index].fragments.len() == 1 {
             self.page_start_spacing_spent = self.leading_spacing_spent;

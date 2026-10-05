@@ -523,6 +523,22 @@ pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String
     hit::range_rects_json(display_list, from as i64, to as i64).map_err(|e| JsValue::from_str(&e))
 }
 
+/// @internal
+#[wasm_bindgen]
+pub fn range_rects_on_pages_json(
+    display_list: &str,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String, JsValue> {
+    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
+        return Ok("[]".to_string());
+    };
+    hit::range_rects_on_pages_json(display_list, from as i64, to as i64, first_page, last_page)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 /// wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
 /// `region` is `"body" | "header" | "footer" | "footnote" | "endnote"`;
 /// `part_id` scopes a header/footer to one HF part (empty for body / match-any)
@@ -622,6 +638,22 @@ pub fn vertical_move_by_handle(
 #[wasm_bindgen]
 pub fn range_rects_by_handle(handle: u32, from: f64, to: f64) -> Result<String, JsValue> {
     session::range_rects_by_handle(handle, from as i64, to as i64)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+/// @internal
+#[wasm_bindgen]
+pub fn range_rects_on_pages_by_handle(
+    handle: u32,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String, JsValue> {
+    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
+        return Ok("[]".to_string());
+    };
+    session::range_rects_on_pages_by_handle(handle, from as i64, to as i64, first_page, last_page)
         .map_err(|e| JsValue::from_str(&e))
 }
 

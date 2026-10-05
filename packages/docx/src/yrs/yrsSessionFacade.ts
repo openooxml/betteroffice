@@ -617,6 +617,22 @@ export function wrapSession(
     displayVerticalMoveJson: (position, direction, goalX) =>
       session.display_vertical_move_json(position, direction, goalX),
     displayRangeRectsJson: (from, to) => session.display_range_rects_json(from, to),
+    displayRangeRectsOnPagesJson: (from, to, firstPage, lastPage) => {
+      const query = (session as EditSession & {
+        display_range_rects_on_pages_json?: (
+          from: number,
+          to: number,
+          firstPage: number,
+          lastPage: number
+        ) => string;
+      }).display_range_rects_on_pages_json;
+      if (query) return query.call(session, from, to, firstPage, lastPage);
+      return JSON.stringify(
+        (JSON.parse(session.display_range_rects_json(from, to)) as { pageIndex: number }[]).filter(
+          (rect) => rect.pageIndex >= firstPage && rect.pageIndex <= lastPage
+        )
+      );
+    },
     displayRangeRectsRegionJson: (region, rId, from, to) =>
       session.display_range_rects_region_json(region, rId, from, to),
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),

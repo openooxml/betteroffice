@@ -562,6 +562,24 @@ pub fn range_rects_by_handle(handle: u32, from: i64, to: i64) -> Result<String, 
     })
 }
 
+pub fn range_rects_on_pages_by_handle(
+    handle: u32,
+    from: i64,
+    to: i64,
+    first_page: usize,
+    last_page: usize,
+) -> Result<String, String> {
+    SESSIONS.with(|s| {
+        let sessions = s.borrow();
+        let dl = sessions
+            .get(handle)
+            .ok_or_else(|| format!("unknown display-list handle {handle}"))?;
+        let pages = first_page..last_page.saturating_add(1).min(dl.pages.len());
+        serde_json::to_string(&range_rects_on_pages(dl, pages, from, to))
+            .map_err(|e| format!("serialize: {e}"))
+    })
+}
+
 /// Region-aware range rects against a stored display list — the by-handle twin
 /// of [`crate::hit::range_rects_region_json`]. `region` is
 /// `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
