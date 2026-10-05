@@ -324,3 +324,83 @@ fn changed_spill_range_uses_legacy_rewrite() {
     assert_eq!(saved, legacy);
     assert!(cells(&saved)["A1"].contains(r#"<f t="array" ref="A1">A3</f>"#));
 }
+
+#[test]
+fn cache_types_and_styles_preserve_markup_like_oracle() {
+    for cached in ["", "<v/>", "<v>1.00</v>"] {
+        let source = format!(
+            r#"<sheetData><row r="1"><c r="A1" ph="1"><f ca="1">A2</f>{cached}<extLst><ext uri="cache"/></extLst></c></row></sheetData>"#
+        );
+        let parsed = parsed(&source);
+        for (value, ty, cached) in [
+            (number(3.25), "", "<v>3.25</v>"),
+            (CellValue::Bool { value: false }, r#" t="b""#, "<v>0</v>"),
+            (
+                CellValue::Error {
+                    value: ErrorValue::NA,
+                },
+                r#" t="e""#,
+                "<v>#N/A</v>",
+            ),
+            (
+                CellValue::Text {
+                    value: "text & <value>".to_owned(),
+                },
+                r#" t="str""#,
+                "<v>text &amp; &lt;value&gt;</v>",
+            ),
+            (CellValue::Empty, "", ""),
+        ] {
+            let mut workbook = parsed.workbook.clone();
+            edit(&mut workbook, "A1", |cell| {
+                cell.value = value;
+                cell.style = Some(1);
+            });
+            let saved = save(&parsed, &workbook, Some(SheetAxes::default()));
+            let (oracle, _) =
+                with_legacy_save_path(|| save(&parsed, &workbook, Some(SheetAxes::default())));
+            assert_eq!(saved, oracle);
+            assert_eq!(
+                cells(&saved)["A1"],
+                format!(
+                    r#"<c r="A1" ph="1" s="1"{ty}><f ca="1">A2</f>{cached}<extLst><ext uri="cache"/></extLst></c>"#
+                )
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_cache_edits_and_uniform_moves_match_oracle() {
+    for moved in [false, true] {
+        let parsed = parsed(SHARED);
+        let mut workbook = parsed.workbook.clone();
+        let mut axes = SheetAxes::default();
+        if moved {
+            workbook.sheets[0].remap_cells(|at| Some(CellRef::new(at.row + 1, at.col)));
+            axes.rows.insert(0, 1);
+        }
+        let master = if moved { "B2" } else { "B1" };
+        let follower = if moved { "B3" } else { "B2" };
+        edit(&mut workbook, master, |cell| cell.value = number(8.0));
+        edit(&mut workbook, follower, |cell| {
+            cell.value = number(10.0);
+            cell.style = Some(1);
+        });
+        let saved = save(&parsed, &workbook, Some(axes.clone()));
+        let (oracle, _) = with_legacy_save_path(|| save(&parsed, &workbook, Some(axes)));
+        assert_eq!(saved, oracle);
+        let saved = cells(&saved);
+        let reference = if moved { "B2:B4" } else { "B1:B3" };
+        assert_eq!(
+            saved[master],
+            format!(
+                r#"<c r="{master}"><f t="shared" ref="{reference}" si="0">A1*2</f><v>8</v></c>"#
+            )
+        );
+        assert_eq!(
+            saved[follower],
+            format!(r#"<c r="{follower}" s="1"><f t="shared" si="0"/><v>10</v></c>"#)
+        );
+    }
+}

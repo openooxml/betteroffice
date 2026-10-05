@@ -872,16 +872,8 @@ fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usiz
                 depth += 1;
             }
             Event::Empty(element) if depth == 1 => match element.local_name().as_ref() {
-                b"f" => {
-                    if formula_end.replace(after).is_some() {
-                        return Ok(None);
-                    }
-                }
-                b"v" => {
-                    if value.replace(before..after).is_some() {
-                        return Ok(None);
-                    }
-                }
+                b"f" if formula_end.replace(after).is_some() => return Ok(None),
+                b"v" if value.replace(before..after).is_some() => return Ok(None),
                 b"is" => return Ok(None),
                 _ => {}
             },
@@ -892,16 +884,8 @@ fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usiz
                 }
                 if depth == 1 {
                     match element.local_name().as_ref() {
-                        b"f" => {
-                            if formula_end.replace(after).is_some() {
-                                return Ok(None);
-                            }
-                        }
-                        b"v" => {
-                            if value.replace(child_start..after).is_some() {
-                                return Ok(None);
-                            }
-                        }
+                        b"f" if formula_end.replace(after).is_some() => return Ok(None),
+                        b"v" if value.replace(child_start..after).is_some() => return Ok(None),
                         _ => {}
                     }
                 }
