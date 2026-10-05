@@ -318,7 +318,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           if (previous?.operation && previous.input !== undefined) acceptedCells.set(key, previous.input);
           else acceptedCells.delete(key);
         }
-        if (!previewOps.size && revision === previewState.revision && !run.retiring) {
+        if (!previewOps.size && (current || revision === previewState.revision) && !run.retiring) {
           setPreviewDraft(previewState.committed);
           previewState.request = null;
         } else if (current && !run.retiring) {

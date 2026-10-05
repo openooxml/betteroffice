@@ -790,6 +790,7 @@ export function createWorkerInputCoordinator(
     requestHydration,
     flush() {
       current();
+      if (failure) return Promise.reject(failure.error);
       const lease = cycle;
       const barrierAfter = acknowledgedRefusal;
       const flushed = runAfterPendingInput(async (_, markApplied) => {
