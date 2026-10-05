@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { PluginInvocation } from '../../../../../../shared/plugin-host/runtime';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import * as yrsFacade from '@betteroffice/docx/yrs';
@@ -45,21 +46,23 @@ import type { DocxEditorCollaborationOptions } from '../types';
 import { awaitWorkerOpenReplica, ensureWorkerOpenReplica, requestWorkerOpenReplica, workerOpenDocumentHeld } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import { useViewerSession } from '../internals/viewerSession';
-import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf } from '../internals/layoutProvenance';
+import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewKey, revisionPreviewKeyOf, sourceVersionOf, stampSourceVersion } from '../internals/layoutProvenance';
 import { workerOpenSave } from '../internals/workerOpenSave';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
 import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
-import { UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
+import { createDocxCommandController, DocxCommandAdmissionError, UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
+import { testBinding } from '../../../commands/testing';
 import { createCommentIdAllocator } from '../commentFactories';
 import { DOCX_REF_REPLICA_LOADING_MUTATIONS, DocxAsyncOnlyError, DocxReplicaNotReadyError, useDocxEditorRefApi } from './useDocxEditorRefApi';
 import { usePagedEditorCommandBridge, type PagedEditorCommandBridge } from './usePagedEditorRefApi';
 import { YrsInput, type YrsInputRef } from '../YrsInput';
 import { flushEditorInput } from '../editorBatches';
 import { defineDocxPlugin } from '../../../plugins/defineDocxPlugin';
-import type { DocxPlugin, DocxPluginContext, DocxPluginEvent } from '../../../plugins/types';
+import { createPluginClients } from '../../../plugins/createPluginClients';
+import type { DocxPlugin, DocxPluginContext, DocxPluginEvent, DocxPluginSnapshot } from '../../../plugins/types';
 import * as pluginHosts from '../../../plugins/useDocxPluginHost';
 import * as pluginHostFactories from '../../../plugins/createDocxPluginHost';
 
@@ -324,6 +327,7 @@ interface HarnessProps {
   workerPreview?: boolean;
   handleSave?: () => Promise<ArrayBuffer>;
   openInWorker?: OpenInWorker;
+  onWorkerOpen?: (worker: Awaited<ReturnType<OpenInWorker>>) => void;
   openPreviewInWorker?: OpenPreviewInWorker;
   source: Uint8Array;
   generation: number;
@@ -385,8 +389,13 @@ function useHarness(props: HarnessProps) {
   }, []);
   const loadChecks = useRef<number[]>([]);
   const openInWorker = useCallback<OpenInWorker>((session, source, digest, generation) => {
-    return (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
-  }, [props.openInWorker, renderer.openInWorker]);
+    const opening = (props.openInWorker ?? renderer.openInWorker)(session, source, digest, generation);
+    if (!props.onWorkerOpen) return opening;
+    return opening.then((worker) => {
+      props.onWorkerOpen?.(worker);
+      return worker;
+    });
+  }, [props.onWorkerOpen, props.openInWorker, renderer.openInWorker]);
   const core = useYrsCoreSession(
     true, host?.document ?? null, props.loader?.yrsSeedDocument ?? null,
     props.loader ? props.loader.yrsSeedBytes : props.source, generation, props.collaboration,
@@ -5375,7 +5384,7 @@ async function pendingFontEditor() {
   }
 }
 
-function holdPeerFallback() {
+function holdPeerFallback(options: { allTimers?: boolean } = {}) {
   const schedule = globalThis.setTimeout;
   const unschedule = globalThis.clearTimeout;
   const timers = new Map<number, { at: number; callback: () => void }>();
@@ -5383,9 +5392,9 @@ function holdPeerFallback() {
   let nextId = 0;
   globalThis.setTimeout = ((...input: Parameters<typeof setTimeout>) => {
     const [callback, delay, ...args] = input;
-    if (delay === 10_000 && typeof callback === 'function') {
+    if ((options.allTimers || delay === 10_000) && typeof callback === 'function') {
       const id = --nextId;
-      timers.set(id, { at: now + delay, callback: () => callback(...args) });
+      timers.set(id, { at: now + (delay ?? 0), callback: () => callback(...args) });
       return id as unknown as ReturnType<typeof setTimeout>;
     }
     return schedule(callback, delay, ...args);
@@ -5395,13 +5404,28 @@ function holdPeerFallback() {
   }) as typeof clearTimeout;
   return {
     timers,
+    get now() { return now; },
     advance(ms: number) {
-      now += ms;
-      for (const [id, timer] of [...timers]) {
-        if (timer.at > now) continue;
+      if (!options.allTimers) {
+        now += ms;
+        for (const [id, timer] of [...timers]) {
+          if (timer.at > now) continue;
+          timers.delete(id);
+          timer.callback();
+        }
+        return;
+      }
+      const target = now + ms;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        const [id, timer] = next;
+        now = timer.at;
         timers.delete(id);
         timer.callback();
       }
+      now = target;
     },
     restore: registerRestore(() => {
       globalThis.setTimeout = schedule;
@@ -7731,6 +7755,283 @@ test.each([
   },
   15_000
 );
+
+function observePluginFallback<T>(promise: Promise<T>, clock: ReturnType<typeof holdPeerFallback>) {
+  const outcome = {
+    settled: false,
+    value: undefined as T | undefined,
+    error: undefined as unknown,
+    at: undefined as number | undefined,
+  };
+  void promise.then(
+    (value) => { outcome.settled = true; outcome.value = value; outcome.at = clock.now; },
+    (error: unknown) => { outcome.settled = true; outcome.error = error; outcome.at = clock.now; }
+  );
+  return outcome;
+}
+
+async function flushPluginFallback(clock: ReturnType<typeof holdPeerFallback>) {
+  for (let turn = 0; turn < 12; turn += 1) {
+    await act(async () => {
+      clock.advance(0);
+      for (let microtask = 0; microtask < 12; microtask += 1) await Promise.resolve();
+    });
+  }
+}
+
+async function openingPluginFallback() {
+  const source = await longFixture(2);
+  const worker = installWorker({ holdState: true, holdCompletion: true });
+  const frames = holdFrames(true);
+  const clock = holdPeerFallback({ allTimers: true });
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const deferred = spyOn(replicaHelpers, 'deferWorkerOpenReplica');
+  let opened!: NonNullable<Awaited<ReturnType<OpenInWorker>>>;
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, source, layoutCompleteSession: null,
+      onWorkerOpen: (worker) => { if (worker) opened = worker; },
+    },
+  });
+  await flushPluginFallback(clock);
+  expect(result.current.host).not.toBeNull();
+  expect(opened).toBeDefined();
+  const session = result.current.core.session!;
+  expect(session.storyIds()).toEqual([]);
+  expect(result.current.core.replicaReady).toBe(false);
+  const replicaIndex = deferred.mock.calls.findIndex(([owner]) => owner === session);
+  expect(replicaIndex).toBeGreaterThanOrEqual(0);
+  const replica = deferred.mock.results[replicaIndex]!.value as ReturnType<typeof replicaHelpers.deferWorkerOpenReplica>;
+  const snapshot = observePluginFallback(opened.documentRead({
+    kind: 'readParagraphs', request: { view: 'accepted' },
+  }), clock);
+  await flushPluginFallback(clock);
+  expect(snapshot.settled).toBe(true);
+  expect(snapshot.error).toBeUndefined();
+  if (!snapshot.value?.value.ok) throw new Error('The worker paragraph read did not succeed');
+  const version = snapshot.value.version;
+  const paragraphs = snapshot.value.value.paragraphs;
+  expect(paragraphs.map((paragraph) => paragraph.text)).toEqual(['First paragraph', 'Tail paragraph']);
+  const editor = result.current.pagedEditorRef.current!;
+  const focus = mock(() => {});
+  Object.assign(editor, { focus });
+  const flush = spyOn(editor, 'flushPendingInput').mockImplementation(async () => {
+    await replicaHelpers.awaitWorkerOpenReplica(session);
+  });
+  const start = spyOn(replica, 'start');
+  const ensure = spyOn(replica, 'ensure');
+  const requestReady = spyOn(replica, 'requestReady');
+  const requested = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+  const ensured = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+  const readinessRequested = spyOn(replicaHelpers, 'requestWorkerOpenReplicaReadiness');
+  const ready = spyOn(replicaHelpers, 'awaitWorkerOpenReplica');
+  const load = spyOn(session, 'loadState');
+  const apply = spyOn(session, 'applyEdits');
+  const selection = spyOn(session, 'setSelection');
+  const binding = testBinding();
+  binding.state.admission = async () => {
+    const flushed = await flushEditorInput(result.current.pagedEditorRef);
+    if (!flushed.ok) throw new DocxCommandAdmissionError(flushed.code);
+  };
+  const commands = createDocxCommandController();
+  commands.attach(binding.binding);
+  const controller = new AbortController();
+  const lifetime = new AbortController();
+  const invocation: PluginInvocation<DocxPluginSnapshot> = {
+    pluginId: 'acme.review',
+    activation: {},
+    snapshot: {} as DocxPluginSnapshot,
+    signal: controller.signal,
+    lifetimeSignal: lifetime.signal,
+    state: () => null,
+    setState: () => false,
+    onCleanup: () => {},
+    run: async () => {},
+    commit: (write) => write(),
+    refusal: () => controller.signal.aborted ? 'aborted' : null,
+  };
+  const queries = {
+    sourceState: () => ({ status: 'ready' }),
+    anchorRect: () => ({ pageIndex: 0, x: 0, y: 0, width: 1, height: 1 }),
+  } as unknown as DisplayListQueries;
+  stampSourceVersion(queries, version);
+  const clients = createPluginClients(invocation, {
+    pagedEditorRef: result.current.pagedEditorRef,
+    writeMode: () => 'editing',
+    viewer: () => false,
+    commands: () => commands,
+    layout: () => ({ queries, complete: false, failed: false }),
+    subscribeLayout: (listener) => session.onUpdate(listener),
+  }, () => ({ document: 'write', editBatches: true }), commands.store);
+  return {
+    worker, frames, clock, tasks, visibility, result, unmount, session, replica,
+    version, paragraphs, clients, focus, flush, start, ensure, requestReady,
+    requested, ensured, readinessRequested, ready, load, apply, selection, binding,
+  };
+}
+
+async function expectPluginOwnerFallback(
+  calls: (env: Awaited<ReturnType<typeof openingPluginFallback>>) => readonly Promise<unknown>[],
+  complete: (values: readonly unknown[], env: Awaited<ReturnType<typeof openingPluginFallback>>) => void
+) {
+  const env = await openingPluginFallback();
+  const { clock, replica, result, session, worker } = env;
+  let outcomes: ReturnType<typeof observePluginFallback>[] = [];
+  try {
+    expect(clock.now).toBe(0);
+    expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.pagedEditorRef.current?.hasPendingInput()).toBe(false);
+    outcomes = calls(env).map((call) => observePluginFallback(call, clock));
+    await flushPluginFallback(clock);
+    expectUnstarted();
+    await act(async () => { clock.advance(9_999); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(9_999);
+    expectUnstarted();
+    await act(async () => { clock.advance(2); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(10_001);
+    expect(replica.started).toBe(true);
+    expect(env.start).toHaveBeenCalledTimes(1);
+    expect(env.requested.mock.calls).toEqual([[session]]);
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(env.load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    expectPassiveCall();
+    await act(async () => { worker.workers[0]!.release(); });
+    await flushPluginFallback(clock);
+    expect(env.tasks.tasks).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    await act(async () => { await env.tasks.run(); });
+    await flushPluginFallback(clock);
+    expect(env.load).toHaveBeenCalledTimes(1);
+    expect(env.tasks.tasks).toHaveLength(1);
+    await act(async () => { await env.tasks.run(); });
+    await flushPluginFallback(clock);
+    expect(replica.hydrated).toBe(true);
+    expect(replica.pending).toBe(true);
+    expect(session.version()).toBe(env.version);
+    expect(clock.now).toBe(10_001);
+    expect(result.current.core.replicaReady).toBe(false);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    await act(async () => { clock.advance(2_999); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(13_000);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    await act(async () => { clock.advance(27_001); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(10_000 + 30_000 + 1);
+    for (const outcome of outcomes) {
+      expect(outcome.settled).toBe(true);
+      expect(outcome.error).toBeUndefined();
+      expect(outcome.at).toBeLessThanOrEqual(10_000 + 30_000 + 1);
+    }
+    expect(replica.pending).toBe(false);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(env.start).toHaveBeenCalledTimes(1);
+    expect(env.requested.mock.calls).toEqual([[session]]);
+    expect(env.load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(result.current.errors).toEqual([]);
+    expectPassiveCall();
+    complete(outcomes.map((outcome) => outcome.value), env);
+  } finally {
+    env.unmount();
+    env.visibility.restore();
+    env.tasks.restore();
+    env.clock.restore();
+    env.frames.restore();
+  }
+
+  function expectPassiveCall() {
+    expect(env.ensure).not.toHaveBeenCalled();
+    expect(env.requestReady).not.toHaveBeenCalled();
+    expect(env.ensured).not.toHaveBeenCalled();
+    expect(env.readinessRequested).not.toHaveBeenCalled();
+    expect(env.ready.mock.calls).toEqual(outcomes.map(() => [session]));
+    expect(env.flush).toHaveBeenCalledTimes(outcomes.length);
+    expect(result.current.pagedEditorRef.current?.hasPendingInput()).toBe(false);
+  }
+
+  function expectUnstarted() {
+    expect(replica.pending).toBe(true);
+    expect(replica.started).toBe(false);
+    expect(env.start).not.toHaveBeenCalled();
+    expect(env.requested).not.toHaveBeenCalled();
+    expect(env.load).not.toHaveBeenCalled();
+    expect(env.apply).not.toHaveBeenCalled();
+    expect(env.selection).not.toHaveBeenCalled();
+    expect(env.focus).not.toHaveBeenCalled();
+    expect(env.binding.calls).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toEqual([]);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    expectPassiveCall();
+  }
+}
+
+test('reads and versions issued after worker open wait for the owner fallback and complete by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [
+    env.clients.read.version(),
+    env.clients.read.readParagraphs({ view: 'accepted' }),
+  ], (values, env) => {
+    expect(values[0]).toEqual({ ok: true, version: env.version });
+    expect(values[1]).toEqual(env.session.readParagraphs({ view: 'accepted' }));
+    expect(values[1]).toMatchObject({ ok: true, paragraphs: [
+      expect.objectContaining({ text: 'First paragraph' }),
+      expect.objectContaining({ text: 'Tail paragraph' }),
+    ] });
+  });
+});
+
+test('text search issued after worker open waits for the owner fallback and completes by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [env.clients.read.findText({
+    text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+  })], (values, env) => {
+    expect(values[0]).toEqual(env.session.findText({
+      text: 'Tail', within: { kind: 'story', story: 'body' }, view: 'accepted',
+    }));
+    expect(values[0]).toMatchObject({ ok: true, matches: [expect.objectContaining({ text: 'Tail' })] });
+  });
+});
+
+test('navigation with focus issued after worker open waits for the owner fallback and completes by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [env.clients.navigation.scrollToParagraph(
+    { story: 'body', paraId: env.paragraphs[1]!.paraId },
+    { expectVersion: env.version, focus: true }
+  )], (values, env) => {
+    expect(values).toEqual([{ ok: true }]);
+    expect(env.session.selection()?.head).toMatchObject({
+      story: 'body', paraId: env.paragraphs[1]!.paraId, offset: 0,
+    });
+    expect(env.selection).toHaveBeenCalledTimes(1);
+    expect(env.focus).toHaveBeenCalledTimes(1);
+    expect(env.result.current.searchReveals).toHaveLength(1);
+  });
+});
+
+test('mutations and commands issued after worker open wait for the owner fallback and complete by 40,001 ms without starting the peer', async () => {
+  await expectPluginOwnerFallback((env) => [
+    env.clients.edits!.applyEdits({
+      expectVersion: env.version,
+      steps: [{
+        op: 'replaceText', target: { kind: 'paragraph', story: 'body', paraId: env.paragraphs[0]!.paraId },
+        text: 'Owner-ready edit',
+      }],
+    }),
+    env.clients.commands.execute('reviewNext', null),
+  ], (values, env) => {
+    expect(values[0]).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
+    expect(values[1]).toEqual({ ok: true, status: 'executed' });
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    expect(env.apply).toHaveBeenCalledTimes(1);
+    expect(env.binding.calls).toEqual([{ id: 'reviewNext', args: null, ordered: true }]);
+  });
+});
 
 test.each([false, true])('the ten-second fallback starts the editor peer when layout never settles with ownFrame=%s', async (ownFrame) => {
   const { posted, workers } = installWorker({ holdState: true });
