@@ -2922,7 +2922,8 @@ mod tests {
             })
             .collect();
         let json = serde_json::to_string(&dl).unwrap();
-        let all: Vec<Value> = serde_json::from_str(&range_rects_json(&json, 2, 4).unwrap()).unwrap();
+        let all: Vec<Value> =
+            serde_json::from_str(&range_rects_json(&json, 2, 4).unwrap()).unwrap();
         assert_eq!(all.len(), dl.pages.len());
         let handle = crate::session::open_display_list(&json).unwrap();
         for (first, last) in [
@@ -2942,24 +2943,24 @@ mod tests {
             (0.0, 4294967296.0),
             (4294967296.0, f64::INFINITY),
         ] {
-            let expected: Vec<_> = all
+            let expected: Vec<Value> = all
                 .iter()
                 .filter(|rect| {
                     let index = rect["pageIndex"].as_u64().unwrap() as f64;
                     index >= first.ceil() && index <= last.floor()
                 })
+                .cloned()
                 .collect();
-            let expected_json = serde_json::to_string(&expected).unwrap();
-            assert_eq!(
-                crate::range_rects_on_pages_json(&json, 2.0, 4.0, first, last).unwrap(),
-                expected_json,
-                "JSON {first}..={last}"
-            );
-            assert_eq!(
-                crate::range_rects_on_pages_by_handle(handle, 2.0, 4.0, first, last).unwrap(),
-                expected_json,
-                "handle {first}..={last}"
-            );
+            let by_json: Vec<Value> = serde_json::from_str(
+                &crate::range_rects_on_pages_json(&json, 2.0, 4.0, first, last).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(by_json, expected, "JSON {first}..={last}");
+            let by_handle: Vec<Value> = serde_json::from_str(
+                &crate::range_rects_on_pages_by_handle(handle, 2.0, 4.0, first, last).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(by_handle, expected, "handle {first}..={last}");
         }
         crate::session::close_display_list(handle);
     }
