@@ -497,7 +497,9 @@ fn eval_node_with(
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
-    if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
+    if ctx.has_missing_clock()
+        || (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty)
+    {
         return (None, ctx.exhausted());
     }
     if refused && authored.is_some() {
