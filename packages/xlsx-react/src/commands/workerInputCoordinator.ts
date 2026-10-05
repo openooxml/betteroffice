@@ -634,12 +634,13 @@ export function createWorkerInputCoordinator(
       }, { kind: 'host' });
       void flushed.catch(() => {});
       return Promise.all([requestHydration('flush'), flushed]).then(async () => {
+        const throwFailure = () => { if (failure) throw failure.error; };
         let watermark: number;
         do {
           await wait(pump(), lease);
           current();
           if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
-          if (failure) throw failure.error;
+          throwFailure();
           if (entries.some((entry) => !entry.applied)) {
             throw new XlsxCommandAdmissionError('input-failed');
           }
@@ -647,7 +648,7 @@ export function createWorkerInputCoordinator(
           await wait(hooks.flushEdits(), lease);
           current();
           if (lease !== cycle) throw new XlsxCommandAdmissionError('document-replaced');
-          if (failure) throw failure.error;
+          throwFailure();
         } while (nextId !== watermark || entries.length > 0);
       });
     },
