@@ -117,7 +117,10 @@ beforeEach(() => {
     () => paint.mockRestore(), () => { globalThis.ResizeObserver = observer; });
 });
 afterEach(() => { cleanup(); for (const restore of restorers.reverse()) restore(); restorers.length = 0; });
-afterAll(() => { if (ownsDom) GlobalRegistrator.unregister(); });
+afterAll(async () => {
+  await new Promise((done) => setTimeout(done));
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
 
 test('dispatches_only_flagged_editable_props', async () => {
   const value = session();
