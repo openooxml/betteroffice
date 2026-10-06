@@ -14685,7 +14685,7 @@ mod tests {
                     "../tests/fixtures/field-code-paragraphs/body-field-code-paragraphs.docx"
                 )
                 .as_slice(),
-                false,
+                true,
             ),
             (
                 include_bytes!("../tests/fixtures/suppressed-list-markers.docx").as_slice(),
