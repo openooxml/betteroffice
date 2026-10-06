@@ -196,6 +196,102 @@ fn cell(address: &str) -> CellRef {
 }
 
 #[test]
+fn precedent_edit_keeps_shared_formulas_and_recalculated_caches() {
+    for (name, variant) in VARIANTS {
+        let source = package(variant);
+        let before = parts(&source);
+        let mut workbook = Workbook::open(&source).unwrap();
+        workbook
+            .edit_cell(SheetId(1), cell("A2"), "5", CalculationOptions::default())
+            .unwrap();
+        let after = parts(&workbook.save().unwrap());
+        let source_cells = cells(&text(&before, "xl/worksheets/sheet2.xml"));
+        let saved_cells = cells(&text(&after, "xl/worksheets/sheet2.xml"));
+
+        for address in ["B1", "B2", "B3"] {
+            let expected = if address == "B2" {
+                source_cells[address].replace("<v>4</v>", "<v>10</v>")
+            } else {
+                source_cells[address].clone()
+            };
+            assert_eq!(saved_cells[address], expected, "{name}: {address}");
+            assert!(
+                saved_cells[address].contains(r#"t="shared""#),
+                "{name}: {address}"
+            );
+        }
+        assert!(saved_cells["A2"].contains("<v>5</v>"), "{name}");
+    }
+}
+
+#[test]
+fn master_precedent_edit_keeps_shared_formulas_and_reopens() {
+    for (name, variant) in VARIANTS {
+        let source = package(variant);
+        let before = parts(&source);
+        let mut workbook = Workbook::open(&source).unwrap();
+        workbook
+            .edit_cell(SheetId(1), cell("A1"), "5", CalculationOptions::default())
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let source_cells = cells(&text(&before, "xl/worksheets/sheet2.xml"));
+        let saved_cells = cells(&text(&after, "xl/worksheets/sheet2.xml"));
+        let reopened = Workbook::open(&saved).unwrap();
+
+        for address in ["B1", "B2", "B3"] {
+            let expected = if address == "B1" {
+                source_cells[address].replace("<v>2</v>", "<v>10</v>")
+            } else {
+                source_cells[address].clone()
+            };
+            assert_eq!(saved_cells[address], expected, "{name}: {address}");
+            let current = workbook.model().sheets[1].cell(cell(address)).unwrap();
+            let opened = reopened.model().sheets[1].cell(cell(address)).unwrap();
+            assert_eq!(opened.formula, current.formula, "{name}: {address}");
+            assert_eq!(opened.value, current.value, "{name}: {address}");
+        }
+    }
+}
+
+#[test]
+fn shared_cache_type_change_keeps_formula_markup_and_reopens() {
+    for (name, variant) in VARIANTS {
+        let source = package(variant);
+        let before = parts(&source);
+        let mut workbook = Workbook::open(&source).unwrap();
+        workbook
+            .edit_cell(
+                SheetId(1),
+                cell("A2"),
+                "text",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let saved = workbook.save().unwrap();
+        let after = parts(&saved);
+        let source_cells = cells(&text(&before, "xl/worksheets/sheet2.xml"));
+        let saved_cells = cells(&text(&after, "xl/worksheets/sheet2.xml"));
+        let reopened = Workbook::open(&saved).unwrap();
+
+        for address in ["B1", "B2", "B3"] {
+            let expected = if address == "B2" {
+                source_cells[address]
+                    .replace(r#"s="2""#, r#"s="2" t="e""#)
+                    .replace("<v>4</v>", "<v>#VALUE!</v>")
+            } else {
+                source_cells[address].clone()
+            };
+            assert_eq!(saved_cells[address], expected, "{name}: {address}");
+            let current = workbook.model().sheets[1].cell(cell(address)).unwrap();
+            let opened = reopened.model().sheets[1].cell(cell(address)).unwrap();
+            assert_eq!(opened.formula, current.formula, "{name}: {address}");
+            assert_eq!(opened.value, current.value, "{name}: {address}");
+        }
+    }
+}
+
+#[test]
 fn unrelated_edit_keeps_equivalent_style_indices_and_other_parts() {
     for (name, variant) in VARIANTS {
         let source = package(variant);

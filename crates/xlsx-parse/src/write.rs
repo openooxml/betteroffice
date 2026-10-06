@@ -3051,35 +3051,7 @@ pub(crate) fn write_cell(
     array_ref: Option<xlsx_model::CellRange>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
-    let has_formula = cell.formula.is_some();
-
-    let mut ty: Option<&str> = None;
-    let mut value: Option<String> = None;
-    let mut inline: Option<String> = None;
-    match &cell.value {
-        CellValue::Empty => {}
-        CellValue::Number { value: n } => value = Some(fmt_num(*n)),
-        CellValue::Bool { value: b } => {
-            ty = Some("b");
-            value = Some(if *b { "1" } else { "0" }.to_string());
-        }
-        CellValue::Error { value: e } => {
-            ty = Some("e");
-            value = Some(e.as_str().to_string());
-        }
-        CellValue::Text { value: s } => {
-            if has_formula {
-                ty = Some("str");
-                value = Some(s.clone());
-            } else if let Some(idx) = retained.or_else(|| sst_index.get(s.as_str()).copied()) {
-                ty = Some("s");
-                value = Some(idx.to_string());
-            } else {
-                ty = Some("inlineStr");
-                inline = Some(s.clone());
-            }
-        }
-    }
+    let CellValueMarkup { ty, value, inline } = cell_value_markup(cell, sst_index, retained);
 
     let mut start = BytesStart::new("c");
     start.push_attribute(("r", a1.as_str()));
@@ -3112,6 +3084,50 @@ pub(crate) fn write_cell(
     }
     w.write_event(Event::End(BytesEnd::new("c")))?;
     Ok(())
+}
+
+pub(crate) struct CellValueMarkup {
+    pub(crate) ty: Option<&'static str>,
+    pub(crate) value: Option<String>,
+    inline: Option<String>,
+}
+
+pub(crate) fn cell_value_markup(
+    cell: &Cell,
+    sst_index: &HashMap<&str, usize>,
+    retained: Option<usize>,
+) -> CellValueMarkup {
+    let mut markup = CellValueMarkup {
+        ty: None,
+        value: None,
+        inline: None,
+    };
+    match &cell.value {
+        CellValue::Empty => {}
+        CellValue::Number { value } => markup.value = Some(fmt_num(*value)),
+        CellValue::Bool { value } => {
+            markup.ty = Some("b");
+            markup.value = Some(if *value { "1" } else { "0" }.to_owned());
+        }
+        CellValue::Error { value } => {
+            markup.ty = Some("e");
+            markup.value = Some(value.as_str().to_owned());
+        }
+        CellValue::Text { value } => {
+            if cell.formula.is_some() {
+                markup.ty = Some("str");
+                markup.value = Some(value.clone());
+            } else if let Some(index) = retained.or_else(|| sst_index.get(value.as_str()).copied())
+            {
+                markup.ty = Some("s");
+                markup.value = Some(index.to_string());
+            } else {
+                markup.ty = Some("inlineStr");
+                markup.inline = Some(value.clone());
+            }
+        }
+    }
+    markup
 }
 
 fn write_merges(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
