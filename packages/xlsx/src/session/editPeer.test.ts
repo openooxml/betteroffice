@@ -1,29 +1,35 @@
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { isClientMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
+import JSZip from 'jszip';
+import { isClientMessage, isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
 import type { XlsxEditRequest, XlsxRangeTarget } from '../edits';
 import {
-  openWorkbook, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
+  openWorkbook, workbookPeerHydration, StaleProposalError, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
-import type { WorkbookSession } from './client';
+import { hydratePeer, type WorkbookSession } from './client';
 import {
   createWorkbookEditPeer, WorkbookEditPeerFailedError, type WorkbookEditPeer,
 } from './editPeer';
+import { workbookEditPeerOperations } from './editPeerInternals';
 import { WORKBOOK_SESSION_METHODS, WORKBOOK_SESSION_POLICIES } from './methods';
+import { WorkbookPeerHydrationError } from './peerHydrationError';
 import {
   WORKBOOK_INTERNAL_SESSION_POLICIES,
   workbookSessionInternals,
   type WorkbookReplayEnvelope,
   type WorkbookReplayMethod,
+  type WorkbookReplayOp,
+  type WorkbookReplayReply,
 } from './replay';
 import { batchRequests, createTestWorkbookSession, loadWorkbookSessionFixtures } from './testHelpers';
 
 let fixture: Uint8Array;
 let chartFixture: Uint8Array;
+let wasmBytes: Uint8Array<ArrayBuffer>;
 const calculation: WorkbookCalculationContext = { nowSerial: 46_000.5, randSeed: 123456789 };
 const viewport: Viewport = { x: 0, y: 0, width: 800, height: 800 };
 
 beforeAll(async () => {
-  ({ fixture, chartFixture } = await loadWorkbookSessionFixtures());
+  ({ fixture, chartFixture, wasmBytes } = await loadWorkbookSessionFixtures());
 });
 
 function target(a1: string): XlsxRangeTarget {
@@ -146,6 +152,80 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('refuses retained replay before attachment without mutation and remains usable', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    let peer: WorkbookHandle | undefined;
+    let edits: WorkbookEditPeer | undefined;
+    try {
+      const initial = await session.save();
+      const initialVersion = await session.call.version();
+      const initialState = structuredClone(session.state);
+      const initialSequence = (await session.call.frame(viewport)).sequence;
+      const envelope: WorkbookReplayEnvelope = {
+        sequence: 1, calculation, op: { method: 'editCell', args: [0, 2, 1, 'refused replay'] },
+      };
+      await expect(replay(session, envelope)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      await expect(replay(session, envelope)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+      expect(await session.call.version()).toBe(initialVersion);
+      expect((await session.call.frame(viewport)).sequence).toBe(initialSequence);
+      expect(await session.save()).toEqual(initial);
+      expect(session.state).toEqual(initialState);
+      expect(session.failure).toBeUndefined();
+      peer = await hydratePeer(session);
+      expect(peer.version()).toBe(initialVersion);
+      edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+      await matchingDigest(0, 'open', edits, peer, session);
+      expect(edits.editCell(0, 2, 1, 'accepted replay').applied).toBe(true);
+      await matchingDigest(1, 'editCell', edits, peer, session);
+      expect(peer.version()).toBe(await session.call.version());
+      expect((await session.call.frame(viewport)).sequence).toBe(1);
+      expect((await session.call.cellInputs(0, 'B3')).cells[0][0].input).toBe('accepted replay');
+      expect(session.failure).toBeUndefined();
+    } finally {
+      edits?.dispose();
+      peer?.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('serves immediate retained frames, reads and saves after peer edits without awaiting flush', async () => {
+    for (const wrapHost of [undefined, batchRequests]) {
+      const session = await createTestWorkbookSession(fixture, wrapHost, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      const peer = await hydratePeer(session);
+      const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+      try {
+        await matchingDigest(0, 'open', edits, peer, session);
+        const initial = await digest(await session.save());
+        expect(peer.sheetCount()).toBeGreaterThan(1);
+        expect(edits.editCell(0, 2, 1, 'immediate retained edit').applied).toBe(true);
+        edits.setActiveSheet(1);
+        const pendingFrame = session.call.frame(viewport);
+        const pendingRead = session.call.cellInputs(0, 'B3');
+        const pendingSave = session.save();
+        expect(edits.sentSequence).toBe(2);
+        expect(edits.acknowledgedSequence).toBe(0);
+        const [frame, read, saved] = await Promise.all([pendingFrame, pendingRead, pendingSave]);
+        expect(frame.sequence).toBe(2);
+        expect(frame.sheet).toBe(1);
+        expect(frame.displayList).toEqual(peer.displayList(viewport));
+        expect(read.cells[0][0].input).toBe('immediate retained edit');
+        expect(read.version).toBe(peer.version());
+        expect(await digest(saved)).toBe(await digest(peer.save()));
+        expect(await digest(saved)).not.toBe(initial);
+        expect(session.state.activeSheet).toBe(1);
+        await matchingDigest(2, 'setActiveSheet', edits, peer, session);
+      } finally {
+        edits.dispose();
+        peer.dispose();
+        await session.dispose();
+      }
+    }
+  });
+
   test('matches saved digests after every mutator batch, volatile formula and history boundary', async () => {
     const peer = openWorkbook(fixture, { calculation });
     const session = await createTestWorkbookSession(fixture, undefined, { calculation });
@@ -244,6 +324,231 @@ describe('workbook edit peers', () => {
       await matchingDigest(2, 'undo', edits, peer, session);
       expect(edits.redo().applied).toBe(true);
       await matchingDigest(3, 'redo', edits, peer, session);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('replays proposal mutators with identical results, versions and saved digests', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const replies: WorkbookReplayReply[] = [];
+    const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    const peer = await hydratePeer(session);
+    const internal = workbookSessionInternals.get(session);
+    if (!internal) throw new Error('Missing internal workbook replay helper');
+    const submitReplay = internal.replay;
+    internal.replay = async (envelope) => {
+      const reply = await submitReplay(envelope);
+      replies.push(reply);
+      return reply;
+    };
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    let batch = 0;
+    let revision = 0;
+    const [peerNonce, initialRevision] = peer.version().split('-');
+    expect(peer.version()).toBe(await session.call.version());
+    async function check(
+      method: WorkbookReplayMethod, result: WorkbookReplayReply['result'], changed = false
+    ): Promise<void> {
+      if (changed) revision += 1;
+      await matchingDigest(++batch, method, edits, peer, session);
+      expect(replies[batch - 1]).toEqual({ sequence: batch, revision, version: revision, result });
+      expect(peer.version()).toBe(`${peerNonce}-${Number(initialRevision) + revision}`);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(session.state).toMatchObject({ version: revision, stage: 'ready' });
+    }
+    try {
+      expect(peer.isProposalsAvailable()).toBe(true);
+      const stable = edits.propose('agent', null, [{ sheet: 0, row: 6, col: 4, input: '42' }]);
+      await check('propose', stable);
+      const stableAccepted = edits.acceptProposal(stable.id);
+      expect(stableAccepted.applied).toBe(true);
+      await check('acceptProposal', stableAccepted, true);
+      const proposal = edits.propose('agent', 'totals', [
+        { sheet: 0, row: 6, col: 4, input: '=NOW()+RANDBETWEEN(1,1000000)', numberFormat: 'number' },
+      ]);
+      await check('propose', proposal);
+      expect(peer.listProposals()).toContainEqual(proposal);
+      expect(() => edits.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      await check('acceptProposal', undefined);
+      const accepted = edits.acceptProposal(proposal.id, { force: true });
+      expect(accepted.applied).toBe(true);
+      await check('acceptProposal', accepted, true);
+      const rejected = edits.propose('agent', null, [
+        { sheet: 0, row: 6, col: 5, input: '0.5', numberFormat: 'percent' },
+      ]);
+      await check('propose', rejected);
+      expect(edits.rejectProposal(rejected.id)).toBe(true);
+      await check('rejectProposal', true);
+      expect(edits.rejectProposal(rejected.id)).toBe(false);
+      await check('rejectProposal', false);
+      expect(peer.listProposals()).toEqual([]);
+      const forced = edits.propose('agent', null, [{ sheet: 0, row: 6, col: 6, input: '42' }]);
+      await check('propose', forced);
+      await check('editCell', edits.editCell(0, 6, 6, '999'), true);
+      const forcedResult = edits.acceptProposal(forced.id, { force: true });
+      expect(forcedResult.applied).toBe(true);
+      await check('acceptProposal', forcedResult, true);
+      expect(peer.cell(0, 6, 6).input).toBe('42');
+      expect(new Set(envelopes.map((envelope) => envelope.calculation.randSeed)).size).toBe(batch);
+      expect(new Set(envelopes.map((envelope) => envelope.calculation.nowSerial)).size).toBe(batch);
+      expect(edits.state).toBe('ready');
+      expect(edits.error).toBeUndefined();
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('replays a proposal refresh between queued edits before non-forced acceptance', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const session = await createTestWorkbookSession(fixture, (transport) => batchRequests(recordReplays(envelopes)(transport)), {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    const peer = await hydratePeer(session);
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      expect(edits.editCell(0, 0, 0, '10').applied).toBe(true);
+      const proposal = edits.propose('agent', null, [{
+        sheet: 0, row: 0, col: 2, input: '=A1*2', numberFormat: 'automatic',
+      }]);
+      expect(proposal.cells[0]?.newText).toBe('20');
+      await matchingDigest(2, 'propose', edits, peer, session);
+      expect(edits.editCell(0, 0, 0, '99').applied).toBe(true);
+      expect(() => edits.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      expect(peer.listProposals()[0]?.cells[0]?.newText).toBe('198');
+      expect(edits.sentSequence).toBe(4);
+      expect(edits.editCell(0, 0, 1, '=A1+1').applied).toBe(true);
+      await matchingDigest(5, 'editCell', edits, peer, session);
+      const frame = await session.call.frame(viewport);
+      expect(frame.sequence).toBe(5);
+      expect(frame.displayList).toEqual(peer.displayList(viewport));
+      expect(peer.version()).toBe(await session.call.version());
+      expect(edits.acceptProposal(proposal.id).applied).toBe(true);
+      await matchingDigest(6, 'acceptProposal', edits, peer, session);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(peer.cell(0, 0, 1).input).toBe('=A1+1');
+      expect(peer.cell(0, 0, 2).input).toBe('=A1*2');
+      expect(envelopes.map(({ sequence, op }) => [sequence, op.method])).toEqual([
+        [1, 'editCell'], [2, 'propose'], [3, 'editCell'], [4, 'acceptProposal'],
+        [5, 'editCell'], [6, 'acceptProposal'],
+      ]);
+      expect(envelopes[3]?.staleProposal?.cells).toEqual(['C1']);
+      expect(session.failure).toBeUndefined();
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('replays hydrated version guards verbatim and refuses stale guards on both replicas', async () => {
+    const envelopes: WorkbookReplayEnvelope[] = [];
+    const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    const peer = await hydratePeer(session);
+    expect(peer.version()).toBe(await session.call.version());
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      const initialVersion = peer.version();
+      expect(initialVersion).toBe(await session.call.version());
+      const guarded = request(peer, 'B3', 'guarded');
+      expect(edits.applyEdits(guarded)).toMatchObject({ ok: true, applied: true });
+      await matchingDigest(1, 'applyEdits', edits, peer, session);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(envelopes[0]?.op).toEqual({ method: 'applyEdits', args: [guarded] });
+      const stale = { ...request(peer, 'B3', 'stale'), expectVersion: initialVersion };
+      const refusal = edits.applyEdits(stale);
+      expect(refusal).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      expect<unknown>(await session.call.validateEdits(stale)).toEqual(refusal);
+      const workerVersion = await session.call.version();
+      const workerDigest = await digest(await session.save());
+      edits.dispose();
+      await expect(session.call.applyEdits(stale)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      await expect(session.call.applyEdits(stale)).rejects.toMatchObject({ code: 'mutation-outside-replay' });
+      expect(await session.call.version()).toBe(workerVersion);
+      expect(await digest(await session.save())).toBe(workerDigest);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(await digest(peer.save())).toBe(await digest(await session.save()));
+      expect(envelopes).toHaveLength(1);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('replays volatile proposal refresh and non-forced acceptance with equal hydrated versions and digests', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, {
+      calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+    });
+    const peer = await hydratePeer(session);
+    let nowSerial = calculation.nowSerial;
+    let randSeed = calculation.randSeed;
+    const edits = createWorkbookEditPeer({
+      session, peer, now: () => (nowSerial - 25_569) * 86_400_000, randomSeed: () => randSeed,
+    });
+    try {
+      const proposal = edits.propose('agent', null, [{
+        sheet: 0, row: 6, col: 4, input: '=NOW()+RANDBETWEEN(1,1000000)', numberFormat: 'number',
+      }]);
+      await matchingDigest(1, 'propose', edits, peer, session);
+      expect(peer.version()).toBe(await session.call.version());
+      nowSerial += 2;
+      randSeed = 42;
+      expect(() => edits.acceptProposal(proposal.id)).toThrow(StaleProposalError);
+      expect(edits.sentSequence).toBe(2);
+      await matchingDigest(2, 'acceptProposal', edits, peer, session);
+      expect(peer.version()).toBe(await session.call.version());
+      const frame = await session.call.frame(viewport);
+      expect(frame.sequence).toBe(2);
+      expect(frame.displayList).toEqual(peer.displayList(viewport));
+      expect(edits.acceptProposal(proposal.id).applied).toBe(true);
+      await matchingDigest(3, 'acceptProposal', edits, peer, session);
+      expect(edits.acknowledgedSequence).toBe(3);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(session.failure).toBeUndefined();
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('keeps retained operation helpers off the exported edit peer', async () => {
+    const session = await createTestWorkbookSession(fixture, undefined, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer });
+    try {
+      expect(edits).not.toHaveProperty('applyQueuedOp');
+      expect(edits).not.toHaveProperty('applyRecoveryOp');
+      expect(workbookEditPeerOperations(edits).applyQueuedOp({
+        method: 'editCell', args: [0, 0, 0, 'queued'],
+      })).toMatchObject({ applied: true });
+      await matchingDigest(1, 'editCell', edits, peer, session);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('handles a false proposal rejection reply without failing the client', async () => {
+    const peer = openWorkbook(fixture, { calculation });
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      expect(edits.rejectProposal('missing-proposal')).toBe(false);
+      await matchingDigest(1, 'rejectProposal', edits, peer, session);
+      expect(edits.acknowledgedSequence).toBe(1);
+      expect(session.failure).toBeUndefined();
+      expect(edits.state).toBe('ready');
     } finally {
       edits.dispose();
       peer.dispose();
@@ -676,6 +981,85 @@ describe('workbook edit peers', () => {
     }
   });
 
+  test('rejects malformed proposal replay envelopes without mutation and remains usable', async () => {
+    const session = await createTestWorkbookSession(fixture, batchRequests, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      const initial = await digest(await session.save());
+      const initialVersion = await session.call.version();
+      expect(peer.version()).toBe(initialVersion);
+      const envelope: WorkbookReplayEnvelope = {
+        sequence: 1, calculation, op: { method: 'setActiveSheet', args: [0] },
+      };
+      await expect(replay(session, { ...envelope, sequence: 2 })).rejects.toMatchObject({
+        name: 'WorkbookReplayOrderError',
+      });
+      expect(await digest(await session.save())).toBe(initial);
+      peer.setCalculationContext(calculation);
+      peer.setActiveSheet(0);
+      expect(await replay(session, envelope)).toMatchObject({ sequence: 1, revision: 0, version: 0 });
+      for (const sequence of [1, 3]) {
+        await expect(replay(session, { ...envelope, sequence })).rejects.toMatchObject({
+          name: 'WorkbookReplayOrderError',
+        });
+      }
+      const malformedEnvelopes: unknown[] = [
+        { ...envelope, sequence: 2, op: { method: 'propose', args: [42, null, []] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', undefined, []] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', null, [{
+          sheet: -1, row: 0, col: 0, input: '42',
+        }]] } },
+        { ...envelope, sequence: 2, op: { method: 'propose', args: ['agent', null, [{
+          sheet: 0, row: 0, col: 0, input: '42', numberFormat: { type: 'custom', pattern: 1 },
+        }]] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: [42] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: ['p1', 42] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: ['p1', { force: 1 }] } },
+        { ...envelope, sequence: 2, op: { method: 'acceptProposal', args: ['p1', null] } },
+        { ...envelope, sequence: 2, op: { method: 'rejectProposal', args: [42] } },
+        { ...envelope, sequence: 2, op: { method: 'rejectProposal', args: ['p1', true] } },
+      ];
+      for (const entry of [null, 42, {}]) {
+        const operations = [
+          { method: 'propose', args: ['agent', null, [entry]] },
+          { method: 'propose', args: ['agent', null, entry] },
+        ];
+        malformedEnvelopes.push(...operations.map((op) => ({ ...envelope, sequence: 2, op })));
+      }
+      for (const malformed of malformedEnvelopes) {
+        await expect(replay(session, malformed as WorkbookReplayEnvelope)).rejects.toMatchObject({
+          name: 'WorkbookReplayValidationError',
+        });
+        expect(await digest(await session.save())).toBe(initial);
+        expect(await session.call.version()).toBe(initialVersion);
+        expect((await session.call.frame(viewport)).sequence).toBe(1);
+        expect(session.state).toMatchObject({ version: 0, dirty: false, stage: 'ready' });
+        expect(session.failure).toBeUndefined();
+        expect(await digest(peer.save())).toBe(initial);
+      }
+      const accepted = request(peer, 'B3', '777');
+      expect(peer.applyEdits(accepted)).toMatchObject({ ok: true, applied: true });
+      const changed = await replay(session, {
+        sequence: 2, calculation, op: { method: 'applyEdits', args: [accepted] },
+      });
+      expect(changed).toMatchObject({ sequence: 2, revision: 1, version: 1, result: { ok: true, applied: true } });
+      expect(peer.version()).toBe(await session.call.version());
+      expect(await digest(await session.save())).toBe(await digest(peer.save()));
+      expect((await session.call.frame(viewport)).sequence).toBe(2);
+      expect(session.failure).toBeUndefined();
+      expect(await replay(session, {
+        sequence: 3, calculation, op: { method: 'applyEdits', args: [request(peer, 'B3', '777')] },
+      })).toMatchObject({ sequence: 3, revision: 1, version: 1, result: { ok: true, applied: false } });
+      expect((await session.call.frame(viewport)).sequence).toBe(3);
+      expect(peer.version()).toBe(await session.call.version());
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
   test('fails terminally on worker refusal and preserves all accepted peer edits for one recovery save', async () => {
     const peer = openWorkbook(fixture, { calculation });
     const session = await createTestWorkbookSession(fixture, (transport) => {
@@ -728,6 +1112,134 @@ describe('workbook edit peers', () => {
         expect(reopened.cell(0, 2, 1).input).toBe('saved edit');
         expect(reopened.cell(0, 2, 2).input).toBe('queued edit');
       } finally { reopened.dispose(); }
+      expect(() => edits.recoverySave()).toThrow('already saved');
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('applies only unapplied materialized queued operations during recovery', async () => {
+    const session = await createTestWorkbookSession(fixture, (transport) => {
+      const batched = batchRequests(transport);
+      return { ...batched, listen: (listener) => batched.listen((message) => {
+        if (isClientMessage(message) && message.kind === 'call' && message.method === 'replay') {
+          const envelope = message.args[0] as WorkbookReplayEnvelope;
+          if (envelope.op.method === 'applyEdits') {
+            envelope.op.args[0].steps = [{
+              op: 'setCellInputs', target: { ...target('B3'), sheetId: 'missing-sheet' }, inputs: [['901']],
+            }];
+          }
+        }
+        listener(message);
+      }) };
+    }, { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const errors: Error[] = [];
+    const edits = createWorkbookEditPeer({
+      session, peer, ...deterministicOptions(), onError: (error) => { errors.push(error); },
+    });
+    const committed: WorkbookReplayOp = { method: 'applyEdits', args: [request(peer, 'B3', '901')] };
+    const inserted: WorkbookReplayOp = {
+      method: 'applyOps', args: [[{ type: 'insertRows', sheet: 0, at: 2, count: 1 }]],
+    };
+    const unapplied: WorkbookReplayOp = {
+      method: 'applyOps', args: [[{ type: 'insertRows', sheet: 0, at: 2, count: 1 }]],
+    };
+    try {
+      expect(() => workbookEditPeerOperations(edits).applyRecoveryOp(unapplied)).toThrow('requires a failed');
+      const committedResult = workbookEditPeerOperations(edits).applyQueuedOp(committed);
+      expect(committedResult).toMatchObject({ ok: true, applied: true });
+      const insertedResult = workbookEditPeerOperations(edits).applyQueuedOp(inserted);
+      expect(insertedResult).toMatchObject({ applied: true });
+      const committedVersion = peer.version();
+      expect(workbookEditPeerOperations(edits).applyQueuedOp(inserted)).toBe(insertedResult);
+      expect(peer.version()).toBe(committedVersion);
+      const committedBytes = await digest(peer.save());
+      await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      expect(() => workbookEditPeerOperations(edits).applyQueuedOp(unapplied)).toThrow(WorkbookEditPeerFailedError);
+      expect(() => edits.applyOps(unapplied.args[0])).toThrow(WorkbookEditPeerFailedError);
+      expect(workbookEditPeerOperations(edits).applyRecoveryOp(committed)).toBe(committedResult);
+      expect(workbookEditPeerOperations(edits).applyRecoveryOp(inserted)).toBe(insertedResult);
+      expect(peer.version()).toBe(committedVersion);
+      expect(await digest(peer.save())).toBe(committedBytes);
+      const recoveredResult = workbookEditPeerOperations(edits).applyRecoveryOp(unapplied);
+      expect(recoveredResult).toMatchObject({ applied: true });
+      const recoveredVersion = peer.version();
+      const recoveredBytes = await digest(peer.save());
+      expect(peer.cell(0, 4, 1).input).toBe('901');
+      expect(workbookEditPeerOperations(edits).applyRecoveryOp(unapplied)).toBe(recoveredResult);
+      expect(peer.version()).toBe(recoveredVersion);
+      expect(await digest(peer.save())).toBe(recoveredBytes);
+      expect(edits.sentSequence).toBe(2);
+      expect(edits.acknowledgedSequence).toBe(0);
+      expect(await digest(edits.recoverySave().bytes)).toBe(recoveredBytes);
+      expect(() => workbookEditPeerOperations(edits).applyRecoveryOp(unapplied)).toThrow('already saved');
+      expect(errors).toEqual([edits.error!]);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('rejects normal waiters on failure even when replay never settles', async () => {
+    let crash: ((error: unknown) => void) | undefined;
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      onError(listener) { crash = listener; return transport.onError(listener); },
+    }), { calculation });
+    const internal = workbookSessionInternals.get(session);
+    if (!internal) throw new Error('Missing internal workbook replay helper');
+    internal.replay = () => new Promise<WorkbookReplayReply>(() => {});
+    const peer = openWorkbook(fixture, { calculation });
+    const errors: Error[] = [];
+    const edits = createWorkbookEditPeer({ session, peer, onError: (error) => { errors.push(error); } });
+    try {
+      edits.editCell(0, 2, 1, 'recover pending replay');
+      const waiting = Promise.allSettled([edits.flush(), edits.save()]);
+      if (!crash) throw new Error('Missing worker crash callback');
+      crash(new SessionFailure('crash', 'Worker stopped'));
+      for (const result of await waiting) {
+        if (result.status !== 'rejected') throw new Error('Normal waiter survived worker failure');
+        expect(result.reason).toBeInstanceOf(WorkbookEditPeerFailedError);
+      }
+      expect(await digest(edits.recoverySave().bytes)).toBe(await digest(peer.save()));
+      expect(errors).toEqual([edits.error!]);
+    } finally {
+      edits.dispose();
+      peer.dispose();
+      await session.dispose();
+    }
+  });
+
+  test('refuses an invalid recovery operation without changing or discarding peer state', async () => {
+    let crash: ((error: unknown) => void) | undefined;
+    const session = await createTestWorkbookSession(fixture, (transport) => ({
+      ...transport,
+      onError(listener) { crash = listener; return transport.onError(listener); },
+    }), { calculation });
+    const peer = openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      expect(edits.editCell(0, 2, 1, 'accepted').applied).toBe(true);
+      await edits.flush();
+      const before = await digest(peer.save());
+      if (!crash) throw new Error('Missing worker crash callback');
+      const failed = new Promise<SessionFailure>((resolve) => { session.onFailure(resolve); });
+      crash(new SessionFailure('crash', 'Worker stopped'));
+      expect(await failed).toMatchObject({ code: 'crash', message: 'Worker stopped' });
+      await expect(edits.flush()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      await expect(edits.save()).rejects.toBeInstanceOf(WorkbookEditPeerFailedError);
+      const op: WorkbookReplayOp = {
+        method: 'applyEdits', args: [{ ...request(peer, 'B3', 'refused'), expectVersion: 'stale' }],
+      };
+      expect(() => workbookEditPeerOperations(edits).applyRecoveryOp(op)).toThrow('Engine refused workbook recovery');
+      expect(() => workbookEditPeerOperations(edits).applyRecoveryOp(op)).toThrow('Engine refused workbook recovery');
+      expect(await digest(peer.save())).toBe(before);
+      expect(edits.sentSequence).toBe(1);
+      expect(await digest(edits.recoverySave().bytes)).toBe(before);
       expect(() => edits.recoverySave()).toThrow('already saved');
     } finally {
       edits.dispose();
@@ -808,4 +1320,66 @@ describe('workbook edit peers', () => {
       }
     }
   });
+});
+
+
+test('keeps calculation context equal after a refused hydrated mutation', async () => {
+  const zip = new JSZip();
+  zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>');
+  zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>');
+  zip.file('xl/workbook.xml', '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Volatile" sheetId="1" r:id="rId1"/></sheets></workbook>');
+  zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
+  zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>TODAY()</f><v>0</v></c><c r="C1"><f>RANDBETWEEN(1,1000000)</f><v>0</v></c></row></sheetData></worksheet>');
+  const bytes = await zip.generateAsync({ type: 'uint8array' });
+  let retained = '';
+  const session = await createTestWorkbookSession(bytes, (transport) => ({
+    ...transport,
+    post(message, transfer) {
+      if (isHostMessage(message) && message.kind === 'wasm-module') retained = message.hydration ?? '';
+      transport.post(message, transfer);
+    },
+  }), { wasm: wasmBytes.buffer, retainPeerHydration: true, calculation: { nowSerial: 46000.5, randSeed: 41 } });
+  const peer = await hydratePeer(session);
+  const edits = createWorkbookEditPeer({ session, peer,
+    now: () => (46001.75 - 25569) * 86400000, randomSeed: () => 42 });
+  try {
+    const original = JSON.parse(retained);
+    expect(JSON.parse(workbookPeerHydration(peer))).toEqual(original);
+    const before = await session.call.readCells({ ranges: [target('A1:C1')] });
+    if (!before.ok) throw new Error(before.failure.message);
+    expect(before.ranges[0].cells[0].map((cell) => cell.value.kind)).toEqual(['number', 'number', 'number']);
+    expect(edits.applyEdits({ ...request(peer, 'A1', 'refused'), expectVersion: 'stale' })).toMatchObject({ ok: false });
+    await edits.flush();
+    expect(JSON.parse(workbookPeerHydration(peer))).toEqual(original);
+    expect(peer.version()).toBe(await session.call.version());
+    expect(peer.readCells({ ranges: [target('A1:C1')] })).toEqual(before);
+    expect(peer.listProposals()).toEqual([]);
+    expect(JSON.parse(workbookPeerHydration(peer)).workbook.proposal_id_counter).toBe(original.workbook.proposal_id_counter);
+    expect(edits.sentSequence).toBe(0);
+    expect(edits.acknowledgedSequence).toBe(0);
+    expect(await digest(peer.save())).toBe(await digest(await session.save()));
+  } finally { edits.dispose(); peer.dispose(); await session.dispose(); }
+});
+
+test('preserves ordinary disposed-wrapper recovery while refusing disposed worker peers', async () => {
+  for (const retained of [false, true]) {
+    const session = await createTestWorkbookSession(fixture, undefined, {
+      calculation, ...(retained ? { retainPeerHydration: true, wasm: wasmBytes.buffer } : {}),
+    });
+    const peer = retained ? await hydratePeer(session) : openWorkbook(fixture, { calculation });
+    const edits = createWorkbookEditPeer({ session, peer, ...deterministicOptions() });
+    try {
+      edits.editCell(0, 2, 1, 'retained ordinary recovery');
+      await edits.flush();
+      edits.dispose();
+      if (retained) expect(() => edits.recoverySave()).toThrow('disposed');
+      else {
+        const recovered = edits.recoverySave();
+        expect(recovered.recovery).toBe(true);
+        const reopened = openWorkbook(new Uint8Array(recovered.bytes), { calculation });
+        try { expect(reopened.cell(0, 2, 1).input).toBe('retained ordinary recovery'); }
+        finally { reopened.dispose(); }
+      }
+    } finally { edits.dispose(); peer.dispose(); await session.dispose(); }
+  }
 });

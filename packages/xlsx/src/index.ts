@@ -7,10 +7,20 @@
 
 /** @experimental */
 export { openWorkbookSession } from './session/client';
+/** @internal */
+export { hydratePeer } from './session/client';
+/** @experimental */
+export { WorkbookPeerHydrationError } from './session/peerHydrationError';
 /** @experimental */
 export type { OpenWorkbookSessionOptions, WorkbookSession } from './session/client';
 /** @internal */
 export { createWorkbookEditPeer } from './session/editPeer';
+/** @internal */
+export type { WorkbookEditPeer, WorkbookEditPeerOptions } from './session/editPeer';
+/** @experimental */
+export { WorkbookEditPeerFailedError } from './session/editPeer';
+/** @internal */
+export { createWorkbookRecoveryMutators, failWorkbookEditPeer } from './session/editPeerInternals';
 /** @experimental */
 export type {
   WorkbookCellGeometry,

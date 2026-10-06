@@ -35,7 +35,9 @@ import {
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
+  failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
+  hasEditorWorkerProposalRounds,
   workerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
@@ -163,8 +165,12 @@ function addsFontChainsOnly(
 }
 
 function workerProposalRenderEnv(session: YrsSession, renderEnv: YrsRenderEnv): YrsRenderEnv {
-  return workerProposalAuthority(session)?.initialized
+  if (!hasEditorWorkerProposalRounds(session)) return workerProposalAuthority(session)?.initialized
     ? { ...renderEnv, revisionPreview: proposalRevisionPreview(session.getProposals()) }
+    : renderEnv;
+  return registeredWorkerProposalAuthority(session)?.snapshot()
+    ? { ...renderEnv, revisionPreview: registeredWorkerProposalAuthority(session)!.revisionPreview() ??
+        proposalRevisionPreview(session.getProposals()) }
     : renderEnv;
 }
 
@@ -282,11 +288,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (
       layout &&
       session &&
-      workerProposalAuthority(session)?.initialized &&
+      (hasEditorWorkerProposalRounds(session) ? registeredWorkerProposalAuthority(session)?.snapshot() : workerProposalAuthority(session)?.initialized) &&
       !isSupersededLayout(layout) &&
       sourceVersionOf(layout) === session.version() &&
       revisionPreviewKeyOf(layout) ===
-        revisionPreviewKey(proposalRevisionPreview(session.getProposals()))
+        revisionPreviewKey(hasEditorWorkerProposalRounds(session) ? registeredWorkerProposalAuthority(session)!.revisionPreview() : proposalRevisionPreview(session.getProposals()))
     ) markLayoutQueued(session, false);
     onLayoutComputedRef.current?.(layout);
     const total = documentPageCount(layout);
@@ -389,6 +395,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       markLayoutQueued(owner, false);
     }
     if (viewer && failure instanceof SupersededPreviewError) return failure;
+    if (!viewer && hasEditorWorkerProposalRounds(owner) &&
+      !registeredWorkerProposalAuthority(owner)?.retirementReason() &&
+      !(failure instanceof SupersededPreviewError)) failWorkerProposalAuthority(owner, failure);
     onErrorRef.current?.(failure, owner);
     return failure;
   }, [isViewerSession]);
@@ -687,7 +696,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             }
           } catch (error) {
             console.error('[PagedEditor] Layout pipeline error:', error);
-            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+            if (hasEditorWorkerProposalRounds(session)) reportLayoutError(session, error);
+            else onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           }
         };
 

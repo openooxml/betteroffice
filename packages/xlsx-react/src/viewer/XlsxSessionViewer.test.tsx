@@ -830,7 +830,7 @@ describe('workbook session viewer', () => {
   });
 
   for (const props of [
-    { readOnly: false, experimentalWorkerOpen: true },
+    { experimentalWorkerOpen: false },
     { readOnly: true, experimentalWorkerOpen: false },
     { readOnly: true },
   ]) it(`keeps local dispatch without both flags (${JSON.stringify(props)})`, async () => {

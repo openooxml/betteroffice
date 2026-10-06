@@ -25,8 +25,9 @@ import { editWasmModule } from './wasm/index';
 
 /** @internal */
 export interface ResidentProposalReply
-  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector'> {
+  extends Omit<ResidentProposalResponse, 'updates' | 'stateVector' | 'peerDiff'> {
   updates: Uint8Array[];
+  peerDiff?: Uint8Array;
   stateVector: Uint8Array;
 }
 
@@ -433,9 +434,13 @@ export class ResidentEngineWorkerClient {
     if (!response.proposal) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted the proposal result');
     }
+    const { peerDiff, ...proposal } = response.proposal;
     return {
-      ...response.proposal,
+      ...proposal,
       updates: response.proposal.updates.map((update) => new Uint8Array(update)),
+      ...(peerDiff === undefined
+        ? {}
+        : { peerDiff: new Uint8Array(peerDiff) }),
       stateVector: new Uint8Array(response.proposal.stateVector),
     };
   }
@@ -476,12 +481,14 @@ export class ResidentEngineWorkerClient {
   }
 
   /** @internal */
-  async handOver(): Promise<{
+  async handOver(peerMetadata?: true): Promise<{
     state: Uint8Array;
+    metadata?: Uint8Array;
+    metadataReason?: string;
     version: string;
     proposals: DocxProposalRegistryState;
   }> {
-    const response = await this.request({ type: 'encodeState' });
+    const response = await this.request({ type: 'encodeState', ...(peerMetadata ? { peerMetadata } : {}) });
     if (!response.state || response.version === undefined || !response.proposals) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its document handoff');
     }
@@ -489,6 +496,12 @@ export class ResidentEngineWorkerClient {
       state: new Uint8Array(response.state),
       version: response.version,
       proposals: response.proposals,
+      ...(peerMetadata ? {
+        metadata: response.peerMetadata === undefined ? undefined : new Uint8Array(response.peerMetadata),
+        metadataReason: response.peerMetadata === undefined
+          ? response.peerMetadataReason ?? 'missing-capability: Worker omitted peer metadata'
+          : undefined,
+      } : {}),
     };
   }
 
@@ -502,12 +515,26 @@ export class ResidentEngineWorkerClient {
   }
 
   /** @internal */
-  async encodeVersionedState(): Promise<{ state: Uint8Array; version: string | undefined }> {
-    const response = await this.request({ type: 'encodeState' });
+  async encodeVersionedState(peerMetadata?: true): Promise<{
+    state: Uint8Array;
+    version: string | undefined;
+    metadata?: Uint8Array;
+    metadataReason?: string;
+  }> {
+    const response = await this.request({ type: 'encodeState', ...(peerMetadata ? { peerMetadata } : {}) });
     if (!response.state) {
       throw new ResidentWorkerFailureError('Resident engine worker omitted its state');
     }
-    return { state: new Uint8Array(response.state), version: response.version };
+    return {
+      state: new Uint8Array(response.state),
+      version: response.version,
+      ...(peerMetadata ? {
+        metadata: response.peerMetadata === undefined ? undefined : new Uint8Array(response.peerMetadata),
+        metadataReason: response.peerMetadata === undefined
+          ? response.peerMetadataReason ?? 'missing-capability: Worker omitted peer metadata'
+          : undefined,
+      } : {}),
+    };
   }
 
   /**

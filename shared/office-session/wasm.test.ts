@@ -29,6 +29,31 @@ function cacheClient(onWasmModule: (url: string, module: WebAssembly.Module) => 
 }
 
 describe('worker wasm advertisements', () => {
+  it('keeps legacy module callbacks compatible while forwarding optional hydration headers', async () => {
+    const module = new WebAssembly.Module(WASM_BYTES);
+    const wire = transport([]);
+    const onWasmModule = mock((_url: string, _module: WebAssembly.Module) => {});
+    const onWasmModuleMessage = mock((_message: HostMessage) => {});
+    const client = createSessionClient<{ open(): string }, {}>(wire, {
+      methods: { open: true }, onWasmModule, onWasmModuleMessage,
+    });
+    try {
+      const open = client.call.open();
+      const legacy = { protocol: 1 as const, kind: 'wasm-module' as const, url: URL_INPUT.href, module };
+      wire.receive(legacy);
+      expect(onWasmModule.mock.calls).toEqual([[URL_INPUT.href, module]]);
+      expect(onWasmModuleMessage).toHaveBeenCalledWith(legacy);
+      const retained = { ...legacy, hydration: 'opaque hydration', version: 'v1', sequence: 7 };
+      expect(isHostMessage(retained)).toBe(true);
+      wire.receive(retained);
+      expect(onWasmModule.mock.calls).toEqual([[URL_INPUT.href, module], [URL_INPUT.href, module]]);
+      expect(onWasmModuleMessage).toHaveBeenLastCalledWith(retained);
+      wire.receive({ protocol: 1, kind: 'reply', id: 1, ok: true, value: 'opened' });
+      expect(await open).toBe('opened');
+      expect(client.failure).toBeUndefined();
+    } finally { await client.dispose(); }
+  });
+
   it('accepts modules from another realm without interrupting open', async () => {
     const module: WebAssembly.Module = runInNewContext('new WebAssembly.Module(bytes)', { bytes: WASM_BYTES });
     expect(module instanceof WebAssembly.Module).toBe(false);
