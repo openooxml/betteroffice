@@ -14872,7 +14872,7 @@ mod tests {
         for paragraph in 0..6 {
             let (engine, request) =
                 local_patch_laid_out(&Package::new(&toc).bytes(), 9614, enabled);
-            local_patch_paragraph_edits(&engine, &request, paragraph, matches!(paragraph, 0 | 5));
+            local_patch_paragraph_edits(&engine, &request, paragraph, !matches!(paragraph, 1..=3));
         }
         let hidden = format!(
             "{}{}{}{}{}",
