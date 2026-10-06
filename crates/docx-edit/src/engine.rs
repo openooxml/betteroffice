@@ -13585,7 +13585,10 @@ mod tests {
             engine.set_local_lowering(cold_enabled);
             let oracle = cold!(render measurement pagination regions display capture resumable
                 note_separators preview_font_requirements preview_locality);
-            assert_eq!(incremental.0, oracle.0, "{label} cold_enabled={cold_enabled}");
+            assert_eq!(
+                incremental.0, oracle.0,
+                "{label} cold_enabled={cold_enabled}"
+            );
             if cold_enabled == enabled {
                 assert_eq!(incremental.1, oracle.1, "{label} seeds");
             }
@@ -13641,8 +13644,7 @@ mod tests {
         use super::lowering_fixture::{Package, para, run};
 
         let shape = local_patch_float();
-        let field =
-            r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
+        let field = r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
         let body = format!(
             "{}{}{}{}{}",
             para("10000001", &run("Before")),
@@ -13858,7 +13860,9 @@ mod tests {
                     !enabled || blocked,
                 );
                 assert_eq!(
-                    engine.render.borrow().stories["body"].local.has_dependencies(),
+                    engine.render.borrow().stories["body"]
+                        .local
+                        .has_dependencies(),
                     enabled && dependencies,
                 );
                 let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();

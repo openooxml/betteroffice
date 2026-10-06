@@ -101,7 +101,11 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
                 "math",
                 "horizontalRule",
             ]
-            .contains(&value_string(values.get("_kind")).unwrap_or_default().as_str());
+            .contains(
+                &value_string(values.get("_kind"))
+                    .unwrap_or_default()
+                    .as_str(),
+            );
             !seed_only
                 || ["fieldCodeMarks", "fieldResultBlocks"]
                     .iter()
@@ -213,9 +217,7 @@ impl LocalLowering {
             .iter()
             .enumerate()
             .filter_map(|(slot, block)| match block.as_ref() {
-                LayoutBlock::Paragraph(paragraph) => {
-                    paragraph.pm_start.map(|pm| (pm as u64, slot))
-                }
+                LayoutBlock::Paragraph(paragraph) => paragraph.pm_start.map(|pm| (pm as u64, slot)),
                 _ => None,
             })
             .collect();
