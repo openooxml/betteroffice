@@ -262,6 +262,46 @@ describe('worker XLSX commands', () => {
     expect(rawMutation).not.toHaveBeenCalled();
   });
 
+  test('keeps live read-only gates during an admitted save and preserves editable queued commands', async () => {
+    const { store, controller, binding, state, edits, bridge } = harness();
+    const saveEntered = deferred<void>();
+    const saved = deferred<ArrayBuffer>();
+    edits.save.mockImplementation(async () => { saveEntered.resolve(); return saved.promise; });
+    const plugin = 'plugin:acme/stamp' as const;
+    const execute = mock(async () => {
+      edits.applyOps([{ type: 'stamp' }]);
+      return { ok: true as const, status: 'executed' as const };
+    });
+    controller.setPluginCommands([{
+      descriptor: { id: plugin, label: 'Stamp', mutatesDocument: true, shortcuts: [] },
+      state: () => ({ enabled: true }),
+      execute,
+    }], []);
+    expect(store.getState('bold').enabled).toBe(true);
+    expect(store.getState(plugin).enabled).toBe(true);
+    const saving = store.execute('save', null);
+    await saveEntered.promise;
+    const editable = store.execute('bold', null);
+    state.readOnly = true;
+    controller.refresh();
+    expect(binding.environment(false).readOnly).toBe(true);
+    expect(binding.environment(true).readOnly).toBe(true);
+    expect(store.getState('bold')).toMatchObject({ enabled: false, disabledReason: { code: 'read-only' } });
+    expect(store.getState(plugin)).toMatchObject({ enabled: false, disabledReason: { code: 'read-only' } });
+    expect(await store.execute(plugin, null)).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    expect(execute).not.toHaveBeenCalled();
+    expect(edits.applyOps).not.toHaveBeenCalled();
+    expect(edits.patchRangeStyle).not.toHaveBeenCalled();
+    expect(bridge.deliver).not.toHaveBeenCalled();
+    saved.resolve(new Uint8Array([8, 9]).buffer);
+    expect(await saving).toEqual({ ok: true, status: 'executed' });
+    expect(await editable).toEqual({ ok: true, status: 'executed' });
+    expect(bridge.deliver).toHaveBeenCalledWith(new Uint8Array([8, 9]));
+    expect(edits.patchRangeStyle.mock.calls).toEqual([[0, 'A1:B3', { bold: true }]]);
+    expect(execute).not.toHaveBeenCalled();
+    expect(edits.applyOps).not.toHaveBeenCalled();
+  });
+
   test('disables PNG exports with the viewer png-unavailable reason', async () => {
     const { store, binding } = harness();
     expect(binding.environment(false).pngExport).toBe(false);
