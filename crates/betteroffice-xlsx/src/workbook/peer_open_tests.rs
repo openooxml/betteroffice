@@ -1,4 +1,6 @@
 use std::fmt::Write;
+use std::future::Future;
+use std::task::{Context, Poll, Waker};
 
 use super::edit_tests::{options, r};
 use super::*;
@@ -231,6 +233,65 @@ fn assert_equal(actual: &mut Workbook, expected: &mut Workbook) {
             .as_slice(),
         br#"<coverage xmlns="urn:peer-coverage">preserved source part</coverage>"#.as_slice()
     );
+}
+
+#[test]
+fn sliced_authority_chunks_match_oracle_with_repeated_cell_formats() {
+    let mut model = WorkbookModel::default();
+    model.styles.fonts.push(xlsx_model::Font {
+        bold: true,
+        ..Default::default()
+    });
+    let format = xlsx_model::Xf {
+        font: Some(0),
+        ..Default::default()
+    };
+    model.styles.cell_xfs = vec![xlsx_model::Xf::default(), format.clone(), format];
+    let mut sheet = Sheet::new("Chunks");
+    for row in 0..4097 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            xlsx_model::Cell {
+                value: CellValue::Text {
+                    value: format!("value {row}"),
+                },
+                formula: (row % 3 == 0).then(|| format!("\"value {row}\"")),
+                style: Some(1 + row % 2),
+            },
+        );
+    }
+    sheet.col_widths = BTreeMap::from([(2, 12.5), (10, 18.0)]);
+    sheet.row_heights = BTreeMap::from([(2, 24.0), (10, 30.5)]);
+    model.sheets = vec![sheet, Sheet::new("Empty")];
+    let (expected, _, _) =
+        WorkbookAuthority::from_source_with_projection(&model, Some(73), &[], None).unwrap();
+    for units in [1, 256] {
+        let work = ooxml_opc::WorkBudget::default();
+        let mut opening = Box::pin(WorkbookAuthority::from_source_with_projection_sliced(
+            &model,
+            Some(73),
+            &[],
+            None,
+            &work,
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        let actual = loop {
+            work.reset(units);
+            let state = opening.as_mut().poll(&mut context);
+            assert!(work.touched() <= units);
+            if let Poll::Ready(result) = state {
+                break result.unwrap().0;
+            }
+        };
+        assert_eq!(
+            actual.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+        assert_eq!(
+            actual.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+    }
 }
 
 #[test]

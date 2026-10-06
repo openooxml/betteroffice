@@ -695,7 +695,6 @@ impl WorkbookAuthority {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
 
-        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
             .collect::<Vec<_>>();
@@ -708,10 +707,9 @@ impl WorkbookAuthority {
                 }
             },
         };
-        peer_open::seed_sliced(&bootstrap, &doc, &base, model, &keys, work)
+        peer_open::seed_sliced(&doc, &base, model, &keys, work)
             .await
             .map_err(AuthorityError::InvalidState)?;
-        drop(bootstrap);
         let authority = Self::hydrated(doc, Arc::new(base), 0);
         let (model, structure) = authority
             .materialize_bootstrap_sliced(true, work)

@@ -32,7 +32,9 @@ impl WorkBudget {
     pub async fn append_bytes(&self, target: &mut Vec<u8>, source: &[u8]) {
         let mut offset = 0;
         while offset < source.len() {
-            let count = (self.take(256).await * 64).min(source.len() - offset);
+            let remaining = source.len() - offset;
+            let count = self.take(remaining.div_ceil(64).min(256)).await * 64;
+            let count = count.min(remaining);
             target.extend_from_slice(&source[offset..offset + count]);
             offset += count;
         }
@@ -44,7 +46,9 @@ impl WorkBudget {
         }
         let mut offset = 0;
         while offset < left.len() {
-            let count = (self.take(256).await * 64).min(left.len() - offset);
+            let remaining = left.len() - offset;
+            let count = self.take(remaining.div_ceil(64).min(256)).await * 64;
+            let count = count.min(remaining);
             if left[offset..offset + count] != right[offset..offset + count] {
                 return false;
             }
