@@ -1277,11 +1277,11 @@ impl PaginationState {
     }
 
     fn clear_display_damage(&mut self) {
+        self.position_deltas.clear();
         if self.display_uses_region_path {
             self.display_rebuilt_pages.clear();
             self.display_layout_pending = false;
             self.display_full_rebuild = false;
-            self.position_deltas.clear();
             self.note_changed_pages.clear();
         }
         self.restamped_pages = Some(BTreeSet::new());
@@ -10641,10 +10641,12 @@ mod tests {
     /// The retained region state equals a cold full pass of `request` over the same document.
     fn assert_region_state_matches_cold(engine: &EngineSession, request: &str, label: &str) {
         let snapshot = |engine: &EngineSession| {
+            engine.build_display_list_frame("{}", 0).unwrap();
             (
                 engine.retained_layout_json().unwrap(),
                 engine.retained_kernel_inputs_json().unwrap(),
                 engine.pagination.borrow().block_fingerprints.clone(),
+                engine.with_display_list(Clone::clone).unwrap(),
             )
         };
         let resident = snapshot(engine);
@@ -13558,6 +13560,7 @@ mod tests {
 
         let enabled = engine.local_lowering.get();
         let snapshot = |engine: &EngineSession| {
+            engine.build_display_list_frame("{}", 0).unwrap();
             let render = engine.render.borrow();
             let lowered = &render.stories["body"];
             let pagination = engine.pagination.borrow();
@@ -13567,6 +13570,7 @@ mod tests {
                 serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
                 pagination.block_fingerprints.clone(),
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+                engine.with_display_list(Clone::clone).unwrap(),
             )
         };
         let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
@@ -13600,6 +13604,47 @@ mod tests {
             patched && enabled,
             "{story} [{start}, {end}) {text:?} enabled={enabled}"
         );
+    }
+
+    #[test]
+    fn resident_section_suffix_positions_shift_once_per_edit() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}",
+            para(
+                "10000001",
+                r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r>"#,
+            ),
+            para("10000002", &run("Second")),
+        );
+        for enabled in [false, true] {
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&body).bytes(), 9623, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            repeat_final_section(&mut request);
+            let request = request.to_string();
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            for (start, end, text) in [
+                (0, 0, Some("😀")),
+                (0, 2, None),
+                (0, 0, Some("x")),
+                (0, 1, None),
+            ] {
+                local_patch_step(&engine, &request, "body", (start, end, text), false);
+                let before = engine.with_display_list(Clone::clone).unwrap();
+                assert!(before.pages.len() >= 2);
+                assert!(engine.pagination.borrow().position_deltas.is_empty());
+                for _ in 0..2 {
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    engine.build_display_list_frame("{}", epoch).unwrap();
+                    assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+                }
+            }
+        }
     }
 
     #[test]
