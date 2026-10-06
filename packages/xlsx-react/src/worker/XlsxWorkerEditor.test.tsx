@@ -3009,7 +3009,8 @@ for (const route of ['draft', 'bulk'] as const) {
     await advance();
     const op = host.preview.mock.calls[0][2][0];
     expect(op.method).toBe(route === 'draft' ? 'editCell' : 'applyEdits');
-    expect(op.calculation?.nowSerial).toBe(Date.UTC(2026, 0, 2, 1, 30) / 86_400_000 + 25_569);
+    if (!op.calculation) throw new Error('Missing preview calculation context');
+    expect(op.calculation.nowSerial).toBe(Date.UTC(2026, 0, 2, 1, 30) / 86_400_000 + 25_569);
     const calculation = structuredClone(op.calculation);
     clock.mockReturnValue(Date.UTC(2026, 0, 3));
     await act(async () => hydration.resolve(host.peer));

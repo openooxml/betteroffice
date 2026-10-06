@@ -4,11 +4,12 @@ import {
   isClientMessage, isHostMessage, SessionFailure, type SessionTransport,
 } from '../../../../shared/office-session';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
+import type { XlsxCellRead } from '../edits';
 import * as workbookWasm from '../wasm/loader';
 import { wasmAssetUrl } from '../wasm/asset';
 import { XlsxDocument } from '../wasm/generated/xlsx_wasm.js';
 import { openWorkbook, type WorkbookCalculationContext, type WorkbookHandle } from '../wasm/loader';
-import { createWorkbookSession, hydratePeer } from './client';
+import { createWorkbookSession, hydratePeer, type WorkbookSession } from './client';
 import { createWorkbookEditPeer, WorkbookEditPeerFailedError, type WorkbookEditPeer } from './editPeer';
 import { workbookEditPeerOperations } from './editPeerInternals';
 import { createWorkbookSessionHost } from './host';
@@ -476,7 +477,7 @@ describe('workbook peer hydration', () => {
       });
       const opening = await session.call.readCells(read);
       if (!opening.ok) throw new Error(opening.failure.message);
-      expect(opening.ranges[0].cells[0].slice(0, 2).map((cell) => cell.value)).toEqual([
+      expect(opening.ranges[0].cells[0].slice(0, 2).map((cell: XlsxCellRead) => cell.value)).toEqual([
         { kind: 'number', value: nowSerial },
         { kind: 'number', value: Math.floor(nowSerial) },
       ]);
@@ -488,13 +489,15 @@ describe('workbook peer hydration', () => {
       await edits.flush();
       const edited = peer.readCells(read);
       if (!edited.ok) throw new Error(edited.failure.message);
-      expect(edited.ranges[0].cells[0].slice(0, 2).map((cell) => cell.value)).toEqual([
+      expect(edited.ranges[0].cells[0].slice(0, 2).map((cell: XlsxCellRead) => cell.value)).toEqual([
         { kind: 'number', value: nowSerial + 1 },
         { kind: 'number', value: Math.floor(nowSerial) + 1 },
       ]);
-      expect(edited).toEqual(await session.call.readCells(read));
+      const workerEdited = await session.call.readCells(read);
+      if (!workerEdited.ok) throw new Error(workerEdited.failure.message);
+      expect(edited).toEqual(workerEdited);
       clock.mockReturnValue(ms + 2 * 86_400_000);
-      expect(new Uint8Array(await edits.save())).toEqual(peer.save());
+      expect(new Uint8Array(await edits.save())).toEqual(new Uint8Array(peer.save()));
       expect(peer.readCells(read)).toEqual(edited);
       expect(await session.call.readCells(read)).toEqual(edited);
       expect(session.failure).toBeUndefined();
