@@ -295,6 +295,13 @@ fn emit_grid_segments(
     let mut commands = Vec::new();
     for vertical in [true, false] {
         let (axis, across) = if vertical { (cols, rows) } else { (rows, cols) };
+        let axis_edge = |index| {
+            if vertical {
+                geometry.col_x(index)
+            } else {
+                geometry.row_y(index)
+            }
+        };
         let across_edge = |index| {
             if vertical {
                 geometry.row_y(index)
@@ -305,8 +312,12 @@ fn emit_grid_segments(
         let Some(first) = axis.tracks.first() else {
             continue;
         };
-        let boundaries: Vec<_> = std::iter::once((first.index, first.start))
-            .chain(axis.tracks.iter().map(|track| (track.index + 1, track.end)))
+        let boundaries: Vec<_> = std::iter::once((first.index, first.start, first.pinned))
+            .chain(
+                axis.tracks
+                    .iter()
+                    .map(|track| (track.index + 1, track.end, track.pinned)),
+            )
             .collect();
         let mut blocked: HashMap<u32, Vec<(f32, f32)>> = HashMap::new();
         for range in &merges {
@@ -329,12 +340,21 @@ fn emit_grid_segments(
             if intervals.is_empty() {
                 continue;
             }
-            let first = boundaries.partition_point(|&(index, _)| index <= start);
-            let last = boundaries.partition_point(|&(index, _)| index <= end);
+            let first = boundaries.partition_point(|&(index, _, _)| index <= start);
+            let last = boundaries.partition_point(|&(index, _, _)| index <= end);
             if first >= last {
                 continue;
             }
-            for &(index, _) in &boundaries[first..last] {
+            let lower = axis_edge(start);
+            let upper = axis_edge(end.saturating_add(1));
+            for &(index, position, pinned) in &boundaries[first..last] {
+                let scroll = if pinned { 0.0 } else { axis.scroll };
+                let position = position + offset;
+                let lower = lower - scroll + offset;
+                let upper = upper - scroll + offset;
+                if !(lower < position && position < upper) {
+                    continue;
+                }
                 blocked
                     .entry(index)
                     .or_default()
@@ -357,7 +377,7 @@ fn emit_grid_segments(
         }
         let start = across.tracks.first().map_or(0.0, |track| track.start);
         let end = across.tracks.last().map_or(0.0, |track| track.end);
-        for (index, position) in boundaries {
+        for (index, position, _) in boundaries {
             let mut emit = |start: f32, end: f32| {
                 let (x1, y1, x2, y2) = if vertical {
                     (position, start, position, end)

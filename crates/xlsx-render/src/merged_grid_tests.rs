@@ -275,7 +275,21 @@ fn assert_merge_subtraction(
     let offset = print.map_or(0.0, |(metrics, _)| 48.0 / metrics.dpi);
     let mut expected = Vec::new();
     for (command, (vertical, index)) in reference.into_iter().zip(boundaries) {
-        if !(2..=3).contains(&index) {
+        let position = match &command {
+            DrawCmd::Line { x1, y1, .. } => {
+                if vertical {
+                    *x1
+                } else {
+                    *y1
+                }
+            }
+            _ => unreachable!(),
+        };
+        let (axis_start, axis_end) = interior[usize::from(!vertical)];
+        if !(2..=3).contains(&index)
+            || position <= axis_start + offset
+            || position >= axis_end + offset
+        {
             expected.push(command);
             continue;
         }
@@ -547,6 +561,56 @@ fn merge_spanning_hidden_tracks_preserves_collapsed_outer_edges() {
             DrawCmd::Line { x1, y1, x2, y2, .. } => x1 != x2 || y1 != y2,
             _ => true,
         }));
+    }
+}
+
+#[test]
+fn hidden_leading_and_trailing_merge_tracks_preserve_exact_grid_commands() {
+    for (hidden_col, hidden_row) in [
+        (Some(1), None),
+        (Some(3), None),
+        (None, Some(1)),
+        (None, Some(3)),
+    ] {
+        for frozen in [0, 2, 4] {
+            let mut wb = workbook("B2:D4");
+            if let Some(col) = hidden_col {
+                wb.sheets[0].col_widths.insert(col, 0.0);
+            }
+            if let Some(row) = hidden_row {
+                wb.sheets[0].row_heights.insert(row, 0.0);
+            }
+            if frozen > 0 {
+                wb.sheets[0].freeze_pane =
+                    Some(FreezePane::new(frozen, frozen, CellRef::new(4, 4)));
+            }
+            let geom = GridGeometry::new(&wb.sheets[0], &wb.styles);
+            for scroll in [0.0, 0.25] {
+                let vp = Viewport {
+                    x: scroll,
+                    y: scroll,
+                    ..viewport(&geom)
+                };
+                let leading_scroll = if frozen > 1 { 0.0 } else { scroll };
+                let trailing_scroll = if frozen >= 4 { 0.0 } else { scroll };
+                assert_merge_subtraction(
+                    &wb,
+                    &vp,
+                    &geom,
+                    None,
+                    [
+                        (
+                            geom.col_x(1) - leading_scroll,
+                            geom.col_x(4) - trailing_scroll,
+                        ),
+                        (
+                            geom.row_y(1) - leading_scroll,
+                            geom.row_y(4) - trailing_scroll,
+                        ),
+                    ],
+                );
+            }
+        }
     }
 }
 
