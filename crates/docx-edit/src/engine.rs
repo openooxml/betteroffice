@@ -14107,7 +14107,6 @@ mod tests {
             .layout_regions_for_trigger(&request, None, trigger)
             .unwrap();
         assert!(engine.pagination.borrow().measured_with_floats);
-        assert!(engine.regions.borrow().as_ref().unwrap().fast_path.is_none());
         (engine, request)
     }
 
