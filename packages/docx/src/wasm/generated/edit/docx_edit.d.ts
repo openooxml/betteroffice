@@ -173,6 +173,7 @@ export class EditSession {
      * Until the matching `end_shared_reads`, committed reads share story projections of each document state.
      */
     begin_shared_reads(): void;
+    bootstrap_peer(state: Uint8Array, metadata: Uint8Array, source?: Uint8Array | null): void;
     /**
      * Display-only input JSON in, one binary `FrameDelta` v1 out (exposed as
      * a transferable `Uint8Array`). `expected_frame_epoch` is the epoch of the
@@ -352,6 +353,7 @@ export class EditSession {
      * state vector.
      */
     encode_diff(remote_state_vector: Uint8Array): Uint8Array;
+    encode_peer_metadata(): Uint8Array;
     /**
      * The full document state as one yrs v1 update. Hand it to
      * [`EditSession::load`] on a fresh replica to reproduce this document.
@@ -1583,6 +1585,7 @@ export interface InitOutput {
     readonly editsession_begin_opening: (a: number, b: number, c: number) => void;
     readonly editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_begin_shared_reads: (a: number) => void;
+    readonly editsession_bootstrap_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -1611,6 +1614,7 @@ export interface InitOutput {
     readonly editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_drain_update_event: (a: number) => [number, number];
     readonly editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
     readonly editsession_encode_state: (a: number) => [number, number];
     readonly editsession_encode_state_vector: (a: number) => [number, number];
     readonly editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

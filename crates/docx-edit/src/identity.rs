@@ -84,7 +84,8 @@ pub(crate) fn entropy() -> [u64; 2] {
 }
 
 /// Kind of Word story a source part holds.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum SourceStoryKind {
     Body,
     Header,
@@ -95,12 +96,14 @@ pub enum SourceStoryKind {
 }
 
 /// A Word story qualified by the package part it is read from.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SourceStory {
     /// The OPC part name, such as `/word/document.xml`.
     pub part_uri: String,
     pub kind: SourceStoryKind,
     /// The note or comment ID, for the stories that share a part.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub item_id: Option<String>,
 }
 
@@ -316,6 +319,8 @@ pub(crate) struct SourcePartInput {
     pub(crate) roots: Vec<(String, Option<String>)>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourcePart {
     uri: String,
     /// Lowercase hex SHA-256 of the part's XML.
@@ -323,9 +328,11 @@ struct SourcePart {
     /// Whether the parser reads the part's XML exactly as written, so its bytes can be kept.
     as_written: bool,
     kind: SourceStoryKind,
+    #[serde(with = "crate::peer_bootstrap::occurrences")]
     occurrences: Vec<ParagraphOccurrence>,
     /// Occurrence ordinal to the session keys seeded from it: one per root
     /// story sharing the part, each a view of the same paragraph, first seeded first.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     backed: HashMap<u32, Vec<String>>,
     roots: Vec<String>,
 }
@@ -352,28 +359,108 @@ impl SourcePart {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Seeded {
     root: String,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     part: Option<usize>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     ordinal: Option<u32>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     source_para_id: Option<String>,
 }
 
 /// Identity index of the retained source package, reconstructible from its bytes.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceIndex {
     package_sha256: String,
+    #[serde(skip, default = "empty_package_bytes")]
     bytes: PackageBytes,
     occupied: BTreeSet<u32>,
     /// Story parts in package order.
     parts: Vec<SourcePart>,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     roots: HashMap<String, SourceStory>,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     seeded: HashMap<String, Seeded>,
     /// IDs the comment companion parts reference.
     comment_references: BTreeSet<u32>,
+    #[serde(skip)]
     seed_states: OnceLock<HashMap<String, StoryState>>,
 }
 
+fn empty_package_bytes() -> PackageBytes {
+    Vec::new().into()
+}
+
 impl SourceIndex {
+    pub(crate) fn attach_peer_source(&mut self, bytes: PackageBytes) -> Result<(), String> {
+        for (part_index, part) in self.parts.iter().enumerate() {
+            if !part.uri.starts_with('/') || part.uri.len() == 1 {
+                return Err("invalid source part URI".to_owned());
+            }
+            for (ordinal, occurrence) in part.occurrences.iter().enumerate() {
+                if occurrence.ordinal as usize != ordinal
+                    || occurrence.tag.start >= occurrence.tag.end
+                {
+                    return Err("invalid source paragraph occurrence".to_owned());
+                }
+            }
+            for (ordinal, views) in &part.backed {
+                if *ordinal as usize >= part.occurrences.len() || views.is_empty() {
+                    return Err("invalid source paragraph views".to_owned());
+                }
+                let mut roots = HashSet::new();
+                for key in views {
+                    let seed = self
+                        .seeded
+                        .get(key)
+                        .ok_or("invalid source paragraph view")?;
+                    if seed.part != Some(part_index)
+                        || seed.ordinal != Some(*ordinal)
+                        || !roots.insert(&seed.root)
+                    {
+                        return Err("inconsistent source paragraph view".to_owned());
+                    }
+                }
+            }
+        }
+        for (key, seed) in &self.seeded {
+            if let Some(part) = seed.part {
+                let part = self.parts.get(part).ok_or("invalid seeded part")?;
+                if seed
+                    .ordinal
+                    .is_some_and(|ordinal| ordinal as usize >= part.occurrences.len())
+                {
+                    return Err("invalid seeded paragraph ordinal".to_owned());
+                }
+                if let Some(ordinal) = seed.ordinal
+                    && !part
+                        .backed
+                        .get(&ordinal)
+                        .is_some_and(|views| views.contains(key))
+                {
+                    return Err("seeded paragraph missing its source view".to_owned());
+                }
+            } else if seed.ordinal.is_some() {
+                return Err("seeded paragraph ordinal without a part".to_owned());
+            }
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+
+    pub(crate) fn package_digest(&self) -> &str {
+        &self.package_sha256
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_states_initialized(&self) -> bool {
+        self.seed_states.get().is_some()
+    }
+
     pub(crate) fn bytes(&self) -> PackageBytes {
         self.bytes.clone()
     }

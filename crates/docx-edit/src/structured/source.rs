@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use yrs::types::{DeepObservable, Event, PathSegment};
 use yrs::{Assoc, ID, IndexScope, IndexedSequence, ReadTxn, StickyIndex, Text, Transact};
@@ -18,17 +19,26 @@ use crate::raw::SeedRange;
 use crate::{COMMENTS, EditingDoc, story_ref};
 
 /// A header, footer or note story and the part it was read from.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceStory {
     pub story: String,
     pub kind: StoryKind,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub part: Option<String>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub note_id: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SourceComment {
     pub id: String,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub author: Option<String>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub date: Option<String>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub parent_id: Option<String>,
     pub done: bool,
     /// The comment body as parsed blocks.
@@ -36,7 +46,8 @@ pub(crate) struct SourceComment {
 }
 
 /// An internal part or external target a relationship names.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum RelationshipTarget {
     Part(String),
     External(String),
@@ -44,9 +55,12 @@ pub(crate) enum RelationshipTarget {
 
 /// A story position recorded as a unit index at seeding, pinned to the stream of the replica that
 /// seeded it so it follows later edits.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Pin {
     pub story: String,
     pub unit: u32,
+    #[serde(skip)]
     pub position: Option<StickyIndex>,
 }
 
@@ -80,7 +94,8 @@ impl Pin {
 }
 
 /// Inline source content the stream does not carry where the source had it.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum InlineSource {
     /// A raw XML node, an unmodelled drawing or object, or a control child the control's frozen
     /// content drops.
@@ -88,12 +103,14 @@ pub(crate) enum InlineSource {
     /// A page or column break, which seeding moves out of its paragraph or drops.
     Break {
         kind: BreakType,
+        #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
         revision: Option<Revision>,
     },
 }
 
 /// How the stream still carries a source break.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum Witness {
     /// Nothing in the stream stands for it.
     Invisible,
@@ -104,6 +121,8 @@ pub(crate) enum Witness {
 }
 
 /// Inline source content, pinned to the unit it precedes.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct InlineRecord {
     pub pin: Pin,
     pub para_id: String,
@@ -111,13 +130,15 @@ pub(crate) struct InlineRecord {
     pub in_control: bool,
     /// Where in that control's content, as UTF-16 offsets into it and each nested control,
     /// when known.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub control_offset: Option<Vec<u32>>,
     pub content: InlineSource,
     pub witness: Witness,
 }
 
 /// How a source cell takes part in a vertical merge.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) enum SourceMerge {
     None,
     Restart,
@@ -125,16 +146,21 @@ pub(crate) enum SourceMerge {
 }
 
 /// A source cell on the table grid.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CellLayout {
     pub column: u32,
     pub span: u32,
     pub merge: SourceMerge,
     /// The cell story seeding made for it; continuation cells usually have none.
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub story: Option<String>,
     /// The source cell holds text or drawings.
     pub content: bool,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RowLayout {
     pub grid_before: u32,
     pub grid_after: u32,
@@ -142,9 +168,43 @@ pub(crate) struct RowLayout {
 }
 
 /// A table's grid as the source defines it, which the stream's layout-oriented spans simplify.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct TableLayout {
     pub grid_columns: u32,
     pub rows: Vec<RowLayout>,
+}
+
+impl TableLayout {
+    pub(crate) fn validate_peer_row_count(rows: usize) -> Result<(), String> {
+        u32::try_from(rows).map_err(|_| "too many table rows".to_owned())?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_peer_metadata(&self) -> Result<(), String> {
+        Self::validate_peer_row_count(self.rows.len())?;
+        for row in &self.rows {
+            let mut column = row.grid_before;
+            for cell in &row.cells {
+                if cell.span == 0 {
+                    return Err("invalid table cell span".to_owned());
+                }
+                if cell.column != column {
+                    return Err("invalid table cell column".to_owned());
+                }
+                column = column
+                    .checked_add(cell.span)
+                    .ok_or("table cell column overflow")?;
+            }
+            let end = column
+                .checked_add(row.grid_after)
+                .ok_or("table row column overflow")?;
+            if end > self.grid_columns {
+                return Err("invalid table grid extent".to_owned());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The identity of a tracked insertion (`inserted`) or deletion, for matching a stream stamp to
@@ -157,35 +217,45 @@ pub(crate) fn move_key(inserted: bool, id: &str, author: &str, date: &str) -> St
 }
 
 /// A break embed seeding moved out of the paragraph `para_id`.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Relocated {
     pub pin: Pin,
     pub para_id: String,
 }
 
 /// Source structure and content the editing stream does not carry.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Provenance {
     /// Each story's raw XML block elements, in source order.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub raw_blocks: HashMap<String, Vec<String>>,
     /// The source block order of the stories with raw XML blocks: the id seeding gives each other
     /// block (paragraph id, `{story}:t{n}`, `{story}:sdt{n}`), `None` for a raw block.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub block_order: HashMap<String, Vec<Option<String>>>,
     pub inline: Vec<InlineRecord>,
     /// Where each raw XML block sits in its part, until resolved against the package.
     pub raw_sources: Vec<RawSource>,
     /// Source grids, keyed by table id (`{story}:t{index}`).
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub tables: HashMap<String, TableLayout>,
     /// The break embeds seeding moved out of paragraphs.
     pub relocated: Vec<Relocated>,
     /// The revisions of moved content, whose stream stamps read as plain insertions and
     /// deletions; see [`move_key`].
+    #[serde(with = "crate::peer_bootstrap::sorted_set")]
     pub moves: HashSet<String>,
     /// Once pinned, the indices into `inline` and into `relocated` of each story's records.
+    #[serde(skip)]
     pub by_story: HashMap<String, (Vec<usize>, Vec<usize>)>,
     /// Once pinned, the relocated breaks an inline record witnesses.
+    #[serde(skip)]
     pub witnessed: HashSet<usize>,
     /// Each story's paragraphs in stream order, with the story block index of those seeded
     /// from a source `w:p`; `None` for paragraphs seeding supplied.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub paragraph_sources: HashMap<String, Vec<Option<usize>>>,
 }
 
@@ -262,10 +332,13 @@ pub(crate) enum Step {
 }
 
 /// A raw XML block and the steps to it from its part's root element.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RawSource {
     pub story: String,
     /// Its position among the story's raw blocks.
     pub index: usize,
+    #[serde(with = "crate::peer_bootstrap::steps")]
     pub steps: Vec<Step>,
     pub xml: String,
 }
@@ -387,7 +460,7 @@ impl CommentWrites {
         Self { written }
     }
 
-    #[cfg(feature = "wasm")]
+    #[cfg(any(test, feature = "wasm"))]
     pub(crate) fn snapshot(&self) -> HashSet<(String, Option<String>)> {
         self.written
             .lock()
@@ -415,35 +488,48 @@ impl CommentWrites {
 }
 
 /// Everything the export reads from the source package rather than the editing stream.
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReadSource {
     pub document_part: String,
     pub stories: Vec<SourceStory>,
     /// The index in `stories` of each story.
+    #[serde(skip)]
     story_index: HashMap<String, usize>,
     pub footnote_separators: usize,
     pub endnote_separators: usize,
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub note_separator_paragraphs: HashMap<String, Vec<Value>>,
     pub comments: Vec<SourceComment>,
     /// Comments seeding anchored into the comment store; the others never had a range.
+    #[serde(with = "crate::peer_bootstrap::sorted_set")]
     pub seeded_comments: HashSet<String>,
     /// Source provenance of each story's raw XML blocks, parallel to `provenance.raw_blocks`, and
     /// of each source comment body's (keyed `comment:{id}`).
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub raw_block_anchors: HashMap<String, Vec<Option<Anchor>>>,
     /// Each source comment's `w:comment` element.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub comment_anchors: HashMap<String, Anchor>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub final_section: Option<Value>,
+    #[serde(deserialize_with = "crate::peer_bootstrap::required_option")]
     pub settings: Option<Value>,
     /// Each part's relationships, the main document part's included.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub relationships: HashMap<String, HashMap<String, RelationshipTarget>>,
+    #[serde(with = "crate::peer_bootstrap::numbering")]
     pub numbering: Arc<docx_parse::NumberingMap>,
     pub provenance: Provenance,
     pub warnings: Vec<String>,
     /// This replica's stories were seeded from the package, so recorded positions are pinned.
+    #[serde(skip)]
     pub pinned: bool,
+    #[serde(skip)]
     pub comment_writes: CommentWrites,
     /// Content-control safety by story part and [`safety_key`]; `None` when the package parts
     /// were not available to read it from.
+    #[serde(with = "crate::peer_bootstrap::optional_map")]
     pub control_safety: Option<HashMap<(String, String), ControlSafety>>,
     /// Controls inside raw XML blocks and comment bodies, in source order.
     pub source_controls: Vec<SourceControl>,
@@ -456,8 +542,10 @@ pub(crate) struct ReadSource {
     pub unrepresented_anchors: Vec<Anchor>,
     /// The occurrences, in document order, of each story-part [`safety_key`] shared by controls
     /// whose safety differs, with the paragraph each sits in.
+    #[serde(with = "crate::peer_bootstrap::sorted_map")]
     pub ambiguous_safety: HashMap<(String, String), Vec<(Option<String>, ControlSafety)>>,
     /// The safety of each seeded control embed whose occurrence seeding could pair with it.
+    #[serde(skip)]
     pub embed_safety: std::sync::OnceLock<HashMap<yrs::branch::BranchID, ControlSafety>>,
 }
 
@@ -519,6 +607,63 @@ fn targets(
 }
 
 impl ReadSource {
+    pub(crate) fn rebuild_peer_metadata(&mut self) -> Result<(), String> {
+        for layout in self.provenance.tables.values() {
+            layout.validate_peer_metadata()?;
+        }
+        for comment in &self.comments {
+            crate::seed::validate_peer_blocks(&comment.body)?;
+        }
+        for paragraphs in self.note_separator_paragraphs.values() {
+            crate::seed::validate_peer_blocks(paragraphs)?;
+        }
+        if self.unrepresented_anchors.len() > self.unrepresented_controls {
+            return Err("invalid unrepresented control count".to_owned());
+        }
+        if self.control_safety.is_none() {
+            self.unlocated_controls
+                .checked_add(
+                    self.provenance
+                        .raw_sources
+                        .iter()
+                        .filter(|source| may_hold_controls(&source.xml))
+                        .count(),
+                )
+                .and_then(|count| {
+                    count.checked_add(
+                        self.comments
+                            .iter()
+                            .filter(|comment| comment.body.iter().any(holds_control))
+                            .count(),
+                    )
+                })
+                .ok_or("unlocated control count overflow")?;
+        }
+        self.story_index.clear();
+        for (index, story) in self.stories.iter().enumerate() {
+            self.story_index.entry(story.story.clone()).or_insert(index);
+        }
+        for record in &self.provenance.inline {
+            if let Witness::Embed(index) = record.witness
+                && index >= self.provenance.relocated.len()
+            {
+                return Err("invalid break witness".to_owned());
+            }
+        }
+        for (index, control) in self.source_controls.iter().enumerate() {
+            if let Some(parent) = control.parent {
+                if parent >= index {
+                    return Err("invalid source control parent".to_owned());
+                }
+                let parent = &self.source_controls[parent];
+                if parent.story != control.story || parent.raw_block != control.raw_block {
+                    return Err("source control parent belongs to another container".to_owned());
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Reads the parts of `package` (the parsed package as JSON) the export needs.
     pub(crate) fn from_package(
         package: &Value,

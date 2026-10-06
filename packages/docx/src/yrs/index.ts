@@ -150,6 +150,7 @@ export {
   type DocxSessionSave,
 } from './saveYrsDocx';
 export { sessionSourcePackage } from './sessionInternals';
+export { PeerMetadataError, peerMetadataTags } from './peerMetadata';
 export {
   DirtyProjectionStories,
   dirtyProjectionStory,
@@ -1045,6 +1046,14 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
+  encodePeerMetadata(): Uint8Array;
+  bootstrapPeer(
+    state: Uint8Array,
+    metadata: Uint8Array,
+    source: Uint8Array | undefined,
+    host: YrsDocxHost,
+    options?: YrsOpeningOptions
+  ): YrsDocxHost;
   /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
   seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
   /**
