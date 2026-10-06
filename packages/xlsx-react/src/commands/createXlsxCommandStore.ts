@@ -64,7 +64,7 @@ export interface XlsxCommandBinding {
   /** Whether `id` must wait behind accepted input. */
   ordered(id: XlsxCommandId): boolean;
   /** Runs `operation` after input accepted before this call. */
-  admit<T>(operation: () => T | Promise<T>, id?: XlsxCommandId): Promise<T>;
+  admit<T>(operation: (readOnly?: boolean) => T | Promise<T>, id?: XlsxCommandId): Promise<T>;
   refuse?(reason: { code: string; message: string }): void;
   /** Performs a command whose gate passed against `env`. */
   perform<K extends XlsxCommandId>(
@@ -331,7 +331,7 @@ export function createXlsxCommandController(): XlsxCommandController {
     const ordered = builtIn !== null && current.ordered(builtIn);
     const origin =
       prepared !== undefined ? prepared : ordered && builtIn ? capture(current, builtIn) : null;
-    const attempt = (): XlsxPluginCommandResult | Promise<XlsxPluginCommandResult> => {
+    const attempt = (readOnly?: boolean): XlsxPluginCommandResult | Promise<XlsxPluginCommandResult> => {
       if (binding !== current) return failure('editor-unavailable', null);
       if (origin && builtIn) {
         const stale = current.resume(origin, builtIn);
@@ -341,7 +341,8 @@ export function createXlsxCommandController(): XlsxCommandController {
       }
       const denied = scope?.deny(id) ?? null;
       if (denied) return failure(denied, environment(true));
-      const env = environment(true);
+      const live = environment(true);
+      const env = live && readOnly !== undefined ? { ...live, readOnly } : live;
       const state = compute(id, args, env);
       if (!state.enabled) return { ok: false, failure: state.disabledReason };
       if (scope && mutatingBuiltIn(id)) return failure('unsupported-policy', env);
