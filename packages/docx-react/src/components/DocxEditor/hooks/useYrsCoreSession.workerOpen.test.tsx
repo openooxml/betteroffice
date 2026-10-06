@@ -51,7 +51,7 @@ import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewK
 import { workerOpenSave } from '../internals/workerOpenSave';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
-import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
+import { registeredWorkerProposalAuthority, workerProposalAuthority, workerProposalFailure } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { createDocxCommandController, DocxCommandAdmissionError, UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
@@ -4809,6 +4809,135 @@ test('a first editor round uses the base peer call when pending hydration falls 
     expect(registeredWorkerProposalAuthority(session)).toBeNull();
     expect(posted.some((request) => request.type === 'proposal')).toBe(false);
   } finally { unmount(); }
+});
+
+test('a font preflight OOM after a proposal mirrors retires without failing peer rounds or saves', async () => {
+  let holdMutation = false;
+  let holdRequirements = false;
+  const options: Parameters<typeof installWorker>[0] = {
+    holdReply: (request) => (holdMutation && request.type === 'proposal' && request.operation.kind === 'propose') ||
+      (holdRequirements && request.type === 'fontRequirements'),
+  };
+  const { posted, workers, received, reply, responses } = installWorker(options);
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+  });
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let frames: ReturnType<typeof holdFrames> | undefined;
+  let unmountPreflight: (() => void) | undefined;
+  let unmountIO: (() => void) | undefined;
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    const api = result.current.ref.current!;
+    await act(async () => {
+      expect(await api.proposeChanges({ expectVersion: session.version(), proposals: [] })).toMatchObject({ ok: true });
+      await api.whenLayoutComplete({ timeoutMs: 5000 });
+    });
+    const authority = registeredWorkerProposalAuthority(session)!;
+    expect(authority.initialized).toBe(true);
+    const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const preflightErrors: Array<[Error, YrsSession]> = [];
+    const fontId = session.registerFont(font);
+    const preflight = renderHook(() => useLayoutPipeline({
+      document: result.current.host!.document, session, renderEnv: {}, pageGap: 24, zoom: 1,
+      residentMeasurementConfig: (requirements) => ({
+        fontChains: Object.fromEntries(requirements.map((requirement) => [requirement.key, [fontId]])),
+        defaults: { fontSize: 11, fontFamily: 'Calibri' },
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+      }),
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null }, viewportLayoutRef: { current: null },
+      syncCoordinator: new LayoutSelectionGate(), getScrollContainer: () => null,
+      experimentalWorkerOpen: true,
+      fontRequirementsInWorker: result.current.renderer.fontRequirementsInWorker,
+      layoutInWorker: result.current.renderer.layoutInWorker,
+      onError: (error, owner) => preflightErrors.push([error, owner]),
+    }));
+    unmountPreflight = preflight.unmount;
+    frames = holdFrames();
+    holdMutation = true;
+    const previous = posted.at(-1)!.id;
+    const round = api.proposeChanges({
+      expectVersion: session.version(),
+      proposals: [{
+        id: 'before-font-oom', paragraph,
+        suggest: { author: 'Host', date: '2026-10-06T00:00:00Z' },
+        op: 'insertText', at: 'start', text: 'Mirrored ',
+      }],
+    });
+    void round.catch(() => {});
+    const mutation = await received('proposal', previous);
+    expect(authority.holdsWorkerState()).toBe(true);
+    holdRequirements = true;
+    options.oomStage = 'fontRequirements';
+    act(() => preflight.result.current.runLayoutPipeline());
+    const requirements = await received('fontRequirements', mutation.id);
+    expect(responses.get(requirements)).toMatchObject({ ok: false, outOfMemory: true });
+    await act(async () => { reply(mutation); expect(await round).toMatchObject({ ok: true }); });
+    expect(session.paragraphs('body')[0]!.text).toContain('Mirrored ');
+    expect(authority.holdsWorkerState()).toBe(false);
+    expect(authority.retirementReason()).toBeNull();
+    const peerRequirements = spyOn(session, 'layoutFontRequirementsJson');
+    const peerLayout = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    await act(async () => { reply(requirements); });
+    expect(authority.retirementReason()).toBe('source-fallback');
+    expect(workerProposalFailure(session)).toBeUndefined();
+    expect(preflightErrors).toHaveLength(1);
+    expect(preflightErrors[0]![0]).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(preflightErrors[0]![1]).toBe(session);
+    await act(async () => { await frames!.until(result.current.renderer.settledDisplayList(null, null)); });
+    expect(peerRequirements).toHaveBeenCalled();
+    expect(peerLayout).toHaveBeenCalled();
+    expect(result.current.renderer.workerSurfacesActive).toBe(false);
+    expect(result.current.renderer.status).toBe('ready');
+    expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+    const workerRounds = posted.filter((request) => request.type === 'proposal').length;
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: session.version(),
+        proposals: [{
+          id: 'after-font-oom', paragraph,
+          suggest: { author: 'Host', date: '2026-10-06T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect(authority.snapshot()!.proposals.map(({ id }) => id)).toEqual(['before-font-oom', 'after-font-oom']);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(session.paragraphs('body')[0]!.text).toContain('Recovered ');
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerRounds);
+    const saved: ArrayBuffer[] = [];
+    const saveErrors: Error[] = [];
+    const io = renderHook(() => useFileIO({
+      pagedEditorRef: result.current.pagedEditorRef, viewerSession: false,
+      resolveImage: () => null, comments: [], documentName: undefined,
+      onSave: (buffer) => saved.push(buffer), downloadOnSave: false,
+      onError: (error) => saveErrors.push(error),
+      onOpen: undefined, onPrint: undefined, onDocumentNameChange: undefined,
+      loadBuffer: async () => {}, focusActiveEditor: () => {},
+    }));
+    unmountIO = io.unmount;
+    let buffer: ArrayBuffer | null = null;
+    await act(async () => { buffer = await io.result.current.handleSave(); });
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    expect(saved).toEqual([buffer!]);
+    expect(saveErrors).toEqual([]);
+    expect(workerProposalFailure(session)).toBeUndefined();
+    expect(workers).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmountIO?.();
+    unmountPreflight?.();
+    unmount();
+    frames?.restore();
+    errorLog.mockRestore();
+  }
 });
 
 test('the host proposal gate refuses before initializing the worker authority', async () => {

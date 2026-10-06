@@ -692,7 +692,6 @@ export function useYrsCoreSession(
             };
             const activateEditorProposals = () => {
               if (stale() || !worker.canSave()) return null;
-              const openedProposalOwner = worker.stateRevision?.()?.owner;
               let laidOut = renderedFrameRef.current && renderedFrameRef.current !== inheritedFrameRef.current
                 ? Promise.resolve()
                 : new Promise<void>((resolve) => {
@@ -710,12 +709,9 @@ export function useYrsCoreSession(
                   workerOpenRef.current?.refreshWorkerLayout?.();
                 },
                 current: () => !stale(),
-                laidOut: () => {
-                  const owner = worker.stateRevision?.()?.owner;
-                  return owner !== openedProposalOwner && worker.whenBootstrapSent
-                    ? Promise.race([laidOut, worker.whenBootstrapSent()])
-                    : laidOut;
-                },
+                laidOut: () => worker.whenBootstrapSent
+                  ? Promise.race([laidOut, worker.whenBootstrapSent()])
+                  : laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
                 projectionChanged: (stories) => {
                   inputPositionMapsRef.current.clear();

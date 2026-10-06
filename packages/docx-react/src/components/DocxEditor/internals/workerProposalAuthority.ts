@@ -533,6 +533,7 @@ export function registerWorkerProposalAuthority(
       initializing = Promise.resolve(awaitWorkerOpenReplica(session)).then(() =>
         Promise.race([hooks.laidOut(), stopped, retired])
       ).then(() => enqueue(initializeNow));
+      void initializing.catch(() => {});
       return initializing;
     },
     geometry: () => geometry,

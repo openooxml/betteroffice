@@ -395,7 +395,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       markLayoutQueued(owner, false);
     }
     if (viewer && failure instanceof SupersededPreviewError) return failure;
-    if (!viewer && hasEditorWorkerProposalRounds(owner)) failWorkerProposalAuthority(owner, failure);
+    if (!viewer && hasEditorWorkerProposalRounds(owner) &&
+      !registeredWorkerProposalAuthority(owner)?.retirementReason() &&
+      !(failure instanceof SupersededPreviewError)) failWorkerProposalAuthority(owner, failure);
     onErrorRef.current?.(failure, owner);
     return failure;
   }, [isViewerSession]);
