@@ -21,6 +21,41 @@ fn apply_resident(engine: &EngineSession, profiled: bool) -> Result<(), String> 
     }
 }
 
+pub(super) fn full_display_frame(
+    engine: &EngineSession,
+    extras: &str,
+    mut display: DisplayState,
+) -> (Vec<u8>, DisplayList, usize) {
+    let pagination = engine.pagination.borrow();
+    let (_, list) = docx_layout::build_resident_display_list_observed(
+        pagination.input.as_ref().unwrap(),
+        pagination.layout.as_ref().unwrap(),
+        extras,
+        &mut || {},
+    )
+    .unwrap();
+    let epochs = FrameEpochs {
+        doc_epoch: engine.doc_epoch(),
+        layout_epoch: pagination.layout_epoch,
+        frame_epoch: display.frame_epoch + 1,
+        base_frame_epoch: display.binary_frame_epoch,
+    };
+    for snapshot in &mut display.pages {
+        snapshot.materialize_positions();
+    }
+    let bytes = encode_frame_delta(
+        &list,
+        &display.pages,
+        epochs,
+        false,
+        &mut display.next_page_id,
+    )
+    .unwrap()
+    .0;
+    let rebuilt = list.pages.len();
+    (bytes, list, rebuilt)
+}
+
 #[test]
 fn resident_errors_consume_interactive_before_the_next_preview() {
     let fonts = docx_layout::MeasureFonts::default();
@@ -124,7 +159,7 @@ fn sliced_errors_consume_interactive_before_the_next_preview() {
 }
 
 #[test]
-fn display_reset_preserves_plain_damage_and_clears_region_damage() {
+fn display_reset_clears_damage_on_both_paths() {
     for region in [false, true] {
         let mut pagination = PaginationState {
             display_uses_region_path: region,
@@ -137,11 +172,11 @@ fn display_reset_preserves_plain_damage_and_clears_region_damage() {
             ..Default::default()
         };
         pagination.clear_display_damage();
-        assert_eq!(pagination.display_rebuilt_pages.is_empty(), region);
-        assert_eq!(pagination.display_layout_pending, !region);
-        assert_eq!(pagination.display_full_rebuild, !region);
+        assert!(pagination.display_rebuilt_pages.is_empty());
+        assert!(!pagination.display_layout_pending);
+        assert!(!pagination.display_full_rebuild);
         assert!(pagination.position_deltas.is_empty());
-        assert_eq!(pagination.note_changed_pages.is_empty(), region);
+        assert!(pagination.note_changed_pages.is_empty());
         assert_eq!(pagination.restamped_pages, Some(BTreeSet::new()));
     }
 }
@@ -173,16 +208,13 @@ fn repeated_interactive_frames_match_main_with_and_without_notes() {
         engine
             .layout_document_with_regions_retained(&request.to_string())
             .unwrap();
-        let (note_pages, rebuilt_ranges, display_pending) = {
+        let rebuilt_ranges = {
             let pagination = engine.pagination.borrow();
             assert!(pagination.last_incremental);
             assert!(!pagination.display_uses_region_path);
             assert!(!pagination.position_deltas.is_empty());
-            (
-                pagination.note_changed_pages.clone(),
-                pagination.rebuilt_page_ranges.clone(),
-                pagination.display_layout_pending,
-            )
+            assert!(pagination.display_layout_pending);
+            pagination.rebuilt_page_ranges.clone()
         };
         for frame in 0..2 {
             let (expected_bytes, expected_list, _) =
@@ -200,13 +232,151 @@ fn repeated_interactive_frames_match_main_with_and_without_notes() {
             {
                 let pagination = engine.pagination.borrow();
                 assert!(pagination.position_deltas.is_empty());
-                assert_eq!(pagination.note_changed_pages, note_pages);
+                assert!(pagination.note_changed_pages.is_empty());
                 assert_eq!(pagination.rebuilt_page_ranges, rebuilt_ranges);
-                assert_eq!(pagination.display_layout_pending, display_pending);
+                assert!(!pagination.display_layout_pending);
                 assert_eq!(pagination.restamped_pages, Some(BTreeSet::new()));
             }
             reference_display = main_frame_baseline(&engine, &extras);
         }
+    }
+}
+
+#[test]
+fn unshown_interactive_layouts_in_different_paragraphs_match_cold() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for order in [[1, 30], [30, 1]] {
+        let engine = paragraphs_engine(9395, 40);
+        engine.set_relayout_trigger(RelayoutTrigger::Interactive);
+        let request = small_page_request(font);
+        let request_value: serde_json::Value = serde_json::from_str(&request).unwrap();
+        let extras = json!({"fontChains": request_value["measurement"]["fontChains"]}).to_string();
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let before = engine.stats();
+        let shown = engine.with_display_list(Clone::clone).unwrap();
+        let paragraphs = engine.doc().paragraphs("body").unwrap();
+        for (step, paragraph) in order.into_iter().enumerate() {
+            let at = engine
+                .doc()
+                .paragraph_mark_position(&paragraphs[paragraph].para_id)
+                .unwrap()
+                .index
+                - 1;
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", at, at), Some("x"), true)
+                .unwrap();
+            engine
+                .layout_document_with_regions_retained(&request)
+                .unwrap();
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.last_incremental);
+            assert!(!pagination.display_uses_region_path);
+            assert!(pagination.display_layout_pending);
+            assert_eq!(pagination.display_full_rebuild, step != 0);
+        }
+        assert_eq!(engine.stats().display_builds, before.display_builds);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        assert!(engine.build_display_list_frame("{", epoch).is_err());
+        assert!(engine.pagination.borrow().display_layout_pending);
+        assert!(engine.pagination.borrow().display_full_rebuild);
+        assert_eq!(engine.with_display_list(Clone::clone).unwrap(), shown);
+        assert_region_state_matches_cold(&engine, &request, "unshown interactive layouts");
+        assert!(!engine.pagination.borrow().has_display_damage());
+        assert_eq!(engine.stats().display_builds, before.display_builds + 2);
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
+            engine.with_display_list(|list| list.pages.len()).unwrap() as u64
+        );
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", 3, 3), Some("y"), true)
+            .unwrap();
+        engine
+            .layout_document_with_regions_retained(&request)
+            .unwrap();
+        assert!(!engine.pagination.borrow().display_full_rebuild);
+        let incremental = engine.stats().incremental_display_builds;
+        assert_region_state_matches_cold(&engine, &request, "typing after unshown layouts");
+        assert_eq!(engine.stats().incremental_display_builds, incremental + 2);
+    }
+}
+
+#[test]
+fn unshown_layouts_crossing_display_paths_match_cold() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    for region_first in [true, false] {
+        let (engine, request) = interactive_note_sections_engine(font);
+        let request = request.to_string();
+        let before = engine.stats();
+        let paragraphs = engine.doc().paragraphs("body").unwrap();
+        let undo = crate::UndoSession::new();
+        for (step, paragraph) in [0, 18].into_iter().enumerate() {
+            let region = (step == 0) == region_first;
+            if region {
+                let batch: crate::EditRequest = serde_json::from_value(json!({
+                    "expectVersion": engine.doc().version(), "history": "separate",
+                    "steps": [{"op": "insertText", "at": "start", "text": "bulk", "target": {
+                        "kind": "paragraph", "story": "body",
+                        "paraId": paragraphs[paragraph].para_id
+                    }}]
+                }))
+                .unwrap();
+                assert!(
+                    engine
+                        .doc()
+                        .apply_edits(&batch, &undo)
+                        .unwrap()
+                        .unwrap()
+                        .applied
+                );
+            } else {
+                let at = engine
+                    .doc()
+                    .paragraph_mark_position(&paragraphs[paragraph].para_id)
+                    .unwrap()
+                    .index
+                    - 1;
+                engine
+                    .edit_resident_text(crate::StoryRange::new("body", at, at), Some("x"), true)
+                    .unwrap();
+            }
+            assert_eq!(
+                engine.region_relayout_trigger(&request).unwrap(),
+                if region {
+                    RelayoutTrigger::Bulk
+                } else {
+                    RelayoutTrigger::Interactive
+                }
+            );
+            engine
+                .layout_document_with_regions_retained(&request)
+                .unwrap();
+            assert_eq!(engine.pagination.borrow().display_uses_region_path, region);
+            assert!(engine.pagination.borrow().display_layout_pending);
+        }
+        assert_eq!(engine.stats().display_builds, before.display_builds);
+        assert!(engine.pagination.borrow().display_full_rebuild);
+        assert_region_state_matches_cold(&engine, &request, "unshown layouts across paths");
+        assert!(!engine.pagination.borrow().has_display_damage());
+        assert_eq!(engine.stats().display_builds, before.display_builds + 2);
+        assert_eq!(
+            engine.stats().incremental_display_builds,
+            before.incremental_display_builds + 1
+        );
+        assert_eq!(
+            engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
+            engine.with_display_list(|list| list.pages.len()).unwrap() as u64
+        );
     }
 }
 
@@ -262,7 +432,7 @@ fn interactive_damage_engine(
 }
 
 #[test]
-fn separated_interactive_layouts_match_main_note_anchors_and_frame_bytes() {
+fn separated_interactive_layouts_match_cold_note_anchors_and_frame_bytes() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -290,7 +460,7 @@ fn separated_interactive_layouts_match_main_note_anchors_and_frame_bytes() {
     }
     assert!(engine.pagination.borrow().note_changed_pages.is_empty());
     let (expected_bytes, expected_list, expected_rebuilt) =
-        main_frame_oracle(&engine, &extras, reference_display);
+        full_display_frame(&engine, &extras, reference_display);
     let before = engine.stats();
     let epoch = engine.display.borrow().binary_frame_epoch;
     assert_eq!(
@@ -309,7 +479,7 @@ fn separated_interactive_layouts_match_main_note_anchors_and_frame_bytes() {
 }
 
 #[test]
-fn interactive_page_build_before_undo_matches_main_frame_bytes() {
+fn interactive_page_build_before_undo_matches_cold_frame_bytes() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -397,7 +567,7 @@ fn interactive_page_build_before_undo_matches_main_frame_bytes() {
         .layout_document_with_regions_retained(&request)
         .unwrap();
     assert!(engine.pagination.borrow().display_rebuilt_pages.is_empty());
-    let (expected_bytes, expected_list, _) = main_frame_oracle(&engine, &extras, reference_display);
+    let (expected_bytes, expected_list, _) = full_display_frame(&engine, &extras, reference_display);
     assert_eq!(
         engine
             .build_display_list_frame(&extras, epochs.frame_epoch)
@@ -411,7 +581,7 @@ fn interactive_page_build_before_undo_matches_main_frame_bytes() {
 }
 
 #[test]
-fn interactive_layouts_past_the_region_damage_limit_match_main_frames() {
+fn interactive_layouts_past_the_region_damage_limit_match_cold_frames() {
     let fonts = docx_layout::MeasureFonts::default();
     let _scope = fonts.enter();
     let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -447,13 +617,17 @@ fn interactive_layouts_past_the_region_damage_limit_match_main_frames() {
         {
             let pagination = engine.pagination.borrow();
             assert!(pagination.last_incremental);
-            assert!(!pagination.display_full_rebuild);
+            assert_eq!(pagination.display_full_rebuild, each_layout);
             assert!(!pagination.display_uses_region_path);
             assert!(pagination.display_rebuilt_pages.is_empty());
         }
         assert_eq!(engine.stats().display_builds, before.display_builds);
-        let (expected_bytes, expected_list, expected_rebuilt) =
-            main_frame_oracle(&engine, &extras, std::mem::take(&mut reference_display));
+        let reference = std::mem::take(&mut reference_display);
+        let (expected_bytes, expected_list, expected_rebuilt) = if each_layout {
+            full_display_frame(&engine, &extras, reference)
+        } else {
+            main_frame_oracle(&engine, &extras, reference)
+        };
         let epoch = engine.display.borrow().binary_frame_epoch;
         assert_eq!(
             engine.build_display_list_frame(&extras, epoch).unwrap(),
@@ -465,7 +639,7 @@ fn interactive_layouts_past_the_region_damage_limit_match_main_frames() {
         );
         assert_eq!(
             engine.stats().incremental_display_builds,
-            before.incremental_display_builds + 1
+            before.incremental_display_builds + u64::from(!each_layout)
         );
         assert_eq!(
             engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,

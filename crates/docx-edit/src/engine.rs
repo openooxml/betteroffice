@@ -1278,12 +1278,10 @@ impl PaginationState {
 
     fn clear_display_damage(&mut self) {
         self.position_deltas.clear();
-        if self.display_uses_region_path {
-            self.display_rebuilt_pages.clear();
-            self.display_layout_pending = false;
-            self.display_full_rebuild = false;
-            self.note_changed_pages.clear();
-        }
+        self.display_rebuilt_pages.clear();
+        self.display_layout_pending = false;
+        self.display_full_rebuild = false;
+        self.note_changed_pages.clear();
         self.restamped_pages = Some(BTreeSet::new());
     }
 }
@@ -6755,7 +6753,9 @@ impl EngineSession {
             pagination.revision_preview = preview.clone();
         }
         if trigger.uses_region_path() {
-            pagination.display_full_rebuild |= !incremental || !same_page_count;
+            pagination.display_full_rebuild |= !incremental
+                || !same_page_count
+                || (pagination.display_layout_pending && !pagination.display_uses_region_path);
             if !pagination.display_full_rebuild {
                 let state = &mut *pagination;
                 if state.display_layout_pending {
@@ -6782,10 +6782,11 @@ impl EngineSession {
             }
             pagination.limit_display_damage();
         } else {
+            pagination.display_full_rebuild |= pagination.display_layout_pending;
             pagination.position_deltas = deltas;
             pagination.note_changed_pages.clear();
             pagination.display_rebuilt_pages.clear();
-            pagination.display_full_rebuild = false;
+            pagination.limit_display_damage();
         }
         pagination.display_uses_region_path = trigger.uses_region_path();
         pagination.rebuilt_page_start = run.rebuilt_page_start;
@@ -8104,8 +8105,8 @@ impl EngineSession {
             };
             let font_cache_identity =
                 docx_layout::measure_font_cache_identity(&display.font_chains);
-            let build = if pagination.last_incremental
-                && (!pagination.display_uses_region_path || !pagination.display_full_rebuild)
+            let build = if (pagination.last_incremental || !pagination.display_layout_pending)
+                && !pagination.display_full_rebuild
                 && display.extras_fingerprint == extras_fingerprint
                 && display.font_cache_identity == Some(font_cache_identity)
             {
@@ -8113,7 +8114,9 @@ impl EngineSession {
                 // but later ranges, the pages elsewhere whose notes anchor to
                 // references the edit moved, and retained pages whose section or
                 // numbering stamps changed are rebuilt too.
-                let first = if pagination.display_uses_region_path {
+                let first = if !pagination.display_layout_pending {
+                    0..0
+                } else if pagination.display_uses_region_path {
                     pagination
                         .pending_display_pages()
                         .min()
@@ -8160,6 +8163,7 @@ impl EngineSession {
                     pagination
                         .rebuilt_page_ranges
                         .iter()
+                        .filter(|_| pagination.display_layout_pending)
                         .skip(1)
                         .flat_map(Clone::clone)
                         .chain(pagination.note_changed_pages.iter().copied())
@@ -11174,8 +11178,15 @@ mod tests {
                     expected.checkpointed.rebuilt_page_end
                 );
             }
-            let (expected_frame, expected_list, expected_rebuilt) =
-                main_frame_oracle(&engine, &extras, reference_display);
+            let (expected_frame, expected_list, expected_rebuilt) = if layouts == 1 {
+                main_frame_oracle(&engine, &extras, reference_display)
+            } else {
+                interactive_layout_regression_tests::full_display_frame(
+                    &engine,
+                    &extras,
+                    reference_display,
+                )
+            };
             let before = engine.stats().rebuilt_display_pages;
             let frame = engine.build_display_list_frame(&extras, epoch).unwrap();
             assert_eq!(frame, expected_frame, "{layouts} layouts");
@@ -11232,7 +11243,11 @@ mod tests {
             );
         }
         let (expected_frame, expected_list, expected_rebuilt) =
-            main_frame_oracle(&engine, &extras, reference_display);
+            interactive_layout_regression_tests::full_display_frame(
+                &engine,
+                &extras,
+                reference_display,
+            );
         let before = engine.stats().rebuilt_display_pages;
         assert_eq!(
             engine.build_display_list_frame(&extras, epoch).unwrap(),
