@@ -20,7 +20,8 @@
     "nanoid": "^3.3.17",
     "undici": "^7.29.1",
     "ip-address": "^10.4.0",
-    "browserslist": "^4.28.7"
+    "browserslist": "^4.28.7",
+    "@modelcontextprotocol/sdk": "~1.31.0"
   },
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",
