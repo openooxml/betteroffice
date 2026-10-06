@@ -269,6 +269,7 @@ struct RegionWorkCounts {
 #[cfg(test)]
 thread_local! {
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
+    static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static REGION_WORK_COUNTS: Cell<RegionWorkCounts> = const { Cell::new(RegionWorkCounts {
@@ -1215,13 +1216,26 @@ struct MeasurementPatch {
     replaced: std::ops::Range<usize>,
     old_blocks: Vec<Rc<LayoutBlock>>,
     shift: crate::bridge::preview::ParagraphEdit,
+    shifted_identities: Vec<std::rc::Weak<LayoutBlock>>,
 }
 
 impl MeasurementPatch {
+    fn certifies_block(&self, blocks: &(impl BlockSource + ?Sized), index: usize) -> bool {
+        !self.replaced.contains(&index)
+            && index.abs_diff(self.replaced.start) > 1
+            && self
+                .shifted_identities
+                .get(index)
+                .zip(blocks.identity(index))
+                .is_some_and(|(previous, next)| previous.ptr_eq(&Rc::downgrade(next)))
+    }
+
     fn shifted_block(&self, index: usize, block: &LayoutBlock) -> Option<LayoutBlock> {
         if index < self.replaced.end || self.shift.delta == 0 {
             return None;
         }
+        #[cfg(test)]
+        CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().2.push(index));
         let mut shifted = block.clone();
         crate::bridge::local::shift_block(&mut shifted, self.shift.delta);
         Some(shifted)
@@ -1266,6 +1280,7 @@ struct PaginationState {
     lowered_from: Option<Rc<SharedBlocks>>,
     lowered_generation: Option<u64>,
     measurement_patch: Option<MeasurementPatch>,
+    measured_shift_safe: Vec<bool>,
     /// The doc epoch and lowering map a resident edit path built `input` from.
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     retain_matches: Vec<Option<BlockCertificate>>,
@@ -1311,6 +1326,24 @@ struct PaginationState {
 }
 
 impl PaginationState {
+    fn refresh_shift_safety(&mut self) {
+        if self.measured_shift_safe.len()
+            != self.input.as_ref().map_or(0, |input| input.measured.len())
+        {
+            self.measured_shift_safe = self
+                .input
+                .as_ref()
+                .map(|input| {
+                    input
+                        .measured
+                        .iter()
+                        .map(|entry| measurement_shift_safe(&entry.block))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+    }
+
     fn set_font_dependencies(
         &mut self,
         dependencies: Vec<FontChainDependencies>,
@@ -1906,6 +1939,30 @@ fn measured_fingerprint(measured: &MeasuredBlock) -> Result<Fingerprint, String>
         relative_run_position_fingerprint(&measured.block),
     ))
     .map_err(|error| format!("fingerprint measured block: {error}"))
+}
+
+fn measurement_shift_safe(block: &LayoutBlock) -> bool {
+    let position = |value: Option<f64>| {
+        value.is_none_or(|value| value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
+    };
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            paragraph.pm_start.is_some()
+                && position(paragraph.pm_start)
+                && position(paragraph.pm_end)
+                && paragraph.sdt_groups.is_none()
+                && paragraph.runs.iter().all(|run| {
+                    !matches!(run, Run::Image(_) | Run::Unsupported)
+                        && !matches!(run, Run::Text(text) if text.inline_sdt_widget.is_some())
+                        && position(run.pm_start())
+                        && position(run.pm_end())
+                })
+        }
+        LayoutBlock::PageBreak(block) => block.sdt_groups.is_none(),
+        LayoutBlock::ColumnBreak(block) => block.sdt_groups.is_none(),
+        LayoutBlock::Unsupported => true,
+        _ => false,
+    }
 }
 
 fn relative_run_position_fingerprint(block: &LayoutBlock) -> u64 {
@@ -2650,6 +2707,9 @@ fn normalize_retained_block(
 }
 
 fn retain_shape_measurements(next: &mut LayoutBlock, previous: &LayoutBlock) {
+    if !shape_measurement_counts_match(next, previous) {
+        return;
+    }
     fn shape(next: &mut docx_layout::types::ShapeBlock, previous: &docx_layout::types::ShapeBlock) {
         next.inner_measures.clone_from(&previous.inner_measures);
         for (next, previous) in next.children.iter_mut().zip(&previous.children) {
@@ -2669,6 +2729,52 @@ fn retain_shape_measurements(next: &mut LayoutBlock, previous: &LayoutBlock) {
         }
         _ => {}
     }
+}
+
+fn shape_measurement_counts_match(next: &LayoutBlock, previous: &LayoutBlock) -> bool {
+    fn shape(
+        next: &docx_layout::types::ShapeBlock,
+        previous: &docx_layout::types::ShapeBlock,
+    ) -> bool {
+        next.inner_text.as_ref().map(Vec::len) == previous.inner_text.as_ref().map(Vec::len)
+            && next.children.len() == previous.children.len()
+            && next
+                .children
+                .iter()
+                .zip(&previous.children)
+                .all(|(next, previous)| shape(next, previous))
+    }
+    match (next, previous) {
+        (LayoutBlock::Shape(next), LayoutBlock::Shape(previous)) => shape(next, previous),
+        (LayoutBlock::Table(next), LayoutBlock::Table(previous)) => {
+            next.rows.len() == previous.rows.len()
+                && next.rows.iter().zip(&previous.rows).all(|(next, previous)| {
+                    next.cells.len() == previous.cells.len()
+                        && next.cells.iter().zip(&previous.cells).all(|(next, previous)| {
+                            next.blocks.len() == previous.blocks.len()
+                                && next
+                                    .blocks
+                                    .iter()
+                                    .zip(&previous.blocks)
+                                    .all(|(next, previous)| {
+                                        shape_measurement_counts_match(next, previous)
+                                    })
+                        })
+                })
+        }
+        _ => std::mem::discriminant(next) == std::mem::discriminant(previous),
+    }
+}
+
+fn retained_shape_block_matches(next: &LayoutBlock, previous: &LayoutBlock) -> bool {
+    if !matches!(next, LayoutBlock::Shape(_) | LayoutBlock::Table(_))
+        || !shape_measurement_counts_match(next, previous)
+    {
+        return false;
+    }
+    let mut candidate = next.clone();
+    retain_shape_measurements(&mut candidate, previous);
+    candidate == *previous
 }
 
 fn certify_retained_blocks(
@@ -3773,8 +3879,8 @@ impl EngineSession {
     fn clear_region_retention(&self) {
         self.region_retention_valid.set(false);
         let mut pagination = self.pagination.borrow_mut();
-        pagination.measurement_patch = None;
         if !pagination.moved_blocks.is_empty() {
+            pagination.measurement_patch = None;
             pagination.input = None;
             pagination.measured_with = None;
             pagination.set_font_dependencies(Vec::new(), None);
@@ -3795,16 +3901,43 @@ impl EngineSession {
         if self.region_retention_valid.replace(true) {
             return;
         }
-        self.render.borrow_mut().stories = HashMap::new();
+        let preserve_patch = {
+            drop(self.measurement_patch());
+            let pagination = self.pagination.borrow();
+            let render = self.render.borrow();
+            pagination.measurement_patch.as_ref().is_some_and(|patch| {
+                render.stories.get("body").is_some_and(|lowered| {
+                    patch.current_generation == lowered.generation
+                        && patch.epochs == (pagination.doc_epoch, self.doc_epoch())
+                        && patch.block_count_after == lowered.blocks.len()
+                        && pagination.input.as_ref().is_some_and(|input| {
+                            patch.block_count_before == input.measured.len()
+                        })
+                        && pagination.moved_blocks.is_empty()
+                })
+            })
+        };
+        self.render
+            .borrow_mut()
+            .stories
+            .retain(|story, _| preserve_patch && story == "body");
         self.measurement.borrow_mut().templates = HashMap::new();
         self.note_separators.borrow_mut().take();
         self.preview_locality.borrow_mut().take();
         let mut pagination = self.pagination.borrow_mut();
+        if preserve_patch {
+            pagination.input_lowering = None;
+            pagination.retain_matches.clear();
+            pagination.checkpoints.clear();
+            pagination.region_placements.clear();
+            return;
+        }
         pagination.input = None;
         pagination.measured_with = None;
         pagination.lowered_from = None;
         pagination.lowered_generation = None;
         pagination.measurement_patch = None;
+        pagination.measured_shift_safe.clear();
         pagination.input_lowering = None;
         pagination.retain_matches = Vec::new();
         pagination.moved_blocks = BTreeSet::new();
@@ -3849,6 +3982,17 @@ impl EngineSession {
             pagination.measurement_patch = None;
         }
         std::cell::RefMut::map(pagination, |pagination| &mut pagination.measurement_patch)
+    }
+
+    fn certified_float_reuse_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.allow_float_measurement_patch.get()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
 
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
@@ -4073,6 +4217,7 @@ impl EngineSession {
                     pm: shift.pm.clone(),
                     delta: shift.delta,
                 },
+                shifted_identities: Vec::new(),
             })
         } else {
             previous_patch.and_then(|patch| {
@@ -4085,6 +4230,10 @@ impl EngineSession {
                 )
             })
         };
+        let measurement_patch = measurement_patch.map(|mut patch| {
+            patch.shifted_identities = blocks.shared().iter().map(Rc::downgrade).collect();
+            patch
+        });
         lowered.generation = generation;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
@@ -5120,7 +5269,9 @@ impl EngineSession {
                         .regions
                         .borrow()
                         .as_ref()
-                        .is_some_and(|state| state.fonts != fonts))
+                        .is_some_and(|state| {
+                            state.fonts != fonts || state.request_json != input_json
+                        }))
             {
                 pagination.measurement_patch = None;
             }
@@ -5212,6 +5363,7 @@ impl EngineSession {
                     apply_section_geometry(&mut input, &regions);
                 }
                 Arena::Full(mut blocks, coupled) => {
+                    self.pagination.borrow_mut().measured_shift_safe.clear();
                     #[cfg(test)]
                     BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().1 += 1);
                     let mut section_index = 0;
@@ -5671,6 +5823,7 @@ impl EngineSession {
         pagination.lowered_from = lowered_from;
         pagination.lowered_generation = lowered_generation;
         pagination.measurement_patch = None;
+        pagination.refresh_shift_safety();
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
@@ -6136,10 +6289,10 @@ impl EngineSession {
             (true, Some(env)) => Some((self.regional_fingerprint(&regions, env), env.clone())),
             _ => None,
         };
-        let retain_matches = match lowered_from
-            .as_deref()
-            .filter(|_| uses_region_path && !provisional)
-        {
+        let certify = uses_region_path
+            && !provisional
+            && (!has_floats || !self.certified_float_reuse_enabled());
+        let retain_matches = match lowered_from.as_deref().filter(|_| certify) {
             Some(blocks) => certify_retained_blocks(
                 blocks,
                 self.pagination
@@ -6184,6 +6337,7 @@ impl EngineSession {
         pagination.lowered_generation = lowered_generation;
         pagination.measurement_patch = None;
         pagination.retain_matches = retain_matches;
+        pagination.refresh_shift_safety();
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
@@ -7397,6 +7551,7 @@ impl EngineSession {
         let mut reused = vec![false; blocks.len()];
         let mut certificates = vec![None; blocks.len()];
         let mut float_dirty = vec![false; blocks.len()];
+        let mut shifted_reuse = vec![false; blocks.len()];
         let mut sections = Vec::with_capacity(blocks.len());
         let mut marks = Vec::with_capacity(blocks.len());
         let mut measure_calls = 0_u64;
@@ -7422,10 +7577,6 @@ impl EngineSession {
             sections.push(section_index);
             marks.push(section_break_mark);
             let previous_entry = &previous.measured[index];
-            let shifted = measurement_patch
-                .as_ref()
-                .and_then(|patch| patch.shifted_block(index, &previous_entry.block));
-            let previous_block = shifted.as_ref().unwrap_or(&previous_entry.block);
             let certificate = pagination
                 .retain_matches
                 .get(index)
@@ -7455,6 +7606,25 @@ impl EngineSession {
                 && matches!(previous_entry.measure, BlockExtent::Unsupported)
                     == matches!(next_block, LayoutBlock::Unsupported)
                 && raw_clean;
+            let certified_shift = width_clean
+                && pagination.measured_shift_safe.get(index) == Some(&true)
+                && measurement_patch
+                    .as_ref()
+                    .is_some_and(|patch| patch.certifies_block(blocks, index));
+            if certified_shift {
+                candidates.push(None);
+                reused[index] = true;
+                shifted_reuse[index] = true;
+                continue;
+            }
+            #[cfg(test)]
+            if measurement_patch.is_some() {
+                CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().0.push(index));
+            }
+            let shifted = measurement_patch
+                .as_ref()
+                .and_then(|patch| patch.shifted_block(index, &previous_entry.block));
+            let previous_block = shifted.as_ref().unwrap_or(&previous_entry.block);
             let exact = width_clean
                 && measurement_patch.is_none()
                 && certificate.is_some_and(|certificate| {
@@ -7491,14 +7661,22 @@ impl EngineSession {
                 }));
                 reused[index] = true;
             } else {
-                let mut owned = normalize_retained_block(blocks, index, regions, section_index);
-                if width_clean && floats.is_some() {
-                    retain_shape_measurements(&mut owned, previous_block);
+                #[cfg(test)]
+                if measurement_patch.is_some() {
+                    CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().1.push(index));
                 }
+                let mut owned = normalize_retained_block(blocks, index, regions, section_index);
+                let shape_equal = width_clean
+                    && floats.is_some()
+                    && retained_shape_block_matches(&owned, previous_block);
                 if width_clean
-                    && (owned == *previous_block
+                    && (shape_equal
+                        || owned == *previous_block
                         || section_breaks_match_but_margins(&owned, previous_block))
                 {
+                    if shape_equal {
+                        retain_shape_measurements(&mut owned, previous_block);
+                    }
                     candidates.push(Some(MeasuredBlock {
                         block: owned,
                         measure: BlockExtent::Unsupported,
@@ -7539,7 +7717,6 @@ impl EngineSession {
                 section_index += 1;
             }
         }
-        let reused_blocks = reused.iter().filter(|&&reused| reused).count() as u64;
         if let Some(geometry) = floats {
             let default_width = widths.first().copied().unwrap_or(0.0);
             let mut start = 0;
@@ -7554,6 +7731,10 @@ impl EngineSession {
                 if float_dirty[start..end].contains(&true) {
                     let mut segment: Vec<_> = (start..end)
                         .map(|index| {
+                            #[cfg(test)]
+                            if measurement_patch.is_some() {
+                                CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().1.push(index));
+                            }
                             normalize_measurement_block(
                                 blocks.get(index).expect("body block"),
                                 regions,
@@ -7585,6 +7766,7 @@ impl EngineSession {
                         candidates[index] = Some(MeasuredBlock { block, measure });
                         dependencies[index] = reads[offset].clone();
                         reused[index] = false;
+                        shifted_reuse[index] = false;
                         certificates[index] = None;
                         measure_calls = measure_calls.wrapping_add(1);
                         #[cfg(test)]
@@ -7594,15 +7776,19 @@ impl EngineSession {
                 start = end;
             }
         }
+        let reused_blocks = reused.iter().filter(|&&reused| reused).count() as u64;
         let block_fingerprints = candidates
             .iter()
             .enumerate()
             .map(|(index, entry)| {
                 if reused[index]
+                    && !shifted_reuse[index]
                     && measurement_patch
                         .as_ref()
                         .is_some_and(|patch| index >= patch.replaced.end && patch.shift.delta != 0)
                 {
+                    #[cfg(test)]
+                    CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().3.push(index));
                     measured_parts_fingerprint(
                         &entry.as_ref().expect("normalized retained block").block,
                         &previous.measured[index].measure,
@@ -7610,6 +7796,10 @@ impl EngineSession {
                 } else if reused[index] {
                     Ok(previous_fingerprints[index])
                 } else {
+                    #[cfg(test)]
+                    if measurement_patch.is_some() {
+                        CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().3.push(index));
+                    }
                     measured_fingerprint(entry.as_ref().expect("measured dirty block"))
                 }
             })
@@ -7628,11 +7818,26 @@ impl EngineSession {
                 }
             };
             if reused[index] {
+                if shifted_reuse[index]
+                    && let Some(patch) = &measurement_patch
+                    && index >= patch.replaced.end
+                    && patch.shift.delta != 0
+                {
+                    crate::bridge::local::shift_block(&mut entry.block, patch.shift.delta);
+                }
                 pagination.measurement_patch = None;
                 entry.measure =
                     std::mem::replace(&mut previous_entry.measure, BlockExtent::Unsupported);
             }
             measured.push(entry);
+        }
+        for (index, entry) in measured.iter().enumerate() {
+            if !shifted_reuse[index] {
+                if pagination.measured_shift_safe.len() != blocks.len() {
+                    pagination.measured_shift_safe.resize(blocks.len(), false);
+                }
+                pagination.measured_shift_safe[index] = measurement_shift_safe(&entry.block);
+            }
         }
         #[cfg(test)]
         {
@@ -7670,6 +7875,19 @@ impl EngineSession {
         measurement_fingerprint: u64,
         floats: Option<&docx_layout::measure_blocks::FloatPageGeometry>,
     ) -> Result<Option<(Vec<MeasuredBlock>, Vec<Fingerprint>)>, String> {
+        if floats.is_some() {
+            return self.resident_region_measured(
+                blocks,
+                lowered_generation,
+                widths,
+                table_wrap_frames,
+                regions,
+                measurement,
+                measurement_fingerprint,
+                floats,
+                RelayoutTrigger::Bulk,
+            );
+        }
         let measurement_patch = self.measurement_patch().take();
         let pagination = &mut *self.pagination.borrow_mut();
         let Some(previous) = pagination.input.as_mut() else {
@@ -14143,6 +14361,12 @@ mod tests {
         let epoch = engine.display.borrow().binary_frame_epoch;
         let frame = engine.build_display_list_frame("{}", epoch).unwrap();
         let warm_frame = crate::frame_delta::apply_placeholder_test_frame(&frame, retained);
+        assert_eq!(retained.len(), engine.display.borrow().pages.len());
+        for snapshot in &engine.display.borrow().pages {
+            let page = &retained[&snapshot.page_id];
+            assert_eq!(page.fingerprint, snapshot.fingerprint);
+            assert_eq!(page.primitive_ids.as_slice(), snapshot.primitive_ids.as_ref());
+        }
         let cold = EngineSession::new(9636);
         cold.doc()
             .apply_update_v1(&engine.doc().encode_state_as_update_v1())
@@ -14150,8 +14374,32 @@ mod tests {
         cold.layout_regions_for_trigger(request, None, RelayoutTrigger::Open)
             .unwrap();
         let frame = cold.build_display_list_frame("{}", 0).unwrap();
+        let mut cold_retained = HashMap::new();
         let cold_frame =
-            crate::frame_delta::apply_placeholder_test_frame(&frame, &mut HashMap::new());
+            crate::frame_delta::apply_placeholder_test_frame(&frame, &mut cold_retained);
+        assert_eq!(cold_retained.len(), cold.display.borrow().pages.len());
+        for snapshot in &cold.display.borrow().pages {
+            let page = &cold_retained[&snapshot.page_id];
+            assert_eq!(page.fingerprint, snapshot.fingerprint);
+            assert_eq!(page.primitive_ids.as_slice(), snapshot.primitive_ids.as_ref());
+        }
+        let canonical_frame = |list: &docx_layout::display_list::DisplayList| {
+            encode_frame_delta(
+                list,
+                &[],
+                FrameEpochs {
+                    doc_epoch: 1,
+                    layout_epoch: 1,
+                    frame_epoch: 1,
+                    base_frame_epoch: 0,
+                },
+                true,
+                &mut 0,
+            )
+            .unwrap()
+            .0
+        };
+        assert_eq!(canonical_frame(&warm_frame), canonical_frame(&cold_frame));
         let snapshot = |engine: &EngineSession| {
             let pagination = engine.pagination.borrow();
             (
@@ -14169,8 +14417,19 @@ mod tests {
     }
 
     fn certified_float_dirty_segment(engine: &EngineSession) -> Vec<usize> {
-        let patch = engine.measurement_patch();
-        let replaced = patch.as_ref().unwrap().replaced.clone();
+        let replaced = engine
+            .measurement_patch()
+            .as_ref()
+            .unwrap()
+            .replaced
+            .clone();
+        certified_float_segment(engine, replaced)
+    }
+
+    fn certified_float_segment(
+        engine: &EngineSession,
+        replaced: std::ops::Range<usize>,
+    ) -> Vec<usize> {
         let render = engine.render.borrow();
         let blocks = &render.stories["body"].blocks;
         let start = (0..=replaced.start)
@@ -14185,6 +14444,68 @@ mod tests {
             })
             .unwrap_or(blocks.len());
         (start..end).collect()
+    }
+
+    #[test]
+    fn resident_certified_float_observed_keystroke_matches_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) =
+            certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        let slot = engine.render.borrow().stories["body"]
+            .blocks
+            .iter()
+            .position(|block| match block {
+                LayoutBlock::Paragraph(paragraph) => block_key(&paragraph.id) == "0000000A",
+                _ => false,
+            })
+            .unwrap();
+        let expected = certified_float_segment(&engine, slot..slot + 1);
+        let offset = certified_float_offset(&engine, 9);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset),
+                Some("😀"),
+                true,
+            )
+            .unwrap();
+        assert_eq!(engine.relayout_trigger.get(), RelayoutTrigger::Interactive);
+        assert!(!engine.region_retention_valid.get());
+        assert!(engine.measurement_patch().is_none());
+        BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
+        engine.layout_regions(&request, None).unwrap();
+        BODY_MEASUREMENT_WORK.with(|work| {
+            assert_eq!(*work.borrow(), (expected, 0));
+        });
+        assert_certified_float_cold(&engine, &request, &mut retained);
+    }
+
+    #[test]
+    fn resident_certified_float_unpatched_local_bulk_edit_falls_back() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) =
+            certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+        let blocks = engine.render.borrow().stories["body"].blocks.len();
+        let offset = certified_float_offset(&engine, 9);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset),
+                Some("x"),
+                true,
+            )
+            .unwrap();
+        assert!(!engine.region_retention_valid.get());
+        assert!(engine.measurement_patch().is_none());
+        assert_eq!(
+            certified_float_layout(&engine, &request, RelayoutTrigger::Bulk),
+            ((0..blocks).collect(), 1),
+        );
+        assert_certified_float_cold(&engine, &request, &mut HashMap::new());
     }
 
     #[test]
@@ -14436,6 +14757,8 @@ mod tests {
                 let blocks = engine.render.borrow().stories["body"].blocks.len();
                 assert_eq!(initial.1, 1);
                 assert_eq!(initial.0, (0..blocks).collect::<Vec<_>>());
+                let mut retained = HashMap::new();
+                assert_certified_float_cold(&engine, &request, &mut retained);
                 let paragraph = middle * 8 + 1;
                 measurement_patch_type(&engine, certified_float_offset(&engine, paragraph), "x");
                 let expected = certified_float_dirty_segment(&engine);
@@ -14448,12 +14771,306 @@ mod tests {
                     measured.len() as u64,
                 );
                 counts.push(measured.len());
+                assert_certified_float_cold(&engine, &request, &mut retained);
                 assert_eq!(
                     certified_float_layout(&engine, &request, trigger),
                     (Vec::new(), 0),
                 );
+                assert_certified_float_cold(&engine, &request, &mut retained);
             }
             assert_eq!(counts[0], counts[1]);
+        }
+    }
+
+    #[test]
+    fn resident_certified_float_suffix_work_is_bounded() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for trigger in [RelayoutTrigger::Bulk, RelayoutTrigger::Interactive] {
+            let (engine, request) =
+                certified_float_engine(font, 10_000, &[0], false, false, trigger);
+            measurement_patch_type(&engine, certified_float_offset(&engine, 1), "x");
+            let expected = certified_float_dirty_segment(&engine);
+            CERTIFIED_FLOAT_WORK.with(|work| *work.borrow_mut() = Default::default());
+            assert_eq!(
+                certified_float_layout(&engine, &request, trigger),
+                (expected.clone(), 0),
+            );
+            CERTIFIED_FLOAT_WORK.with(|work| {
+                let work = work.borrow();
+                assert!(!work.0.is_empty());
+                assert!(!work.1.is_empty());
+                assert!(!work.2.is_empty());
+                assert!(!work.3.is_empty());
+                let render = engine.render.borrow();
+                let blocks = &render.stories["body"].blocks;
+                for indices in [&work.0, &work.1, &work.2, &work.3] {
+                    assert!(indices.iter().all(|index| {
+                        expected.contains(index)
+                            || matches!(blocks.get(*index), Some(LayoutBlock::SectionBreak(_)))
+                    }));
+                    assert!(indices.len() <= expected.len() * 2 + 1);
+                }
+            });
+            assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+        }
+    }
+
+    fn certified_float_rich_engine(
+        font: u32,
+        trigger: RelayoutTrigger,
+        children: usize,
+        rows: usize,
+        cells: usize,
+        text: &str,
+        inset: f64,
+    ) -> (EngineSession, String) {
+        let leaf = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "textBody": {
+                "margins": {"left": inset, "right": 19050, "top": 28575, "bottom": 38100},
+                "content": [{"type": "paragraph", "paraId": "shape-text", "content": [{
+                    "type": "run",
+                    "formatting": {"fontFamily": {"ascii": "Shape Font"}, "fontSize": 24},
+                    "content": [{"type": "text", "text": text}]
+                }]}]
+            }
+        });
+        let mut rich = leaf.clone();
+        let child_shapes: Vec<_> = (0..children)
+            .map(|_| {
+                let mut child = leaf.clone();
+                child["children"] = json!([leaf.clone()]);
+                child
+            })
+            .collect();
+        rich["children"] = json!(child_shapes);
+        rich["position"] = json!({
+            "horizontal": {"relativeTo": "column", "alignment": "left"},
+            "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+        });
+        rich["wrap"] = json!({"type": "square", "wrapText": "bothSides"});
+        let mut blocks = Vec::new();
+        for index in 0..40 {
+            let mut content = vec![json!({
+                "type": "run", "content": [{"type": "text", "text": format!("Text {index}.")}]
+            })];
+            if index == 3 || index == 27 {
+                content.push(json!({"type": "shape", "shape": rich.clone()}));
+            }
+            blocks.push(json!({
+                "type": "paragraph", "paraId": format!("{:08X}", index + 1),
+                "formatting": {"pageBreakBefore": index > 0 && index % 8 == 0},
+                "content": content
+            }));
+            if index == 35 {
+                let table_cells: Vec<_> = (0..cells)
+                    .map(|_| {
+                        json!({
+                            "type": "tableCell", "content": [{
+                                "type": "paragraph",
+                                "content": [{"type": "shape", "shape": leaf.clone()}]
+                            }]
+                        })
+                    })
+                    .collect();
+                let table_rows: Vec<_> = (0..rows)
+                    .map(|_| json!({"type": "tableRow", "cells": table_cells.clone()}))
+                    .collect();
+                blocks.push(json!({"type": "table", "rows": table_rows}));
+            }
+        }
+        let engine = EngineSession::new(9637);
+        crate::seed::seed_blocks(engine.doc(), None, &[("body".to_owned(), &blocks)]).unwrap();
+        engine.set_local_lowering(true);
+        engine.allow_float_measurement_patch.set(true);
+        let mut request: serde_json::Value =
+            serde_json::from_str(&small_page_request(font)).unwrap();
+        request["measurement"]["fontChains"]["shape font|0|0"] = json!([font]);
+        let request = request.to_string();
+        certified_float_layout(&engine, &request, trigger);
+        assert!(engine.pagination.borrow().measured_with_floats);
+        {
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            let assert_shape = |shape: &docx_layout::types::ShapeBlock| {
+                assert!(!shape.inner_text.as_ref().unwrap().is_empty());
+                assert!(!shape.inner_measures.as_ref().unwrap().is_empty());
+                let Run::Text(run) = &shape.inner_text.as_ref().unwrap()[0].runs[0] else {
+                    panic!("shape text run");
+                };
+                assert_eq!(run.fmt.font_family.as_deref(), Some("Shape Font"));
+                assert_eq!(
+                    shape.text_body_properties.as_ref().unwrap()["margins"]["left"],
+                    json!(inset / 9525.0),
+                );
+            };
+            let mut shape_count = 0;
+            let mut table_count = 0;
+            for entry in measured {
+                match &entry.block {
+                    LayoutBlock::Shape(shape) => {
+                        shape_count += 1;
+                        assert_shape(shape);
+                        assert_eq!(shape.children.len(), children);
+                        for child in &shape.children {
+                            assert_shape(child);
+                            assert_eq!(child.children.len(), 1);
+                            assert_shape(&child.children[0]);
+                        }
+                    }
+                    LayoutBlock::Table(table) => {
+                        table_count += 1;
+                        assert_eq!(table.rows.len(), rows);
+                        for row in &table.rows {
+                            assert_eq!(row.cells.len(), cells);
+                            for cell in &row.cells {
+                                let shape = cell.blocks.iter().find_map(|block| match block {
+                                    LayoutBlock::Shape(shape) => Some(shape),
+                                    _ => None,
+                                });
+                                assert_shape(shape.unwrap());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(shape_count, 2);
+            assert_eq!(table_count, 1);
+        }
+        (engine, request)
+    }
+
+    #[test]
+    fn resident_certified_float_rich_shapes_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for trigger in [RelayoutTrigger::Bulk, RelayoutTrigger::Interactive] {
+            let (engine, request) =
+                certified_float_rich_engine(font, trigger, 2, 2, 2, "Shape text", 9525.0);
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            measurement_patch_type(&engine, certified_float_offset(&engine, 9), "x");
+            let expected = certified_float_dirty_segment(&engine);
+            let (measured, full) = certified_float_layout(&engine, &request, trigger);
+            assert_eq!(full, 0);
+            assert_eq!(measured, expected);
+            {
+                let render = engine.render.borrow();
+                let work = engine.font_dependency_work.borrow();
+                let reused = work.reuse_sets.last().unwrap();
+                for (index, block) in render.stories["body"].blocks.iter().enumerate() {
+                    if matches!(block, LayoutBlock::Shape(_) | LayoutBlock::Table(_)) {
+                        assert!(reused.contains(&index));
+                        assert!(!measured.contains(&index));
+                    }
+                }
+            }
+            assert_certified_float_cold(&engine, &request, &mut retained);
+        }
+    }
+
+    #[test]
+    fn resident_float_rich_shapes_without_patch_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for trigger in [RelayoutTrigger::Bulk, RelayoutTrigger::Interactive] {
+            let (engine, request) =
+                certified_float_rich_engine(font, trigger, 2, 2, 2, "Shape text", 9525.0);
+            engine.allow_float_measurement_patch.set(false);
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            certified_float_layout(&engine, &request, trigger);
+            assert!(engine.measurement_patch().is_none());
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            let offset = certified_float_offset(&engine, 9);
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset),
+                    Some("x"),
+                    true,
+                )
+                .unwrap();
+            certified_float_layout(&engine, &request, trigger);
+            assert!(engine.measurement_patch().is_none());
+            assert_certified_float_cold(&engine, &request, &mut retained);
+        }
+    }
+
+    #[test]
+    fn resident_certified_float_changed_shape_counts_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for trigger in [RelayoutTrigger::Bulk, RelayoutTrigger::Interactive] {
+            for (children, rows, cells, text, inset) in [
+                (1, 2, 2, "Shape text", 9525.0),
+                (3, 2, 2, "Shape text", 9525.0),
+                (2, 1, 2, "Shape text", 9525.0),
+                (2, 3, 2, "Shape text", 9525.0),
+                (2, 2, 1, "Shape text", 9525.0),
+                (2, 2, 3, "Shape text", 9525.0),
+                (2, 2, 2, "Changed shape text", 9525.0),
+                (2, 2, 2, "Shape text", 19050.0),
+            ] {
+                let (previous, _) =
+                    certified_float_rich_engine(font, trigger, 2, 2, 2, "Shape text", 9525.0);
+                let (engine, request) =
+                    certified_float_rich_engine(font, trigger, children, rows, cells, text, inset);
+                {
+                    let previous = previous.pagination.borrow();
+                    let render = engine.render.borrow();
+                    for (next, previous) in render.stories["body"]
+                        .blocks
+                        .iter()
+                        .zip(&previous.input.as_ref().unwrap().measured)
+                    {
+                        if matches!(next, LayoutBlock::Shape(_) | LayoutBlock::Table(_)) {
+                            let pristine = serde_json::to_vec(next).unwrap();
+                            let _ = retained_shape_block_matches(next, &previous.block);
+                            assert_eq!(serde_json::to_vec(next).unwrap(), pristine);
+                            if !shape_measurement_counts_match(next, &previous.block) {
+                                let mut candidate = next.clone();
+                                retain_shape_measurements(&mut candidate, &previous.block);
+                                assert_eq!(serde_json::to_vec(&candidate).unwrap(), pristine);
+                            }
+                        }
+                    }
+                }
+                engine.pagination.replace(previous.pagination.take());
+                engine.region_retention_valid.set(true);
+                let (measured, full) = certified_float_layout(&engine, &request, trigger);
+                assert_eq!(full, 0);
+                let render = engine.render.borrow();
+                let work = engine.font_dependency_work.borrow();
+                let reused = work.reuse_sets.last().unwrap();
+                for (index, block) in render.stories["body"].blocks.iter().enumerate() {
+                    let changed = match block {
+                        LayoutBlock::Shape(_) => {
+                            children != 2 || text != "Shape text" || inset != 9525.0
+                        }
+                        LayoutBlock::Table(_) => {
+                            rows != 2 || cells != 2 || text != "Shape text" || inset != 9525.0
+                        }
+                        _ => continue,
+                    };
+                    if changed {
+                        assert!(measured.contains(&index));
+                        assert!(!reused.contains(&index));
+                    } else {
+                        assert!(!measured.contains(&index));
+                        assert!(reused.contains(&index));
+                    }
+                }
+                drop(work);
+                drop(render);
+                assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+            }
         }
     }
 
@@ -14490,7 +15107,16 @@ mod tests {
                 .prepare_region_layout(&request, None, trigger)
                 .unwrap();
             assert!(prepared.body.is_none());
-            assert_eq!(starts(&engine), previous);
+            let pagination = engine.pagination.borrow();
+            let measured = &pagination.input.as_ref().unwrap().measured;
+            for (index, entry) in measured.iter().enumerate() {
+                if pagination.moved_blocks.contains(&index) {
+                    assert!(matches!(entry.block, LayoutBlock::Unsupported));
+                } else {
+                    assert_eq!(entry.block.pm_start(), previous[index]);
+                }
+            }
+            drop(pagination);
             assert_eq!(
                 prepared
                     .input
@@ -14514,6 +15140,7 @@ mod tests {
             for case in [
                 "generation",
                 "epoch",
+                "current epoch",
                 "before count",
                 "after count",
                 "observer",
@@ -14527,6 +15154,7 @@ mod tests {
                     match case {
                         "generation" => patch.current_generation += 1,
                         "epoch" => patch.epochs.0 += 1,
+                        "current epoch" => patch.epochs.1 += 1,
                         "before count" => patch.block_count_before += 1,
                         "after count" => patch.block_count_after += 1,
                         "observer" => engine.measurement_patch_invalidated.set(true),
