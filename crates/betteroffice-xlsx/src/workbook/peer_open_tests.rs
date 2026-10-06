@@ -135,7 +135,11 @@ fn hydration_chunks_bound_bytes_and_split_oversized_cells() {
         .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
         .unwrap()
         .1;
-    let text = "long🙂\"".repeat(32 * 1024);
+    let text: String = "l🙂🙂\""
+        .chars()
+        .cycle()
+        .take(xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
+        .collect();
     *sheet = String::from_utf8(std::mem::take(sheet)).unwrap().replace(
         "</sheetData>",
         &format!("<row r=\"30\"><c r=\"A30\" t=\"inlineStr\"><is><t>{text}</t></is></c></row></sheetData>"),
