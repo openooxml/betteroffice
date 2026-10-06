@@ -2982,8 +2982,10 @@ fn incremental_eligible_plain(
     previous: &PaginationState,
     next: &LayoutInput,
     next_options_fingerprint: u64,
+    next_fingerprints: &[Fingerprint],
 ) -> bool {
-    incremental_eligible(previous, next, next_options_fingerprint)
+    previous.options_fingerprint == next_options_fingerprint
+        && incremental_structure_eligible(previous, next, Some(next_fingerprints))
 }
 
 fn incremental_eligible(
@@ -2992,10 +2994,14 @@ fn incremental_eligible(
     next_options_fingerprint: u64,
 ) -> bool {
     previous.options_fingerprint == next_options_fingerprint
-        && incremental_structure_eligible(previous, next)
+        && incremental_structure_eligible(previous, next, None)
 }
 
-fn incremental_structure_eligible(previous: &PaginationState, next: &LayoutInput) -> bool {
+fn incremental_structure_eligible(
+    previous: &PaginationState,
+    next: &LayoutInput,
+    next_fingerprints: Option<&[Fingerprint]>,
+) -> bool {
     let Some(previous_input) = previous.input.as_ref() else {
         return false;
     };
@@ -3015,6 +3021,17 @@ fn incremental_structure_eligible(previous: &PaginationState, next: &LayoutInput
             .all(|(index, (retained, next))| {
                 previous.moved_blocks.contains(&index)
                     || resident_fragment_keys_match(&retained.block, &next.block)
+                    || next_fingerprints.is_some_and(|fingerprints| {
+                        matches!(
+                            (&retained.block, &next.block),
+                            (LayoutBlock::Shape(_), LayoutBlock::Shape(_))
+                                | (LayoutBlock::Chart(_), LayoutBlock::Chart(_))
+                        ) && previous
+                            .block_fingerprints
+                            .get(index)
+                            .zip(fingerprints.get(index))
+                            .is_some_and(|(retained, next)| retained != next)
+                    })
             })
 }
 
@@ -5951,7 +5968,7 @@ impl EngineSession {
         let passes_eligible = uses_region_path && (!refs.is_empty()
             || input.measured.iter().any(|measured| {
                 matches!(&measured.block, LayoutBlock::Shape(shape) if wraps_by_page_side(shape))
-            })) && incremental_structure_eligible(&self.pagination.borrow(), &input);
+            })) && incremental_structure_eligible(&self.pagination.borrow(), &input, None);
         let mut placement_passes = RegionPlacementPasses {
             eligible: passes_eligible,
             allow_coupled: {
@@ -6944,7 +6961,12 @@ impl EngineSession {
         // holding a revision whose decision changed can show other source.
         if let Some((key, preview, resident)) = revision_preview
             && key != previous.revision_preview_key
-            && incremental_eligible_plain(previous, input, input_options_fingerprint)
+            && incremental_eligible_plain(
+                previous,
+                input,
+                input_options_fingerprint,
+                block_fingerprints,
+            )
             && let moved = (resident && previous.doc_epoch == self.doc_epoch())
                 .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
                 .transpose()?
@@ -7019,7 +7041,7 @@ impl EngineSession {
         // holding a revision whose decision changed can show other source.
         if let Some((key, preview, resident)) = revision_preview
             && key != previous.revision_preview_key
-            && incremental_structure_eligible(previous, input)
+            && incremental_structure_eligible(previous, input, None)
             && let moved = (resident && previous.doc_epoch == self.doc_epoch())
                 .then(|| self.preview_changed_paragraphs(&previous.revision_preview, preview))
                 .transpose()?
@@ -7065,7 +7087,7 @@ impl EngineSession {
         }
         let _moved = (trigger.uses_region_path()
             || !self.pagination.borrow().moved_blocks.is_empty())
-            .then(|| MovedArenaGuard(&self.pagination));
+        .then(|| MovedArenaGuard(&self.pagination));
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
         }
@@ -7107,7 +7129,12 @@ impl EngineSession {
                 && if trigger.uses_region_path() {
                     incremental_eligible(&previous, &input, input_options_fingerprint)
                 } else {
-                    incremental_eligible_plain(&previous, &input, input_options_fingerprint)
+                    incremental_eligible_plain(
+                        &previous,
+                        &input,
+                        input_options_fingerprint,
+                        &block_fingerprints,
+                    )
                 }
                 && (!trigger.uses_region_path()
                     || (previous.doc_epoch != self.doc_epoch()
@@ -11790,6 +11817,7 @@ mod tests {
                         &previous,
                         &next,
                         options_fingerprint(&next).unwrap(),
+                        fingerprints,
                     ) {
                     docx_layout::place::layout_document_incremental_ranges(
                         &mut next,
@@ -14855,10 +14883,16 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             if key > 0 {
-                assert!(engine.pagination.borrow().last_incremental);
+                let pagination = engine.pagination.borrow();
+                assert!(pagination.last_incremental);
+                assert!(pagination.rebuilt_page_start > 0);
                 assert_eq!(
                     engine.stats().incremental_pagination_calls,
                     before.incremental_pagination_calls + 1,
+                );
+                assert!(
+                    engine.stats().pagination_blocks_placed - before.pagination_blocks_placed
+                        < pagination.input.as_ref().unwrap().measured.len() as u64
                 );
             }
             assert_certified_float_cold(&engine, &request, &mut retained);
