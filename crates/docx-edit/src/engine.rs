@@ -13686,7 +13686,9 @@ mod tests {
         let bytes = Package::new(&body).bytes();
         for enabled in [false, true] {
             let (engine, request) = local_patch_laid_out(&bytes, 9620, enabled);
+            assert!(engine.render.borrow().stories["body"].preview.is_none());
             let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            local_patch_preview_warm_up(&engine, &mut request);
             for decision in ["rejected", "accepted", "rejected"] {
                 request["renderEnv"]["revisionPreview"] = json!({"1": decision});
                 let before = engine.stats();
@@ -13704,6 +13706,186 @@ mod tests {
                 );
             }
             local_patch_paragraph_edits(&engine, &request.to_string(), 2, true);
+        }
+    }
+
+    #[test]
+    fn resident_preview_revealing_fields_and_controls_matches_cold_full() {
+        resident_stateful_preview_matches_cold_full("del");
+        resident_stateful_block_preview_matches_cold_full("del");
+    }
+
+    #[test]
+    fn resident_preview_hiding_fields_and_controls_matches_cold_full() {
+        resident_stateful_preview_matches_cold_full("ins");
+        resident_stateful_block_preview_matches_cold_full("ins");
+    }
+
+    fn resident_stateful_preview_matches_cold_full(kind: &str) {
+        use super::lowering_fixture::{Package, para, run};
+
+        for instruction in ["REF mark", "PAGEREF mark"] {
+            let field = format!(
+                r#"<w:fldSimple w:instr=" {instruction} "><w:r><w:t>Target</w:t></w:r></w:fldSimple>"#,
+            );
+            let control = format!(
+                r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent>{field}</w:sdtContent></w:sdt>"#,
+            );
+            for content in [&field, &control] {
+                let body = format!(
+                    "{}{}{}",
+                    para(
+                        "10000001",
+                        r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Target</w:t></w:r><w:bookmarkEnd w:id="0"/>"#,
+                    ),
+                    para(
+                        "10000002",
+                        &format!(
+                            r#"{}<w:{kind} w:id="1" w:author="A">{content}</w:{kind}>"#,
+                            run("Owner"),
+                        ),
+                    ),
+                    para("10000003", &run("After")),
+                );
+                let bytes = Package::new(&body).bytes();
+                for enabled in [false, true] {
+                    let (engine, request) = local_patch_laid_out(&bytes, 9621, enabled);
+                    assert!(engine.render.borrow().stories["body"].preview.is_none());
+                    let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                    local_patch_preview_warm_up(&engine, &mut request);
+                    request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+                    let before = engine.stats();
+                    engine
+                        .layout_document_with_regions_retained_json(&request.to_string())
+                        .unwrap();
+                    assert_eq!(
+                        engine.stats().lower_preview_fallbacks,
+                        before.lower_preview_fallbacks + u64::from(enabled),
+                    );
+                    assert_eq!(
+                        engine.stats().lower_cache_misses,
+                        before.lower_cache_misses + u64::from(enabled),
+                    );
+                    assert_eq!(
+                        engine.stats().lower_preview_patches,
+                        before.lower_preview_patches + u64::from(!enabled),
+                    );
+                    let request = request.to_string();
+                    assert_local_patch_matches_cold(
+                        &engine,
+                        &request,
+                        &format!("{kind} {instruction} preview enabled={enabled}"),
+                    );
+                    local_patch_paragraph_edits(&engine, &request, 1, false);
+                    local_patch_paragraph_edits(&engine, &request, 0, false);
+                    local_patch_paragraph_edits(&engine, &request, 2, true);
+                }
+            }
+        }
+    }
+
+    fn resident_stateful_block_preview_matches_cold_full(kind: &str) {
+        use super::lowering_fixture::{Package, para, run};
+
+        let paragraph = para("10000002", &run("Child"));
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{paragraph}</w:tc></w:tr></w:tbl>"#,
+        );
+        let control = format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent>{paragraph}</w:sdtContent></w:sdt>"#,
+        );
+        let sectioned = format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+            para(
+                "10000002",
+                r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr><w:r><w:t>Child</w:t></w:r>"#,
+            ),
+        );
+        let dependent = format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent>{}{}{}</w:sdtContent></w:sdt>"#,
+            para(
+                "10000002",
+                r#"<w:r><w:t>Child</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> REF mark </w:instrText></w:r>"#,
+            ),
+            para("10000004", r#"<w:r><w:instrText> \h </w:instrText></w:r>"#),
+            para(
+                "10000005",
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Before</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+        );
+        for (content, blocked, dependencies) in [
+            (&table, false, false),
+            (&control, false, false),
+            (&sectioned, true, false),
+            (&dependent, false, true),
+        ] {
+            let body = format!(
+                "{}{content}{}",
+                para(
+                    "10000001",
+                    r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Before</w:t></w:r><w:bookmarkEnd w:id="0"/>"#,
+                ),
+                para("10000003", &run("After")),
+            );
+            let bytes = Package::new(&body).bytes();
+            for enabled in [false, true] {
+                let (engine, request) = local_patch_laid_out(&bytes, 9622, enabled);
+                let stamp = Any::Map(std::sync::Arc::new(HashMap::from([(
+                    "id".to_owned(),
+                    Any::from("1"),
+                )])));
+                engine
+                    .doc()
+                    .apply_raw_ops(
+                        "body",
+                        vec![crate::RawOp::Format {
+                            index: 7,
+                            len: 1,
+                            attrs: [(kind.into(), stamp)].into(),
+                        }],
+                        &crate::EditCtx::local("", ""),
+                    )
+                    .unwrap();
+                engine.render.replace(Default::default());
+                engine.region_retention_valid.set(false);
+                engine
+                    .layout_document_with_regions_retained_json(&request)
+                    .unwrap();
+                engine.build_display_list_frame("{}", 0).unwrap();
+                assert!(engine.render.borrow().stories["body"].preview.is_none());
+                assert_eq!(
+                    engine.render.borrow().stories["body"].local.blocked,
+                    !enabled || blocked,
+                );
+                assert_eq!(
+                    engine.render.borrow().stories["body"].local.has_dependencies(),
+                    enabled && dependencies,
+                );
+                let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                local_patch_preview_warm_up(&engine, &mut request);
+                request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                assert_eq!(
+                    engine.stats().lower_preview_fallbacks,
+                    before.lower_preview_fallbacks + u64::from(enabled),
+                );
+                assert_eq!(
+                    engine.stats().lower_cache_misses,
+                    before.lower_cache_misses + u64::from(enabled),
+                );
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches + u64::from(!enabled),
+                );
+                let request = request.to_string();
+                assert_local_patch_matches_cold(&engine, &request, "structural preview");
+                let child = engine.render.borrow().stories["body"].map.stories[1].clone();
+                local_patch_step(&engine, &request, &child, (1, 1, Some("x")), false);
+                local_patch_step(&engine, &request, &child, (1, 2, None), false);
+            }
         }
     }
 
@@ -14091,6 +14273,28 @@ mod tests {
         }
     }
 
+    fn local_patch_preview_warm_up(engine: &EngineSession, request: &mut serde_json::Value) {
+        request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+        let before = engine.stats();
+        engine
+            .layout_document_with_regions_retained_json(&request.to_string())
+            .unwrap();
+        assert_eq!(
+            engine.stats().lower_preview_fallbacks,
+            before.lower_preview_fallbacks + 1,
+        );
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches,
+        );
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1,
+        );
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        assert_local_patch_matches_cold(engine, &request.to_string(), "first preview decision");
+    }
+
     fn local_patch_float() -> &'static str {
         r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="2" name="shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
     }
@@ -14256,8 +14460,9 @@ mod tests {
             para("10000003", &run("After")),
         );
         let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9616, enabled);
-        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        assert!(engine.render.borrow().stories["body"].preview.is_none());
         let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        local_patch_preview_warm_up(&engine, &mut request);
         request["renderEnv"] = serde_json::to_value(
             RenderEnv::default().with_revision_preview("1", RevisionPreview::Rejected),
         )
@@ -14272,6 +14477,24 @@ mod tests {
             before.lower_preview_patches + 1,
         );
         assert_local_patch_matches_cold(&engine, &request, "rejected insertion preview");
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        for decision in ["accepted", "rejected"] {
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            let before = engine.stats();
+            engine
+                .layout_document_with_regions_retained_json(&request.to_string())
+                .unwrap();
+            assert_eq!(
+                engine.stats().lower_preview_patches,
+                before.lower_preview_patches + 1,
+            );
+            assert_local_patch_matches_cold(
+                &engine,
+                &request.to_string(),
+                &format!("{decision} insertion preview"),
+            );
+        }
+        let request = request.to_string();
         for paragraph in [0, 2] {
             local_patch_paragraph_edits(&engine, &request, paragraph, true);
         }

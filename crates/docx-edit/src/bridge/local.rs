@@ -82,7 +82,42 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
         }
 }
 
+pub(super) fn preview_touches_state<T: ReadTxn>(
+    diff: &yrs::types::text::Diff<YChange>,
+    txn: &T,
+) -> bool {
+    match &diff.insert {
+        Out::Any(Any::String(_)) => false,
+        Out::YMap(mark) if is_pilcrow(mark, txn) => false,
+        Out::YMap(mark) => {
+            let values = pilcrow_values(mark, txn);
+            let seed_only = [
+                "break",
+                "pageBreak",
+                "columnBreak",
+                "image",
+                "shape",
+                "noteRef",
+                "math",
+                "horizontalRule",
+            ]
+            .contains(&value_string(values.get("_kind")).unwrap_or_default().as_str());
+            !seed_only
+                || ["fieldCodeMarks", "fieldResultBlocks"]
+                    .iter()
+                    .any(|key| !any_strings(values.get(*key)).is_empty())
+                || value_string(values.get("fieldCodeTarget")).is_some()
+        }
+        _ => true,
+    }
+}
+
 impl LocalLowering {
+    #[cfg(test)]
+    pub(crate) fn has_dependencies(&self) -> bool {
+        !self.dependent.is_empty()
+    }
+
     #[cfg(test)]
     pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug + use<> {
         use super::preview::AnySnapshot;
@@ -143,6 +178,12 @@ impl LocalLowering {
     pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
         self.seeds.retain(|_, seed| !pm.contains(&seed.pm_start));
         self.seeds.extend(replacement.seeds);
+    }
+
+    pub(super) fn replay_preserves_state(&self, replacement: &Self) -> bool {
+        self.blocked == replacement.blocked
+            && (self.preview_blocked || !replacement.preview_blocked)
+            && replacement.dependent.is_empty()
     }
 
     pub(crate) fn refresh_seeds(&mut self, blocks: &[Rc<LayoutBlock>], map: &LoweringMap) {

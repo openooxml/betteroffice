@@ -302,6 +302,7 @@ impl PreviewUnits {
                     record.seed.as_deref().map(BoundaryState::exact_snapshot),
                     record.after.exact_snapshot(),
                     record.capture_raw,
+                    record.local_stateful,
                 )
             })
             .collect::<Vec<_>>();
@@ -397,6 +398,7 @@ struct UnitRecord {
     seed: Option<Rc<BoundaryState>>,
     after: Rc<BoundaryState>,
     capture_raw: Option<u32>,
+    local_stateful: bool,
 }
 
 struct Window {
@@ -411,6 +413,7 @@ struct Window {
     mutated: bool,
     reused: Option<usize>,
     capture_raw: Option<u32>,
+    local_stateful: bool,
 }
 
 pub(super) struct UnitRecorder {
@@ -519,6 +522,7 @@ impl UnitRecorder {
                 mutated: is_break,
                 reused,
                 capture_raw: None,
+                local_stateful: false,
             });
             let expected = reused.map(|index| {
                 Rc::clone(&self.units.refresh.as_ref().unwrap().previous.records[index].ids)
@@ -531,6 +535,7 @@ impl UnitRecorder {
             });
         }
         let window = self.window.as_mut().unwrap();
+        window.local_stateful |= local::preview_touches_state(diff, txn);
         if !window.mutated && (pilcrow || standalone) {
             let has_reads = READS.with(|reads| {
                 reads
@@ -622,6 +627,8 @@ impl UnitRecorder {
             pm,
             seed: window.seed,
             capture_raw: window.capture_raw,
+            local_stateful: window.local_stateful
+                || previous.is_some_and(|record| record.local_stateful),
             after: Rc::new(if let Some(previous) = previous {
                 previous
                     .after
@@ -679,7 +686,7 @@ pub(crate) fn lower_recorded(
     story: &str,
     env: &RenderEnv,
     local: &mut local::LocalLowering,
-    _record: bool,
+    record: bool,
 ) -> Result<
     (
         Vec<LayoutBlock>,
@@ -689,7 +696,7 @@ pub(crate) fn lower_recorded(
     ),
     BridgeError,
 > {
-    let mut preview = (story == "body").then(PreviewUnits::default);
+    let mut preview = (record && story == "body").then(PreviewUnits::default);
     let mut revealable = Some(Vec::new());
     let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(
         doc,
@@ -794,6 +801,9 @@ pub(crate) fn replay(
         if record.ids.is_disjoint(changed) {
             continue;
         }
+        if local.enabled && record.local_stateful {
+            return None;
+        }
         let seed = record.seed.as_ref()?;
         let mut list_state = seed.list_state.clone();
         let mut opaque_sequences = seed.opaque_sequences.clone();
@@ -830,6 +840,7 @@ pub(crate) fn replay(
         if position != record.after.position
             || after != *record.after.context
             || reads.hidden_fields
+            || !local.replay_preserves_state(&replay_local)
             || output
                 .spans
                 .iter()
