@@ -100,9 +100,12 @@ function open(value: ReturnType<typeof session>) {
 beforeEach(() => {
   painted = [];
   delayPaint = undefined;
-  const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (this: HTMLCanvasElement) {
-    return { canvas: this, clearRect() {}, setTransform() {}, fillRect() {} } as unknown as CanvasRenderingContext2D;
-  } as HTMLCanvasElement['getContext']);
+  const context = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'getContext')!;
+  Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+    ...context, value(this: HTMLCanvasElement) {
+      return { canvas: this, clearRect() {}, setTransform() {}, fillRect() {} } as unknown as CanvasRenderingContext2D;
+    },
+  });
   const paint = spyOn(pptx, 'paintSlide').mockImplementation(async (ctx, frame) => {
     if (delayPaint) await delayPaint();
     ctx.fillRect(0, 0, 1, 1);
@@ -110,7 +113,8 @@ beforeEach(() => {
   });
   const observer = globalThis.ResizeObserver;
   globalThis.ResizeObserver = class { observe() {} disconnect() {} } as unknown as typeof ResizeObserver;
-  restorers.push(() => context.mockRestore(), () => paint.mockRestore(), () => { globalThis.ResizeObserver = observer; });
+  restorers.push(() => Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', context),
+    () => paint.mockRestore(), () => { globalThis.ResizeObserver = observer; });
 });
 afterEach(() => { cleanup(); for (const restore of restorers.reverse()) restore(); restorers.length = 0; });
 afterAll(() => { if (ownsDom) GlobalRegistrator.unregister(); });
@@ -119,17 +123,31 @@ test('dispatches_only_flagged_editable_props', async () => {
   const value = session();
   const worker = open(value);
   const viewer = spyOn(presentationSessionOpener, 'open').mockRejectedValue(new Error('viewer sentinel'));
-  const main = spyOn(pptx, 'initWasm').mockRejectedValue(new Error('main sentinel'));
-  restorers.push(() => viewer.mockRestore(), () => main.mockRestore());
+  const main = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
+  const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw new Error('local sentinel'); });
+  restorers.push(() => viewer.mockRestore(), () => main.mockRestore(), () => local.mockRestore());
   const view = render(<PptxEditor fonts={[]} file={file} clientId={42} experimentalWorkerOpen />);
   await waitFor(() => expect(worker).toHaveBeenCalledTimes(1));
   expect(main).not.toHaveBeenCalled();
+  expect(local).not.toHaveBeenCalled();
+  expect(viewer).not.toHaveBeenCalled();
   expect(worker.mock.calls[0][1]?.clientId).toBe(42);
   view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly />);
   await waitFor(() => expect(viewer).toHaveBeenCalledTimes(1));
+  expect(worker).toHaveBeenCalledTimes(1);
+  expect(main).not.toHaveBeenCalled();
+  expect(local).not.toHaveBeenCalled();
   view.rerender(<PptxEditor fonts={[]} file={file} />);
   await waitFor(() => expect(main).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(local).toHaveBeenCalledTimes(1));
   expect(worker).toHaveBeenCalledTimes(1);
+  expect(viewer).toHaveBeenCalledTimes(1);
+  worker.mockReturnValueOnce(session().owner);
+  view.rerender(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen readOnly={false} />);
+  await waitFor(() => expect(worker).toHaveBeenCalledTimes(2));
+  expect(viewer).toHaveBeenCalledTimes(1);
+  expect(main).toHaveBeenCalledTimes(1);
+  expect(local).toHaveBeenCalledTimes(1);
   const error = new pptx.PptxWorkerEditorCollaborationError();
   worker.mockImplementationOnce(() => { throw error; });
   const failed = mock(() => {});
@@ -139,6 +157,7 @@ test('dispatches_only_flagged_editable_props', async () => {
   await waitFor(() => expect(failed).toHaveBeenCalledWith(error));
   expect(ready).not.toHaveBeenCalled();
   expect(main).toHaveBeenCalledTimes(1);
+  expect(local).toHaveBeenCalledTimes(1);
 });
 
 test('preparing_state_disables_every_edit_entry', async () => {

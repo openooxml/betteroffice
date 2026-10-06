@@ -8,10 +8,11 @@ import {
   createPresentationEditPeer, type PresentationEditPeer, type PptxWorkerEditorAccess,
 } from './editPeer';
 import { presentationEditPeerInternals } from './editPeerInternals';
+import { peerHydrationError } from './editorPeerHydrationError';
 import type { PresentationSessionState } from './methods';
 import {
   PptxPeerHydrationError, PptxPeerNotReadyError, PptxWorkerEditorCollaborationError,
-  PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError, peerHydrationError,
+  PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
 } from './peerHydrationError';
 import {
   presentationEditorSessionInternals,

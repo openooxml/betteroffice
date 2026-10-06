@@ -13,7 +13,8 @@ import {
   type PresentationHandle, type PresentationPeerHandle,
 } from '../wasm/loader';
 import { frameAssetIds } from './frame';
-import { PptxPeerHydrationError, peerHydrationError } from './peerHydrationError';
+import { peerHydrationError } from './editorPeerHydrationError';
+import { PptxPeerHydrationError } from './peerHydrationError';
 import {
   PRESENTATION_EDITOR_POLICIES, type PresentationEditorMethods,
 } from './replay';

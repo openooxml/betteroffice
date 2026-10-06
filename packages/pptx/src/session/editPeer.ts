@@ -5,8 +5,9 @@ import {
   type PresentationHandle, type PresentationPeerHandle, type PresentationReplayEnvelope,
 } from '../wasm/loader';
 import { presentationEditPeerInternals } from './editPeerInternals';
+import { peerHydrationError } from './editorPeerHydrationError';
 import {
-  PptxPeerHydrationError, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError, peerHydrationError,
+  PptxPeerHydrationError, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
 } from './peerHydrationError';
 import {
   matchingReplayReply, PRESENTATION_REPLAY_MUTATORS, presentationEditorSessionInternals,

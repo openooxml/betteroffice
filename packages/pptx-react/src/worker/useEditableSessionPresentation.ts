@@ -87,17 +87,17 @@ export class EditablePresentation {
     return this.matches(frame) && navigation === this.navigation &&
       currentPresentationFrame(frame, this.active, this.frame(this.active));
   }
-  resolveImage = (id: string) => {
+  resolveImage = async (id: string) => {
     const frame = this.frame(this.active);
-    if (!frame) return Promise.resolve(null);
+    if (!frame) return null;
     const resolve = this.images.resolve(frame);
-    return resolve(id).finally(() => resolve.release());
+    try { return await resolve(id); } finally { resolve.release(); }
   };
-  thumbnailImage = (list: SlideDisplayList, id: string) => {
+  thumbnailImage = async (list: SlideDisplayList, id: string) => {
     const frame = this.lists.get(list);
-    if (!frame || !this.matches(frame)) return Promise.resolve(null);
+    if (!frame || !this.matches(frame)) return null;
     const resolve = this.images.resolve(frame);
-    return resolve(id).finally(() => resolve.release());
+    try { return await resolve(id); } finally { resolve.release(); }
   };
   isThumbnailCurrent(list: SlideDisplayList): boolean {
     const frame = this.lists.get(list);

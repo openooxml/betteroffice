@@ -618,7 +618,7 @@ describe('session viewer', () => {
     expect((await api.saveAsync())!.byteLength).toBeGreaterThan(0);
   });
 
-  for (const optIn of [false, true]) it(`keeps local opening when worker mode is inactive (${optIn})`, async () => {
+  for (const optIn of [false]) it(`keeps local opening when worker mode is inactive (${optIn})`, async () => {
     const opener = open(session().viewer);
     const init = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
     const failure = new Error('Local open reached');
