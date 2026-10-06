@@ -13938,7 +13938,11 @@ mod tests {
             )
             .unwrap();
         let env = engine.render.borrow().stories["body"].env.clone();
-        assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_some());
+        assert!(
+            engine
+                .patch_lowered_body(engine.doc_epoch(), &env)
+                .is_some()
+        );
     }
 
     #[test]
@@ -13981,7 +13985,10 @@ mod tests {
         assert_eq!(patch.old_blocks.len(), 1);
         assert!(Rc::ptr_eq(&patch.old_blocks[0], &old_block));
         assert_eq!(patch.old_blocks[0], old_block);
-        assert!(!Rc::ptr_eq(&patch.old_blocks[0], &lowered.blocks.shared()[1]));
+        assert!(!Rc::ptr_eq(
+            &patch.old_blocks[0],
+            &lowered.blocks.shared()[1]
+        ));
         assert_eq!(
             lowered.blocks.get(2).unwrap().pm_start(),
             Some(suffix_start + 1.0),
@@ -14011,7 +14018,10 @@ mod tests {
             let pagination = engine.pagination.borrow();
             let patch = pagination.measurement_patch.as_ref().unwrap();
             assert_eq!(patch.base_generation, before_generation);
-            assert_eq!(patch.current_generation, before_generation + step as u64 + 1);
+            assert_eq!(
+                patch.current_generation,
+                before_generation + step as u64 + 1
+            );
             assert_eq!(patch.epochs, (before_epoch, engine.doc_epoch()));
             assert_eq!(patch.block_count_before, block_count);
             assert_eq!(patch.block_count_after, block_count);
@@ -14021,10 +14031,18 @@ mod tests {
             assert!(Rc::ptr_eq(&patch.old_blocks[0], &old_block));
         }
         engine
-            .edit_resident_text(crate::StoryRange::new("body", offset, offset + 1), None, true)
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset + 1),
+                None,
+                true,
+            )
             .unwrap();
         let env = engine.render.borrow().stories["body"].env.clone();
-        assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_some());
+        assert!(
+            engine
+                .patch_lowered_body(engine.doc_epoch(), &env)
+                .is_some()
+        );
         let pagination = engine.pagination.borrow();
         let patch = pagination.measurement_patch.as_ref().unwrap();
         assert_eq!(patch.base_generation, before_generation);
@@ -14210,7 +14228,10 @@ mod tests {
                     engine
                         .prepare_region_layout(&request.to_string(), None, RelayoutTrigger::Bulk)
                         .unwrap();
-                    assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+                    assert_eq!(
+                        engine.render.borrow().stories["body"].generation,
+                        generation
+                    );
                 }
                 "placement" => {
                     let input = engine.pagination.borrow().input.as_ref().unwrap().clone();
@@ -14218,7 +14239,10 @@ mod tests {
                     engine.layout_document_value(input).unwrap();
                     assert!(engine.pagination.borrow().lowered_from.is_none());
                     assert!(engine.pagination.borrow().lowered_generation.is_none());
-                    assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+                    assert_eq!(
+                        engine.render.borrow().stories["body"].generation,
+                        generation
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -14263,8 +14287,8 @@ mod tests {
             let generation = engine.render.borrow().stories["body"].generation;
             let blocks = (shared == "blocks")
                 .then(|| Rc::clone(&engine.render.borrow().stories["body"].blocks));
-            let map = (shared == "map")
-                .then(|| Rc::clone(&engine.render.borrow().stories["body"].map));
+            let map =
+                (shared == "map").then(|| Rc::clone(&engine.render.borrow().stories["body"].map));
             let revealable = (shared == "revealable")
                 .then(|| Rc::clone(&engine.render.borrow().stories["body"].revealable_blocks));
             engine
@@ -14276,12 +14300,17 @@ mod tests {
                 .unwrap();
             let env = engine.render.borrow().stories["body"].env.clone();
             assert!(
-                engine.patch_lowered_body(engine.doc_epoch(), &env).is_none(),
+                engine
+                    .patch_lowered_body(engine.doc_epoch(), &env)
+                    .is_none(),
                 "{shared}"
             );
             assert!(engine.pagination.borrow().measurement_patch.is_none());
             assert!(engine.pagination.borrow().lowered_generation.is_none());
-            assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+            assert_eq!(
+                engine.render.borrow().stories["body"].generation,
+                generation
+            );
             drop((blocks, map, revealable));
         }
     }
@@ -14340,14 +14369,24 @@ mod tests {
                 .unwrap();
             assert!(engine.pagination.borrow().measured_with_floats);
             let generation = engine.render.borrow().stories["body"].generation;
-            assert_eq!(engine.pagination.borrow().lowered_generation, Some(generation));
+            assert_eq!(
+                engine.pagination.borrow().lowered_generation,
+                Some(generation)
+            );
             engine
                 .edit_resident_text(crate::StoryRange::new("body", 1, 1), Some("x"), true)
                 .unwrap();
             let env = engine.render.borrow().stories["body"].env.clone();
-            assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_none());
+            assert!(
+                engine
+                    .patch_lowered_body(engine.doc_epoch(), &env)
+                    .is_none()
+            );
             assert!(engine.pagination.borrow().measurement_patch.is_none());
-            assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+            assert_eq!(
+                engine.render.borrow().stories["body"].generation,
+                generation
+            );
             assert_eq!(
                 engine.pagination.borrow().lowered_generation,
                 Some(generation),
