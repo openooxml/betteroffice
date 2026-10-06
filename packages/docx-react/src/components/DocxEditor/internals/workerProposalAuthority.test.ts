@@ -12,6 +12,7 @@ import {
   type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { createProposalRegistry, type DocxProposalSession } from '@betteroffice/docx/yrs/proposals';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
 import {
   beginWorkerProposalHandover,
@@ -1050,4 +1051,99 @@ test('paged exports read their layout request after the calls queued ahead of th
   expect(await read).toBeNull();
   expect(h.events.indexOf('request')).toBeGreaterThan(h.events.indexOf('snapshot'));
   expect(h.worker.documentRead).not.toHaveBeenCalled();
+});
+
+function editorRoundHarness(laidOut = async () => {}) {
+  const local = { version: 'worker-1', previewVersion: 0, proposals: [] };
+  const session = {
+    version: () => 'worker-1', encodeStateVector: () => new Uint8Array(),
+    getProposals: () => local,
+    createWorkerProposalRegistry: (state: ResidentProposalReply['mirror']['proposals']) => {
+      const registry = createProposalRegistry(session);
+      registry.mirror({ version: session.version(), proposals: state });
+      registry.mirror(null);
+      return registry;
+    },
+    storiesChangedSince: () => ({ revision: 0, stories: [] }),
+  } as unknown as YrsSession & DocxProposalSession;
+  const events: string[] = [];
+  const worker = {
+    proposal: mock(async (op: Parameters<WorkerOpenedDocument['proposal']>[0]): Promise<ResidentProposalReply> => {
+      events.push(op.kind);
+      return { ...reply(), peerDiff: new Uint8Array() };
+    }),
+    documentRead: mock(async () => { throw new Error('unexpected document read'); }),
+    handOver: mock(async () => { throw new Error('unexpected handover'); }),
+    integrateProposalUpdate: mock((_update: Uint8Array, _stories: readonly string[]): readonly string[] => []),
+  };
+  const peerUpdated = mock((_stories: readonly string[]) => {});
+  const authority = registerWorkerProposalAuthority(session, worker as unknown as WorkerOpenedDocument, {
+    editorPeer: true, current: () => true, laidOut, relayout: () => {}, adopted: () => {},
+    contentChanged: () => {}, peerUpdated,
+  });
+  return { session, worker, authority, peerUpdated, events };
+}
+
+test('integrated proposal updates notify peerUpdated only for changed stories', async () => {
+  const h = editorRoundHarness();
+  await h.authority.initialize();
+  const states = { expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] };
+  expect(await h.authority.setStates(states, unusedMain)).toMatchObject({ ok: true });
+  expect(h.worker.integrateProposalUpdate).toHaveBeenCalledTimes(1);
+  expect(h.peerUpdated).not.toHaveBeenCalled();
+  h.worker.integrateProposalUpdate.mockReturnValueOnce(['body', 'hf:rId7']);
+  h.worker.proposal.mockResolvedValueOnce({ ...reply('worker-1', ['body']), peerDiff: new Uint8Array() });
+  expect(await h.authority.setStates(states, unusedMain)).toMatchObject({ ok: true });
+  expect(h.peerUpdated).toHaveBeenCalledTimes(1);
+  expect(h.peerUpdated).toHaveBeenCalledWith(['body', 'hf:rId7']);
+});
+
+test('editor save stays behind a round admitted before the first layout', async () => {
+  const layout = deferred<void>();
+  const waiting = deferred<void>();
+  const h = editorRoundHarness(() => { waiting.resolve(); return layout.promise; });
+  const round = h.authority.propose(request, unusedMain);
+  const save = mock(async () => { h.events.push('save'); return 'saved'; });
+  const saving = h.authority.save(save);
+  await waiting.promise;
+  expect(h.worker.proposal).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
+  layout.resolve();
+  expect(await round).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('editor save stays behind a round admitted during initialization', async () => {
+  const h = editorRoundHarness();
+  const initializing = deferred<ResidentProposalReply>();
+  const posted = deferred<void>();
+  h.worker.proposal.mockImplementationOnce(async () => { h.events.push('snapshot'); posted.resolve(); return initializing.promise; });
+  const initialization = h.authority.initialize();
+  await posted.promise;
+  const round = h.authority.propose(request, unusedMain);
+  const saving = h.authority.save(async () => { h.events.push('save'); return 'saved'; });
+  initializing.resolve(reply());
+  await initialization;
+  expect(await round).toMatchObject({ ok: true });
+  expect(await saving).toBe('saved');
+  expect(h.events).toEqual(['snapshot', 'propose', 'save', 'snapshot']);
+});
+
+test('a queued editor round reuses the failed initialization rejection', async () => {
+  const h = editorRoundHarness();
+  const failure = new Error('snapshot failed');
+  h.worker.proposal.mockRejectedValueOnce(failure);
+  await expect(h.authority.initialize()).rejects.toBe(failure);
+  await expect(h.authority.propose(request, unusedMain)).rejects.toBe(failure);
+  expect(h.worker.proposal).toHaveBeenCalledTimes(1);
+});
+
+test('an unchanged empty editor decision keeps the worker rebuildable', async () => {
+  const h = editorRoundHarness();
+  expect(await h.authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, unusedMain))
+    .toMatchObject({ ok: true });
+  expect(h.authority.holdsCommittedWorkerState()).toBe(false);
+  h.authority.restart();
+  expect(h.authority.initialized).toBe(false);
 });

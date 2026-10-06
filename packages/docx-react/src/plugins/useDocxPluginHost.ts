@@ -32,7 +32,8 @@ import {
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
-import { workerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { workerProposalAuthority, workerProposalRoundAuthority, hasEditorWorkerProposalRounds, subscribeEditorWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { workerOpenReplicaReady } from '../components/DocxEditor/internals/workerOpenReplica';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
 import type { ViewerSelectionChange } from '../components/DocxEditor/internals/viewerSelectionController';
@@ -201,15 +202,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     if (!options.session) return;
     host.open(options.session);
-    const unsubscribe = workerProposalAuthority(options.session)?.subscribe(() => {
+    const update = () => {
       host.geometryChanged();
       if (layoutRef.current) host.layoutPresented(layoutRef.current);
-    });
+    };
+    const unsubscribe = workerProposalAuthority(options.session)?.subscribe(update);
+    const unsubscribeEditor = subscribeEditorWorkerProposalAuthority(options.session, update);
     let attached = true;
     const detach = () => {
       if (!attached) return;
       attached = false;
       unsubscribe?.();
+      unsubscribeEditor();
       if (detachAuthority.current === detach) detachAuthority.current = null;
     };
     detachAuthority.current = detach;
@@ -340,6 +344,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const geometry = useMemo(() => {
     if (!currentLayout || !dom || dom.queries !== options.queries || !layer) return null;
     const shownList = dom.queries.displayList;
+    let proposalTarget = false;
     const created: DocxPluginGeometry = createPluginGeometry(
       currentLayout,
       dom.context,
@@ -361,8 +366,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       () => {
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const proposalGeometry = session ? workerProposalAuthority(session)?.geometry() : null;
-        return editor && session
+        const active = session && hasEditorWorkerProposalRounds(session);
+        const proposalGeometry = session ? (active ? proposalTarget ? workerProposalRoundAuthority(session)?.geometry() : null : workerProposalAuthority(session)?.geometry()) : null;
+        return editor && session && (!active || proposalTarget || workerOpenReplicaReady(session))
           ? {
               session,
               editor,
@@ -378,6 +384,13 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
       (clientX, clientY) => readPluginPositionAtPoint(latest.current.pagedEditorRef, clientX, clientY)
     );
+    const resolveAnchor = created.getAnchorGeometry;
+    created.getAnchorGeometry = (target) => {
+      const previous = proposalTarget;
+      proposalTarget = target.kind === 'proposal';
+      try { return resolveAnchor(target); }
+      finally { proposalTarget = previous; }
+    };
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps

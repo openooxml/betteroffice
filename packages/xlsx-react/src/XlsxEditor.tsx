@@ -96,6 +96,8 @@ import {
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { deriveLimits, scaledRect } from './viewer/sessionGeometry';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
+import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
+import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
 import type {
   XlsxAdmission,
   XlsxPluginEditorAccess,
@@ -256,6 +258,14 @@ export type XlsxWorkerViewerProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly'
   experimentalWorkerOpen: true;
   onError?: (error: Error) => void;
   onReady?: (api: XlsxWorkerViewerApi) => void | (() => void);
+};
+
+/** @experimental */
+export type XlsxWorkerEditorProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly' | 'collaboration'> & {
+  readOnly?: false;
+  experimentalWorkerOpen: true;
+  onError?: (error: Error) => void;
+  onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
 };
 
 /** the open in-cell editor: which cell it targets and its current draft text. */
@@ -558,12 +568,15 @@ function useSyncedState<T>(initial: T) {
  * The xlsx editor React component.
  */
 export function XlsxEditor(props: XlsxWorkerViewerProps): React.JSX.Element;
+export function XlsxEditor(props: XlsxWorkerEditorProps): React.JSX.Element;
 export function XlsxEditor(props: XlsxEditorProps): React.JSX.Element;
-export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxEditorProps): React.JSX.Element {
+export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxWorkerEditorProps | XlsxEditorProps): React.JSX.Element {
   return (
     <LocaleProvider i18n={props.i18n}>
       {'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && props.readOnly ? (
         <XlsxSessionViewer {...props as XlsxWorkerViewerProps} />
+      ) : 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && !props.readOnly ? (
+        <XlsxWorkerEditor {...props as XlsxWorkerEditorProps} />
       ) : (
         <XlsxEditorContent {...props as XlsxEditorProps} />
       )}

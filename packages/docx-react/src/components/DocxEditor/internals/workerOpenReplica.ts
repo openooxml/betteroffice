@@ -359,3 +359,8 @@ export function adoptWorkerOpenMirrorVersion(session: YrsSession, version: strin
   const replica = replicas.get(session);
   if (replica?.pending) replica.mirrorVersion = version;
 }
+
+export function workerOpenReplicaReady(session: YrsSession): boolean {
+  const replica = replicas.get(session);
+  return !replica || (!replica.pending && replica.hydrated);
+}

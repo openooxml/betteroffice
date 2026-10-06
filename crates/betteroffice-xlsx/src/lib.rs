@@ -35,6 +35,8 @@ pub use types::{
     ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
     TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
+#[doc(hidden)]
+pub use workbook::PeerHydration;
 pub use workbook::batch::{
     CalculationRequest, CellGuard, DocumentVersion, EditApplication, EditCalculation, EditFailure,
     EditFailureCode, EditHistory, EditOperation, EditOutcome, EditPreview, EditReceipt,
