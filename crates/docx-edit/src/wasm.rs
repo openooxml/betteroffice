@@ -127,6 +127,17 @@ fn js_err(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
 }
 
+fn peer_metadata_js_err(error: crate::PeerMetadataError) -> JsValue {
+    let value = js_sys::Error::new(&error.to_string());
+    value.set_name("PeerMetadataError");
+    let _ = js_sys::Reflect::set(
+        &value,
+        &JsValue::from_str("code"),
+        &JsValue::from_str(error.code()),
+    );
+    value.into()
+}
+
 /// Host randomness for version nonces; the wasm target has no ambient entropy source.
 fn js_entropy() -> u64 {
     #[cfg(target_arch = "wasm32")]
@@ -2396,6 +2407,39 @@ impl EditSession {
         }
         self.engine.doc().rotate_version(js_entropy());
         Ok(())
+    }
+
+    pub fn encode_peer_metadata(&self) -> Result<Vec<u8>, JsValue> {
+        self.engine
+            .doc()
+            .encode_peer_metadata()
+            .map_err(peer_metadata_js_err)
+    }
+
+    pub fn bootstrap_peer(
+        &self,
+        state: &[u8],
+        metadata: &[u8],
+        source: Option<Vec<u8>>,
+    ) -> Result<(), JsValue> {
+        let source = source.map(PackageBytes::from);
+        let bootstrap = self
+            .engine
+            .doc()
+            .prepare_peer_bootstrap(state, metadata, source)
+            .map_err(peer_metadata_js_err)?;
+        let retained = self
+            .engine
+            .doc()
+            .install_peer_bootstrap(bootstrap, js_entropy())
+            .map_err(peer_metadata_js_err)?;
+        self.docx_source.replace(Some(retained.source));
+        self.docx_digest.replace(Some(retained.digest));
+        self.awaiting_comment_baseline.set(true);
+        self.engine.set_partial_document(false);
+        self.engine.set_relayout_trigger(RelayoutTrigger::Open);
+        self.engine.doc().rotate_version(js_entropy());
+        self.load(state)
     }
 
     /// [`EditSession::open_docx`] with seeding always on.

@@ -116,6 +116,8 @@ async function workerOpened(
   const saved: ArrayBuffer[] = [];
   const errors: Error[] = [];
   const opens: boolean[] = [];
+  const bootstraps: Parameters<YrsSession['bootstrapPeer']>[] = [];
+  const snapshots: Awaited<ReturnType<ResidentEngineWorkerClient['encodeVersionedState']>>[] = [];
   const flush = mock(async () => {});
   const project = mock(() => {});
   const hook = renderHook((generation: number) => {
@@ -128,8 +130,25 @@ async function workerOpened(
     const renderer = useCanvasRenderer(undefined, undefined, undefined, undefined, undefined, true, viewerSessionRef);
     const workerDocument = useRef<WorkerOpenedDocument | null>(null);
     const openInWorker = useCallback<OpenInWorker>(async (...args) => {
-      workerDocument.current = await renderer.openInWorker(...args);
-      return workerDocument.current;
+      const opened = await renderer.openInWorker(...args);
+      if (opened?.encodeVersionedState) {
+        const encode = opened.encodeVersionedState;
+        opened.encodeVersionedState = async (prefetch) => {
+          const snapshot = await encode(prefetch);
+          snapshots.push(snapshot);
+          return snapshot;
+        };
+      }
+      if (opened) {
+        const handOver = opened.handOver;
+        opened.handOver = async (...args) => {
+          const snapshot = await handOver(...args);
+          snapshots.push(snapshot);
+          return snapshot;
+        };
+      }
+      workerDocument.current = opened;
+      return opened;
     }, [renderer.openInWorker]);
     const [host, setHost] = useState<YrsDocxHost | null>(null);
     const [renderedFrame, setRenderedFrame] = useState<object | null>(null);
@@ -140,6 +159,11 @@ async function workerOpened(
         session.openDocx = (input, seed, options) => {
           opens.push(seed);
           return open(input, seed, options);
+        };
+        const bootstrap = session.bootstrapPeer.bind(session);
+        session.bootstrapPeer = (...args) => {
+          bootstraps.push(args);
+          return bootstrap(...args);
         };
       },
       onHostDocument: (document) => setHost(document),
@@ -255,7 +279,16 @@ async function workerOpened(
     capture.mockRestore();
   }
   const session = hook.result.current.core.session!;
-  return { hook, session, client, worker: workers.at(-1)!, saved, errors, opens, flush, project };
+  return { hook, session, client, worker: workers.at(-1)!, saved, errors, opens, bootstraps, snapshots, flush, project };
+}
+
+function expectPeerBootstrap(opened: Awaited<ReturnType<typeof workerOpened>>) {
+  expect(opened.opens).toEqual([]);
+  expect(opened.bootstraps).toHaveLength(1);
+  const snapshot = opened.snapshots.at(-1);
+  if (!snapshot || snapshot.metadata === undefined) throw new Error('Expected captured worker state and peer metadata');
+  expect(opened.bootstraps[0]![0]).toBe(snapshot.state);
+  expect(opened.bootstraps[0]![1]).toBe(snapshot.metadata);
 }
 
 async function layOut(opened: Awaited<ReturnType<typeof workerOpened>>) {
@@ -350,7 +383,7 @@ test.each(['worker', 'loaded copy'] as const)('an editor switched to viewing pre
     expect(opened.flush.mock.calls).toHaveLength(flushed + 1);
     expect(opened.worker.requests.slice(posted)).not.toContain('encodeState');
     expect(opened.session.encodeStateVector()).toEqual(opened.worker.sessions[0]!.encodeStateVector());
-    expect(opened.opens).toEqual([false]);
+    expectPeerBootstrap(opened);
     expect(opened.project).not.toHaveBeenCalled();
     expect(opened.errors).toEqual([]);
   } finally {
@@ -460,7 +493,7 @@ test('a save without the editing copy clears the editor\'s save marks for the ne
     act(() => opened.hook.result.current.setViewing(false));
     await act(async () => { await requestWorkerOpenReplica(opened.session); });
     expect(opened.hook.result.current.core.replicaReady).toBe(true);
-    expect(opened.opens).toEqual([false]);
+    expectPeerBootstrap(opened);
     expect(await opened.hook.result.current.io.handleSave()).toBeInstanceOf(ArrayBuffer);
     expect(save.mock.calls).toHaveLength(2);
     expect(save.mock.calls[1]![0].stories).toEqual([]);
@@ -836,7 +869,7 @@ test.each([true, false])('worker save unavailable with viewer=%s (a viewer repor
   } else {
     expect(buffer).toBeInstanceOf(ArrayBuffer);
     expect(opened.errors).toEqual([]);
-    expect(opened.opens).toEqual([false]);
+    expectPeerBootstrap(opened);
     expect(opened.project).toHaveBeenCalledTimes(1);
     expect(opened.saved).toEqual([buffer!]);
   }
@@ -891,7 +924,7 @@ test('a queued editor save falls back to its loaded copy when the worker fails d
     expect(xml).toMatch(/<w:commentRangeEnd\b[^>]*\bw:id="1"/);
     expect(xml).toContain('w:top="2000"');
     expect(await zip.file('word/header1.xml')!.async('string')).toContain('Unsaved header ');
-    expect(opened.opens).toEqual([false]);
+    expectPeerBootstrap(opened);
   } finally {
     opened.worker.release();
     save.mockRestore();
