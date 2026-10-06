@@ -32,7 +32,7 @@ export class EditablePresentation {
 
   constructor(props: PptxWorkerEditorProps, private readonly changed: () => void,
     private readonly isCurrent: () => boolean = () => true) {
-    this.active = Math.max(0, (props.initialSlide ?? 1) - 1);
+    this.active = Number.isInteger(props.initialSlide) ? Math.max(0, props.initialSlide! - 1) : 0;
     this.owner = workerEditorSessionOpener.open(props.file!, {
       fonts: props.fonts, clientId: props.clientId, collaboration: props.collaboration,
       onError: (error) => { if (this.current) props.onError?.(error); },

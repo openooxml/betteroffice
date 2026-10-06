@@ -219,6 +219,19 @@ test('hydration_keeps_navigation_and_the_painted_worker_slide', async () => {
   expect(painted).not.toContain(value.peerFrame);
 });
 
+for (const initialSlide of [Number.NaN, 1.5]) test(`invalid_initial_slide_${initialSlide}_opens_the_first_slide`, async () => {
+  const value = session(false, 2);
+  open(value);
+  const ready = mock(() => {});
+  const view = render(<PptxEditor fonts={[]} file={file} initialSlide={initialSlide} experimentalWorkerOpen
+    onReady={ready} />);
+  await waitFor(() => expect(view.container.querySelectorAll('aside button')).toHaveLength(2));
+  await act(async () => { value.hydrate(); });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  expect(view.container.querySelectorAll('aside button')[0].getAttribute('aria-current')).toBe('page');
+  expect(painted).toContain(value.frames.find((frame) => frame.slideId === 's')!.displayList);
+});
+
 test('applyEdits_publishes_only_applied_batches_and_waits_for_replay', async () => {
   const value = session();
   open(value);
