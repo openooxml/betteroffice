@@ -1,6 +1,6 @@
 use super::*;
 use ooxml_opc::WorkBudget;
-use yrs::block::HAS_PARENT_SUB;
+use yrs::block::{HAS_ORIGIN, HAS_PARENT_SUB};
 
 const SEED_CHUNK_BYTES: usize = 64 * 1024;
 
@@ -121,6 +121,39 @@ pub(super) async fn hash_cell_value_sliced(
 enum SeedParent {
     Root(&'static str),
     Item(ID),
+    Origin(ID),
+}
+
+impl SeedParent {
+    fn encoder(self, key: Option<&str>, content_ref: u8) -> EncoderV1 {
+        let mut encoder = EncoderV1::new();
+        let info = content_ref | if key.is_some() { HAS_PARENT_SUB } else { 0 };
+        encoder.write_info(
+            info | if matches!(self, Self::Origin(_)) {
+                HAS_ORIGIN
+            } else {
+                0
+            },
+        );
+        match self {
+            Self::Root(name) => {
+                encoder.write_parent_info(true);
+                encoder.write_string(name);
+            }
+            Self::Item(id) => {
+                encoder.write_parent_info(false);
+                encoder.write_left_id(&id);
+            }
+            Self::Origin(id) => {
+                encoder.write_left_id(&id);
+                return encoder;
+            }
+        }
+        if let Some(key) = key {
+            encoder.write_string(key);
+        }
+        encoder
+    }
 }
 
 enum SeedContent {
@@ -186,25 +219,11 @@ impl<'a> SeedEncoder<'a> {
             }
             SeedContent::Map => work.step().await,
         }
-        let mut encoder = EncoderV1::new();
         let content_ref = match &content {
             SeedContent::Map => BLOCK_ITEM_TYPE_REF_NUMBER,
             _ => BLOCK_ITEM_ANY_REF_NUMBER,
         };
-        encoder.write_info(content_ref | if key.is_some() { HAS_PARENT_SUB } else { 0 });
-        match parent {
-            SeedParent::Root(name) => {
-                encoder.write_parent_info(true);
-                encoder.write_string(name);
-            }
-            SeedParent::Item(id) => {
-                encoder.write_parent_info(false);
-                encoder.write_left_id(&id);
-            }
-        }
-        if let Some(key) = key {
-            encoder.write_string(&key);
-        }
+        let mut encoder = parent.encoder(key.as_deref(), content_ref);
         match content {
             SeedContent::Value(value) => {
                 encoder.write_len(1);
@@ -261,6 +280,44 @@ impl<'a> SeedEncoder<'a> {
         self.push(parent, Some(key.to_owned()), SeedContent::Map, work)
             .await
             .map(SeedParent::Item)
+    }
+
+    async fn order(&mut self, keys: &[String], work: &WorkBudget) -> Result<(), String> {
+        let mut parent = SeedParent::Root(SHEET_ORDER);
+        let mut order = Vec::new();
+        let mut bytes = 0;
+        for key in keys {
+            work.step().await;
+            charge_bytes(key.len(), work).await;
+            let value = Any::from(key.clone());
+            let mut encoder = EncoderV1::new();
+            encoder.write_any(&value);
+            let value_bytes = encoder.to_vec().len();
+            let mut header = parent.encoder(None, BLOCK_ITEM_ANY_REF_NUMBER);
+            header.write_len(u32::MAX);
+            if !order.is_empty()
+                && header.to_vec().len() + bytes + value_bytes + 32 > SEED_CHUNK_BYTES
+            {
+                let len = order.len() as u32;
+                let id = self
+                    .push(
+                        parent,
+                        None,
+                        SeedContent::Order(std::mem::take(&mut order)),
+                        work,
+                    )
+                    .await?;
+                parent = SeedParent::Origin(ID::new(id.client, id.clock + len - 1));
+                bytes = 0;
+            }
+            bytes += value_bytes;
+            order.push(value);
+        }
+        if !order.is_empty() {
+            self.push(parent, None, SeedContent::Order(order), work)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn flush(&mut self, work: &WorkBudget) -> Result<(), String> {
@@ -333,20 +390,7 @@ pub(super) async fn seed_sliced(
         .value(meta, STRUCTURE_GENERATION, 0_i64, work)
         .await?;
     if !keys.is_empty() {
-        let mut order = Vec::with_capacity(keys.len());
-        for key in keys {
-            work.step().await;
-            charge_bytes(key.len(), work).await;
-            order.push(Any::from(key.clone()));
-        }
-        encoder
-            .push(
-                SeedParent::Root(SHEET_ORDER),
-                None,
-                SeedContent::Order(order),
-                work,
-            )
-            .await?;
+        encoder.order(keys, work).await?;
     }
     let sheets = SeedParent::Root(SHEETS);
     for (key, sheet) in keys.iter().zip(&model.sheets) {

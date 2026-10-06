@@ -128,6 +128,38 @@ fn seed_batches_charge_long_values_and_sheet_metadata() {
 }
 
 #[test]
+fn seed_sheet_order_spans_byte_bounded_batches_and_matches_oracle() {
+    let mut model = WorkbookModel::default();
+    for index in 0..8192 {
+        let name = format!("Sheet-{index:04}-{}", "n".repeat(20));
+        model.sheets.push(Sheet::new(name));
+    }
+    let order_bytes = (0..model.sheets.len())
+        .map(|index| format!("sheet:{index}").len() + 2)
+        .sum::<usize>();
+    assert!(order_bytes > 64 * 1024);
+    let (expected, _, _) =
+        WorkbookAuthority::from_source_with_projection(&model, Some(73), &[], None).unwrap();
+    for units in [1, 256, usize::MAX] {
+        crate::authority::take_seed_batches();
+        let (actual, _) = sliced_authority(&model, units);
+        let batches = crate::authority::take_seed_batches();
+        assert!(batches.iter().all(|(bytes, _)| *bytes <= 64 * 1024));
+        let entries = batches.iter().map(|(_, count)| count).sum::<usize>();
+        let order_entries = entries - (4 + 10 * model.sheets.len());
+        assert!(order_entries > 1);
+        assert_eq!(
+            actual.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+        assert_eq!(
+            actual.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+    }
+}
+
+#[test]
 fn hydration_chunks_bound_bytes_and_split_oversized_cells() {
     let mut parts = ooxml_opc::unzip_parts(&source_bytes(0)).unwrap();
     let sheet = &mut parts
