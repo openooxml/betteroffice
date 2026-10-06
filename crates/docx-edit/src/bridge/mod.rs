@@ -500,7 +500,10 @@ fn lower_story_with_preview<T: ReadTxn>(
     let result = (|| {
         let story = story_ref(txn, story_id)?;
         let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
-        let chunks = story.diff(txn, YChange::identity);
+        let chunks = std::rc::Rc::new(story.diff(txn, YChange::identity));
+        if story_id == "body" && !local.blocked {
+            local.chunks = Some(std::rc::Rc::clone(&chunks));
+        }
         let initial = preview::WalkPosition::new(story_slot, pm_base, map);
         let (blocks, after, _) = walk_story_chunks(
             txn,
@@ -520,6 +523,9 @@ fn lower_story_with_preview<T: ReadTxn>(
             BTreeSet::new(),
             recording.as_deref_mut(),
         )?;
+        if story_id == "body" {
+            local.chunks = None;
+        }
         if let Some(recording) = recording {
             recording.save_chunks(&chunks, comments);
         }
@@ -622,7 +628,7 @@ fn walk_story_chunks<T: ReadTxn>(
             );
         }
         let attributes = diff.attributes.as_deref();
-        local.observe(&mut plain, diff, txn, story_id);
+        local.observe(&mut plain, diff, txn, story_id, chunk_index);
         match &diff.insert {
             Out::Any(Any::String(text)) => {
                 let text = text.as_ref();

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use super::*;
@@ -9,8 +11,11 @@ pub(crate) struct LocalLowering {
     pub(super) enabled: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
+    pub(super) chunks: Option<Rc<Vec<yrs::types::text::Diff<YChange>>>>,
     dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
+    #[cfg(test)]
+    pub(crate) materialized_text_units: u32,
 }
 
 #[derive(Debug, Default)]
@@ -20,6 +25,7 @@ pub(super) struct ParagraphSeed {
     slot: usize,
     source: u32,
     segments: Vec<TextSegment>,
+    chunks: Option<(Rc<Vec<yrs::types::text::Diff<YChange>>>, std::ops::Range<usize>)>,
     pilcrow: Option<MapRef>,
     mark_attrs: Option<Attrs>,
     pm_start: u64,
@@ -32,6 +38,19 @@ struct TextSegment {
 }
 
 impl ParagraphSeed {
+    fn segments(&self) -> Cow<'_, [TextSegment]> {
+        let Some((chunks, range)) = &self.chunks else {
+            return Cow::Borrowed(&self.segments);
+        };
+        let mut segments = Vec::new();
+        for diff in &chunks[range.clone()] {
+            if let Out::Any(Any::String(text)) = &diff.insert {
+                push_segment(&mut segments, text, diff.attributes.as_deref());
+            }
+        }
+        Cow::Owned(segments)
+    }
+
     pub(super) fn start(&mut self, safe: bool) {
         *self = Self {
             tainted: !safe,
@@ -64,6 +83,19 @@ fn same_attributes(attrs: &Attrs, other: Option<&Attrs>) -> bool {
             .filter(|(_, value)| **value != Any::Null)
     };
     other().count() == attrs.len() && other().all(|(key, value)| attrs.get(key) == Some(value))
+}
+
+fn push_segment(segments: &mut Vec<TextSegment>, text: &str, attrs: Option<&Attrs>) {
+    if let Some(last) = segments.last_mut()
+        && same_attributes(&last.attrs, attrs)
+    {
+        last.text.push_str(text);
+    } else {
+        segments.push(TextSegment {
+            text: text.to_owned(),
+            attrs: attributes(attrs),
+        });
+    }
 }
 
 fn unsafe_value(key: &str, value: &Any) -> bool {
@@ -210,7 +242,7 @@ impl LocalLowering {
                     seed.slot,
                     seed.source,
                     seed.pm_start,
-                    seed.segments
+                    seed.segments()
                         .iter()
                         .map(|segment| (segment.text.clone(), attrs(&segment.attrs)))
                         .collect::<Vec<_>>(),
@@ -260,11 +292,11 @@ impl LocalLowering {
         if self.seeds.is_empty() {
             return;
         }
-        let mut identities = BTreeSet::new();
-        let duplicates: BTreeSet<_> = map
+        let mut identities = HashSet::new();
+        let duplicates: HashSet<_> = map
             .paragraphs
             .iter()
-            .filter_map(|(_, id)| (!identities.insert(id.clone())).then_some(id.clone()))
+            .filter_map(|(_, id)| (!identities.insert(id.as_str())).then_some(id.as_str()))
             .collect();
         let sources: BTreeMap<_, _> = map
             .paragraphs
@@ -287,7 +319,7 @@ impl LocalLowering {
             })
             .collect();
         self.seeds.retain(|id, seed| {
-            if self.dependent.contains(id) || duplicates.contains(id) {
+            if self.dependent.contains(id) || duplicates.contains(id.as_str()) {
                 return false;
             }
             let Some((&source, &pm)) = sources
@@ -322,6 +354,7 @@ impl LocalLowering {
         diff: &yrs::types::text::Diff<YChange>,
         txn: &T,
         story: &str,
+        chunk_index: usize,
     ) {
         if self.blocked {
             return;
@@ -334,17 +367,20 @@ impl LocalLowering {
         self.preview_blocked |= unsafe_attrs;
         paragraph.tainted |= unsafe_attrs;
         match &diff.insert {
-            Out::Any(Any::String(_)) if story != "body" => {}
+            Out::Any(Any::String(_)) if story != "body" || paragraph.tainted => {}
             Out::Any(Any::String(text)) => {
-                if let Some(last) = paragraph.segments.last_mut()
-                    && same_attributes(&last.attrs, attrs)
-                {
-                    last.text.push_str(text);
+                if let Some(chunks) = &self.chunks {
+                    if let Some((_, range)) = &mut paragraph.chunks {
+                        range.end = chunk_index + 1;
+                    } else {
+                        paragraph.chunks = Some((Rc::clone(chunks), chunk_index..chunk_index + 1));
+                    }
                 } else {
-                    paragraph.segments.push(TextSegment {
-                        text: text.to_string(),
-                        attrs: attributes(attrs),
-                    });
+                    #[cfg(test)]
+                    {
+                        self.materialized_text_units += utf16_len(text);
+                    }
+                    push_segment(&mut paragraph.segments, text, attrs);
                 }
             }
             Out::YMap(mark) if is_pilcrow(mark, txn) => {}
@@ -410,15 +446,15 @@ impl LocalLowering {
             self.seeds.clear();
             return;
         }
-        let mut identities = BTreeSet::new();
-        let duplicates: BTreeSet<_> = map
+        let mut identities = HashSet::new();
+        let duplicates: HashSet<_> = map
             .paragraphs
             .iter()
-            .filter_map(|(_, id)| (!identities.insert(id.clone())).then_some(id.clone()))
+            .filter_map(|(_, id)| (!identities.insert(id.as_str())).then_some(id.as_str()))
             .collect();
         self.preview_blocked |= !duplicates.is_empty() || !blocks.iter().all(shiftable);
         self.seeds.retain(|id, seed| {
-            if duplicates.contains(id) || self.dependent.contains(id) {
+            if duplicates.contains(id.as_str()) || self.dependent.contains(id) {
                 return false;
             }
             let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
@@ -472,13 +508,18 @@ impl LocalLowering {
         let pilcrow = seed.pilcrow.as_ref()?;
         let (raw, slot, source) = (seed.raw_start, seed.slot, seed.source);
         let pm_start = seed.pm_start;
-        let old_units: u32 = seed
-            .segments
+        let old_segments = seed.segments();
+        let old_units: u32 = old_segments
             .iter()
             .map(|segment| utf16_len(&segment.text))
             .sum();
         let old_end = pm_start + u64::from(old_units) + 2;
-        let segments = patch_segments(&seed.segments, edit)?;
+        #[cfg(test)]
+        if seed.chunks.is_some() {
+            self.materialized_text_units += old_units;
+        }
+        let segments = patch_segments(&old_segments, edit)?;
+        drop(old_segments);
         let delta = i64::from(utf16_len(&edit.text)) - i64::from(edit.removed);
         let mut runs = Vec::new();
         let mut units = 0;
@@ -519,6 +560,7 @@ impl LocalLowering {
             paragraph.attrs = old.attrs.clone();
         }
         seed.segments = segments;
+        seed.chunks = None;
         blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
         for block in &mut blocks[slot + 1..] {
             shift_block(Rc::make_mut(block), delta);

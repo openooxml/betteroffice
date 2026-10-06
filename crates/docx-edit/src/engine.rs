@@ -269,6 +269,7 @@ struct RegionWorkCounts {
 #[cfg(test)]
 thread_local! {
     static BODY_MEASUREMENT_WORK: RefCell<(Vec<usize>, u64)> = const { RefCell::new((Vec::new(), 0)) };
+    static SHIFT_SAFETY_WORK: Cell<usize> = const { Cell::new(0) };
     static CERTIFIED_FLOAT_WORK: RefCell<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> = const { RefCell::new((Vec::new(), Vec::new(), Vec::new(), Vec::new())) };
     static OPEN_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static PREVIEW_REGION_PATH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
@@ -1280,7 +1281,7 @@ struct PaginationState {
     lowered_from: Option<Rc<SharedBlocks>>,
     lowered_generation: Option<u64>,
     measurement_patch: Option<MeasurementPatch>,
-    measured_shift_safe: Vec<bool>,
+    measured_shift_safe: Vec<Option<bool>>,
     /// The doc epoch and lowering map a resident edit path built `input` from.
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     retain_matches: Vec<Option<BlockCertificate>>,
@@ -1326,24 +1327,6 @@ struct PaginationState {
 }
 
 impl PaginationState {
-    fn refresh_shift_safety(&mut self) {
-        if self.measured_shift_safe.len()
-            != self.input.as_ref().map_or(0, |input| input.measured.len())
-        {
-            self.measured_shift_safe = self
-                .input
-                .as_ref()
-                .map(|input| {
-                    input
-                        .measured
-                        .iter()
-                        .map(|entry| measurement_shift_safe(&entry.block))
-                        .collect()
-                })
-                .unwrap_or_default();
-        }
-    }
-
     fn set_font_dependencies(
         &mut self,
         dependencies: Vec<FontChainDependencies>,
@@ -1940,6 +1923,8 @@ fn measured_fingerprint(measured: &MeasuredBlock) -> Result<Fingerprint, String>
 }
 
 fn measurement_shift_safe(block: &LayoutBlock) -> bool {
+    #[cfg(test)]
+    SHIFT_SAFETY_WORK.with(|work| work.set(work.get() + 1));
     let position = |value: Option<f64>| {
         value.is_none_or(|value| value >= 0.0 && value <= u32::MAX as f64 && value.fract() == 0.0)
     };
@@ -5877,7 +5862,6 @@ impl EngineSession {
         pagination.lowered_from = lowered_from;
         pagination.lowered_generation = lowered_generation;
         pagination.measurement_patch = None;
-        pagination.refresh_shift_safety();
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
@@ -6389,7 +6373,6 @@ impl EngineSession {
         pagination.lowered_generation = lowered_generation;
         pagination.measurement_patch = None;
         pagination.retain_matches = retain_matches;
-        pagination.refresh_shift_safety();
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
@@ -7612,7 +7595,16 @@ impl EngineSession {
         let mut reused = vec![false; blocks.len()];
         let mut certificates = vec![None; blocks.len()];
         let mut float_dirty = vec![false; blocks.len()];
-        let mut shifted_reuse = vec![false; blocks.len()];
+        let shift_blocks = if measurement_patch.is_some() {
+            blocks.len()
+        } else {
+            0
+        };
+        let mut shifted_reuse = vec![false; shift_blocks];
+        if measurement_patch.is_some() && pagination.measured_shift_safe.len() != blocks.len() {
+            pagination.measured_shift_safe.clear();
+            pagination.measured_shift_safe.resize(blocks.len(), None);
+        }
         let mut sections = Vec::with_capacity(blocks.len());
         let mut marks = Vec::with_capacity(blocks.len());
         let mut measure_calls = 0_u64;
@@ -7668,10 +7660,11 @@ impl EngineSession {
                     == matches!(next_block, LayoutBlock::Unsupported)
                 && raw_clean;
             let certified_shift = width_clean
-                && pagination.measured_shift_safe.get(index) == Some(&true)
                 && measurement_patch
                     .as_ref()
-                    .is_some_and(|patch| patch.certifies_block(blocks, index));
+                    .is_some_and(|patch| patch.certifies_block(blocks, index))
+                && *pagination.measured_shift_safe[index]
+                    .get_or_insert_with(|| measurement_shift_safe(&previous_entry.block));
             if certified_shift {
                 candidates.push(None);
                 reused[index] = true;
@@ -7727,15 +7720,20 @@ impl EngineSession {
                     CERTIFIED_FLOAT_WORK.with(|work| work.borrow_mut().1.push(index));
                 }
                 let mut owned = normalize_retained_block(blocks, index, regions, section_index);
+                let ordinary_equal = width_clean
+                    && (owned == *previous_block
+                        || section_breaks_match_but_margins(&owned, previous_block));
                 let shape_equal = width_clean
                     && floats.is_some()
-                    && retained_shape_block_matches(&owned, previous_block);
-                if width_clean
-                    && (shape_equal
-                        || owned == *previous_block
-                        || section_breaks_match_but_margins(&owned, previous_block))
-                {
-                    if shape_equal {
+                    && !ordinary_equal
+                    && if measurement_patch.is_some() {
+                        retained_shape_block_matches(&owned, previous_block)
+                    } else {
+                        retain_shape_measurements(&mut owned, previous_block);
+                        owned == *previous_block
+                    };
+                if ordinary_equal || shape_equal {
+                    if shape_equal && measurement_patch.is_some() {
                         retain_shape_measurements(&mut owned, previous_block);
                     }
                     candidates.push(Some(MeasuredBlock {
@@ -7827,7 +7825,9 @@ impl EngineSession {
                         candidates[index] = Some(MeasuredBlock { block, measure });
                         dependencies[index] = reads[offset].clone();
                         reused[index] = false;
-                        shifted_reuse[index] = false;
+                        if let Some(shifted) = shifted_reuse.get_mut(index) {
+                            *shifted = false;
+                        }
                         certificates[index] = None;
                         measure_calls = measure_calls.wrapping_add(1);
                         #[cfg(test)]
@@ -7843,7 +7843,7 @@ impl EngineSession {
             .enumerate()
             .map(|(index, entry)| {
                 if reused[index]
-                    && !shifted_reuse[index]
+                    && shifted_reuse.get(index) != Some(&true)
                     && measurement_patch
                         .as_ref()
                         .is_some_and(|patch| index >= patch.replaced.end && patch.shift.delta != 0)
@@ -7867,6 +7867,12 @@ impl EngineSession {
             .collect::<Result<Vec<_>, String>>()?;
         let mut measured = Vec::with_capacity(blocks.len());
         for (index, candidate) in candidates.into_iter().enumerate() {
+            if shifted_reuse.get(index) != Some(&true)
+                && (!reused[index] || (measurement_patch.is_some() && candidate.is_some()))
+                && let Some(safe) = pagination.measured_shift_safe.get_mut(index)
+            {
+                *safe = None;
+            }
             let previous_entry = &mut previous.measured[index];
             let mut entry = match candidate {
                 Some(entry) => entry,
@@ -7879,7 +7885,7 @@ impl EngineSession {
                 }
             };
             if reused[index] {
-                if shifted_reuse[index]
+                if shifted_reuse.get(index) == Some(&true)
                     && let Some(patch) = &measurement_patch
                     && index >= patch.replaced.end
                     && patch.shift.delta != 0
@@ -7891,14 +7897,6 @@ impl EngineSession {
                     std::mem::replace(&mut previous_entry.measure, BlockExtent::Unsupported);
             }
             measured.push(entry);
-        }
-        for (index, entry) in measured.iter().enumerate() {
-            if !shifted_reuse[index] {
-                if pagination.measured_shift_safe.len() != blocks.len() {
-                    pagination.measured_shift_safe.resize(blocks.len(), false);
-                }
-                pagination.measured_shift_safe[index] = measurement_shift_safe(&entry.block);
-            }
         }
         #[cfg(test)]
         {
@@ -14330,6 +14328,155 @@ mod tests {
     #[test]
     fn resident_local_lowering_patch_applies_with_floats() {
         local_lowering_measurement_reuse(true);
+    }
+
+    #[test]
+    fn local_lowering_skips_tainted_text_and_preserves_following_seeds() {
+        let mut body = preview_fixture::paragraph(
+            1,
+            &format!(
+                "{}<w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r>{}",
+                preview_fixture::run("Head"),
+                preview_fixture::run("Tail"),
+            ),
+        );
+        for index in 2..34 {
+            body.push_str(&preview_fixture::paragraph(
+                index,
+                &preview_fixture::run("Plain"),
+            ));
+        }
+        let engine = EngineSession::new(9637);
+        crate::seed_from_docx(engine.doc(), &preview_fixture::document(&body)).unwrap();
+        let env = RenderEnv::default();
+        let mut local = crate::bridge::local::LocalLowering::new(true);
+        let lowered = crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
+            engine.doc(),
+            "body",
+            &env,
+            &mut local,
+        )
+        .unwrap();
+        let mut disabled = crate::bridge::local::LocalLowering::new(false);
+        let cold = crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
+            engine.doc(),
+            "body",
+            &env,
+            &mut disabled,
+        )
+        .unwrap();
+        assert_eq!(lowered, cold);
+        assert_eq!(local.materialized_text_units, 0);
+        assert!(local.offset("00000001", u32::MAX).is_none());
+        assert!((2..34).all(|index| local.offset(&format!("{index:08X}"), u32::MAX).is_some()));
+        let offset = measurement_patch_offset(&engine, 1);
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", offset),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        let (blocks, mut map, mut revealable) = lowered;
+        let mut blocks: Vec<_> = blocks.into_iter().map(Rc::new).collect();
+        let edit = crate::bridge::local::TextEdit {
+            paragraph: "00000002".to_owned(),
+            offset: 1,
+            removed: 0,
+            text: "x".to_owned(),
+            attributes: None,
+            epochs: (0, 0),
+        };
+        local
+            .patch(
+                &mut blocks,
+                &mut map,
+                &mut revealable,
+                &engine.doc().yrs_doc().transact(),
+                &env,
+                &edit,
+            )
+            .unwrap();
+        assert_eq!(local.materialized_text_units, 5);
+        let cold = crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
+            engine.doc(),
+            "body",
+            &env,
+            &mut disabled,
+        )
+        .unwrap();
+        assert_eq!(
+            blocks.iter().map(Rc::as_ref).collect::<Vec<_>>(),
+            cold.0.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(map, cold.1);
+        assert_eq!(revealable, cold.2);
+    }
+
+    #[test]
+    fn resident_shift_safety_is_lazy_and_certified_float_edits_match_cold() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        SHIFT_SAFETY_WORK.with(|work| work.set(0));
+        let plain = paragraphs_engine(9638, 40);
+        let request = small_page_request(font);
+        plain
+            .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
+            .unwrap();
+        for text in ["x", "y"] {
+            let offset = measurement_patch_offset(&plain, 1);
+            plain
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset),
+                    Some(text),
+                    true,
+                )
+                .unwrap();
+            certified_float_layout(&plain, &request, RelayoutTrigger::Bulk);
+            assert!(plain.measurement_patch().is_none());
+            assert!(plain.pagination.borrow().measured_shift_safe.is_empty());
+        }
+        assert!(
+            plain.pagination.borrow().layout.as_ref().unwrap().pages.len() > 1
+        );
+        SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
+        let (engine, request) =
+            certified_float_engine(font, 40, &[0], false, false, RelayoutTrigger::Bulk);
+        assert!(engine.pagination.borrow().measured_shift_safe.is_empty());
+        engine.pagination.borrow_mut().lowered_generation = None;
+        let offset = certified_float_offset(&engine, 17);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset),
+                Some("z"),
+                true,
+            )
+            .unwrap();
+        certified_float_layout(&engine, &request, RelayoutTrigger::Bulk);
+        assert!(engine.measurement_patch().is_none());
+        assert!(engine.pagination.borrow().measured_shift_safe.is_empty());
+        SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        for (pass, text) in ["x", "y"].into_iter().enumerate() {
+            measurement_patch_type(&engine, certified_float_offset(&engine, 1), text);
+            let expected = certified_float_dirty_segment(&engine);
+            SHIFT_SAFETY_WORK.with(|work| work.set(0));
+            assert_eq!(
+                certified_float_layout(&engine, &request, RelayoutTrigger::Bulk),
+                (expected.clone(), 0),
+            );
+            SHIFT_SAFETY_WORK.with(|work| {
+                assert!(work.get() > 0);
+                if pass > 0 {
+                    assert!(work.get() <= expected.len() + 1);
+                }
+            });
+            assert_certified_float_cold(&engine, &request, &mut retained);
+        }
     }
 
     fn certified_float_engine(
