@@ -62,14 +62,22 @@ pub(super) fn projected(parsed: &ParsedWorkbook) -> Workbook {
     workbook
 }
 
-fn edit(workbook: &mut Workbook, address: &str, edit: impl FnOnce(&mut xlsx_model::Cell)) {
+pub(super) fn edit(
+    workbook: &mut Workbook,
+    address: &str,
+    edit: impl FnOnce(&mut xlsx_model::Cell),
+) {
     let at = xlsx_model::CellRef::parse_a1(address).unwrap();
     let mut cell = workbook.sheets[0].cell(at).cloned().unwrap();
     edit(&mut cell);
     workbook.sheets[0].set_cell(at, cell);
 }
 
-fn save(parsed: &ParsedWorkbook, workbook: &Workbook, axes: Option<SheetAxes>) -> String {
+pub(super) fn save(
+    parsed: &ParsedWorkbook,
+    workbook: &Workbook,
+    axes: Option<SheetAxes>,
+) -> String {
     let provenance = vec![parsed.package.source_shared_string_cells(0)];
     let saved = serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
         workbook,
@@ -103,7 +111,7 @@ fn reopen(xml: &str) -> Workbook {
 }
 
 /// Each `<c>` element's markup keyed by its `r` attribute.
-fn cells(xml: &str) -> BTreeMap<String, String> {
+pub(super) fn cells(xml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut rest = xml;
     while let Some(start) = rest.find("<c ") {
