@@ -1,7 +1,10 @@
 use super::*;
 use ooxml_opc::WorkBudget;
 
-pub(super) async fn json_list<T: Serialize>(values: &[T], work: &WorkBudget) -> Result<Vec<u8>, String> {
+pub(super) async fn json_list<T: Serialize>(
+    values: &[T],
+    work: &WorkBudget,
+) -> Result<Vec<u8>, String> {
     let mut bytes = vec![b'['];
     for (index, value) in values.iter().enumerate() {
         work.step().await;
@@ -15,22 +18,31 @@ pub(super) async fn json_list<T: Serialize>(values: &[T], work: &WorkBudget) -> 
     Ok(bytes)
 }
 
-pub(super) async fn fingerprint_styles_json(styles: FingerprintStyles<'_>, work: &WorkBudget) -> Result<Vec<u8>, String> {
+pub(super) async fn fingerprint_styles_json(
+    styles: FingerprintStyles<'_>,
+    work: &WorkBudget,
+) -> Result<Vec<u8>, String> {
     let mut bytes = b"{\"fonts\":".to_vec();
-    work.append_bytes(&mut bytes, &json_list(&styles.styles.fonts, work).await?).await;
+    work.append_bytes(&mut bytes, &json_list(&styles.styles.fonts, work).await?)
+        .await;
     bytes.extend_from_slice(b",\"fills\":");
-    work.append_bytes(&mut bytes, &json_list(&styles.styles.fills, work).await?).await;
+    work.append_bytes(&mut bytes, &json_list(&styles.styles.fills, work).await?)
+        .await;
     bytes.extend_from_slice(b",\"borders\":");
-    work.append_bytes(&mut bytes, &json_list(&styles.styles.borders, work).await?).await;
+    work.append_bytes(&mut bytes, &json_list(&styles.styles.borders, work).await?)
+        .await;
     bytes.extend_from_slice(b",\"cell_xfs\":");
-    work.append_bytes(&mut bytes, &json_list(&styles.styles.cell_xfs, work).await?).await;
+    work.append_bytes(&mut bytes, &json_list(&styles.styles.cell_xfs, work).await?)
+        .await;
     bytes.extend_from_slice(b",\"num_fmts\":");
-    work.append_bytes(&mut bytes, &json_list(&styles.styles.num_fmts, work).await?).await;
+    work.append_bytes(&mut bytes, &json_list(&styles.styles.num_fmts, work).await?)
+        .await;
     bytes.extend_from_slice(b",\"theme\":");
     bytes.extend(serde_json::to_vec(&styles.styles.theme).map_err(|error| error.to_string())?);
     if !styles.indexed_colors.is_empty() {
         bytes.extend_from_slice(b",\"indexed_colors\":");
-        work.append_bytes(&mut bytes, &json_list(styles.indexed_colors, work).await?).await;
+        work.append_bytes(&mut bytes, &json_list(styles.indexed_colors, work).await?)
+            .await;
     }
     bytes.push(b'}');
     Ok(bytes)
@@ -50,7 +62,11 @@ pub(super) async fn hash_payload_sliced(hasher: &mut Sha256, bytes: &[u8], work:
     }
 }
 
-pub(super) async fn hash_cell_value_sliced(hasher: &mut Sha256, value: &CellValue, work: &WorkBudget) {
+pub(super) async fn hash_cell_value_sliced(
+    hasher: &mut Sha256,
+    value: &CellValue,
+    work: &WorkBudget,
+) {
     match value {
         CellValue::Text { value } => {
             hasher.update([2]);
@@ -99,16 +115,34 @@ pub(super) async fn seed_sliced(
 ) -> Result<(), String> {
     let mut state = StateVector::default();
     work.step().await;
-    let cell_formats = bootstrap.transact_mut_with(BOOTSTRAP_ORIGIN).get_or_insert_map(CELL_FORMATS);
+    let cell_formats = bootstrap
+        .transact_mut_with(BOOTSTRAP_ORIGIN)
+        .get_or_insert_map(CELL_FORMATS);
     replicate(bootstrap, local, &mut state)?;
     let default = cell_format_entry(&CellFormat::default())?;
-    seed_values(bootstrap, local, &mut state, &cell_formats,
-        [(default.0, Any::from(default.1))], work).await?;
+    seed_values(
+        bootstrap,
+        local,
+        &mut state,
+        &cell_formats,
+        [(default.0, Any::from(default.1))],
+        work,
+    )
+    .await?;
     for index in 0..model.styles.cell_xfs.len() {
         work.step().await;
-        let index = u32::try_from(index).map_err(|_| "cell format table is too large".to_owned())?;
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_owned())?;
         let (key, payload) = cell_format_entry(&model.styles.cell_format(Some(index)))?;
-        seed_values(bootstrap, local, &mut state, &cell_formats, [(key, Any::from(payload))], work).await?;
+        seed_values(
+            bootstrap,
+            local,
+            &mut state,
+            &cell_formats,
+            [(key, Any::from(payload))],
+            work,
+        )
+        .await?;
     }
     work.step().await;
     {
@@ -123,16 +157,21 @@ pub(super) async fn seed_sliced(
     for (index, key) in keys.iter().enumerate() {
         work.step().await;
         let mut txn = bootstrap.transact_mut_with(BOOTSTRAP_ORIGIN);
-        txn.get_or_insert_array(SHEET_ORDER).insert(&mut txn, index as u32, key.clone());
+        txn.get_or_insert_array(SHEET_ORDER)
+            .insert(&mut txn, index as u32, key.clone());
         drop(txn);
         replicate(bootstrap, local, &mut state)?;
     }
     work.step().await;
-    let sheets = bootstrap.transact_mut_with(BOOTSTRAP_ORIGIN).get_or_insert_map(SHEETS);
+    let sheets = bootstrap
+        .transact_mut_with(BOOTSTRAP_ORIGIN)
+        .get_or_insert_map(SHEETS);
     replicate(bootstrap, local, &mut state)?;
     for (key, sheet) in keys.iter().zip(&model.sheets) {
-        let hyperlinks = String::from_utf8(json_list(&sheet.hyperlinks, work).await?).map_err(|error| error.to_string())?;
-        let charts = String::from_utf8(json_list(&sheet.charts, work).await?).map_err(|error| error.to_string())?;
+        let hyperlinks = String::from_utf8(json_list(&sheet.hyperlinks, work).await?)
+            .map_err(|error| error.to_string())?;
+        let charts = String::from_utf8(json_list(&sheet.charts, work).await?)
+            .map_err(|error| error.to_string())?;
         work.step().await;
         let (col_widths, contents, row_heights, styles) = {
             let mut txn = bootstrap.transact_mut_with(BOOTSTRAP_ORIGIN);
@@ -149,8 +188,18 @@ pub(super) async fn seed_sliced(
             (col_widths, contents, row_heights, styles)
         };
         replicate(bootstrap, local, &mut state)?;
-        seed_values(bootstrap, local, &mut state, &col_widths,
-            sheet.col_widths.iter().map(|(&at, &value)| (at.to_string(), Any::from(value))), work).await?;
+        seed_values(
+            bootstrap,
+            local,
+            &mut state,
+            &col_widths,
+            sheet
+                .col_widths
+                .iter()
+                .map(|(&at, &value)| (at.to_string(), Any::from(value))),
+            work,
+        )
+        .await?;
         let mut values = BTreeMap::new();
         let mut style_values = BTreeMap::new();
         for (at, cell) in sheet.iter_cells() {
@@ -163,8 +212,18 @@ pub(super) async fn seed_sliced(
             }
         }
         seed_values(bootstrap, local, &mut state, &contents, values, work).await?;
-        seed_values(bootstrap, local, &mut state, &row_heights,
-            sheet.row_heights.iter().map(|(&at, &value)| (at.to_string(), Any::from(value))), work).await?;
+        seed_values(
+            bootstrap,
+            local,
+            &mut state,
+            &row_heights,
+            sheet
+                .row_heights
+                .iter()
+                .map(|(&at, &value)| (at.to_string(), Any::from(value))),
+            work,
+        )
+        .await?;
         seed_values(bootstrap, local, &mut state, &styles, style_values, work).await?;
     }
     Ok(())

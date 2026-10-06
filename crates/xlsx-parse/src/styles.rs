@@ -51,14 +51,19 @@ pub(crate) async fn parse_stylesheet_sliced(
     if !differs {
         for (legacy, current) in legacy_xfs.iter().zip(&sheet.cell_xfs) {
             work.step().await;
-            if legacy != current { differs = true; break; }
+            if legacy != current {
+                differs = true;
+                break;
+            }
         }
     }
     let legacy = if differs {
         let mut legacy = crate::sliced::clone_stylesheet(&sheet, work).await;
         legacy.cell_xfs = legacy_xfs;
         Some(legacy)
-    } else { None };
+    } else {
+        None
+    };
     Ok((sheet, legacy))
 }
 
@@ -227,7 +232,10 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     Ok((ss, legacy_cell_xfs))
 }
 
-async fn parse_styles_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+async fn parse_styles_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -564,7 +572,10 @@ fn parse_theme(data: &[u8]) -> Result<Theme, ParseError> {
     Ok(theme)
 }
 
-async fn parse_theme_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Theme, ParseError> {
+async fn parse_theme_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Theme, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;

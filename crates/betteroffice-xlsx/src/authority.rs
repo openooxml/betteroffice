@@ -33,7 +33,6 @@ use yrs::{
     StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
-
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
@@ -211,9 +210,12 @@ impl WorkbookBase {
     ) -> Result<Self, String> {
         let mut builder = FingerprintBuilder::new_sliced(model, legacy_dimensions, work).await;
         let styles = FingerprintStyles::new(&model.styles);
-        let (fingerprint, bootstrap_client_id) =
-            builder.fingerprint_sliced(styles, SCHEMA_VERSION, true, true, false, work).await?;
-        let fingerprints = builder.accepted_fingerprints_sliced(styles, legacy_styles, work).await?;
+        let (fingerprint, bootstrap_client_id) = builder
+            .fingerprint_sliced(styles, SCHEMA_VERSION, true, true, false, work)
+            .await?;
+        let fingerprints = builder
+            .accepted_fingerprints_sliced(styles, legacy_styles, work)
+            .await?;
         let mut col_styles = Vec::new();
         let mut hyperlinks = Vec::new();
         let mut charts = Vec::new();
@@ -231,11 +233,15 @@ impl WorkbookBase {
             if let Some(legacy) = legacy_dimensions.get(index) {
                 for (&at, &value) in &sheet.col_widths {
                     work.step().await;
-                    if !legacy.col_widths.contains_key(&at) { hidden.col_widths.insert(at, value); }
+                    if !legacy.col_widths.contains_key(&at) {
+                        hidden.col_widths.insert(at, value);
+                    }
                 }
                 for (&at, &value) in &sheet.row_heights {
                     work.step().await;
-                    if !legacy.row_heights.contains_key(&at) { hidden.row_heights.insert(at, value); }
+                    if !legacy.row_heights.contains_key(&at) {
+                        hidden.row_heights.insert(at, value);
+                    }
                 }
             }
             hidden_dimensions.push(hidden);
@@ -246,7 +252,12 @@ impl WorkbookBase {
             defined_names: work.clone_slice(&model.defined_names).await,
             fingerprint,
             fingerprints,
-            freeze_panes, formats, col_styles, hyperlinks, charts, hidden_dimensions,
+            freeze_panes,
+            formats,
+            col_styles,
+            hyperlinks,
+            charts,
+            hidden_dimensions,
             shared_strings: work.clone_slice(&model.shared_strings).await,
             styles: xlsx_parse::sliced::clone_stylesheet(&model.styles, work).await,
             tables: xlsx_parse::sliced::clone_tables(&model.tables, work).await,
@@ -677,7 +688,8 @@ impl WorkbookAuthority {
             legacy_dimensions,
             legacy_styles,
             work,
-        ).await
+        )
+        .await
         .map_err(AuthorityError::InvalidState)?;
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
@@ -697,11 +709,13 @@ impl WorkbookAuthority {
             },
         };
         peer_open::seed_sliced(&bootstrap, &doc, &base, model, &keys, work)
-            .await.map_err(AuthorityError::InvalidState)?;
+            .await
+            .map_err(AuthorityError::InvalidState)?;
         drop(bootstrap);
         let authority = Self::hydrated(doc, Arc::new(base), 0);
         let (model, structure) = authority
-            .materialize_bootstrap_sliced(true, work).await
+            .materialize_bootstrap_sliced(true, work)
+            .await
             .map_err(AuthorityError::InvalidState)?;
         Ok((authority, model, structure))
     }
@@ -1721,21 +1735,24 @@ impl WorkbookAuthority {
             let hidden_dimensions = base_sheet
                 .and_then(|base| self.base.hidden_dimensions.get(base))
                 .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
-            model.sheets.push(materialize_bootstrap_sheet_sliced(
-                &sheet_map,
-                &txn,
-                &style_indices,
-                version,
-                SheetFallbacks {
-                    freeze_pane,
-                    format,
-                    col_styles,
-                    hyperlinks,
-                    charts,
-                    hidden_dimensions,
-                },
-                work,
-            ).await?);
+            model.sheets.push(
+                materialize_bootstrap_sheet_sliced(
+                    &sheet_map,
+                    &txn,
+                    &style_indices,
+                    version,
+                    SheetFallbacks {
+                        freeze_pane,
+                        format,
+                        col_styles,
+                        hyperlinks,
+                        charts,
+                        hidden_dimensions,
+                    },
+                    work,
+                )
+                .await?,
+            );
         }
         project_shared_frame_anchors_sliced(&mut model.sheets, work).await;
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
@@ -1765,7 +1782,8 @@ impl WorkbookAuthority {
                     version,
                     SheetFallbacks::default(),
                     work,
-                ).await?;
+                )
+                .await?;
             }
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
@@ -1784,19 +1802,30 @@ impl WorkbookAuthority {
             for chart in &sheet.charts {
                 work.step().await;
                 identities.push(ChartIdentity {
-                    part: chart.part.clone(), drawing: chart.drawing.clone(),
-                    anchor_index: chart.anchor_index, anchor: AnchorShape::of(&chart.anchor),
+                    part: chart.part.clone(),
+                    drawing: chart.drawing.clone(),
+                    anchor_index: chart.anchor_index,
+                    anchor: AnchorShape::of(&chart.anchor),
                     refs: work.clone_slice(&chart.refs).await,
                 });
             }
             charts.push(identities);
         }
         let structure = WorkbookStructure {
-            generation, sheet_keys: keys, sheet_names, freeze_panes,
-            hyperlinks, charts, merges, shared_types,
+            generation,
+            sheet_keys: keys,
+            sheet_names,
+            freeze_panes,
+            hyperlinks,
+            charts,
+            merges,
+            shared_types,
         };
         self.projection_valid.store(true, Ordering::Relaxed);
-        while !style_indices.is_empty() { work.step().await; style_indices.pop_first(); }
+        while !style_indices.is_empty() {
+            work.step().await;
+            style_indices.pop_first();
+        }
         Ok((model, structure))
     }
 
@@ -3340,7 +3369,10 @@ async fn materialize_cell_formats_sliced<T: ReadTxn>(
         };
         indices.insert(key, index);
     }
-    while !known.is_empty() { work.step().await; known.pop_first(); }
+    while !known.is_empty() {
+        work.step().await;
+        known.pop_first();
+    }
     Ok((styles, indices))
 }
 
@@ -3659,14 +3691,16 @@ async fn materialize_bootstrap_sheet_sliced<T: ReadTxn>(
         MAX_COLS,
         "column width",
         work,
-    ).await?;
+    )
+    .await?;
     sheet.row_heights = materialize_numbers_sliced(
         &nested_map(sheet_map, txn, ROW_HEIGHTS)?,
         txn,
         MAX_ROWS,
         "row height",
         work,
-    ).await?;
+    )
+    .await?;
     if version < SCHEMA_VERSION {
         for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
             work.step().await;
@@ -3707,7 +3741,7 @@ async fn materialize_bootstrap_sheet_sliced<T: ReadTxn>(
                 return Err("sheet chart state exceeds its size limit".into());
             }
             xlsx_parse::sliced::clone_charts(fallbacks.charts, work).await
-        },
+        }
         (CHARTS_SCHEMA_VERSION.., Some(_)) => {
             return Err("sheet charts are not a string".to_string());
         }
@@ -3721,7 +3755,7 @@ async fn materialize_bootstrap_sheet_sliced<T: ReadTxn>(
                 ranges.extend(merges_from_any(&any_array(vec![merge.clone()]))?);
             }
             ranges
-        },
+        }
         Some(Out::Any(_)) => return Err("sheet merges are not an array".into()),
         _ => return Err("sheet is missing merges".to_string()),
     };
@@ -4446,7 +4480,10 @@ impl<'a> FingerprintBuilder<'a> {
                     (&sheet.col_widths, &legacy.col_widths),
                     (&sheet.row_heights, &legacy.row_heights),
                 ] {
-                    if current.len() != legacy.len() { differs = true; continue; }
+                    if current.len() != legacy.len() {
+                        differs = true;
+                        continue;
+                    }
                     for (left, right) in current.iter().zip(legacy) {
                         work.step().await;
                         differs |= left != right;
@@ -4455,11 +4492,14 @@ impl<'a> FingerprintBuilder<'a> {
             }
         }
         Self {
-            model, legacy_dimensions: if differs { legacy_dimensions } else { &[] },
-            has_col_styles, styles: Vec::new(), style_bytes: Vec::new(), hashes: BTreeMap::new(),
+            model,
+            legacy_dimensions: if differs { legacy_dimensions } else { &[] },
+            has_col_styles,
+            styles: Vec::new(),
+            style_bytes: Vec::new(),
+            hashes: BTreeMap::new(),
         }
     }
-
 
     fn fingerprint(
         &mut self,
@@ -4535,7 +4575,10 @@ impl<'a> FingerprintBuilder<'a> {
                 let bytes = fingerprint_styles_json(styles, work).await?;
                 let mut found = None;
                 for (index, known) in self.style_bytes.iter().enumerate() {
-                    if work.equal_bytes(known, &bytes).await { found = Some(index); break; }
+                    if work.equal_bytes(known, &bytes).await {
+                        found = Some(index);
+                        break;
+                    }
                 }
                 let index = match found {
                     Some(index) => index,
@@ -4573,7 +4616,8 @@ impl<'a> FingerprintBuilder<'a> {
             },
             styles,
             work,
-        ).await?;
+        )
+        .await?;
         self.hashes.insert(key, hash.clone());
         Ok(hash)
     }
@@ -4639,34 +4683,44 @@ impl<'a> FingerprintBuilder<'a> {
     ) -> Result<BTreeMap<i64, Vec<String>>, String> {
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            let (fingerprint, _) = self.fingerprint_sliced(styles, version, version >= 4, true, false, work).await?;
+            let (fingerprint, _) = self
+                .fingerprint_sliced(styles, version, version >= 4, true, false, work)
+                .await?;
             fingerprints.insert(version, vec![fingerprint]);
         }
-        let (defined_names_v3, _) = self.fingerprint_sliced(styles, 3, true, true, false, work).await?;
+        let (defined_names_v3, _) = self
+            .fingerprint_sliced(styles, 3, true, true, false, work)
+            .await?;
         append_fingerprint(&mut fingerprints, 3, defined_names_v3);
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            let (without_col_styles, _) =
-                self.fingerprint_sliced(styles, version, version >= 4, false, false, work).await?;
+            let (without_col_styles, _) = self
+                .fingerprint_sliced(styles, version, version >= 4, false, false, work)
+                .await?;
             append_fingerprint(&mut fingerprints, version, without_col_styles);
         }
         if !self.legacy_dimensions.is_empty() {
             for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
-                let (legacy_fingerprint, _) =
-                    self.fingerprint_sliced(styles, version, version >= 4, true, true, work).await?;
-                let (without_col_styles, _) =
-                    self.fingerprint_sliced(styles, version, version >= 4, false, true, work).await?;
+                let (legacy_fingerprint, _) = self
+                    .fingerprint_sliced(styles, version, version >= 4, true, true, work)
+                    .await?;
+                let (without_col_styles, _) = self
+                    .fingerprint_sliced(styles, version, version >= 4, false, true, work)
+                    .await?;
                 for fingerprint in [legacy_fingerprint, without_col_styles] {
                     append_fingerprint(&mut fingerprints, version, fingerprint);
                 }
             }
-            let (defined_names_v3, _) = self.fingerprint_sliced(styles, 3, true, true, true, work).await?;
+            let (defined_names_v3, _) = self
+                .fingerprint_sliced(styles, 3, true, true, true, work)
+                .await?;
             append_fingerprint(&mut fingerprints, 3, defined_names_v3);
         }
         if let Some(legacy) = legacy_styles
             .map(FingerprintStyles::new)
             .filter(|legacy| *legacy != styles)
         {
-            let legacy_fingerprints = Box::pin(self.accepted_fingerprints_sliced(legacy, None, work)).await?;
+            let legacy_fingerprints =
+                Box::pin(self.accepted_fingerprints_sliced(legacy, None, work)).await?;
             for (version, accepted) in legacy_fingerprints {
                 for fingerprint in accepted {
                     append_fingerprint(&mut fingerprints, version, fingerprint);
@@ -4827,13 +4881,20 @@ async fn fingerprint_model_with_overrides_sliced(
     };
     hasher.update(domain);
     let mut base = vec![serde_json::to_vec(&model.date_system).map_err(|error| error.to_string())?];
-    if include_defined_names { base.push(json_list(&model.defined_names, work).await?); }
+    if include_defined_names {
+        base.push(json_list(&model.defined_names, work).await?);
+    }
     base.push(json_list(&model.shared_strings, work).await?);
     base.push(fingerprint_styles_json(styles, work).await?);
-    hash_u64(&mut hasher, (base.iter().map(Vec::len).sum::<usize>() + base.len() + 1) as u64);
+    hash_u64(
+        &mut hasher,
+        (base.iter().map(Vec::len).sum::<usize>() + base.len() + 1) as u64,
+    );
     hasher.update([b'[']);
     for (index, bytes) in base.iter().enumerate() {
-        if index != 0 { hasher.update([b',']); }
+        if index != 0 {
+            hasher.update([b',']);
+        }
         peer_open::hash_payload_sliced(&mut hasher, bytes, work).await;
     }
     hasher.update([b']']);

@@ -101,7 +101,8 @@ pub async fn parse_workbook_with_owned_package_sliced(
         parsed.rich_shared_strings,
         parsed.cell_facts,
         work,
-    ).await?;
+    )
+    .await?;
     for indices in &mut parsed.shared_string_cells {
         while !indices.is_empty() {
             work.step().await;

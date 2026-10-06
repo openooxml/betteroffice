@@ -157,16 +157,28 @@ pub(crate) async fn parse_workbook_indexed_sliced(
     let meta = parse_workbook_xml_sliced(wb_xml, work).await?;
 
     let wb_rels = find_part(parts, "xl/_rels/workbook.xml.rels");
-    let rels = match wb_rels { Some(bytes) => parse_rels_sliced(bytes, work).await?, None => Default::default() };
+    let rels = match wb_rels {
+        Some(bytes) => parse_rels_sliced(bytes, work).await?,
+        None => Default::default(),
+    };
 
-    let (shared_strings, rich_shared_strings) =
-        match typed_part_sliced(parts, wb_rels, "sharedStrings", "xl/sharedStrings.xml", work).await? {
-            Some(bytes) => parse_shared_strings_sliced(bytes, work).await?,
-            None => Default::default(),
-        };
+    let (shared_strings, rich_shared_strings) = match typed_part_sliced(
+        parts,
+        wb_rels,
+        "sharedStrings",
+        "xl/sharedStrings.xml",
+        work,
+    )
+    .await?
+    {
+        Some(bytes) => parse_shared_strings_sliced(bytes, work).await?,
+        None => Default::default(),
+    };
     let styles_bytes = typed_part_sliced(parts, wb_rels, "styles", "xl/styles.xml", work).await?;
-    let theme_bytes = typed_part_sliced(parts, wb_rels, "theme", "xl/theme/theme1.xml", work).await?;
-    let (styles, legacy_styles) = crate::styles::parse_stylesheet_sliced(styles_bytes, theme_bytes, work).await?;
+    let theme_bytes =
+        typed_part_sliced(parts, wb_rels, "theme", "xl/theme/theme1.xml", work).await?;
+    let (styles, legacy_styles) =
+        crate::styles::parse_stylesheet_sliced(styles_bytes, theme_bytes, work).await?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
@@ -209,9 +221,18 @@ pub(crate) async fn parse_workbook_indexed_sliced(
             &mut legacy,
             &mut facts,
             work,
-        ).await?;
+        )
+        .await?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
-        collect_tables_sliced(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables, work).await?;
+        collect_tables_sliced(
+            parts,
+            &path,
+            &sheet_rels,
+            SheetId(idx as u32),
+            &mut tables,
+            work,
+        )
+        .await?;
         sheets.push(sheet);
         shared_string_cells.push(indices);
         cell_facts.push(facts);
@@ -294,7 +315,11 @@ fn rel_target_by_type(data: &[u8], type_suffix: &str) -> Result<Option<String>, 
     Ok(None)
 }
 
-async fn rel_target_by_type_sliced(data: &[u8], type_suffix: &str, work: &ooxml_opc::WorkBudget) -> Result<Option<String>, ParseError> {
+async fn rel_target_by_type_sliced(
+    data: &[u8],
+    type_suffix: &str,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Option<String>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -393,7 +418,10 @@ fn parse_workbook_xml(data: &[u8]) -> Result<WorkbookMeta, ParseError> {
     })
 }
 
-async fn parse_workbook_xml_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<WorkbookMeta, ParseError> {
+async fn parse_workbook_xml_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<WorkbookMeta, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -434,7 +462,9 @@ async fn parse_workbook_xml_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) ->
                         .and_then(|value| value.parse::<u32>().ok())
                         .map(SheetId);
                     let hidden = attr(&e, b"hidden")?.is_some_and(|value| is_truthy(&value));
-                    let formula = crate::xml::collect_text_sliced(&mut reader, &mut buf, &mut depth, work).await?;
+                    let formula =
+                        crate::xml::collect_text_sliced(&mut reader, &mut buf, &mut depth, work)
+                            .await?;
                     defined_names.push(DefinedName {
                         name,
                         formula,
@@ -510,7 +540,10 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError>
     Ok(map)
 }
 
-async fn parse_rels_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<BTreeMap<String, Relationship>, ParseError> {
+async fn parse_rels_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<BTreeMap<String, Relationship>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -646,7 +679,11 @@ fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError>
     Ok(table)
 }
 
-async fn parse_table_sliced(data: &[u8], sheet: SheetId, work: &ooxml_opc::WorkBudget) -> Result<Option<Table>, ParseError> {
+async fn parse_table_sliced(
+    data: &[u8],
+    sheet: SheetId,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Option<Table>, ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -779,7 +816,10 @@ fn parse_shared_strings(data: &[u8]) -> Result<(Vec<String>, BTreeSet<usize>), P
     Ok((strings, rich))
 }
 
-async fn parse_shared_strings_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<(Vec<String>, BTreeSet<usize>), ParseError> {
+async fn parse_shared_strings_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(Vec<String>, BTreeSet<usize>), ParseError> {
     let mut reader = reader(data);
     let mut buf = Vec::new();
     let mut depth = 0;
@@ -792,7 +832,8 @@ async fn parse_shared_strings_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) 
                 if strings.len() >= MAX_SHARED_STRINGS {
                     return Err(ParseError::TooManyStrings);
                 }
-                let (text, runs) = collect_string_item_sliced(&mut reader, &mut buf, &mut depth, work).await?;
+                let (text, runs) =
+                    collect_string_item_sliced(&mut reader, &mut buf, &mut depth, work).await?;
                 if runs {
                     rich.insert(strings.len());
                 }
@@ -1084,13 +1125,17 @@ async fn parse_worksheet_sliced(
                     });
                 }
                 b"v" => {
-                    let text = crate::xml::collect_text_sliced(&mut reader, &mut buf, &mut depth, work).await?;
+                    let text =
+                        crate::xml::collect_text_sliced(&mut reader, &mut buf, &mut depth, work)
+                            .await?;
                     if let Some(c) = cur.as_mut() {
                         c.value_text = Some(text);
                     }
                 }
                 b"f" => {
-                    let text = crate::xml::collect_text_sliced(&mut reader, &mut buf, &mut depth, work).await?;
+                    let text =
+                        crate::xml::collect_text_sliced(&mut reader, &mut buf, &mut depth, work)
+                            .await?;
                     let array_ref = array_formula_range(&e)?;
                     if let Some(c) = cur.as_mut() {
                         if let Some(origin) = c.addr {
@@ -1103,7 +1148,8 @@ async fn parse_worksheet_sliced(
                     }
                 }
                 b"is" => {
-                    let (text, runs) = collect_string_item_sliced(&mut reader, &mut buf, &mut depth, work).await?;
+                    let (text, runs) =
+                        collect_string_item_sliced(&mut reader, &mut buf, &mut depth, work).await?;
                     if let Some(c) = cur.as_mut() {
                         c.inline_text = Some(text);
                         c.inline_runs = runs;
@@ -1339,7 +1385,7 @@ fn parse_col(
 }
 
 async fn parse_col_sliced(
-    e: &quick_xml::events::BytesStart,
+    e: &quick_xml::events::BytesStart<'_>,
     sheet: &mut Sheet,
     legacy: &mut LegacySheetDimensions,
     work: &ooxml_opc::WorkBudget,

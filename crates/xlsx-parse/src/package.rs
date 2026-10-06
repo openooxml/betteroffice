@@ -273,7 +273,9 @@ impl PreservedPackage {
             "xl/theme/theme1.xml",
         );
         let shared_strings_template = match shared_strings
-            .as_ref().and_then(|part| find_part(&parts, &part.path)) {
+            .as_ref()
+            .and_then(|part| find_part(&parts, &part.path))
+        {
             Some(bytes) => Some(XmlTemplate::capture_sliced(bytes, work).await?),
             None => None,
         };
@@ -294,7 +296,9 @@ impl PreservedPackage {
             });
         }
         let stylesheet_template = match styles
-            .as_ref().and_then(|part| find_part(&parts, &part.path)) {
+            .as_ref()
+            .and_then(|part| find_part(&parts, &part.path))
+        {
             Some(bytes) => Some(XmlTemplate::capture_sliced(bytes, work).await?),
             None => None,
         };
@@ -405,7 +409,9 @@ impl PreservedPackage {
 
     #[doc(hidden)]
     pub async fn source_shared_string_cells_sliced(
-        &self, index: usize, work: &ooxml_opc::WorkBudget,
+        &self,
+        index: usize,
+        work: &ooxml_opc::WorkBudget,
     ) -> SharedStringCells {
         let mut cells = SharedStringCells::new();
         if let Some(sheet) = self.sheets.get(index) {
@@ -763,7 +769,10 @@ impl XmlTemplate {
         })
     }
 
-    pub(crate) async fn capture_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Self, ParseError> {
+    pub(crate) async fn capture_sliced(
+        data: &[u8],
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<Self, ParseError> {
         let mut reader = NsReader::from_reader(data);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
@@ -1361,7 +1370,10 @@ pub(crate) fn parse_relationships(data: &[u8]) -> Result<Vec<Relationship>, Pars
     Ok(relationships)
 }
 
-pub(crate) async fn parse_relationships_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Vec<Relationship>, ParseError> {
+pub(crate) async fn parse_relationships_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Vec<Relationship>, ParseError> {
     let mut reader = reader(data);
     let mut buffer = Vec::new();
     let mut depth = 0;
@@ -1403,7 +1415,10 @@ fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError>
     Ok(entries)
 }
 
-async fn parse_content_types_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Vec<ContentTypeEntry>, ParseError> {
+async fn parse_content_types_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Vec<ContentTypeEntry>, ParseError> {
     let mut reader = reader(data);
     let mut buffer = Vec::new();
     let mut depth = 0;
@@ -1487,7 +1502,10 @@ fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
     Ok(entries)
 }
 
-async fn parse_sheet_entries_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Vec<SheetEntry>, ParseError> {
+async fn parse_sheet_entries_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Vec<SheetEntry>, ParseError> {
     let mut reader = reader(data);
     let mut buffer = Vec::new();
     let mut depth = 0;

@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use betteroffice_xlsx::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, UpdateEvent,
-    UpdateOrigin, UpdateSubscription,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, UpdateEvent, UpdateOrigin,
+    UpdateSubscription,
 };
 use wasm_bindgen::prelude::*;
 
@@ -68,36 +68,57 @@ struct PeerSource {
 #[wasm_bindgen]
 impl XlsxPeerOpener {
     #[wasm_bindgen(constructor)]
-    pub fn new(bytes: js_sys::Uint8Array, client_id: Option<f64>) -> Result<XlsxPeerOpener, JsValue> {
+    pub fn new(
+        bytes: js_sys::Uint8Array,
+        client_id: Option<f64>,
+    ) -> Result<XlsxPeerOpener, JsValue> {
         let client_id = client_id.map(parse_client_id).transpose()?;
         let copied = Vec::with_capacity(bytes.length() as usize);
         Ok(Self {
-            opener: None, source: Some(PeerSource { bytes, copied }),
-            client_id, hydration: VecDeque::new(), state: 0,
+            opener: None,
+            source: Some(PeerSource { bytes, copied }),
+            client_id,
+            hydration: VecDeque::new(),
+            state: 0,
         })
     }
 
     pub fn advance(&mut self, units: usize) -> Result<u8, JsValue> {
-        if units == 0 { return Ok(self.state); }
+        if units == 0 {
+            return Ok(self.state);
+        }
         if let Some(source) = &mut self.source {
             let offset = source.copied.len();
             let length = source.bytes.length() as usize;
             let count = units.min(256).saturating_mul(64).min(length - offset);
             source.copied.resize(offset + count, 0);
-            source.bytes.subarray(offset as u32, (offset + count) as u32)
+            source
+                .bytes
+                .subarray(offset as u32, (offset + count) as u32)
                 .copy_to(&mut source.copied[offset..]);
             if source.copied.len() == length {
-                let source = self.source.take().ok_or_else(|| js_sys::Error::new("Peer source is missing"))?;
+                let source = self
+                    .source
+                    .take()
+                    .ok_or_else(|| js_sys::Error::new("Peer source is missing"))?;
                 self.opener = Some(core::PeerOpener::new(source.copied, self.client_id));
             }
             return Ok(0);
         }
-        let opener = self.opener.as_mut().ok_or_else(|| js_sys::Error::new("Peer opener is missing"))?;
+        let opener = self
+            .opener
+            .as_mut()
+            .ok_or_else(|| js_sys::Error::new("Peer opener is missing"))?;
         if let Some(chunk) = self.hydration.pop_front() {
-            opener.push_hydration(&chunk).map_err(|error| js_sys::Error::new(&error))?;
+            opener
+                .push_hydration(&chunk)
+                .map_err(|error| js_sys::Error::new(&error))?;
             return Ok(0);
         }
-        self.state = match opener.advance(units).map_err(|error| js_sys::Error::new(&error))? {
+        self.state = match opener
+            .advance(units)
+            .map_err(|error| js_sys::Error::new(&error))?
+        {
             betteroffice_xlsx::OpenerState::Parsing => 0,
             betteroffice_xlsx::OpenerState::NeedsHydration => 1,
             betteroffice_xlsx::OpenerState::Ready => 2,
@@ -116,8 +137,13 @@ impl XlsxPeerOpener {
         if self.source.is_some() || !self.hydration.is_empty() {
             return Err(js_sys::Error::new("Peer opener is not ready").into());
         }
-        self.opener.ok_or_else(|| js_sys::Error::new("Peer opener is missing"))?
-            .finish().map(|session| XlsxDocument { session, update_observer: None })
+        self.opener
+            .ok_or_else(|| js_sys::Error::new("Peer opener is missing"))?
+            .finish()
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
             .map_err(|error| js_sys::Error::new(&error).into())
     }
 }
@@ -135,7 +161,8 @@ impl XlsxDocument {
     #[doc(hidden)]
     #[wasm_bindgen(js_name = peerHydrationChunksJson)]
     pub fn peer_hydration_chunks_json(&self) -> Result<js_sys::Array, JsValue> {
-        self.session.peer_hydration_chunks_json()
+        self.session
+            .peer_hydration_chunks_json()
             .map(|chunks| chunks.into_iter().map(JsValue::from).collect())
             .map_err(|error| js_sys::Error::new(&error).into())
     }

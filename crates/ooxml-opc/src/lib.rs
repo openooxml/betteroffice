@@ -96,7 +96,9 @@ pub async fn unzip_parts_sliced(
     let mut buffer = [0_u8; 16 * 1024];
     for index in 0..archive.len() {
         work.step().await;
-        let mut entry = archive.by_index(index).map_err(|error| format!("bad zip entry: {error}"))?;
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("bad zip entry: {error}"))?;
         if entry.is_dir() {
             continue;
         }
@@ -112,14 +114,17 @@ pub async fn unzip_parts_sliced(
             let count = work.take(buffer.len() / 64).await * 64;
             let remaining = MAX_TOTAL_UNCOMPRESSED_BYTES - total;
             let limit = count.min((remaining + 1) as usize);
-            let read = entry.read(&mut buffer[..limit])
+            let read = entry
+                .read(&mut buffer[..limit])
                 .map_err(|error| format!("read failed for {name}: {error}"))?;
             if read == 0 {
                 break;
             }
             total += read as u64;
             if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
-                return Err(format!("inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"));
+                return Err(format!(
+                    "inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"
+                ));
             }
             bytes.extend_from_slice(&buffer[..read]);
         }

@@ -300,7 +300,7 @@ impl Workbook {
             .get(sheet.0 as usize)
             .copied()
             .flatten()?;
-        let package = self.source_package.as_ref()?.facts();
+        let package = xlsx_parse::PackageFactsView::from_package(self.source_package.as_ref()?);
         let name = self
             .model
             .sheet(sheet)

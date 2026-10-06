@@ -2,10 +2,10 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op,
-    OpenerState, PeerHydrationChunk, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId,
-    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookPeerOpener,
+    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op, OpenerState,
+    PeerHydrationChunk, PrintMetrics, Proposal, ProposalEditInput as WorkbookProposalEditInput,
+    ProposalRequest, SheetId, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
+    WorkbookPeerOpener,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,25 +27,37 @@ pub struct PeerOpener {
 
 impl PeerOpener {
     pub fn new(bytes: Vec<u8>, client_id: Option<u64>) -> Self {
-        Self { opener: WorkbookPeerOpener::new(bytes, client_id), calculation_context: None }
+        Self {
+            opener: WorkbookPeerOpener::new(bytes, client_id),
+            calculation_context: None,
+        }
     }
 
     pub fn advance(&mut self, units: usize) -> Result<OpenerState, String> {
-        self.opener.advance(units).map_err(|error| error.to_string())
+        self.opener
+            .advance(units)
+            .map_err(|error| error.to_string())
     }
 
     pub fn push_hydration(&mut self, json: &str) -> Result<(), String> {
-        let hydration: PeerHydration = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let hydration: PeerHydration =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
         if matches!(&hydration.workbook, PeerHydrationChunk::Header { .. }) {
             self.calculation_context = hydration.calculation_context;
         }
-        self.opener.push_hydration(hydration.workbook).map_err(|error| error.to_string())
+        self.opener
+            .push_hydration(hydration.workbook)
+            .map_err(|error| error.to_string())
     }
 
     pub fn finish(self) -> Result<Session, String> {
-        self.opener.finish().map(|workbook| Session {
-            workbook, calculation_context: self.calculation_context,
-        }).map_err(|error| error.to_string())
+        self.opener
+            .finish()
+            .map(|workbook| Session {
+                workbook,
+                calculation_context: self.calculation_context,
+            })
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -330,12 +342,19 @@ impl Session {
 
     #[doc(hidden)]
     pub fn peer_hydration_chunks_json(&self) -> Result<Vec<String>, String> {
-        self.workbook.peer_hydration().map_err(|error| error.to_string())?
-            .into_chunks().into_iter().map(|workbook| {
+        self.workbook
+            .peer_hydration()
+            .map_err(|error| error.to_string())?
+            .into_chunks()
+            .into_iter()
+            .map(|workbook| {
                 serde_json::to_string(&PeerHydration {
-                    workbook, calculation_context: self.calculation_context,
-                }).map_err(|error| error.to_string())
-            }).collect()
+                    workbook,
+                    calculation_context: self.calculation_context,
+                })
+                .map_err(|error| error.to_string())
+            })
+            .collect()
     }
 
     pub fn open(bytes: &[u8], now_serial: Option<f64>) -> Result<Self, String> {
@@ -1204,7 +1223,9 @@ mod tests {
         assert_eq!(transferred["workbook"]["header"]["delta"], true);
         assert_eq!(transferred["workbook"]["header"]["rand_seed"], 42);
         let mut opener = PeerOpener::new(bytes.clone(), None);
-        for chunk in hydration { opener.push_hydration(&chunk).unwrap(); }
+        for chunk in hydration {
+            opener.push_hydration(&chunk).unwrap();
+        }
         while opener.advance(1).unwrap() != OpenerState::Ready {}
         let mut peer = opener.finish().unwrap();
         assert_eq!(peer.workbook.version(), worker.workbook.version());

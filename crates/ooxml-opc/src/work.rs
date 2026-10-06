@@ -40,11 +40,15 @@ impl WorkBudget {
     }
 
     pub async fn equal_bytes(&self, left: &[u8], right: &[u8]) -> bool {
-        if left.len() != right.len() { return false; }
+        if left.len() != right.len() {
+            return false;
+        }
         let mut offset = 0;
         while offset < left.len() {
             let count = (self.take(256).await * 64).min(left.len() - offset);
-            if left[offset..offset + count] != right[offset..offset + count] { return false; }
+            if left[offset..offset + count] != right[offset..offset + count] {
+                return false;
+            }
             offset += count;
         }
         true

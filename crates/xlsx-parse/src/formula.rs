@@ -107,7 +107,11 @@ impl SharedFormulas {
         Ok(())
     }
 
-    pub(crate) async fn resolve_sliced(mut self, sheet: &mut Sheet, work: &ooxml_opc::WorkBudget) -> Result<(), ParseError> {
+    pub(crate) async fn resolve_sliced(
+        mut self,
+        sheet: &mut Sheet,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<(), ParseError> {
         for ((row, col), index) in self.members {
             work.step().await;
             let at = CellRef::new(row, col);
