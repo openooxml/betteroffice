@@ -83,7 +83,12 @@ export function createWorkbookSessionHost(
       let speculative: WorkbookHandle;
       try {
         for (const chunk of previewSource.hydration) opener.pushHydration(chunk);
-        while (opener.advance(256) !== 2) {}
+        let state: number;
+        do {
+          state = opener.advance(256);
+          if (state === 1) throw new WorkbookPeerHydrationError('missing-hydration',
+            'Workbook preview needs hydration after all retained chunks were pushed');
+        } while (state !== 2);
         speculative = opener.finish();
       } finally { opener.dispose(); }
       try {
@@ -192,7 +197,8 @@ export function createWorkbookSessionHost(
         let initialCalculation: WorkbookCalculationContext | null | undefined;
         if (retainPeerHydration) previewSource = {
           bytes: new Uint8Array(bytes).slice(), hydration: workbookPeerHydrationChunks(opened),
-          options: { collaborative: input.collaborative, clientId: input.clientId, calculation },
+          options: { collaborative: input.collaborative,
+            clientId: input.collaborative ? opened.clientId : undefined, calculation },
         };
         if (previewSource) {
           const hydration = JSON.parse(previewSource.hydration[0]);
