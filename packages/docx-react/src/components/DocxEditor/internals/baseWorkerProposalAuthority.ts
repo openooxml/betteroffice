@@ -130,7 +130,12 @@ export interface WorkerProposalAuthority {
   subscribe(listener: () => void): () => void;
 }
 
-type Handover = { state: Uint8Array; complete(): void };
+type Handover = {
+  state: Uint8Array;
+  metadata?: Uint8Array;
+  metadataReason?: string;
+  complete(): void;
+};
 type RegisteredAuthority = WorkerProposalAuthority & {
   beginHandover(): Promise<Handover>;
   draining(): boolean;
@@ -419,6 +424,8 @@ export function registerWorkerProposalAuthority(
         let completed = false;
         return {
           state: handedOver.state,
+          ...(handedOver.metadata === undefined ? {} : { metadata: handedOver.metadata }),
+          ...(handedOver.metadataReason === undefined ? {} : { metadataReason: handedOver.metadataReason }),
           complete() {
             if (completed) return;
             assertCurrent();

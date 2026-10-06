@@ -17,6 +17,7 @@ import { findBodyMatches } from './findMatches';
 import { createYrsInputPositionMap } from './inputPositionMap';
 import { createYrsPositionProjection, yrsLocToProjectedDisplayPosition } from './yrsPositionProjection';
 import { preloadEditWasm } from './wasm/index';
+import { PeerMetadataError } from './peerMetadata';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
 import type {
@@ -3800,6 +3801,81 @@ describe('resident worker opening', () => {
     });
     return { w, calls };
   }
+
+  async function peerReply(w: ReturnType<typeof worker>, request: ResidentEngineWorkerRequestWithoutId) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        w.send(request),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`No ${request.type} reply`)), 1000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  test('encodeState captures peer metadata, state, version and proposals in one synchronous handler', async () => {
+    const { w } = openingWorker();
+    await peerReply(w, { type: 'open', bytes: new Uint8Array([1]).buffer });
+    let revision = 7;
+    const captures: string[] = [];
+    Object.assign(w.harness.session, {
+      encodeState: () => {
+        captures.push(`state:${revision}`);
+        queueMicrotask(() => { revision += 1; });
+        return new Uint8Array([0, revision, 0]).subarray(1, 2);
+      },
+      encodePeerMetadata: () => {
+        captures.push(`metadata:${revision}`);
+        return new Uint8Array([0, revision, 0]).subarray(1, 2);
+      },
+      proposalEngine: { version: () => {
+        captures.push(`version:${revision}`);
+        return `v${revision}`;
+      } },
+    });
+    const reply = await peerReply(w, { type: 'encodeState', peerMetadata: true });
+    if (!reply.ok || !reply.state || !reply.peerMetadata) throw new Error('Expected peer snapshot');
+    expect(captures).toEqual(['state:7', 'metadata:7', 'version:7']);
+    expect(new Uint8Array(reply.state)).toEqual(new Uint8Array([7]));
+    expect(new Uint8Array(reply.peerMetadata)).toEqual(new Uint8Array([7]));
+    expect(reply.version).toBe('v7');
+    expect(reply.proposals).toEqual({ previewVersion: 0, entries: [] });
+    expect(w.transfers.get(reply.id)).toEqual([reply.state, reply.peerMetadata]);
+  });
+
+  test('state-only encodeState keeps its reply and transfer unchanged', async () => {
+    const { w } = openingWorker();
+    await peerReply(w, { type: 'open', bytes: new Uint8Array([1]).buffer });
+    const metadata = mock(() => new Uint8Array([9]));
+    Object.assign(w.harness.session, { encodePeerMetadata: metadata });
+    const reply = await peerReply(w, { type: 'encodeState' });
+    if (!reply.ok || !reply.state) throw new Error('Expected state');
+    expect(reply).toEqual({
+      id: reply.id, ok: true, state: new Uint8Array([7, 8]).buffer,
+      version: 'opened', proposals: { previewVersion: 0, entries: [] },
+      memory: w.harness.memories,
+    });
+    expect(metadata).not.toHaveBeenCalled();
+    expect(w.transfers.get(reply.id)).toEqual([reply.state]);
+  });
+
+  test.each(['missing', 'rejected'] as const)('encodeState preserves state when metadata is %s', async (kind) => {
+    const { w } = openingWorker();
+    await peerReply(w, { type: 'open', bytes: new Uint8Array([1]).buffer });
+    if (kind === 'rejected') Object.assign(w.harness.session, {
+      encodePeerMetadata: () => { throw new PeerMetadataError('unopened', 'No peer source'); },
+    });
+    const reply = await peerReply(w, { type: 'encodeState', peerMetadata: true });
+    if (!reply.ok || !reply.state) throw new Error('Expected valid state despite metadata absence');
+    expect(new Uint8Array(reply.state)).toEqual(new Uint8Array([7, 8]));
+    expect(reply.peerMetadata).toBeUndefined();
+    expect(reply.peerMetadataReason).toContain(kind === 'missing' ? 'missing-capability' : 'unopened');
+    expect(reply.version).toBe('opened');
+    expect(w.transfers.get(reply.id)).toEqual([reply.state]);
+  });
 
   test('retains the opened source, keeps save history across an opened bootstrap and resets it on destroy/open', async () => {
     const { w } = openingWorker();

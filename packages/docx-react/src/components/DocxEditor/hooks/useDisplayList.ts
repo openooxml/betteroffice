@@ -1878,7 +1878,7 @@ export function useRustDisplayList(
           ...opened,
           encodeState: (prefetch?: boolean) => encodeOpenedState((client) => client.encodeState(), prefetch),
           encodeVersionedState: (prefetch?: boolean) =>
-            encodeOpenedState((client) => client.encodeVersionedState(), prefetch),
+            encodeOpenedState((client) => client.encodeVersionedState(true), prefetch),
           stateRevision: () => {
             const owner = workerRef.current;
             return owner?.engine === hostEngine && !owner.client.hasFailed()
@@ -1901,7 +1901,7 @@ export function useRustDisplayList(
           documentRead: (read) =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.documentRead(read)),
           handOver: () =>
-            requestOpenedWorker(hostEngine, (owner) => owner.client.handOver()),
+            requestOpenedWorker(hostEngine, (owner) => owner.client.handOver(true)),
           syncUpdate: (update, stateVector) =>
             requestOpenedWorker(hostEngine, (owner) => owner.client.syncUpdate(update, stateVector)),
           integrateProposalUpdate: (update, stories) => {

@@ -474,15 +474,31 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'encodeState') {
     if (!session) throw new Error('Resident engine worker is not initialized');
     const state = exactBuffer(session.encodeState());
+    let peerMetadata: ArrayBuffer | undefined;
+    let peerMetadataReason: string | undefined;
+    if (request.peerMetadata) {
+      if (!session.encodePeerMetadata) {
+        peerMetadataReason = 'missing-capability: Worker cannot encode peer metadata';
+      } else {
+        try {
+          peerMetadata = exactBuffer(session.encodePeerMetadata());
+        } catch (error) {
+          if (!(error instanceof Error) || error.name !== 'PeerMetadataError') throw error;
+          const code = (error as Error & { code?: string }).code;
+          peerMetadataReason = `${code ?? 'metadata-error'}: ${error.message}`;
+        }
+      }
+    }
     reply(
       {
         id: request.id,
         ok: true,
         state,
+        ...(request.peerMetadata ? { peerMetadata, peerMetadataReason } : {}),
         version: session.proposalEngine.version(),
         proposals: proposals?.exportState() ?? { previewVersion: 0, entries: [] },
       },
-      [state]
+      peerMetadata ? [state, peerMetadata] : [state]
     );
     return;
   }
