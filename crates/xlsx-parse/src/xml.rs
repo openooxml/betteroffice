@@ -158,3 +158,18 @@ pub(crate) fn find_part<'a>(parts: &'a [(String, Vec<u8>)], name: &str) -> Optio
 pub(crate) fn xml_err<E: core::fmt::Display>(e: E) -> ParseError {
     ParseError::Xml(e.to_string())
 }
+
+pub(crate) async fn find_part_sliced<'a>(
+    parts: &'a [(String, Vec<u8>)],
+    name: &str,
+    work: &ooxml_opc::WorkBudget,
+) -> Option<&'a [u8]> {
+    let want = name.trim_start_matches('/');
+    for (path, bytes) in parts {
+        work.step().await;
+        if path.trim_start_matches('/') == want {
+            return Some(bytes);
+        }
+    }
+    None
+}

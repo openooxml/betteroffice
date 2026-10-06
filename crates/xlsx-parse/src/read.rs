@@ -195,7 +195,13 @@ pub(crate) async fn parse_workbook_indexed_sliced(
                 .filter(|relationship| !relationship.external)
                 .map(|relationship| resolve_part_path("xl", &relationship.target))
             {
-                sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
+                sheet.charts = crate::chart::parse_sheet_charts_sliced(
+                    parts,
+                    &path,
+                    &mut declined_parts,
+                    work,
+                )
+                .await?;
             }
             sheets.push(sheet);
             shared_string_cells.push(SharedStringCells::new());
@@ -223,7 +229,9 @@ pub(crate) async fn parse_workbook_indexed_sliced(
             work,
         )
         .await?;
-        sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
+        sheet.charts =
+            crate::chart::parse_sheet_charts_sliced(parts, &path, &mut declined_parts, work)
+                .await?;
         collect_tables_sliced(
             parts,
             &path,

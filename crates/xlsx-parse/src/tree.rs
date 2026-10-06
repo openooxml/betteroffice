@@ -535,6 +535,390 @@ pub(crate) fn parse_tree(data: &[u8]) -> Result<Element, ParseError> {
     Part::decode(data)?.tree()
 }
 
+pub(crate) async fn charge_bytes(mut bytes: usize, work: &ooxml_opc::WorkBudget) {
+    while bytes > 0 {
+        bytes = bytes.saturating_sub(work.take(bytes.div_ceil(64).min(256)).await * 64);
+    }
+}
+
+pub(crate) async fn copy_text(source: &str, work: &ooxml_opc::WorkBudget) -> String {
+    let mut text = String::with_capacity(source.len());
+    append_text_sliced(&mut text, source, work).await;
+    text
+}
+
+async fn append_text_sliced(target: &mut String, source: &str, work: &ooxml_opc::WorkBudget) {
+    let mut offset = 0;
+    while offset < source.len() {
+        let count = work
+            .take((source.len() - offset).div_ceil(64).min(256))
+            .await
+            * 64;
+        let mut end = (offset + count).min(source.len());
+        while !source.is_char_boundary(end) {
+            end -= 1;
+        }
+        target.push_str(&source[offset..end]);
+        offset = end;
+    }
+}
+
+pub(crate) async fn text_content_sliced(element: &Element, work: &ooxml_opc::WorkBudget) -> String {
+    let mut text = String::new();
+    let mut stack = vec![element.children.iter()];
+    while let Some(children) = stack.last_mut() {
+        work.step().await;
+        match children.next() {
+            Some(Node::Text(value)) => append_text_sliced(&mut text, value, work).await,
+            Some(Node::Element(child)) => stack.push(child.children.iter()),
+            None => {
+                stack.pop();
+            }
+        }
+    }
+    text
+}
+
+pub(crate) async fn names_are_resolvable_sliced(
+    element: &Element,
+    work: &ooxml_opc::WorkBudget,
+) -> bool {
+    let mut stack = vec![element];
+    while let Some(element) = stack.pop() {
+        work.step().await;
+        charge_bytes(element.name.len(), work).await;
+        if valid_qname(&element.name).is_none() {
+            return false;
+        }
+        for attribute in &element.attributes {
+            work.step().await;
+            charge_bytes(attribute.name.len(), work).await;
+            if valid_qname(&attribute.name).is_none() {
+                return false;
+            }
+        }
+        for child in element.child_elements() {
+            work.step().await;
+            stack.push(child);
+        }
+    }
+    true
+}
+
+impl Namespaces {
+    async fn open_sliced(
+        &mut self,
+        start: &BytesStart<'_>,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<(), ParseError> {
+        self.scopes.push(self.bindings.len());
+        for attribute in start.attributes() {
+            work.step().await;
+            let attribute = attribute.map_err(xml_err)?;
+            let Some(prefix) = declared_prefix(attribute.key.as_ref()) else {
+                continue;
+            };
+            let value = attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(xml_err)?;
+            self.bindings
+                .push((prefix.to_owned(), Rc::from(value.as_ref())));
+        }
+        Ok(())
+    }
+}
+
+async fn find_bytes_sliced(
+    source: &str,
+    needle: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let count = work
+            .take((bytes.len() - offset).div_ceil(64).min(256))
+            .await
+            * 64;
+        let end = (offset + count + needle.len() - 1).min(bytes.len());
+        if let Some(found) = bytes[offset..end]
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            return Some(offset + found);
+        }
+        offset = (offset + count).min(bytes.len());
+    }
+    None
+}
+
+async fn trim_start_sliced<'a>(source: &'a str, work: &ooxml_opc::WorkBudget) -> &'a str {
+    for (index, ch) in source.char_indices() {
+        work.step().await;
+        if !ch.is_whitespace() {
+            return &source[index..];
+        }
+    }
+    ""
+}
+
+async fn reject_foreign_declared_encoding_sliced(
+    text: &str,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(), ParseError> {
+    let Some(rest) = text.strip_prefix("<?xml") else {
+        return Ok(());
+    };
+    let Some(end) = find_bytes_sliced(rest, b"?>", work).await else {
+        return Ok(());
+    };
+    let declaration = &rest[..end];
+    let Some(index) = find_bytes_sliced(declaration, b"encoding", work).await else {
+        return Ok(());
+    };
+    let rest = trim_start_sliced(&declaration[index + 8..], work).await;
+    let Some(rest) = rest.strip_prefix('=') else {
+        return Ok(());
+    };
+    let rest = trim_start_sliced(rest, work).await;
+    let Some(quote) = rest
+        .chars()
+        .next()
+        .filter(|quote| matches!(*quote, '"' | '\''))
+    else {
+        return Ok(());
+    };
+    let rest = &rest[1..];
+    let end = find_bytes_sliced(rest, &[quote as u8], work)
+        .await
+        .unwrap_or(rest.len());
+    let value = &rest[..end];
+    if ["utf-8", "utf8", "utf-16", "utf16", "utf-16le", "utf-16be"]
+        .iter()
+        .any(|known| value.eq_ignore_ascii_case(known))
+    {
+        return Ok(());
+    }
+    charge_bytes(value.len(), work).await;
+    Err(ParseError::Malformed(format!(
+        "part declares the unsupported encoding {value}"
+    )))
+}
+
+pub(crate) async fn parse_tree_sliced(
+    data: &[u8],
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Element, ParseError> {
+    if data.len() > MAX_TREE_BYTES {
+        return Err(ParseError::TreeTooLarge);
+    }
+    let (encoding, body) = detect_encoding(data)?;
+    let text = match encoding {
+        Encoding::Utf8 { .. } => {
+            let mut text = String::with_capacity(body.len());
+            let mut offset = 0;
+            while offset < body.len() {
+                let count = work.take((body.len() - offset).div_ceil(64).min(256)).await * 64;
+                let end = (offset + count).min(body.len());
+                match std::str::from_utf8(&body[offset..end]) {
+                    Ok(value) => {
+                        text.push_str(value);
+                        offset = end;
+                    }
+                    Err(error) if error.error_len().is_none() && end < body.len() => {
+                        let valid_end = offset + error.valid_up_to();
+                        let value = std::str::from_utf8(&body[offset..valid_end])
+                            .map_err(|_| ParseError::Malformed("part is not valid utf-8".into()))?;
+                        text.push_str(value);
+                        offset = valid_end;
+                    }
+                    Err(_) => return Err(ParseError::Malformed("part is not valid utf-8".into())),
+                }
+            }
+            text
+        }
+        Encoding::Utf16 { big_endian, .. } => {
+            if !body.len().is_multiple_of(2) {
+                return Err(ParseError::Malformed(
+                    "utf-16 part has an odd byte length".into(),
+                ));
+            }
+            let units = body.chunks_exact(2).map(|pair| {
+                let pair = [pair[0], pair[1]];
+                if big_endian {
+                    u16::from_be_bytes(pair)
+                } else {
+                    u16::from_le_bytes(pair)
+                }
+            });
+            let mut text = String::new();
+            for ch in char::decode_utf16(units) {
+                work.step().await;
+                text.push(ch.map_err(|_| {
+                    ParseError::Malformed("utf-16 part has an unpaired surrogate".into())
+                })?);
+            }
+            text
+        }
+    };
+    if text.len() > MAX_TREE_BYTES {
+        return Err(ParseError::TreeTooLarge);
+    }
+    reject_foreign_declared_encoding_sliced(&text, work).await?;
+    parse_text_sliced(&text, MAX_TREE_NODES, work)
+        .await
+        .map(|(root, _)| root)
+}
+
+async fn parse_text_sliced(
+    text: &str,
+    nodes: usize,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(Element, usize), ParseError> {
+    let mut reader = Reader::from_str(text);
+    let config = reader.config_mut();
+    config.expand_empty_elements = false;
+    config.check_end_names = true;
+
+    let mut budget = Budget {
+        nodes,
+        text: MAX_TREE_TEXT_BYTES,
+    };
+    let mut stack: Vec<Element> = Vec::new();
+    let mut namespaces = Namespaces::default();
+    let mut root: Option<Element> = None;
+    loop {
+        work.step().await;
+        let opened = reader.buffer_position() as usize;
+        let event = reader.read_event().map_err(xml_err)?;
+        let closed = reader.buffer_position() as usize;
+        charge_bytes(closed.saturating_sub(opened), work).await;
+        match event {
+            Event::Start(start) => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(ParseError::DepthExceeded);
+                }
+                namespaces.open_sliced(&start, work).await?;
+                let element =
+                    open_element_sliced(&start, closed, false, &mut budget, &namespaces, work)
+                        .await?;
+                stack.push(element);
+            }
+            Event::Empty(start) => {
+                if stack.len() >= MAX_DEPTH {
+                    return Err(ParseError::DepthExceeded);
+                }
+                namespaces.open_sliced(&start, work).await?;
+                let element =
+                    open_element_sliced(&start, closed, true, &mut budget, &namespaces, work).await;
+                namespaces.close();
+                place(element?, &mut stack, &mut root)?;
+            }
+            Event::End(_) => {
+                let mut done = stack
+                    .pop()
+                    .ok_or_else(|| ParseError::Malformed("unbalanced end tag".into()))?;
+                namespaces.close();
+                done.content.end = opened.max(done.content.start);
+                place(done, &mut stack, &mut root)?;
+            }
+            Event::Text(text) => {
+                let decoded = text.decode().map_err(xml_err)?;
+                push_text_sliced(&decoded, &mut stack, &mut budget, work).await?;
+            }
+            Event::CData(text) => {
+                let decoded = text.decode().map_err(xml_err)?;
+                push_text_sliced(&decoded, &mut stack, &mut budget, work).await?;
+            }
+            Event::GeneralRef(entity) => {
+                let name = entity.decode().map_err(xml_err)?;
+                let resolved = resolve_entity(&name)?;
+                push_text_sliced(&resolved, &mut stack, &mut budget, work).await?;
+            }
+            Event::DocType(_) => {
+                return Err(ParseError::Malformed("doctype is not accepted".into()));
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if !stack.is_empty() {
+        return Err(ParseError::Malformed("unclosed element".into()));
+    }
+    let root = root.ok_or_else(|| ParseError::Malformed("no root element".into()))?;
+    Ok((root, nodes - budget.nodes))
+}
+
+async fn open_element_sliced(
+    start: &BytesStart<'_>,
+    content_start: usize,
+    self_closing: bool,
+    budget: &mut Budget,
+    namespaces: &Namespaces,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Element, ParseError> {
+    budget.nodes = budget
+        .nodes
+        .checked_sub(1)
+        .ok_or(ParseError::TreeTooLarge)?;
+    let name = decode_name(start.name().as_ref())?;
+    let namespace = namespaces.resolve(split_prefix(&name).0);
+    let mut attributes = Vec::new();
+    for attribute in start.attributes() {
+        work.step().await;
+        let attribute = attribute.map_err(xml_err)?;
+        budget.nodes = budget
+            .nodes
+            .checked_sub(1)
+            .ok_or(ParseError::TreeTooLarge)?;
+        let name = decode_name(attribute.key.as_ref())?;
+        let prefix = split_prefix(&name).0;
+        attributes.push(Attribute {
+            namespace: (!prefix.is_empty())
+                .then(|| namespaces.resolve(prefix))
+                .flatten(),
+            name,
+            value: attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(xml_err)?
+                .into_owned(),
+        });
+    }
+    Ok(Element {
+        default_cleared: namespaces.default_cleared(),
+        name,
+        namespace,
+        attributes,
+        children: Vec::new(),
+        content: content_start..content_start,
+        self_closing,
+    })
+}
+
+async fn push_text_sliced(
+    text: &str,
+    stack: &mut [Element],
+    budget: &mut Budget,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(), ParseError> {
+    let Some(parent) = stack.last_mut() else {
+        return Ok(());
+    };
+    budget.text = budget
+        .text
+        .checked_sub(text.len())
+        .ok_or(ParseError::TreeTooLarge)?;
+    match parent.children.last_mut() {
+        Some(Node::Text(existing)) => {
+            append_text_sliced(existing, text, work).await;
+        }
+        _ => parent
+            .children
+            .push(Node::Text(copy_text(text, work).await)),
+    }
+    Ok(())
+}
+
 /// [`parse_tree`] spending at most `nodes` elements and attributes, returning how many it
 /// spent. Running out is [`ParseError::TreeTooLarge`].
 pub(crate) fn parse_tree_within(data: &[u8], nodes: usize) -> Result<(Element, usize), ParseError> {

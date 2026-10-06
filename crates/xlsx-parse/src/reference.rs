@@ -30,6 +30,14 @@ use crate::write::{NS_MAIN, NS_STRICT_MAIN};
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_DEPTH, ParseError};
 
+mod sliced;
+pub(crate) use sliced::unpatchable_references_sliced;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SYNC_REFERENCE_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// the spreadsheetml vocabulary a pivot part is read in. Transitional and
 /// Strict spell the same names in different namespaces and this crate reads
 /// both; an unprefixed name with no namespace at all is read as ours too,
@@ -144,6 +152,8 @@ pub(crate) fn unpatchable_references(
     sheet_paths: &[String],
     declined: &[String],
 ) -> Result<Vec<UnpatchableReference>, ParseError> {
+    #[cfg(test)]
+    SYNC_REFERENCE_OPENS.set(SYNC_REFERENCE_OPENS.get() + 1);
     let mut references = if package_metadata_conforms(parts, content_types, sheet_paths) {
         let mut references = pivot_references(parts, content_types, workbook, sheet_paths);
         for chart in unmodelled_chart_parts(parts, content_types, workbook)? {

@@ -25,6 +25,17 @@ use crate::tree::{
 use crate::xml::{find_part, resolve_part_path};
 use crate::{MAX_CHART_ANCHORS, MAX_CHART_REFS, MAX_DEPTH, ParseError};
 
+mod sliced;
+pub(crate) use sliced::{
+    chart_reference_areas_sliced, drawing_claims_are_unambiguous_sliced,
+    parse_relationships_sliced, parse_sheet_charts_sliced, unmodelled_chart_parts_sliced,
+};
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SYNC_CHART_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// relationship references inside a part (`r:id`).
 pub(crate) const NS_RELATIONSHIPS: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -322,6 +333,8 @@ pub(crate) fn parse_sheet_charts(
     sheet_path: &str,
     declined: &mut Vec<String>,
 ) -> Result<Vec<SheetChart>, ParseError> {
+    #[cfg(test)]
+    SYNC_CHART_OPENS.set(SYNC_CHART_OPENS.get() + 1);
     let mut charts = Vec::new();
     for (drawing_path, drawing_xml) in sheet_drawings(parts, sheet_path)? {
         let drawing_rels = find_part(parts, &relationship_part_path(&drawing_path))

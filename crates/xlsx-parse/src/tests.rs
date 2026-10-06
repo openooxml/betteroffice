@@ -96,6 +96,98 @@ fn package_with_table(table: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
+fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let mut parts = package("<sheetData/>", &[], false);
+    parts[1].1 = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#.to_vec();
+    for (path, xml) in [
+        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>"#.to_owned()),
+        ("xl/worksheets/_rels/sheet1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="p" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivot1.xml"/><Relationship Id="d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_owned()),
+        ("xl/pivotCache/cache1.xml", format!(r#"<pivotCacheDefinition><cacheSource type="worksheet"><worksheetSource sheet="Sheet1" ref="A1:B20"/></cacheSource><cacheFields>{}</cacheFields></pivotCacheDefinition>"#, "<cacheField name=\"field\"/>".repeat(512))),
+        ("xl/pivotTables/pivot1.xml", r#"<pivotTableDefinition><location ref="D1:E20" rowPageCount="1"/></pivotTableDefinition>"#.to_owned()),
+        ("xl/drawings/drawing1.xml", r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="100" cy="100"/><xdr:graphicFrame><c:chart r:id="c"/></xdr:graphicFrame></xdr:absoluteAnchor></xdr:wsDr>"#.to_owned()),
+        ("xl/drawings/_rels/drawing1.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="c" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#.to_owned()),
+        ("xl/charts/chart1.xml", format!(r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:ser><c:val><c:numRef><c:f>Sheet1!A1:A20</c:f><c:numCache>{}</c:numCache></c:numRef></c:val></c:ser></c:chart></c:chartSpace>"#, "<c:pt idx=\"0\"><c:v>1</c:v></c:pt>".repeat(512))),
+    ] {
+        parts.push((path.into(), xml.into_bytes()));
+    }
+    for scenario in 0..5 {
+        let mut parts = parts.clone();
+        if scenario == 1 {
+            parts.iter_mut().find(|(path, _)| path == "[Content_Types].xml").unwrap().1 =
+                br#"<Types decoy="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"/>"#.to_vec();
+        }
+        if scenario == 2 {
+            parts
+                .iter_mut()
+                .find(|(path, _)| path == "xl/drawings/drawing1.xml")
+                .unwrap()
+                .1 = b"<unclosed>".to_vec();
+        }
+        if scenario == 3 {
+            parts
+                .iter_mut()
+                .find(|(path, _)| path == "xl/pivotCache/cache1.xml")
+                .unwrap()
+                .1 = b"<pivotCacheDefinition><cacheSource>".to_vec();
+        }
+        if scenario == 4 {
+            parts
+                .iter_mut()
+                .find(|(path, _)| path == "xl/drawings/_rels/drawing1.xml.rels")
+                .unwrap()
+                .1 = b"<Relationships><Relationship".to_vec();
+        }
+        let expected = crate::parse_workbook_with_owned_package(parts.clone());
+        if scenario == 0 {
+            let expected = expected.as_ref().unwrap();
+            assert_eq!(expected.workbook.sheets[0].charts.len(), 1);
+            assert!(expected.package.unpatchable_references().len() >= 2);
+        }
+        for units in [1, 256, usize::MAX] {
+            crate::reference::SYNC_REFERENCE_OPENS.set(0);
+            crate::chart::SYNC_CHART_OPENS.set(0);
+            let work = ooxml_opc::WorkBudget::default();
+            let mut opening = Box::pin(crate::parse_workbook_with_owned_package_sliced(
+                parts.clone(),
+                &work,
+            ));
+            let mut context = Context::from_waker(Waker::noop());
+            let mut charged = 0;
+            let actual = loop {
+                work.reset(units);
+                let state = opening.as_mut().poll(&mut context);
+                assert!(work.touched() <= units);
+                charged += work.touched();
+                if let Poll::Ready(result) = state {
+                    break result;
+                }
+            };
+            assert_eq!(crate::reference::SYNC_REFERENCE_OPENS.get(), 0);
+            assert_eq!(crate::chart::SYNC_CHART_OPENS.get(), 0);
+            match (actual, &expected) {
+                (Ok(actual), Ok(expected)) => {
+                    assert_eq!(actual.workbook, expected.workbook);
+                    assert_eq!(
+                        crate::PackageFacts::from_package(&actual.package),
+                        crate::PackageFacts::from_package(&expected.package),
+                    );
+                }
+                (Err(actual), Err(expected)) => {
+                    assert_eq!(actual.to_string(), expected.to_string())
+                }
+                _ => panic!("sliced parse differs from oracle"),
+            }
+            if scenario == 0 {
+                assert!(charged > 1024);
+            }
+        }
+    }
+}
+
+#[test]
 fn reads_a_table_part_through_the_worksheet_relationships() {
     let table = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12" totalsRowCount="1"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Extra_x000a_Cost"/><tableColumn id="3" name="_x005F_x0041_"/></tableColumns></table>"#;
     let wb = parse_workbook(&package_with_table(table)).unwrap();

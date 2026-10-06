@@ -308,16 +308,21 @@ impl PreservedPackage {
             Some(bytes) => parse_content_types_sliced(bytes, work).await?,
             None => Vec::new(),
         };
-        let unpatchable_references = crate::reference::unpatchable_references(
+        let part_types = part_content_types_sliced(&content_types, &parts, work).await;
+        let mut sheet_paths = Vec::new();
+        for sheet in &sheets {
+            work.step().await;
+            sheet_paths.push(crate::tree::copy_text(&sheet.path, work).await);
+        }
+        let unpatchable_references = crate::reference::unpatchable_references_sliced(
             &parts,
-            &part_content_types(&content_types, &parts),
+            &part_types,
             workbook,
-            &sheets
-                .iter()
-                .map(|sheet| sheet.path.clone())
-                .collect::<Vec<_>>(),
+            &sheet_paths,
             declined_parts,
-        )?;
+            work,
+        )
+        .await?;
 
         let root_relationships = match find_part(&parts, "_rels/.rels") {
             Some(bytes) => parse_relationships_sliced(bytes, work).await?,
@@ -1456,6 +1461,55 @@ fn part_content_types(
             })
         })
         .collect()
+}
+
+async fn part_content_types_sliced(
+    entries: &[ContentTypeEntry],
+    parts: &[(String, Vec<u8>)],
+    work: &ooxml_opc::WorkBudget,
+) -> Vec<PartContentType> {
+    let mut types = Vec::new();
+    for (path, _) in parts {
+        work.step().await;
+        crate::tree::charge_bytes(path.len(), work).await;
+        let normalized = normalized_part_name(path);
+        let mut resolved = None;
+        for entry in entries {
+            work.step().await;
+            if entry.element == "Override"
+                && entry
+                    .attribute("PartName")
+                    .is_some_and(|part| normalized_part_name(part) == normalized)
+                && let Some(value) = entry.attribute("ContentType")
+            {
+                resolved = Some(value);
+                break;
+            }
+        }
+        if resolved.is_none()
+            && let Some((_, extension)) = path.rsplit_once('.')
+        {
+            for entry in entries {
+                work.step().await;
+                if entry.element == "Default"
+                    && entry
+                        .attribute("Extension")
+                        .is_some_and(|value| value.eq_ignore_ascii_case(extension))
+                    && let Some(value) = entry.attribute("ContentType")
+                {
+                    resolved = Some(value);
+                    break;
+                }
+            }
+        }
+        if let Some(value) = resolved {
+            types.push(PartContentType {
+                path: normalized,
+                content_type: crate::tree::copy_text(value, work).await,
+            });
+        }
+    }
+    types
 }
 
 pub(crate) struct PartContentType {
