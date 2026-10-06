@@ -1561,18 +1561,18 @@ test('worker proposals reach the registry before hydration and survive hand-over
     await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
     expect(result.current.mainOpens).toEqual([]);
     expect(session.workerDocumentMirrored()).toBe(false);
-    expect(session.getProposals().proposals).toEqual([]);
+    expect(session.getProposals().proposals).toEqual(mirrored.proposals);
     expect((await api().getProposals()).proposals).toEqual(mirrored.proposals);
     const workerCalls = posted.filter((request) => request.type === 'proposal').length;
     const decided = await api().setProposalStates({
       expectVersion: session.version(),
-      expectPreviewVersion: mirrored.previewVersion,
+      expectPreviewVersion: session.getProposals().previewVersion,
       changes: [{ id: 'worker-proposal', state: 'accepted' }],
     });
     expect(decided.ok).toBe(true);
+    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
     expect((await api().getProposals()).proposals[0]!.state).toBe('accepted');
-    expect(session.getProposals().proposals).toEqual([]);
-    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls + 2);
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls);
     metadata.check();
   } finally {
     unmount();
