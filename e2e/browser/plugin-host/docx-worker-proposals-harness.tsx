@@ -11,6 +11,7 @@ import type { DocxProposalSnapshot, YrsSession } from '@betteroffice/docx/yrs';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import { pagedDocx } from '../../../packages/docx-react/src/components/DocxEditor/__fixtures__/pagedDocx';
 import { workerOpenReplicaPending } from '../../../packages/docx-react/src/components/DocxEditor/internals/workerOpenReplica';
+import { proposalSnapshot } from '../../../packages/docx-react/src/plugins/proposalPreview';
 import fontUrl from '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf?url';
 import '../../../packages/docx-react/src/styles/editor.css';
 
@@ -200,8 +201,8 @@ const overlay = defineDocxPlugin<OverlayState>({
         snapshotVersion: context.snapshot.version,
       };
     }
-    const snapshot = probe.session!.getProposals();
-    context.setState({ snapshot, eventSerial: probe.eventSerial }, snapshot.version);
+    const snapshot = proposalSnapshot(probe.session!);
+    if (snapshot) context.setState({ snapshot, eventSerial: probe.eventSerial }, snapshot.version);
   },
   overlay: ProposalOverlay,
 });
