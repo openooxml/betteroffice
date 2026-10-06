@@ -146,7 +146,10 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     for (const unit of units) setHidden(unit, false);
     const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
     const available = innerWidth(rail);
+    const triggerPosition = trigger?.style.position;
+    if (trigger) trigger.style.position = 'absolute';
     const widths = units.map(outerWidth);
+    if (trigger) trigger.style.position = triggerPosition ?? '';
     const total =
       widths.reduce((sum, width) => sum + width, 0) + gap * Math.max(0, units.length - 1);
     const next: HTMLElement[] = [];
