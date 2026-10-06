@@ -14333,8 +14333,8 @@ mod tests {
         engine.region_retention_valid.set(true);
         let reused = engine.stats().resident_reused_blocks;
         let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
-        request["regions"]["sections"][0]["headerFooterRefs"] =
-            json!({"headerDefault": "missing"});
+        request["regions"]["sections"][0]["properties"]["headerReferences"] =
+            json!([{"type": "default", "rId": "missing"}]);
         let prepared = engine
             .prepare_region_layout(&request.to_string(), None, RelayoutTrigger::Bulk)
             .unwrap();
