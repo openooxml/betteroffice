@@ -34,6 +34,7 @@ export const editsession_apply_update_with_inference: (a: number, b: number, c: 
 export const editsession_begin_opening: (a: number, b: number, c: number) => void;
 export const editsession_begin_region_layout: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_begin_shared_reads: (a: number) => void;
+export const editsession_bootstrap_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -62,6 +63,7 @@ export const editsession_display_range_rects_region_json: (a: number, b: number,
 export const editsession_display_vertical_move_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_drain_update_event: (a: number) => [number, number];
 export const editsession_encode_diff: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_encode_peer_metadata: (a: number) => [number, number, number, number];
 export const editsession_encode_state: (a: number) => [number, number];
 export const editsession_encode_state_vector: (a: number) => [number, number];
 export const editsession_encode_sticky_position: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

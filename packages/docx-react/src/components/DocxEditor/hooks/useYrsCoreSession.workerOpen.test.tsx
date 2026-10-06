@@ -17,6 +17,7 @@ import {
   preloadResidentEngineWorker,
   ResidentWorkerFailureError,
   ResidentWorkerOutOfMemoryError,
+  PeerMetadataError,
   proposalRevisionPreview,
   createYrsPositionProjection,
   yrsLocToProjectedDisplayPosition,
@@ -35,7 +36,7 @@ import type {
 import { LayoutSelectionGate } from '@betteroffice/docx/layout';
 import { createDisplayListQueries, type DisplayListQueries } from '@betteroffice/docx/layout/render';
 import * as queryEngines from '@betteroffice/docx/layout/render/rustDisplayList';
-import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker } from './useDisplayList';
+import { useCanvasRenderer, type LayoutInWorker, type OpenInWorker, type OpenPreviewInWorker, type WorkerOpenedDocument } from './useDisplayList';
 import type { ResolveDisplayListQueries } from './displayListQueryEpochGate';
 import { useLayoutPipeline } from './useLayoutPipeline';
 import { useHostSearch, type DocxSearchState } from './useHostSearch';
@@ -176,6 +177,7 @@ function withTimeout<T>(promise: PromiseLike<T>, timeout: number, label: string)
 }
 
 function installWorker(options: {
+  peerMetadata?: boolean;
   failOpen?: boolean;
   failState?: boolean;
   failProposal?: boolean;
@@ -288,7 +290,12 @@ function installWorker(options: {
               ? { id: request.id, ok: false, error: 'revision count failed' }
               : { id: request.id, ok: true, revisionCount: options.revisionCount ?? 0 },
           } as MessageEvent));
-        } else send(request, transfer);
+        } else send(
+          request.type === 'encodeState' && !options.peerMetadata
+            ? { ...request, peerMetadata: undefined }
+            : request,
+          transfer,
+        );
       };
       workers.push(worker);
       return worker;
@@ -619,6 +626,1212 @@ function useHarness(props: HarnessProps) {
 }
 
 const initialProps: HarnessProps = { experimentalWorkerOpen: true, source: bytes, generation: 1 };
+
+async function peerHydrationSource(): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await longFixture(1));
+  const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file('[Content_Types].xml', types.replace('</Types>',
+    '<Override PartName="/word/comments.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>'));
+  zip.file('word/_rels/document.xml.rels',
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/></Relationships>');
+  zip.file('word/document.xml', `<w:document ${ns}><w:body><w:p w14:paraId="0000B001">` +
+    '<w:commentRangeStart w:id="1"/><w:r><w:t>Peer paragraph</w:t></w:r><w:commentRangeEnd w:id="1"/>' +
+    '<w:r><w:commentReference w:id="1"/></w:r></w:p><w:sectPr/></w:body></w:document>');
+  zip.file('word/comments.xml', `<w:comments ${ns}><w:comment w:id="1" w:author="Peer author" w:date="2026-10-01T00:00:00Z">` +
+    '<w:p w14:paraId="0000C001"><w:r><w:t>Peer comment</w:t></w:r></w:p></w:comment></w:comments>');
+  return zip.generateAsync({ type: 'uint8array' });
+}
+
+async function peerHydrationHarness(metadata: boolean, sourceOverride?: Uint8Array) {
+  const worker = installWorker({ peerMetadata: metadata, holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const source = sourceOverride ?? await peerHydrationSource();
+  let snapshot: Awaited<ReturnType<NonNullable<WorkerOpenedDocument['encodeVersionedState']>>> | undefined;
+  let corruptOffset: number | undefined;
+  let fallback: ReturnType<typeof mock> | undefined;
+  const replicas: Array<YrsSession | null> = [];
+  const props: HarnessProps = {
+    ...initialProps, source,
+    collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    onWorkerOpen: (opened) => {
+      if (!opened?.encodeVersionedState) throw new Error('Expected a versioned worker snapshot');
+      const encode = opened.encodeVersionedState;
+      opened.encodeVersionedState = async (prefetch) => {
+        snapshot = await encode(prefetch);
+        if (corruptOffset !== undefined) {
+          if (!snapshot.metadata) throw new Error('No metadata to corrupt');
+          snapshot = { ...snapshot, metadata: snapshot.metadata.slice() };
+          snapshot.metadata![corruptOffset] ^= 1;
+        }
+        return snapshot;
+      };
+      const openedFallback = spyOn(opened, 'fallback');
+      fallback ??= openedFallback;
+      registerRestore(() => openedFallback.mockRestore());
+    },
+  };
+  const view = renderHook(useHarness, { initialProps: props });
+  await waitFor(() => expect(view.result.current.host).not.toBeNull());
+  const session = view.result.current.core.session!;
+  const bootstrap = spyOn(session, 'bootstrapPeer');
+  const load = spyOn(session, 'loadState');
+  const open = spyOn(session, 'openDocx');
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  registerRestore(() => { bootstrap.mockRestore(); load.mockRestore(); open.mockRestore(); warn.mockRestore(); });
+  return {
+    ...view, worker, frames, tasks, props, source, session, bootstrap, load, open, warn, replicas,
+    get snapshot() {
+      if (!snapshot) throw new Error('No captured peer snapshot');
+      return snapshot;
+    },
+    get fallback() {
+      if (!fallback) throw new Error('No opened worker');
+      return fallback;
+    },
+    corruptMetadata(offset: number) { corruptOffset = offset; },
+    async start() {
+      const pending = requestWorkerOpenReplica(session);
+      if (!pending) throw new Error('No pending peer hydration');
+      void pending.catch(() => {});
+      await waitFor(() => expect(worker.posted.some((request) => request.type === 'encodeState')).toBe(true));
+      await act(async () => {
+        await withTimeout(Promise.resolve(worker.workers[0]!.release()), 1000, 'held peer snapshot release');
+      });
+      await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+      return { pending };
+    },
+    async finish(pending: Promise<void>) {
+      await act(async () => tasks.run());
+      await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+      await act(async () => {
+        replicaHelpers.notifyWorkerOpenLayoutProgress(session, 'complete');
+        await tasks.run();
+        await withTimeout(pending, 1000, 'peer hydration readiness');
+      });
+    },
+    close() {
+      view.unmount();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+    },
+  };
+}
+
+test('metadata hydration bootstraps the peer and matches compatibility paragraphs, ids and comment exports', async () => {
+  const peer = await peerHydrationHarness(true);
+  try {
+    const { pending } = await peer.start();
+    expect(peer.snapshot.metadata).toBeDefined();
+    const snapshot = peer.snapshot;
+    const host = peer.result.current.host;
+    if (snapshot.metadata === undefined || host === null) throw new Error('Expected peer metadata and host');
+    expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+    expect(peer.bootstrap.mock.calls[0]![0]).toBe(snapshot.state);
+    expect(peer.bootstrap.mock.calls[0]![1]).toBe(snapshot.metadata);
+    expect(peer.bootstrap.mock.calls[0]![2]).toEqual(peer.source);
+    expect(peer.bootstrap.mock.calls[0]![3]).toBe(host);
+    expect(peer.open).not.toHaveBeenCalled();
+    expect(peer.load).not.toHaveBeenCalled();
+    expect(peer.result.current.core.replicaReady).toBe(false);
+    await peer.finish(pending);
+    expect(peer.result.current.core.replicaReady).toBe(true);
+    expect(peer.replicas).toEqual([peer.session]);
+    expect(peer.load).not.toHaveBeenCalled();
+    expect(peer.warn).not.toHaveBeenCalled();
+    expect(peer.fallback).not.toHaveBeenCalled();
+    const baseline = await createYrsSession({ clientId: peer.session.clientId });
+    sessions.push(baseline);
+    baseline.openDocx(peer.source, false);
+    baseline.loadState(peer.snapshot.state);
+    expect(peer.session.storyIds()).toEqual(baseline.storyIds());
+    for (const story of baseline.storyIds()) {
+      expect(peer.session.paragraphs(story)).toEqual(baseline.paragraphs(story));
+      expect(peer.session.storyParagraphIds(story)).toEqual(baseline.storyParagraphIds(story));
+    }
+    expect(peer.session.paragraphIdentities()).toEqual(baseline.paragraphIdentities());
+    expect(peer.session.listComments()).toEqual(baseline.listComments());
+    const options = { revisionView: 'markup' as const, stories: ['comments' as const] };
+    const actual = peer.session.exportStructured(options);
+    const expected = baseline.exportStructured(options);
+    if (!actual.ok || !expected.ok) throw new Error('Comment export failed');
+    expect(actual.content.stories).toHaveLength(1);
+    expect(actual.content).toEqual(expected.content);
+    expect(peer.result.current.errors).toEqual([]);
+  } finally {
+    peer.close();
+  }
+});
+
+test('metadata absence uses the captured state and warns exactly once with the reason and tags', async () => {
+  const peer = await peerHydrationHarness(false);
+  try {
+    const { pending } = await peer.start();
+    expect(peer.bootstrap).not.toHaveBeenCalled();
+    expect(peer.open).toHaveBeenCalledTimes(1);
+    expect(peer.open).toHaveBeenCalledWith(peer.source, false);
+    expect(peer.load).not.toHaveBeenCalled();
+    await peer.finish(pending);
+    expect(peer.load).toHaveBeenCalledTimes(1);
+    expect(peer.load.mock.calls[0]![0]).toBe(peer.snapshot.state);
+    expect(peer.warn).toHaveBeenCalledTimes(1);
+    expect(peer.warn.mock.calls[0]![0]).toContain('missing-capability: Worker omitted peer metadata');
+    expect(peer.warn.mock.calls[0]![0]).toContain('expected tag v1/');
+    expect(peer.warn.mock.calls[0]![0]).toContain('received tag absent');
+    expect(peer.fallback).not.toHaveBeenCalled();
+    expect(peer.result.current.core.replicaReady).toBe(true);
+  } finally {
+    peer.close();
+  }
+});
+
+test.each(['bootstrap-rejection', 'unsupported-version', 'shape-mismatch'] as const)(
+  'metadata %s falls back on the same session and state without worker fallback', async (reason) => {
+    const peer = await peerHydrationHarness(true);
+    try {
+      if (reason === 'bootstrap-rejection') {
+        peer.bootstrap.mockImplementation(() => { throw new PeerMetadataError('source-mismatch', 'Rejected source'); });
+      } else {
+        peer.corruptMetadata(reason === 'unsupported-version' ? 8 : 12);
+      }
+      const { pending } = await peer.start();
+      expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+      expect(peer.open).toHaveBeenCalledWith(peer.source, false);
+      expect(peer.load).not.toHaveBeenCalled();
+      await peer.finish(pending);
+      expect(peer.load).toHaveBeenCalledTimes(1);
+      expect(peer.load.mock.calls[0]![0]).toBe(peer.snapshot.state);
+      expect(peer.result.current.core.session).toBe(peer.session);
+      expect(peer.open.mock.calls.map((call) => call[1])).toEqual([false]);
+      expect(peer.fallback).not.toHaveBeenCalled();
+      expect(peer.warn).toHaveBeenCalledTimes(1);
+      expect(peer.warn.mock.calls[0]![0]).toContain(reason === 'bootstrap-rejection' ? 'source-mismatch' : reason);
+      expect(peer.warn.mock.calls[0]![0]).toContain('expected tag v1/');
+      expect(peer.warn.mock.calls[0]![0]).toContain(`received tag v${reason === 'unsupported-version' ? 0 : 1}/`);
+      expect(peer.result.current.errors).toEqual([]);
+      expect(peer.result.current.core.replicaReady).toBe(true);
+    } finally {
+      peer.close();
+    }
+  },
+);
+
+test('invalid table metadata falls back on the same session and state with one warning', async () => {
+  const peer = await peerHydrationHarness(true);
+  try {
+    peer.bootstrap.mockImplementation(() => {
+      throw new PeerMetadataError('invalid-metadata', 'invalid table cell column');
+    });
+    const { pending } = await peer.start();
+    expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+    expect(peer.open).toHaveBeenCalledWith(peer.source, false);
+    expect(peer.load).not.toHaveBeenCalled();
+    await peer.finish(pending);
+    expect(peer.load).toHaveBeenCalledTimes(1);
+    expect(peer.load.mock.calls[0]![0]).toBe(peer.snapshot.state);
+    expect(peer.result.current.core.session).toBe(peer.session);
+    expect(peer.open.mock.calls.map((call) => call[1])).toEqual([false]);
+    expect(peer.fallback).not.toHaveBeenCalled();
+    expect(peer.warn).toHaveBeenCalledTimes(1);
+    expect(peer.warn.mock.calls[0]![0]).toContain('invalid-metadata: invalid table cell column');
+    expect(peer.warn.mock.calls[0]![0]).toContain('expected tag v1/');
+    expect(peer.warn.mock.calls[0]![0]).toContain('received tag v1/');
+    expect(peer.result.current.errors).toEqual([]);
+    expect(peer.result.current.core.replicaReady).toBe(true);
+  } finally {
+    peer.close();
+  }
+});
+
+test.each(['replace', 'unmount'] as const)('a document %s during metadata bootstrap discards hydration', async (action) => {
+  const peer = await peerHydrationHarness(true);
+  try {
+    const { pending } = await peer.start();
+    expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+    expect(peer.result.current.core.replicaReady).toBe(false);
+    expect(peer.replicas).toEqual([]);
+    const errors = peer.result.current.errors;
+    if (action === 'replace') {
+      act(() => peer.rerender({ ...peer.props, source: peer.source.slice(), generation: 2 }));
+      await waitFor(() => expect(peer.result.current.core.sessionGeneration).toBe(2));
+    } else peer.unmount();
+    await act(async () => peer.tasks.run());
+    await expect(withTimeout(pending, 1000, 'cancelled peer hydration')).rejects.toThrow('The document changed');
+    expect(replicaHelpers.workerOpenReplicaPending(peer.session)).toBe(false);
+    expect(peer.load).not.toHaveBeenCalled();
+    expect(peer.open).not.toHaveBeenCalled();
+    expect(peer.warn).not.toHaveBeenCalled();
+    expect(peer.fallback).not.toHaveBeenCalled();
+    expect(peer.replicas).toEqual([]);
+    expect(errors).toEqual([]);
+    if (action === 'replace') expect(peer.result.current.core.replicaReady).toBe(false);
+  } finally {
+    peer.close();
+  }
+});
+
+test.each([
+  ['fractional omissions and span', '0.5', '1.5', '2.5', 0, 1, 2],
+  ['fractional span truncates to one', '1.5', '0.5', '1.5', 1, 0, 1],
+  ['span above u32 clamps to u16', '0.5', '0.5', '4294967296.5', 0, 0, 65535],
+] as const)(
+  'parser-accepted comment table bootstraps without fallback and exports like source open: %s',
+  async (_name, before, after, span, gridBefore, gridAfter, gridSpan) => {
+    const zip = await JSZip.loadAsync(await peerHydrationSource());
+    const comments = await zip.file('word/comments.xml')!.async('string');
+    const table = '<w:tbl><w:tr><w:trPr>' +
+      `<w:gridBefore w:val="${before}"/><w:gridAfter w:val="${after}"/>` +
+      '</w:trPr><w:tc><w:tcPr>' +
+      `<w:gridSpan w:val="${span}"/>` +
+      '</w:tcPr><w:p><w:r><w:t>Normalized comment cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>';
+    zip.file('word/comments.xml', comments.replace('</w:comment>', table + '</w:comment>'));
+    const source = await zip.generateAsync({ type: 'uint8array' });
+    const peer = await peerHydrationHarness(true, source);
+    try {
+      const { pending } = await peer.start();
+      expect(peer.snapshot.metadata).toBeDefined();
+      expect(peer.bootstrap).toHaveBeenCalledTimes(1);
+      expect(peer.open).not.toHaveBeenCalled();
+      expect(peer.load).not.toHaveBeenCalled();
+      await peer.finish(pending);
+      expect(peer.warn).not.toHaveBeenCalled();
+      expect(peer.fallback).not.toHaveBeenCalled();
+      expect(peer.result.current.core.replicaReady).toBe(true);
+      const baseline = await createYrsSession({ clientId: peer.session.clientId });
+      sessions.push(baseline);
+      baseline.openDocx(source, false);
+      baseline.loadState(peer.snapshot.state);
+      for (const revisionView of ['accepted', 'original', 'markup'] as const) {
+        const options = { revisionView, stories: ['comments' as const] };
+        const actual = peer.session.exportStructured(options);
+        const expected = baseline.exportStructured(options);
+        if (!actual.ok || !expected.ok) throw new Error('Comment table export failed');
+        expect(actual.content).toEqual(expected.content);
+        const block = actual.content.stories[0]!.blocks.find((block) => block.kind === 'table');
+        if (!block || block.kind !== 'table') throw new Error('Expected a comment table');
+        expect(block.table.gridColumns).toBe(gridBefore + gridSpan + gridAfter);
+        expect(block.table.rows[0]).toMatchObject({ gridBefore, gridAfter });
+        expect(block.table.rows[0]!.cells[0]).toMatchObject({ column: gridBefore, gridSpan });
+      }
+      expect(peer.result.current.errors).toEqual([]);
+    } finally {
+      peer.close();
+    }
+  },
+);
+
+function observeMetadataBootstrap(session: YrsSession) {
+  const bootstrap = spyOn(session, 'bootstrapPeer');
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  registerRestore(() => { bootstrap.mockRestore(); warn.mockRestore(); });
+  return {
+    bootstrap,
+    check(installed = true) {
+      expect(bootstrap).toHaveBeenCalledTimes(installed ? 1 : 0);
+      expect(warn.mock.calls.filter(([message]) =>
+        String(message).includes('peer hydration compatibility mode')
+      )).toEqual([]);
+    },
+  };
+}
+
+test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yield %s once with metadata bootstrap', async (boundary) => {
+  const { workers, posted } = installWorker({ peerMetadata: true, holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    if (boundary === 2) await act(async () => tasks.run());
+    act(() => {
+      ensureWorkerOpenReplica(session);
+      expect(session.hasStory('body')).toBe(true);
+      expect(result.current.core.replicaReadyRef?.current).toBe(true);
+      expect(load).not.toHaveBeenCalled();
+      metadata.check();
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(replicas).toEqual([session]);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    expect(session.hasStory('body')).toBe(true);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(replicas).toEqual([session]);
+    metadata.check();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each([false, true])('metadata bootstrap bypasses a loadState error after yielding with failure=%s', async (fails) => {
+  const { workers, posted } = installWorker({ peerMetadata: true, holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  let restoreOpen = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const loadError = new Error('State load failed');
+    const fallbackError = new Error('Replica fallback failed');
+    const load = spyOn(session, 'loadState').mockImplementation(() => { throw loadError; });
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const originalOpen = session.openDocx.bind(session);
+    const fallbackSeeds: boolean[] = [];
+    const open = spyOn(session, 'openDocx').mockImplementation((source, seed, options) => {
+      fallbackSeeds.push(seed);
+      if (fails && seed) throw fallbackError;
+      return originalOpen(source, seed, options);
+    });
+    restoreOpen = registerRestore(() => open.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(load).not.toHaveBeenCalled();
+    metadata.check();
+    expect(result.current.errors).toEqual([]);
+    await act(async () => {
+      await tasks.run();
+      await tasks.run();
+      replicaHelpers.notifyWorkerOpenLayoutProgress(session, 'complete');
+      await pending;
+    });
+    expect(load).not.toHaveBeenCalled();
+    expect(fallbackSeeds).toEqual([]);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(replicas).toEqual([session]);
+    metadata.check();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreOpen();
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each(['replace', 'unmount'] as const)('a document %s between hydration tasks stops the stale peer with metadata bootstrap', async (action) => {
+  const { workers, posted } = installWorker({ peerMetadata: true, holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const props = { ...initialProps,
+      collaboration: { onReplica: (session: unknown) => replicas.push(session as YrsSession | null) },
+    };
+    const { result, rerender, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const errors = result.current.errors;
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    expect(result.current.mainOpens).toEqual([]);
+    metadata.check();
+    expect(session.hasStory('body')).toBe(true);
+    if (action === 'replace') {
+      rerender({ ...props, source: bytes.slice(), generation: 2 });
+      await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+      expect(result.current.core.session).not.toBe(session);
+    } else {
+      unmount();
+    }
+    await act(async () => tasks.run());
+    await expect(pending).rejects.toThrow('The document changed');
+    expect(load).not.toHaveBeenCalled();
+    metadata.check();
+    expect(replicas).toEqual([]);
+    expect(errors).toEqual([]);
+    if (action === 'replace') {
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(false);
+      expect(result.current.core.replicaReadyRef?.current).toBe(false);
+    }
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test('the editor state prefetch waits for a sliced background page-build reply with metadata bootstrap', async () => {
+  const options = {
+    peerMetadata: true,
+    holdCompletion: true,
+    holdReply: (request: ResidentEngineWorkerRequest) =>
+      request.type === 'buildPages' || request.type === 'encodeState',
+  };
+  const { posted, workers, received, reply, replies } = installWorker(options);
+  const frames = holdFrames(true);
+  const fallback = holdPeerFallback();
+  const visibility = stubDocumentVisibility('visible');
+  try {
+    const props = { ...initialProps, source: await longFixture(1200) };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    act(() => result.current.presentFrame());
+    const layout = result.current.renderer.settledDisplayList(null, null, 'document');
+    void layout.catch(() => {});
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    let batch = await received('buildPages');
+    while (batch.type === 'buildPages' && !batch.background) {
+      await act(async () => reply(batch));
+      batch = await received('buildPages', batch.id);
+    }
+    if (batch.type !== 'buildPages') throw new Error('expected a page build');
+    expect(batch.background).toBe(true);
+    expect(batch.pages.length).toBeGreaterThan(4);
+    expect(batch.pages).toEqual(expect.arrayContaining([5, 6]));
+    expect(replies.has(batch.id)).toBe(true);
+    const window = result.current.renderer.settledDisplayList(null, null, 'window');
+    void window.catch(() => {});
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    const postedBeforeReply = posted.length;
+    await act(async () => reply(batch));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    const prefetched = await received('encodeState');
+    expect(posted.indexOf(prefetched)).toBeGreaterThanOrEqual(postedBeforeReply);
+    expectStatePrefetchAfterPageBuilds(posted);
+    await frames.untilCommitted(layout);
+    await window;
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => {
+      reply(prefetched);
+      frames.runIdle();
+    });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expectStatePrefetchAfterPageBuilds(posted);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    metadata.check();
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    visibility.restore();
+    fallback.restore();
+    frames.restore();
+  }
+}, 15_000);
+
+test('the editor peer waits for window layout to settle and then starts on idle with metadata bootstrap', async () => {
+  let holdMargin = true;
+  let marginId: number | null = null;
+  const options = {
+    peerMetadata: true,
+    holdCompletion: true,
+    holdReply: (request: ResidentEngineWorkerRequest) => {
+      if (!holdMargin || request.type !== 'buildPages' || !request.background) return false;
+      marginId ??= request.id;
+      return request.id === marginId;
+    },
+  };
+  const { posted, workers, received, reply } = installWorker(options);
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  try {
+    const props = { ...initialProps, source: await longFixture(1200) };
+    const { result, unmount } = renderHook(useHarness, { initialProps: props });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const full = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(full);
+    const load = spyOn(full, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(full));
+    await waitFor(() => expect(posted.some((request) => request.type === 'completeLayout')).toBe(true));
+    act(() => result.current.presentFrame());
+    let settled = false;
+    const layout = result.current.renderer.settledDisplayList(null, null, 'window');
+    void layout.then(() => { settled = true; }, () => {});
+    await act(async () => {
+      frames.run();
+      frames.runIdle();
+    });
+    expect(settled).toBe(false);
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.core.replicaReady).toBe(false);
+    options.holdCompletion = false;
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(posted.some((request) => request.type === 'buildPages')).toBe(true));
+    await waitFor(() => expect(marginId).not.toBeNull());
+    const margin = await received('buildPages', marginId! - 1);
+    expect(margin).toMatchObject({ type: 'buildPages', pages: [5, 6], background: true });
+    expect(settled).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(0);
+    holdMargin = false;
+    await act(async () => reply(margin));
+    await waitFor(() => expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1));
+    expect(posted.findIndex((request) => request.type === 'encodeState')).toBeGreaterThan(posted.indexOf(margin));
+    await frames.untilCommitted(layout);
+    expect(settled).toBe(true);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect([...frames.idleCallbacks.values()].some(({ options }) => options?.timeout === 2000)).toBe(true);
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(true);
+    expect(result.current.mainOpens).toEqual([]);
+    metadata.check();
+    expect(result.current.errors).toEqual([]);
+    unmount();
+  } finally {
+    cleanup();
+    visibility.restore();
+    frames.restore();
+  }
+}, 15_000);
+
+test.each(['resolved', 'in flight'] as const)(
+  'a host change after state prefetch is %s hydrates the current worker state with metadata bootstrap',
+  async (stage) => {
+    const worker = installWorker({ peerMetadata: true, holdReply: (request) => request.type === 'encodeState' });
+    const frames = holdFrames(true);
+    const visibility = stubDocumentVisibility('visible');
+    let resident!: NonNullable<Awaited<ReturnType<OpenInWorker>>>;
+    const openInWorker: OpenInWorker = async (...args) => {
+      const opened = await result.current.renderer.openInWorker(...args);
+      if (opened) resident = opened;
+      return opened;
+    };
+    const { result, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: await longFixture(1), openInWorker },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const session = result.current.core.session!;
+      const metadata = observeMetadataBootstrap(session);
+      const load = spyOn(session, 'loadState');
+      registerRestore(() => load.mockRestore());
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+      const prefetched = await worker.received('encodeState');
+      const before = worker.responses.get(prefetched)!;
+      if (!before.ok || !before.state || !before.peerMetadata) throw new Error('expected prefetched state');
+      expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+      expect(load).not.toHaveBeenCalled();
+      if (stage === 'resolved') await act(async () => worker.reply(prefetched));
+      const identities = await resident.documentRead({ kind: 'paragraphIdentities' });
+      const paragraph = identities.value.paragraphs.find((entry) => entry.session?.story === 'body')!.session!;
+      await act(async () => {
+        const changed = await resident.proposal({
+          kind: 'propose',
+          request: {
+            expectVersion: identities.version,
+            proposals: [{
+              id: 'after-prefetch', paragraph,
+              suggest: { author: 'Host', date: '2026-10-04T00:00:00Z' },
+              op: 'insertText', at: 'start', text: 'Changed ',
+            }],
+          },
+        });
+        expect(changed.result).toMatchObject({ ok: true });
+      });
+      expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+      await act(async () => frames.runIdle());
+      await waitFor(() => expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(2));
+      const fresh = await worker.received('encodeState', prefetched.id);
+      const after = worker.responses.get(fresh)!;
+      if (!after.ok || !after.state || !after.peerMetadata) throw new Error('expected current worker state');
+      expect(after.version).not.toBe(before.version);
+      expect(load).not.toHaveBeenCalled();
+      await act(async () => {
+        if (stage === 'in flight') worker.reply(prefetched);
+        worker.reply(fresh);
+        await awaitWorkerOpenReplica(session);
+      });
+      expect(load).not.toHaveBeenCalled();
+      expect(metadata.bootstrap.mock.calls[0]![0]).toEqual(new Uint8Array(after.state));
+      expect(metadata.bootstrap.mock.calls[0]![0]).not.toEqual(new Uint8Array(before.state));
+      expect(metadata.bootstrap.mock.calls[0]![1]).toEqual(new Uint8Array(after.peerMetadata));
+      expect(metadata.bootstrap.mock.calls[0]![1].buffer).toBe(after.peerMetadata);
+      expect(metadata.bootstrap.mock.calls[0]![1].buffer).not.toBe(before.peerMetadata);
+      expect(session.paragraphs('body')[0].text).toBe('Changed First paragraph');
+      expect(result.current.mainOpens).toEqual([]);
+      expect(result.current.core.replicaReady).toBe(true);
+      metadata.check();
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      unmount();
+      visibility.restore();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('an already settled editor window prefetches state when its peer begins waiting with metadata bootstrap', async () => {
+  const { posted, received, reply } = installWorker({ peerMetadata: true, holdReply: (request) => request.type === 'encodeState' });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const onLayoutWait = mock(() => {});
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: await longFixture(1), onLayoutWait },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    expect(onLayoutWait).not.toHaveBeenCalled();
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    const prefetched = await received('encodeState');
+    expect(onLayoutWait).toHaveBeenCalledTimes(1);
+    expect(posted.some((request) => request.type === 'buildPages')).toBe(false);
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => reply(prefetched));
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    metadata.check();
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test('a failed state prefetch takes the encode-failure fallback without encoding again with metadata bootstrap', async () => {
+  let holdStateReply = true;
+  const { workers, posted, received, reply, replies } = installWorker({ peerMetadata: true,
+    holdReply: (request) => holdStateReply && request.type === 'encodeState',
+  });
+  const frames = holdFrames(true);
+  const visibility = stubDocumentVisibility('visible');
+  const { result, rerender, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, source: await longFixture(1) },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const load = spyOn(session, 'loadState');
+    registerRestore(() => load.mockRestore());
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(session));
+    act(() => result.current.presentFrame());
+    await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+    const prefetched = await received('encodeState');
+    const lateState = replies.get(prefetched.id)!;
+    await act(async () => {
+      workers[0].onmessage?.({
+        data: { id: prefetched.id, ok: false, error: 'prefetch failed' },
+      } as MessageEvent);
+      reply(prefetched);
+    });
+    expect(replicaHelpers.workerOpenReplicaStarted(session)).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.errors).toEqual([]);
+    await act(async () => frames.runIdle());
+    await waitFor(() => expect(result.current.mainOpens).toEqual([true]));
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.errors).toEqual([]);
+    await act(async () => lateState());
+    expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([true]);
+    metadata.check(false);
+    holdStateReply = false;
+    act(() => rerender({ ...initialProps, source: longBytes.slice(), generation: 2 }));
+    await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const replacement = result.current.core.session!;
+    const replacementMetadata = observeMetadataBootstrap(replacement);
+    const pending = requestWorkerOpenReplica(replacement)!;
+    await act(async () => {
+      replicaHelpers.notifyWorkerOpenLayoutProgress(replacement, 'complete');
+      await pending;
+    });
+    replacementMetadata.check();
+    expect(result.current.core.replicaReady).toBe(true);
+  } finally {
+    unmount();
+    visibility.restore();
+    frames.restore();
+  }
+});
+
+test.each([
+  ['replace', 'resolved'], ['replace', 'in flight'],
+  ['unmount', 'resolved'], ['unmount', 'in flight'],
+] as const)(
+  'a document %s discards a %s state prefetch before peer start with metadata bootstrap',
+  async (action, stage) => {
+    let holdStateReply = true;
+    const { posted, received, reply, responses } = installWorker({ peerMetadata: true,
+      holdReply: (request) => holdStateReply && request.type === 'encodeState',
+    });
+    const frames = holdFrames(true);
+    const visibility = stubDocumentVisibility('visible');
+    const { result, rerender, unmount } = renderHook(useHarness, {
+      initialProps: { ...initialProps, source: await longFixture(1) },
+    });
+    try {
+      await waitFor(() => expect(result.current.host).not.toBeNull());
+      const previous = result.current.core.session!;
+      const previousMetadata = observeMetadataBootstrap(previous);
+      const loadPrevious = spyOn(previous, 'loadState');
+      registerRestore(() => loadPrevious.mockRestore());
+      act(() => result.current.pipeline.runLayoutPipeline());
+      await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(previous));
+      act(() => result.current.presentFrame());
+      await frames.untilCommitted(result.current.renderer.settledDisplayList(null, null, 'window'));
+      const prefetched = await received('encodeState');
+      const oldState = responses.get(prefetched)!;
+      if (!oldState.ok || !oldState.state || !oldState.peerMetadata) throw new Error('expected previous document state');
+      if (stage === 'resolved') await act(async () => reply(prefetched));
+      expect(replicaHelpers.workerOpenReplicaStarted(previous)).toBe(false);
+      const staleIdle = [...frames.idleCallbacks.values()].filter(({ options }) => options?.timeout === 2000);
+      expect(staleIdle).toHaveLength(1);
+      holdStateReply = false;
+      if (action === 'replace') {
+        const source = await longFixture(2);
+        act(() => rerender({ ...initialProps, source, generation: 2 }));
+        await waitFor(() => expect(result.current.core.sessionGeneration).toBe(2));
+      } else unmount();
+      await act(async () => {
+        if (stage === 'in flight') reply(prefetched);
+        for (const { callback } of staleIdle) callback({ didTimeout: false, timeRemaining: () => 50 });
+        frames.runIdle();
+      });
+      expect(loadPrevious).not.toHaveBeenCalled();
+      expect(replicaHelpers.workerOpenReplicaPending(previous)).toBe(false);
+      expect(result.current.mainOpens).toEqual([]);
+      if (action === 'replace') {
+        const replacement = result.current.core.session!;
+        const metadata = observeMetadataBootstrap(replacement);
+        const load = spyOn(replacement, 'loadState');
+        registerRestore(() => load.mockRestore());
+        act(() => result.current.pipeline.runLayoutPipeline());
+        await waitFor(() => expect(result.current.renderer.presentedEngine).toBe(replacement));
+        act(() => result.current.presentFrame());
+        await frames.settleAndIdle(result.current.renderer.settledDisplayList(null, null, 'window'));
+        await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+        expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(2);
+        expect(load).not.toHaveBeenCalled();
+        expect(metadata.bootstrap.mock.calls[0]![0]).not.toEqual(new Uint8Array(oldState.state));
+        metadata.check();
+        expect(texts(replacement).body).toEqual(['First paragraph', 'Tail paragraph']);
+        expect(loadPrevious).not.toHaveBeenCalled();
+        expect(result.current.mainOpens).toEqual([]);
+      } else expect(posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+      previousMetadata.check(false);
+      expect(result.current.errors).toEqual([]);
+    } finally {
+      if (action === 'replace') unmount();
+      visibility.restore();
+      frames.restore();
+    }
+  },
+  15_000
+);
+
+test('worker proposals reach the registry before hydration and survive hand-over with metadata bootstrap', async () => {
+  const { posted } = installWorker({ peerMetadata: true });
+  const frames = holdFrames();
+  const { result, rerender, unmount } = renderHook(useHarness, {
+    initialProps: workerProposalProps,
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const metadata = observeMetadataBootstrap(session);
+    const api = () => result.current.ref.current!;
+    const identities = await api().getParagraphIdentities();
+    const paragraph = identities.paragraphs.find((identity) => identity.session?.story === 'body')!.session!;
+    const initial = await api().getProposals();
+    let applied!: Awaited<ReturnType<DocxEditorRef['proposeChanges']>>;
+    await act(async () => {
+      applied = await api().proposeChanges({
+        expectVersion: initial.version,
+        proposals: [{
+          id: 'worker-proposal', paragraph,
+          suggest: { author: 'Host', date: '2026-09-29T00:00:00Z' },
+          op: 'insertText', at: 'start', text: 'Proposed ',
+        }],
+      });
+    });
+    expect(applied.ok).toBe(true);
+    expect(result.current.core.workerProposalsReady).toBe(true);
+    expect(posted.some((request) => request.type === 'proposal' && request.operation.kind === 'propose')).toBe(true);
+    expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(session.storyIds()).toEqual([]);
+    const mirrored = await api().getProposals();
+    expect(mirrored.proposals.map((proposal) => proposal.id)).toEqual(['worker-proposal']);
+    act(() => rerender({ ...workerProposalProps, viewer: false }));
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    await waitFor(() => expect(result.current.core.replicaReady).toBe(true));
+    expect(result.current.mainOpens).toEqual([]);
+    expect(session.workerDocumentMirrored()).toBe(false);
+    expect(session.getProposals().proposals).toEqual(mirrored.proposals);
+    expect((await api().getProposals()).proposals).toEqual(mirrored.proposals);
+    const workerCalls = posted.filter((request) => request.type === 'proposal').length;
+    const decided = await api().setProposalStates({
+      expectVersion: session.version(),
+      expectPreviewVersion: session.getProposals().previewVersion,
+      changes: [{ id: 'worker-proposal', state: 'accepted' }],
+    });
+    expect(decided.ok).toBe(true);
+    expect(session.getProposals().proposals[0]!.state).toBe('accepted');
+    expect((await api().getProposals()).proposals[0]!.state).toBe('accepted');
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerCalls);
+    metadata.check();
+  } finally {
+    unmount();
+    frames.restore();
+  }
+});
+
+async function openingPluginMetadataFallback() {
+  const source = await longFixture(2);
+  const worker = installWorker({ peerMetadata: true, holdState: true, holdCompletion: true });
+  const frames = holdFrames(true);
+  const clock = holdPeerFallback({ allTimers: true });
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const deferred = spyOn(replicaHelpers, 'deferWorkerOpenReplica');
+  let opened!: NonNullable<Awaited<ReturnType<OpenInWorker>>>;
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: {
+      ...initialProps, source, layoutCompleteSession: null,
+      onWorkerOpen: (worker) => { if (worker) opened = worker; },
+    },
+  });
+  for (let turn = 0; turn < 1_000 && (!opened || result.current.host === null); turn += 1) {
+    await act(async () => {
+      clock.advance(0);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    });
+  }
+  await flushPluginFallback(clock);
+  expect(result.current.host).not.toBeNull();
+  expect(opened).toBeDefined();
+  const session = result.current.core.session!;
+  const metadata = observeMetadataBootstrap(session);
+  expect(session.storyIds()).toEqual([]);
+  expect(result.current.core.replicaReady).toBe(false);
+  const replicaIndex = deferred.mock.calls.findIndex(([owner]) => owner === session);
+  expect(replicaIndex).toBeGreaterThanOrEqual(0);
+  const replica = deferred.mock.results[replicaIndex]!.value as ReturnType<typeof replicaHelpers.deferWorkerOpenReplica>;
+  const snapshot = observePluginFallback(opened.documentRead({
+    kind: 'readParagraphs', request: { view: 'accepted' },
+  }), clock);
+  await flushPluginFallback(clock);
+  expect(snapshot.settled).toBe(true);
+  expect(snapshot.error).toBeUndefined();
+  if (!snapshot.value?.value.ok) throw new Error('The worker paragraph read did not succeed');
+  const version = snapshot.value.version;
+  const paragraphs = snapshot.value.value.paragraphs;
+  expect(paragraphs.map((paragraph) => paragraph.text)).toEqual(['First paragraph', 'Tail paragraph']);
+  const editor = result.current.pagedEditorRef.current!;
+  const focus = mock(() => {});
+  Object.assign(editor, { focus });
+  const flush = spyOn(editor, 'flushPendingInput').mockImplementation(async () => {
+    await replicaHelpers.awaitWorkerOpenReplica(session);
+  });
+  const start = spyOn(replica, 'start');
+  const ensure = spyOn(replica, 'ensure');
+  const requestReady = spyOn(replica, 'requestReady');
+  const requested = spyOn(replicaHelpers, 'requestWorkerOpenReplica');
+  const ensured = spyOn(replicaHelpers, 'ensureWorkerOpenReplica');
+  const readinessRequested = spyOn(replicaHelpers, 'requestWorkerOpenReplicaReadiness');
+  const ready = spyOn(replicaHelpers, 'awaitWorkerOpenReplica');
+  const load = spyOn(session, 'loadState');
+  const apply = spyOn<YrsSession, 'applyEdits'>(session, 'applyEdits');
+  const selection = spyOn(session, 'setSelection');
+  const binding = testBinding();
+  binding.state.admission = async () => {
+    const flushed = await flushEditorInput(result.current.pagedEditorRef);
+    if (!flushed.ok) throw new DocxCommandAdmissionError(flushed.code);
+  };
+  const commands = createDocxCommandController();
+  commands.attach(binding.binding);
+  const controller = new AbortController();
+  const lifetime = new AbortController();
+  const invocation: PluginInvocation<DocxPluginSnapshot> = {
+    pluginId: 'acme.review',
+    activation: {},
+    snapshot: {} as DocxPluginSnapshot,
+    signal: controller.signal,
+    lifetimeSignal: lifetime.signal,
+    state: () => null,
+    setState: () => false,
+    onCleanup: () => {},
+    run: async () => {},
+    commit: (write) => write(),
+    refusal: () => controller.signal.aborted ? 'aborted' : null,
+  };
+  const queries = {
+    sourceState: () => ({ status: 'ready' }),
+    anchorRect: () => ({ pageIndex: 0, x: 0, y: 0, width: 1, height: 1 }),
+  } as unknown as DisplayListQueries;
+  stampSourceVersion(queries, version);
+  const clients = createPluginClients(invocation, {
+    pagedEditorRef: result.current.pagedEditorRef,
+    writeMode: () => 'editing',
+    viewer: () => false,
+    commands: () => commands,
+    layout: () => ({ queries, complete: false, failed: false }),
+    subscribeLayout: (listener) => session.onUpdate(listener),
+  }, () => ({ document: 'write', editBatches: true }), commands.store);
+  return {
+    worker, frames, clock, tasks, visibility, result, unmount, session, replica, metadata,
+    version, paragraphs, clients, focus, flush, start, ensure, requestReady,
+    requested, ensured, readinessRequested, ready, load, apply, selection, binding,
+  };
+}
+
+async function expectPluginMetadataOwnerFallback(
+  calls: (env: Awaited<ReturnType<typeof openingPluginMetadataFallback>>) => readonly Promise<unknown>[],
+  complete: (values: readonly unknown[], env: Awaited<ReturnType<typeof openingPluginMetadataFallback>>) => void | Promise<void>
+) {
+  const env = await openingPluginMetadataFallback();
+  const { clock, replica, result, session, worker } = env;
+  let outcomes: ReturnType<typeof observePluginFallback>[] = [];
+  try {
+    expect(clock.now).toBe(0);
+    expect(worker.posted.filter((request) => request.type === 'open')).toHaveLength(1);
+    expect(result.current.pagedEditorRef.current?.hasPendingInput()).toBe(false);
+    outcomes = calls(env).map((call) => observePluginFallback(call, clock));
+    await flushPluginFallback(clock);
+    expectUnstarted();
+    await act(async () => { clock.advance(9_999); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(9_999);
+    expectUnstarted();
+    await act(async () => { clock.advance(2); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(10_001);
+    expect(replica.started).toBe(true);
+    expect(env.start).toHaveBeenCalledTimes(1);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(env.requested.mock.calls).toEqual([[session]]);
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toHaveLength(1);
+    expect(env.load).not.toHaveBeenCalled();
+    expect(result.current.mainOpens).toEqual([]);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    expectPassiveCall();
+    await act(async () => { worker.workers[0]!.release(); });
+    await flushPluginFallback(clock);
+    expect(env.tasks.tasks).toHaveLength(1);
+    expect(result.current.mainOpens).toEqual([]);
+    await act(async () => { await env.tasks.run(); });
+    await flushPluginFallback(clock);
+    expect(env.load).not.toHaveBeenCalled();
+    env.metadata.check();
+    expect(env.tasks.tasks).toHaveLength(1);
+    await act(async () => { await env.tasks.run(); });
+    await flushPluginFallback(clock);
+    expect(replica.hydrated).toBe(true);
+    expect(replica.pending).toBe(true);
+    const hydratedVersion = replica.readyVersion;
+    expect(hydratedVersion).toBeDefined();
+    if (hydratedVersion === undefined || replica.loadedVersion === undefined) {
+      throw new Error('The replica did not record its hydrated versions');
+    }
+    expect(session.version()).toBe(hydratedVersion);
+    expect(hydratedVersion).toBe(replica.loadedVersion);
+    expect(hydratedVersion).not.toBe(env.version);
+    expect(clock.now).toBe(10_001);
+    expect(result.current.core.replicaReady).toBe(false);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    await act(async () => { clock.advance(2_999); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(13_000);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    await act(async () => { clock.advance(27_001); });
+    await flushPluginFallback(clock);
+    expect(clock.now).toBe(10_000 + 30_000 + 1);
+    for (const outcome of outcomes) {
+      expect(outcome.settled).toBe(true);
+      expect(outcome.error).toBeUndefined();
+      expect(outcome.at).toBeLessThanOrEqual(10_000 + 30_000 + 1);
+    }
+    expect(replica.pending).toBe(false);
+    expect(result.current.core.replicaReady).toBe(true);
+    const applied = env.apply.mock.results
+      .flatMap((call) => call.type === 'return' && call.value ? [call.value] : [])
+      .find((value) => value.ok && value.applied);
+    expect(session.version()).toBe(applied?.version ?? hydratedVersion);
+    expect(env.start).toHaveBeenCalledTimes(1);
+    expect(env.requested.mock.calls).toEqual([[session]]);
+    expect(env.load).not.toHaveBeenCalled();
+    env.metadata.check();
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.core.session).toBe(session);
+    expect<unknown[]>([null, session]).toContain(result.current.renderer.layoutCompleteSession);
+    expect(result.current.errors).toEqual([]);
+    expectPassiveCall();
+    await complete(outcomes.map((outcome) => outcome.value), env);
+  } finally {
+    env.unmount();
+    env.visibility.restore();
+    env.tasks.restore();
+    env.clock.restore();
+    env.frames.restore();
+  }
+
+  function expectPassiveCall() {
+    expect(env.ensure).not.toHaveBeenCalled();
+    expect(env.requestReady).not.toHaveBeenCalled();
+    expect(env.ensured).not.toHaveBeenCalled();
+    expect(env.readinessRequested).not.toHaveBeenCalled();
+    expect(env.ready.mock.calls).toEqual(outcomes.map(() => [session]));
+    expect(env.flush).toHaveBeenCalledTimes(outcomes.length);
+    expect(result.current.pagedEditorRef.current?.hasPendingInput()).toBe(false);
+  }
+
+  function expectUnstarted() {
+    expect(replica.pending).toBe(true);
+    expect(replica.started).toBe(false);
+    expect(env.start).not.toHaveBeenCalled();
+    expect(env.requested).not.toHaveBeenCalled();
+    expect(env.load).not.toHaveBeenCalled();
+    expect(env.apply).not.toHaveBeenCalled();
+    expect(env.selection).not.toHaveBeenCalled();
+    expect(env.focus).not.toHaveBeenCalled();
+    expect(env.binding.calls).toEqual([]);
+    expect(result.current.mainOpens).toEqual([]);
+    expect(result.current.renderer.layoutCompleteSession).toBeNull();
+    expect(worker.posted.filter((request) => request.type === 'encodeState')).toEqual([]);
+    for (const outcome of outcomes) expect(outcome.settled).toBe(false);
+    expectPassiveCall();
+  }
+}
+
+test('a pre-hydration worker version applies after unchanged owner hydration and becomes stale after an edit with metadata bootstrap', async () => {
+  await expectPluginMetadataOwnerFallback(() => [], async (_values, env) => {
+    const readyVersion = env.replica.readyVersion;
+    if (readyVersion === undefined) throw new Error('The replica did not record its ready version');
+    const request = {
+      expectVersion: env.version,
+      steps: [{
+        op: 'replaceText' as const,
+        target: { kind: 'paragraph' as const, story: 'body', paraId: env.paragraphs[0]!.paraId },
+        text: 'Owner-ready edit',
+      }],
+    };
+    expect(env.replica.handoverVersion).toBe(env.version);
+    expect(env.session.version()).toBe(readyVersion);
+    const applied = await env.clients.edits!.applyEdits(request);
+    expect(applied).toMatchObject({ ok: true, applied: true, changedStories: ['body'] });
+    expect(env.apply.mock.calls[0]![0].expectVersion).toBe(readyVersion);
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    const editedVersion = env.session.version();
+    expect(editedVersion).not.toBe(env.replica.readyVersion);
+    expect(await env.clients.edits!.applyEdits({
+      ...request, steps: [{ ...request.steps[0]!, text: 'Stale edit' }],
+    })).toMatchObject({ ok: false, version: editedVersion, failure: { code: 'stale-version' } });
+    expect(env.apply.mock.calls[1]![0].expectVersion).toBe(env.version);
+    expect(env.session.version()).toBe(editedVersion);
+    expect(env.session.paragraphs('body')[0]!.text).toBe('Owner-ready edit');
+    expect(await env.clients.navigation.scrollToParagraph(
+      { story: 'body', paraId: env.paragraphs[1]!.paraId },
+      { expectVersion: env.version, focus: true }
+    )).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+    expect(env.selection).not.toHaveBeenCalled();
+    expect(env.focus).not.toHaveBeenCalled();
+    expect(env.result.current.searchReveals).toEqual([]);
+  });
+});
 
 function parsedDocument(originalBuffer?: ArrayBuffer): Document {
   return {
