@@ -1,7 +1,6 @@
+import { hasEditorWorkerProposalRounds, registeredWorkerProposalAuthority, subscribeEditorWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
-import { proposalRevisionPreview, type DocxProposalSnapshot, type YrsSession } from '@betteroffice/docx/yrs';
-import { workerOpenDocumentHeld } from '../components/DocxEditor/internals/workerOpenReplica';
-import { workerProposalRoundAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { proposalRevisionPreview, type YrsSession, type DocxProposalSnapshot } from '@betteroffice/docx/yrs';
 import {
   revisionPreviewKey,
   revisionPreviewKeyOf,
@@ -16,13 +15,11 @@ export type {
 interface ProposalRegistry {
   getProposals(): DocxProposalSnapshot;
   onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
-  workerDocumentMirrored(): boolean;
 }
 
 /** The session's proposal registry, or null for a session without one. */
 export function proposalSnapshot(session: object | null): DocxProposalSnapshot | null {
-  const worker = session ? workerProposalRoundAuthority(session as YrsSession) : null;
-  if (worker && (worker.initialized || !workerOpenDocumentHeld(session as YrsSession))) return worker.snapshot();
+  if (session && hasEditorWorkerProposalRounds(session as YrsSession)) return registeredWorkerProposalAuthority(session as YrsSession)!.snapshot();
   const registry = session as Partial<ProposalRegistry> | null;
   return typeof registry?.getProposals === 'function' ? registry.getProposals() : null;
 }
@@ -32,23 +29,24 @@ export function observeProposals(
   listener: (snapshot: DocxProposalSnapshot) => void
 ): () => void {
   const registry = session as Partial<ProposalRegistry>;
-  const worker = workerProposalRoundAuthority(session as YrsSession);
-  const update = () => { const snapshot = proposalSnapshot(session); if (snapshot) listener(snapshot); };
   const unsubscribe = typeof registry.onProposalChange === 'function'
-    ? registry.onProposalChange(update)
+    ? registry.onProposalChange((snapshot) => {
+        if (hasEditorWorkerProposalRounds(session as YrsSession)) {
+          const current = proposalSnapshot(session);
+          if (current) listener(current);
+        } else listener(snapshot);
+      })
     : () => {};
-  const unsubscribeWorker = typeof registry.workerDocumentMirrored === 'function'
-    ? worker?.subscribe(() => { if (!workerOpenDocumentHeld(session as YrsSession)) update(); })
-    : undefined;
-  return () => { unsubscribe(); unsubscribeWorker?.(); };
+  const unsubscribeWorker = subscribeEditorWorkerProposalAuthority(session as YrsSession, () => {
+    const snapshot = proposalSnapshot(session);
+    if (snapshot) listener(snapshot);
+  });
+  return () => { unsubscribe(); unsubscribeWorker(); };
 }
 
 /** The preview key a layout of the session's current preview carries. */
 export function currentPreviewKey(session: object | null): string {
-  const worker = session ? workerProposalRoundAuthority(session as YrsSession) : null;
-  if (worker && (worker.initialized || !workerOpenDocumentHeld(session as YrsSession))) {
-    return revisionPreviewKey(worker.revisionPreview());
-  }
+  if (session && hasEditorWorkerProposalRounds(session as YrsSession)) return revisionPreviewKey(registeredWorkerProposalAuthority(session as YrsSession)!.revisionPreview());
   const snapshot = proposalSnapshot(session);
   return revisionPreviewKey(snapshot ? proposalRevisionPreview(snapshot) : undefined);
 }

@@ -11,7 +11,7 @@ import type { WorkerOpenedDocument } from './useDisplayList';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createYrsPositionProjection } from '../internals/yrsPositionProjection';
 import { stampSourceVersion } from '../internals/layoutProvenance';
-import { snapshotWorkerProposalPeer, registerWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
+import { beginWorkerProposalHandover, registerWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
 import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { yrsCellStory } from '../yrsCommands';
 import { topPageInView, useHostSearch, type DocxSearchState } from './useHostSearch';
@@ -217,26 +217,20 @@ async function workerSearch(h: Pick<Awaited<ReturnType<typeof mount>>, 'session'
       await waiting;
       return { version, value };
     },
-    syncUpdate: async (_update: Uint8Array, vector: Uint8Array) => ({
-      version: session.version(), stateVector: session.encodeStateVector(), repair: session.encodeStateAsUpdate(vector),
-    }),
-    integrateProposalUpdate: (update: Uint8Array) => h.session.applyHostUpdate(update),
     handOver: async () => ({
       state: session.encodeState(), version: session.version(), proposals: snapshot().mirror.proposals,
     }),
   };
-  const authority = registerWorkerProposalAuthority(h.session, worker as unknown as WorkerOpenedDocument, {
+  registerWorkerProposalAuthority(h.session, worker as unknown as WorkerOpenedDocument, {
     relayout: () => {}, current: () => h.pagedEditorRef.current?.getYrsSession() === h.session,
-    laidOut: async () => {}, adopted: () => {}, contentChanged: () => {},
+    laidOut: async () => {}, adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
   });
   let replicaRequests = 0;
   deferWorkerOpenReplica(h.session, async () => {
     replicaRequests += 1;
-    const handover = await snapshotWorkerProposalPeer(h.session)!;
-    return () => { h.session.loadState(handover.state); };
-  }, () => { throw new Error('unexpected main fallback'); }, () => {}, {
-    current: () => true, cancel: () => {}, catchUp: (complete) => authority.catchUp(complete),
-  });
+    const handover = await beginWorkerProposalHandover(h.session)!;
+    return () => { h.session.loadState(handover.state); handover.complete(); };
+  }, () => { throw new Error('unexpected main fallback'); }, () => {});
   return {
     session,
     reads,

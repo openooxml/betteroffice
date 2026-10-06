@@ -52,6 +52,9 @@ import {
   registeredWorkerProposalAuthority,
   workerProposalAuthority,
   workerProposalRoundAuthority,
+  activateEditorWorkerProposalRounds,
+  editorWorkerProposalActivationAvailable,
+  hasEditorWorkerProposalRounds,
   type WorkerProposalAuthority,
 } from '../internals/workerProposalAuthority';
 
@@ -318,6 +321,8 @@ function gateReplicaAccess(
           return Reflect.apply(call, api, args);
         }
         if (session) {
+          if ((key === 'proposeChanges' || key === 'setProposalStates' || key === 'withdrawProposals') &&
+            editorWorkerProposalActivationAvailable(session)) return Reflect.apply(call, api, args);
           if (key === 'exportStructuredWithPages' && workerOpenExport(session)) {
             return Reflect.apply(call, api, args);
           }
@@ -734,7 +739,7 @@ export function useDocxEditorRefApi({
     onWorker: (
       authority: WorkerProposalAuthority,
       main: (request: R) => Promise<DocxProposalResult>,
-      admission: ReturnType<typeof roundAdmission>
+      admission?: ReturnType<typeof roundAdmission>
     ) => Promise<DocxProposalResult>,
     call: (session: YrsSession, request: R) => DocxProposalResult
   ): Promise<DocxProposalResult> => {
@@ -748,19 +753,32 @@ export function useDocxEditorRefApi({
         experimentalWorkerOpen
       );
     };
+    const session = pagedEditorRef.current?.getYrsSession();
+    const execute = (authority: WorkerProposalAuthority | null): Promise<DocxProposalResult> => {
+      if (!authority) return main(request);
+      if (!hostProposalsAllowed()) {
+        return Promise.resolve({
+          ok: false,
+          version: pagedEditorRef.current!.getYrsSession()!.version(),
+          failure: { code: 'read-only', message: 'The editor is read-only' },
+        });
+      }
+      if (!session || !hasEditorWorkerProposalRounds(session)) return onWorker(authority, main);
+      return onWorker(authority, main, roundAdmission(true)).catch((error: unknown) => {
+        if (error instanceof ProposalAdmissionRefusal) return error.result;
+        throw error;
+      });
+    };
     const authority = roundAuthority();
-    if (!authority) return main(request);
-    if (!hostProposalsAllowed()) {
-      return Promise.resolve({
-        ok: false,
-        version: pagedEditorRef.current!.getYrsSession()!.version(),
-        failure: { code: 'read-only', message: 'The editor is read-only' },
+    if (authority) return execute(authority);
+    if (modeRef.current !== 'viewing' && hostProposalsAllowed() && experimentalWorkerOpen && session &&
+      editorWorkerProposalActivationAvailable(session)) {
+      return activateEditorWorkerProposalRounds(session, () => modeRef.current !== 'viewing' && hostProposalsAllowed()).then((activated) => {
+        if (pagedEditorRef.current?.getYrsSession() !== session) throw new Error('The document changed while applying proposals');
+        return execute(activated);
       });
     }
-    return onWorker(authority, main, roundAdmission(true)).catch((error: unknown) => {
-      if (error instanceof ProposalAdmissionRefusal) return error.result;
-      throw error;
-    });
+    return main(request);
   };
   const createApi = (): DocxEditorRef => {
     const held = () => {
@@ -880,6 +898,8 @@ export function useDocxEditorRefApi({
       getProposals: () => {
         const main = async () =>
           (await mainSession()).session.getProposals();
+        const session = pagedEditorRef.current?.getYrsSession();
+        if (!session || !hasEditorWorkerProposalRounds(session)) return proposalAuthority()?.getProposals(main) ?? main();
         return roundAuthority()?.getProposals(main, roundAdmission(false)) ?? main();
       },
 

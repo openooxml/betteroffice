@@ -27,9 +27,7 @@ import type { LayoutSelectionGate } from '../internals/LayoutSelectionGate';
 import { documentPageCount } from './documentPageCount';
 import type { FontRequirementsInWorker, LayoutInWorker } from './useDisplayList';
 import {
-  awaitWorkerOpenReplica,
   ensureWorkerOpenReplica,
-  requestWorkerOpenReplicaReadiness,
   workerOpenDocumentHeld,
   workerOpenReplicaPending,
   workerOpenReplicaStarted,
@@ -38,6 +36,7 @@ import {
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
   registeredWorkerProposalAuthority,
+  hasEditorWorkerProposalRounds,
   workerProposalAuthority,
   workerProposalFailure,
 } from '../internals/workerProposalAuthority';
@@ -165,6 +164,9 @@ function addsFontChainsOnly(
 }
 
 function workerProposalRenderEnv(session: YrsSession, renderEnv: YrsRenderEnv): YrsRenderEnv {
+  if (!hasEditorWorkerProposalRounds(session)) return workerProposalAuthority(session)?.initialized
+    ? { ...renderEnv, revisionPreview: proposalRevisionPreview(session.getProposals()) }
+    : renderEnv;
   return registeredWorkerProposalAuthority(session)?.snapshot()
     ? { ...renderEnv, revisionPreview: registeredWorkerProposalAuthority(session)!.revisionPreview() ??
         proposalRevisionPreview(session.getProposals()) }
@@ -285,11 +287,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     if (
       layout &&
       session &&
-      registeredWorkerProposalAuthority(session)?.snapshot() &&
+      (hasEditorWorkerProposalRounds(session) ? registeredWorkerProposalAuthority(session)?.snapshot() : workerProposalAuthority(session)?.initialized) &&
       !isSupersededLayout(layout) &&
       sourceVersionOf(layout) === session.version() &&
       revisionPreviewKeyOf(layout) ===
-        revisionPreviewKey(registeredWorkerProposalAuthority(session)!.revisionPreview())
+        revisionPreviewKey(hasEditorWorkerProposalRounds(session) ? registeredWorkerProposalAuthority(session)!.revisionPreview() : proposalRevisionPreview(session.getProposals()))
     ) markLayoutQueued(session, false);
     onLayoutComputedRef.current?.(layout);
     const total = documentPageCount(layout);
@@ -510,20 +512,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           if (isViewerSession(session) && workerRequirements == null) {
             throw new Error('The document worker did not return font requirements');
           }
-          if (onHost && workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
-            markLayoutQueued(session, true);
-            requestWorkerOpenReplicaReadiness(session);
-            void awaitWorkerOpenReplica(session)?.then(() => {
-              if (pass === passRef.current && sessionRef.current === session) run(workerRequirements);
-            }, (error: unknown) => {
-              if (pass !== passRef.current || sessionRef.current !== session) return;
-              invalidateRetainedLayout();
-              markLayoutQueued(session, false);
-              reportLayoutError(session, error);
-              syncCoordinator.onLayoutComplete(currentEpoch);
-            });
-            return;
-          }
           const requirements = JSON.parse(
             workerRequirements ?? session.layoutFontRequirementsJson(input)
           ) as ResidentFontRequirement[];
@@ -692,18 +680,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
           try {
             // An edit may have landed since the pass began.
             if (workerOpenEnabledRef.current) ensureWorkerOpenReplica(session);
-            if (workerOpenEnabledRef.current && workerOpenReplicaPending(session)) {
-              markLayoutQueued(session, true);
-              requestWorkerOpenReplicaReadiness(session);
-              void awaitWorkerOpenReplica(session)?.then(() => {
-                if (pass === passRef.current && sessionRef.current === session) layOutHere({ recovery });
-              }, (error: unknown) => {
-                if (pass !== passRef.current || sessionRef.current !== session) return;
-                markLayoutQueued(session, false);
-                reportLayoutError(session, error);
-              });
-              return;
-            }
             const version = readSourceVersion();
             const computation = computeLayout(computeInputs);
             applyComputation(computation, layoutUpdateOrigin, version);

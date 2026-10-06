@@ -1074,7 +1074,7 @@ export function useRustDisplayList(
         ensureRebuildableReplica(hostEngine);
       }
       try {
-        const retired = registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback');
+        const retired = editorRounds && registeredWorkerProposalAuthority(hostEngine)?.retire('source-fallback');
         if (editorRounds && retired) {
           if (cause === undefined) {
             console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
@@ -1308,7 +1308,9 @@ export function useRustDisplayList(
         paintToken: number,
         cause: unknown
       ): Promise<ResidentFrameApplyResult | null> => {
-        if (!dropEditorWorker(hostEngine, cause)) throw workerFailureRef.current.get(hostEngine);
+        if (hasEditorWorkerProposalRounds(hostEngine)) {
+          if (!dropEditorWorker(hostEngine, cause)) throw workerFailureRef.current.get(hostEngine);
+        } else adoptHostEngine(hostEngine);
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;
@@ -1569,6 +1571,7 @@ export function useRustDisplayList(
       });
     },
     [
+      adoptHostEngine,
       dropEditorWorker,
       applyPaintedCaretReply,
       markSettled,
@@ -1625,9 +1628,26 @@ export function useRustDisplayList(
         if (outcome !== 'failed') throw new SupersededPreviewError();
         return false;
       }
-      return dropEditorWorker(hostEngine, cause);
+      if (hasEditorWorkerProposalRounds(hostEngine)) return dropEditorWorker(hostEngine, cause);
+      if (holdsWorkerProposals(hostEngine)) {
+        failWorkerDocument(
+          hostEngine, cause ?? new Error('The resident worker holds proposals the main thread cannot rebuild')
+        );
+        return false;
+      }
+      if (workerOpenEnabledRef.current && workerOpenReplicaPending(hostEngine)) {
+        ensureRebuildableReplica(hostEngine);
+      }
+      adoptHostEngine(hostEngine);
+      if (workerRef.current?.engine === hostEngine) {
+        workerRef.current.client.destroy();
+        workerRef.current = null;
+      }
+      setWorkerSurfacesActive(false);
+      setWorkerPresentationActive(false);
+      return true;
     },
-    [dropEditorWorker, isViewerSession, replaceOutOfMemoryWorker]
+    [adoptHostEngine, dropEditorWorker, ensureRebuildableReplica, failWorkerDocument, isViewerSession, replaceOutOfMemoryWorker, setWorkerPresentationActive]
   );
 
   const requestOpenedWorker = useCallback(
@@ -1817,7 +1837,8 @@ export function useRustDisplayList(
         if (reply.repair) {
           suppressWorkerInvalidationRef.current += 1;
           try {
-            peer.applyHostUpdate(reply.repair);
+            if (hasEditorWorkerProposalRounds(peer)) peer.applyHostUpdate(reply.repair);
+            else peer.applyLocalUpdate(reply.repair);
           } finally {
             suppressWorkerInvalidationRef.current -= 1;
           }
@@ -1869,7 +1890,7 @@ export function useRustDisplayList(
           revisionCount: () => requestOpenedWorker(hostEngine, (owner) => owner.client.revisionCount()),
           proposal: (op, prepare) =>
             requestOpenedWorker(hostEngine, async (owner) => {
-              if (!isViewerSession(hostEngine) && workerOpenReplicaReady(hostEngine)) {
+              if (hasEditorWorkerProposalRounds(hostEngine) && !isViewerSession(hostEngine) && workerOpenReplicaReady(hostEngine)) {
                 await owner.client.whenBootstrapSent();
               }
               owner.proposalFontRequirements = undefined;
@@ -1970,6 +1991,10 @@ export function useRustDisplayList(
                 ? workerFailureRef.current.get(hostEngine) ?? cause
                 : new SupersededPreviewError();
             }
+            if (!hasEditorWorkerProposalRounds(hostEngine)) {
+              const owner = workerRef.current;
+              if (!owner || !isCurrentWorker(hostEngine, owner)) throw new SupersededPreviewError();
+            }
             if (!dropWorker(hostEngine)) throw workerFailureRef.current.get(hostEngine);
             needsLayout = true;
           },
@@ -1983,7 +2008,7 @@ export function useRustDisplayList(
           replicaReady: () => {
             if (unmountedRef.current || sessionLoad(hostEngine) !== documentLoadsRef.current) return;
             if (
-              !isLayoutQueued(hostEngine) && (needsLayout ||
+              (!hasEditorWorkerProposalRounds(hostEngine) || !isLayoutQueued(hostEngine)) && (needsLayout ||
                 (workerRef.current?.engine === hostEngine && !workerRef.current.client.bootstrapSent()))
             ) {
               const load = documentLoadsRef.current;

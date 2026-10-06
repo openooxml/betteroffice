@@ -13,7 +13,7 @@ import type { DocxEditorRef } from '../../DocxEditor';
 import type { PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import { applyEditBatch } from '../editorBatches';
-import { registerWorkerProposalAuthority, handedOverRequest } from '../internals/workerProposalAuthority';
+import { installEditorWorkerProposalActivation, registeredWorkerProposalAuthority, handedOverRequest, registerWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
 import { useRustDisplayList } from './useDisplayList';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
@@ -96,6 +96,7 @@ async function editor(holdHydration = false) {
   const replica = deferWorkerOpenReplica(peer, async () => {
     const state = await opened.encodeVersionedState!();
     events.push('snapshot');
+    if (holdHydration) { loaded.resolve(); await release.promise; }
     return [
       () => { peer.loadState(state.state); events.push('load'); loaded.resolve(); },
     ];
@@ -105,18 +106,14 @@ async function editor(holdHydration = false) {
     opened.replicaReady();
   }, {
     current: () => true, cancel: () => {},
-    serializeHydration: (load, complete) => authority.hydratePeer(async () => {
-      await load();
-      if (holdHydration) await release.promise;
-    }, () => { events.push('catchUp'); complete(); }),
   });
   await renderer.result.current.layoutInWorker(peer, LAYOUT);
-  const authority = registerWorkerProposalAuthority(peer, opened, {
+  let authority: ReturnType<typeof registerWorkerProposalAuthority> | null = null;
+  installEditorWorkerProposalActivation(peer, () => authority ??= registerWorkerProposalAuthority(peer, opened, {
     editorPeer: true, current: () => true, laidOut: async () => {}, adopted: () => {},
     relayout: () => {}, contentChanged: () => {}, projectionChanged: peerProjection,
     peerUpdated: () => { if (!replica.pending) refresh(); },
-  });
-  await authority.initialize();
+  }));
   const editor = {
     getYrsSession: () => peer, getDocument: () => document,
     flushPendingInput: async () => {}, syncYrsInputState: refresh,
@@ -147,7 +144,10 @@ async function editor(holdHydration = false) {
   });
   const ready = requestWorkerOpenReplica(peer)!;
   if (holdHydration) await loaded.promise;
-  else await act(async () => { await ready; });
+  else {
+    await act(async () => { await ready; });
+    snapshot(await hook.result.current.api.current!.proposeChanges({ expectVersion: peer.version(), proposals: [] }));
+  }
   const proposal = (id: string, content = 'Worker ', at: 'start' | 'end' = 'start'): DocxProposalInput => ({
     id, paragraph: {
       kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001',
@@ -157,7 +157,11 @@ async function editor(holdHydration = false) {
     peer.insertText({ story: 'body', paraId: '00000001', offset: 0 }, content);
   };
   return {
-    peer, worker, authority, replica, ready, release: () => release.resolve(), events, refresh, peerProjection,
+    peer, worker, get authority() {
+      const current = registeredWorkerProposalAuthority(peer);
+      if (!current) throw new Error('No editor round has activated');
+      return current;
+    }, replica, ready, release: () => release.resolve(), events, refresh, peerProjection,
     api: hook.result.current.api.current!, hook, renderer, pagedEditorRef, proposal, type, modeRef, allowHostProposalsRef,
     workerText: () => text(worker.sessions[0]!.proposalEngine),
   };
@@ -241,25 +245,25 @@ test('typing after posting merges with a successful round and invalidates covera
   expect(text(h.peer)).toContain('Typed ');
   expect(text(h.peer)).toContain('Worker ');
   expect(h.authority.workerCoversPeer(h.peer.version())).toBe(false);
-  await h.authority.catchUp();
+  await h.api.getProposals();
   expect(text(h.peer)).toBe(h.workerText());
 });
 
-test('a hydration round stays in the worker and readiness follows the authority catch-up', async () => {
+test('the first ref round waits for base hydration and then runs in the worker without fallback', async () => {
   const h = await editor(true);
   expect(h.replica.pending).toBe(true);
   const before = h.worker.requests.filter((type) => type === 'proposal').length;
   const peerPropose = spyOn(h.peer, 'proposeChanges');
-  const round = h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('during')] });
+  const round = h.api.proposeChanges({ expectVersion: h.worker.sessions[0]!.proposalEngine.version(), proposals: [h.proposal('during')] });
   expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
-  expect(h.events).toEqual(['snapshot', 'load']);
+  expect(h.events).toEqual(['snapshot']);
   expect(h.replica.pending).toBe(true);
-  expect(h.authority.workerCoversPeer(h.peer.version())).toBe(false);
+  expect(registeredWorkerProposalAuthority(h.peer)).toBeNull();
   h.release();
   await act(async () => { await h.ready; snapshot(await round); });
   expect(peerPropose).not.toHaveBeenCalled();
   expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before + 2);
-  expect(h.events).toEqual(['snapshot', 'load', 'catchUp', 'ready']);
+  expect(h.events).toEqual(['snapshot', 'load', 'ready']);
   expect(text(h.peer)).toBe(h.workerText());
   expect(h.authority.workerCoversPeer(h.peer.version())).toBe(true);
   expect(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('after', 'After ')] }))
@@ -294,6 +298,74 @@ test('same proposal ids stay independent and both decisions enter the preview by
   const settled = snapshot(await h.api.withdrawProposals({ expectVersion: h.peer.version(), ids: ['same'] }));
   expect(settled.proposals).toEqual([]);
   expect(h.peer.getProposals().proposals.map(({ id }) => id)).toEqual(['same']);
+});
+
+test('same proposal ids retain separate records and decisions after permanent worker loss', async () => {
+  const h = await editor();
+  let local!: ReturnType<typeof snapshot>;
+  let remote!: ReturnType<typeof snapshot>;
+  await act(async () => {
+    local = snapshot(h.peer.proposeChanges({ expectVersion: h.peer.version(), proposals: [{
+      ...h.proposal('same', 'Local '), suggest: { ...SUGGEST, author: 'Peer author' },
+    }] }));
+    remote = snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [{
+      ...h.proposal('same', 'Worker ', 'end'), suggest: { ...SUGGEST, author: 'Worker author' },
+    }] }));
+    local = snapshot(h.peer.setProposalStates({ expectVersion: h.peer.version(),
+      expectPreviewVersion: local.previewVersion, changes: [{ id: 'same', state: 'rejected' }] }));
+    remote = snapshot(await h.api.setProposalStates({ expectVersion: h.peer.version(),
+      expectPreviewVersion: remote.previewVersion, changes: [{ id: 'same', state: 'accepted' }] }));
+  });
+  const localRecords = structuredClone(local.proposals);
+  const workerRecords = structuredClone(remote.proposals);
+  const localIds = localRecords.flatMap(({ revisionIds }) => revisionIds);
+  const workerIds = workerRecords.flatMap(({ revisionIds }) => revisionIds);
+  expect(localIds.length).toBeGreaterThan(0);
+  expect(workerIds.length).toBeGreaterThan(0);
+  const authors = () => h.peer.listRevisions().filter(({ revisionId }) =>
+    [...localIds, ...workerIds].includes(revisionId)).map(({ revisionId, author, date }) => ({ revisionId, author, date }));
+  const originalAuthors = authors();
+  expect(originalAuthors.some(({ author }) => author === 'Peer author')).toBe(true);
+  expect(originalAuthors.some(({ author }) => author === 'Worker author')).toBe(true);
+  const previewVersion = h.authority.previewVersion();
+  const preview = structuredClone(h.authority.revisionPreview());
+  spyOn(console, 'error').mockImplementation(() => {});
+  const requests = h.worker.requests.filter((type) => type === 'proposal').length;
+  await act(async () => {
+    h.worker.onerror?.({ message: 'same-id worker crashed' } as ErrorEvent);
+    expect(await h.renderer.result.current.layoutInWorker(h.peer, LAYOUT)).toBeNull();
+  });
+  expect(h.authority.retirementReason()).toBe('source-fallback');
+  expect(h.peer.getProposals().proposals).toEqual(localRecords);
+  expect((await h.api.getProposals()).proposals).toEqual(workerRecords);
+  expect(authors()).toEqual(originalAuthors);
+  expect(h.authority.previewVersion()).toBeGreaterThanOrEqual(previewVersion);
+  expect(h.hook.result.current.preview.revisionPreview).toEqual(preview);
+  for (const id of localIds) expect(preview![id]).toBe('rejected');
+  for (const id of workerIds) expect(preview![id]).toBe('accepted');
+  await act(async () => {
+    remote = snapshot(await h.api.setProposalStates({ expectVersion: h.peer.version(),
+      expectPreviewVersion: remote.previewVersion, changes: [{ id: 'same', state: 'rejected' }] }));
+  });
+  expect(h.peer.getProposals().proposals).toEqual(localRecords);
+  expect(remote.proposals).toEqual(workerRecords.map((record) => ({ ...record, state: 'rejected' })));
+  await act(async () => {
+    local = snapshot(h.peer.setProposalStates({ expectVersion: h.peer.version(),
+      expectPreviewVersion: local.previewVersion, changes: [{ id: 'same', state: 'accepted' }] }));
+  });
+  expect((await h.api.getProposals()).proposals).toEqual(remote.proposals);
+  expect(local.proposals).toEqual(localRecords.map((record) => ({ ...record, state: 'accepted' })));
+  await act(async () => {
+    snapshot(await h.api.withdrawProposals({ expectVersion: h.peer.version(), ids: ['same'] }));
+  });
+  expect((await h.api.getProposals()).proposals).toEqual([]);
+  expect(h.peer.getProposals().proposals).toEqual(local.proposals);
+  await act(async () => {
+    snapshot(h.peer.withdrawProposals({ expectVersion: h.peer.version(), ids: ['same'] }));
+  });
+  expect(h.peer.getProposals().proposals).toEqual([]);
+  expect((await h.api.getProposals()).proposals).toEqual([]);
+  expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(requests);
 });
 
 test('plugin peer batches map a worker token through every correspondence and reject it after an edit', async () => {
@@ -453,15 +525,14 @@ test('a worker crash after a completed round hands over once and keeps edits and
   expect(report).toHaveBeenCalledTimes(1);
   expect(workers).toHaveLength(1);
   expect(text(h.peer)).toBe(before);
-  const retained = [...expected.proposals, ...existing.proposals];
-  expect(await h.api.getProposals()).toMatchObject({ proposals: retained });
-  expect(h.peer.getProposals().proposals).toEqual(retained);
+  expect(await h.api.getProposals()).toMatchObject({ proposals: expected.proposals });
+  expect(h.peer.getProposals().proposals).toEqual(existing.proposals);
   await act(async () => {
     snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [{
       ...h.proposal('local'), op: 'insertText', at: { offset: text(h.peer).indexOf('Alpha') + 2 }, text: 'Peer ',
     }] }));
   });
-  expect(local).toHaveBeenCalledTimes(1);
+  expect(local).not.toHaveBeenCalled();
   expect(text(h.peer)).toContain('Typed ');
   expect(text(h.peer)).toContain('Worker ');
   expect(text(h.peer)).toContain('Peer ');
@@ -473,7 +544,7 @@ test('a worker crash after a completed round hands over once and keeps edits and
   expect(report).toHaveBeenCalledTimes(1);
   expect(workers).toHaveLength(1);
   expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(requests);
-  expect((await h.api.getProposals()).proposals.map(({ id }) => id)).toEqual(['retained', 'peer-existing', 'local']);
+  expect((await h.api.getProposals()).proposals.map(({ id }) => id)).toEqual(['retained', 'local']);
 });
 
 test('a permanent hydrated worker layout drop retires proposal rounds to the peer', async () => {
@@ -493,7 +564,7 @@ test('a permanent hydrated worker layout drop retires proposal rounds to the pee
   const before = h.worker.requests.filter((type) => type === 'proposal').length;
   const peer = spyOn(h.peer, 'proposeChanges');
   snapshot(await h.api.proposeChanges({ expectVersion: h.peer.version(), proposals: [h.proposal('fallback')] }));
-  expect(peer).toHaveBeenCalledTimes(1);
+  expect(peer).not.toHaveBeenCalled();
   expect((await h.api.getProposals()).proposals.map(({ id }) => id)).toEqual(['fallback']);
   expect(h.worker.requests.filter((type) => type === 'proposal')).toHaveLength(before);
   expect(text(h.peer)).toBe('Worker Alpha');

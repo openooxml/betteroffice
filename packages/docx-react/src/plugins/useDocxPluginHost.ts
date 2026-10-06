@@ -32,7 +32,7 @@ import {
 } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import { resolvePointPosition } from '../components/DocxEditor/internals/pointPosition';
-import { workerProposalRoundAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
+import { workerProposalAuthority, workerProposalRoundAuthority, hasEditorWorkerProposalRounds, subscribeEditorWorkerProposalAuthority } from '../components/DocxEditor/internals/workerProposalAuthority';
 import { workerOpenReplicaReady } from '../components/DocxEditor/internals/workerOpenReplica';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { SelectionState } from '../components/DocxEditor/types';
@@ -202,15 +202,18 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     if (!options.session) return;
     host.open(options.session);
-    const unsubscribe = workerProposalRoundAuthority(options.session)?.subscribe(() => {
+    const update = () => {
       host.geometryChanged();
       if (layoutRef.current) host.layoutPresented(layoutRef.current);
-    });
+    };
+    const unsubscribe = workerProposalAuthority(options.session)?.subscribe(update);
+    const unsubscribeEditor = subscribeEditorWorkerProposalAuthority(options.session, update);
     let attached = true;
     const detach = () => {
       if (!attached) return;
       attached = false;
       unsubscribe?.();
+      unsubscribeEditor();
       if (detachAuthority.current === detach) detachAuthority.current = null;
     };
     detachAuthority.current = detach;
@@ -363,8 +366,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       () => {
         const editor = latest.current.pagedEditorRef.current;
         const session = editor?.getYrsSession();
-        const proposalGeometry = proposalTarget && session ? workerProposalRoundAuthority(session)?.geometry() : null;
-        return editor && session && (proposalTarget || workerOpenReplicaReady(session))
+        const active = session && hasEditorWorkerProposalRounds(session);
+        const proposalGeometry = session ? (active ? proposalTarget ? workerProposalRoundAuthority(session)?.geometry() : null : workerProposalAuthority(session)?.geometry()) : null;
+        return editor && session && (!active || proposalTarget || workerOpenReplicaReady(session))
           ? {
               session,
               editor,

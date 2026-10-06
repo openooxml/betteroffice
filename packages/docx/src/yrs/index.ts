@@ -1441,7 +1441,8 @@ export interface YrsSession extends CollaborationReplica {
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
   /** @internal */
-  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null, mirrorProposals?: boolean): void;
+  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+  createWorkerProposalRegistry(state: DocxProposalRegistryState): import('./proposals').DocxProposalRegistry;
   /** @internal */
   workerDocumentMirrored(): boolean;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */

@@ -177,17 +177,13 @@ async function opened({
 }
 
 async function holdProposals(session: YrsSession) {
-  const record = { id: 'held', paragraph: { kind: 'session' as const, sessionId: 'session', story: 'body', paraId: 'p1' },
-    revisionIds: [], state: 'proposed' as const, changed: false };
-  const snapshot = { version: session.version(), previewVersion: 0, proposals: [record] };
+  const snapshot = { version: session.version(), previewVersion: 0, proposals: [] };
   Object.assign(session, {
     getProposals: () => snapshot,
     mirrorWorkerDocument: () => {},
   });
   const reply: ResidentProposalReply = {
-    mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [{
-      record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-    }] } },
+    mirror: { version: snapshot.version, proposals: { previewVersion: 0, entries: [] } },
     result: { ok: true, snapshot },
     changedStories: [],
     geometry: {
@@ -198,18 +194,7 @@ async function holdProposals(session: YrsSession) {
     stateVector: new Uint8Array(),
   };
   const authority = registerWorkerProposalAuthority(session, {
-    proposal: async (op) => {
-      if (op.kind !== 'setStates') return reply;
-      const decided = { ...record, state: 'accepted' as const };
-      const next = { ...snapshot, previewVersion: 1, proposals: [decided] };
-      return {
-        ...reply, result: { ok: true as const, snapshot: next },
-        mirror: { version: snapshot.version, proposals: { previewVersion: 1, entries: [{
-          record: decided, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
-        }] } },
-        geometry: { ...reply.geometry, previewVersion: 1, proposals: proposalSetIdentity(next) },
-      };
-    },
+    proposal: async () => reply,
     documentRead: async () => { throw new Error('unexpected document read'); },
     handOver: async () => { throw new Error('unexpected handover'); },
   }, {
@@ -218,7 +203,7 @@ async function holdProposals(session: YrsSession) {
   });
   await authority.initialize();
   await authority.setStates({
-    expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [{ id: record.id, state: 'accepted' }],
+    expectVersion: snapshot.version, expectPreviewVersion: 0, changes: [],
   }, async () => {
     throw new Error('unexpected main-thread toggle');
   });
@@ -1157,6 +1142,7 @@ test('ready editor layout settles with both registries even when proposal ids ma
         record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
       })) },
     },
+    result: { ok: true, snapshot: remote },
     changedStories: [], updates: [], stateVector: new Uint8Array(),
     geometry: { version: remote.version, previewVersion: 1, proposals: proposalSetIdentity(remote), targets: {}, hidden: [] },
   };
@@ -1171,7 +1157,8 @@ test('ready editor layout settles with both registries even when proposal ids ma
     adopted: () => {}, contentChanged: () => {},
   });
   await authority.initialize();
-  await authority.catchUp();
+  expect(await authority.setStates({ expectVersion: h.session.version(), expectPreviewVersion: 1, changes: [] },
+    async () => { throw new Error('unexpected peer decision'); })).toMatchObject({ ok: true });
   act(() => h.hook.result.current.runLayoutPipeline());
   const preview = { '100:1': 'rejected', '200:1': 'accepted' };
   expect(JSON.parse(h.worker[1]!.request).renderEnv.revisionPreview).toEqual(preview);
@@ -1206,6 +1193,7 @@ test('replacement layout retains both registry decisions while initialization is
         record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
       })) },
     },
+    result: { ok: true, snapshot: remote },
     changedStories: [], updates: [], stateVector: new Uint8Array(),
     geometry: { version: remote.version, previewVersion: 1, proposals: proposalSetIdentity(remote), targets: {}, hidden: [] },
   };
@@ -1220,7 +1208,8 @@ test('replacement layout retains both registry decisions while initialization is
     adopted: () => {}, contentChanged: () => {},
   });
   await authority.initialize();
-  await authority.catchUp();
+  expect(await authority.setStates({ expectVersion: h.session.version(), expectPreviewVersion: 1, changes: [] },
+    async () => { throw new Error('unexpected peer decision'); })).toMatchObject({ ok: true });
   authority.restart();
   expect(authority.initialized).toBe(false);
   act(() => h.hook.result.current.runLayoutPipeline());

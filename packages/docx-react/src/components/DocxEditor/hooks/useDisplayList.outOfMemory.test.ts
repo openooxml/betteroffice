@@ -865,20 +865,17 @@ function proposalAuthority(engine: YrsSession) {
     version: () => mirror?.version ?? 'main-1',
     mirrorWorkerDocument: (next: typeof mirror) => { mirror = next; },
     getProposals: () => ({ ...snapshot, version: engine.version() }),
-    storyIds: () => ['body'],
   });
   const worker = {
     proposal: mock(async () => reply),
     documentRead: mock(async () => { throw new Error('unexpected worker read'); }),
-    syncUpdate: async () => ({ version: 'worker-1', stateVector: new Uint8Array(), repair: null }),
-    integrateProposalUpdate: () => {},
     handOver: mock(async () => ({
       state: Uint8Array.of(1), version: 'worker-1', proposals: reply.mirror.proposals,
     })),
   };
   const authority = workerProposals.registerWorkerProposalAuthority(engine, worker, {
     relayout: () => {}, current: () => true, laidOut: () => Promise.resolve(),
-    adopted: () => {}, contentChanged: () => {},
+    adopted: () => {}, handedOver: () => {}, contentChanged: () => {},
   });
   const hold = async () => {
     await authority.setStates({ expectVersion: 'worker-1', expectPreviewVersion: 0, changes: [] }, async () => {
@@ -938,7 +935,7 @@ for (const stage of ['fontRequirements', 'bootstrap'] as const) {
       expect(result.current.error).toBe(failure as Error);
       await expect(pending).rejects.toBe(failure);
       await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
-      await expect(workerProposals.snapshotWorkerProposalPeer(engine)!).rejects.toBe(failure);
+      await expect(workerProposals.beginWorkerProposalHandover(engine)!).rejects.toBe(failure);
       await expect(opened!.revisionCount()).rejects.toBe(failure);
       expect(FakeWorker.spawned).toHaveLength(1);
     } finally {
@@ -995,7 +992,7 @@ test('a page-build failure with worker-held proposals fails the document and set
     expect(await ready).toBe(failure);
     expect(replica.pending).toBe(false);
     await expect(authority.getProposals(async () => host.getProposals())).rejects.toBe(failure);
-    await expect(workerProposals.snapshotWorkerProposalPeer(host)!).rejects.toBe(failure);
+    await expect(workerProposals.beginWorkerProposalHandover(host)!).rejects.toBe(failure);
     expect(EngineWorker.last!.terminated).toBe(true);
     expect(EngineWorker.spawned).toBe(1);
     expect(result.current.loading).toBe(false);
@@ -1063,7 +1060,7 @@ test('a terminal failure with worker-held proposals rejects concurrent calls aft
     await act(async () => {
       revisionCount = opened!.revisionCount().catch((error: unknown) => error);
       requirements = result.current.fontRequirementsInWorker(engine, REQUEST)!.catch((error: unknown) => error);
-      handover = workerProposals.snapshotWorkerProposalPeer(engine)!.catch((error: unknown) => error);
+      handover = workerProposals.beginWorkerProposalHandover(engine)!.catch((error: unknown) => error);
       proposals = authority.getProposals(async () => engine.getProposals()).catch((error: unknown) => error);
     });
     expect(worker.posted.some((request) => request.type === 'fontRequirements')).toBe(true);
@@ -1081,7 +1078,7 @@ test('a terminal failure with worker-held proposals rejects concurrent calls aft
     expect(await requirements).toBe(failure);
     expect(await handover).toBe(failure);
     expect(await proposals).toBe(failure);
-    await expect(workerProposals.snapshotWorkerProposalPeer(engine)!).rejects.toBe(failure);
+    await expect(workerProposals.beginWorkerProposalHandover(engine)!).rejects.toBe(failure);
     await expect(authority.getProposals(async () => engine.getProposals())).rejects.toBe(failure);
     await expect(authority.readParagraphs({ view: 'accepted' }, async () => {
       throw new Error('unexpected main read');
@@ -1260,11 +1257,9 @@ test('a completed proposal hand-over allows worker OOM replacement and main-thre
   const { native, inputs, frame, engine, mainThreadBuilds } = setup();
   const { authority, hold } = proposalAuthority(engine);
   const replica = deferWorkerOpenReplica(engine, async () => {
-    await workerProposals.snapshotWorkerProposalPeer(engine)!;
-    return () => {};
-  }, () => { throw new Error('unexpected hydration fallback'); }, () => {}, {
-    current: () => true, cancel: () => {}, catchUp: (complete) => authority.catchUp(complete),
-  });
+    const handover = await workerProposals.beginWorkerProposalHandover(engine)!;
+    return () => handover.complete();
+  }, () => { throw new Error('unexpected hydration fallback'); }, () => {});
   const warnings = spyOn(console, 'warn').mockImplementation(() => {});
   const errors = spyOn(console, 'error').mockImplementation(() => {});
   try {
