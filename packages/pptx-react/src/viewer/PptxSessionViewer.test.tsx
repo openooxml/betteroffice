@@ -100,7 +100,10 @@ afterEach(() => {
   for (const restore of restorers.reverse()) restore();
   restorers.length = 0;
 });
-afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
+afterAll(async () => {
+  await new Promise((done) => setTimeout(done));
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
 
 describe('session viewer', () => {
   it('opens through the seam, paints active first and requests only visible thumbnails', async () => {
