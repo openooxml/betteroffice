@@ -435,6 +435,238 @@ describe('workbook worker editor', () => {
     expect(api).toBe(originalApi);
   });
 
+  it('refuses a cell commit awaiting hydration when readOnly turns on and retains its text', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    host.editMethods.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...host.cells])).buffer);
+    let api!: XlsxWorkerEditorApi;
+    const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={onReady} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+    fireEvent.change(view.getByTestId('xlsx-cell-editor'), { target: { value: 'pending text' } });
+    fireEvent.keyDown(view.getByTestId('xlsx-cell-editor'), { key: 'Enter' });
+    await advance(3);
+    expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} onReady={onReady} />);
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    expect(await api.cellAsync(0, 0, 0)).toMatchObject({ input: 'initial' });
+    expect(JSON.parse(new TextDecoder().decode((await api.saveAsync())!))).toEqual([['0:0:0', 'initial']]);
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={onReady} />);
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('pending text');
+  });
+
+  it('refuses a granted plugin batch queued across a readOnly flip', async () => {
+    const host = harness();
+    let context!: XlsxPluginContext<null>;
+    const plugin = defineXlsxPlugin({ id: 'review', createState: () => null, initialize(value) { context = value; } });
+    const plugins = [plugin];
+    const pluginGrants = { review: { document: 'write' as const, editBatches: true } };
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} plugins={plugins} pluginGrants={pluginGrants} />);
+    await opened();
+    await waitFor(() => expect(context).toBeTruthy());
+    const acknowledgment = deferred<void>();
+    const acknowledge = mock(() => acknowledgment.promise);
+    workbookEditPeerInternals.get(host.edits)!.whenAcknowledged = acknowledge;
+    let applied: unknown;
+    await act(async () => {
+      void context.run(async (current) => { applied = await current.edits!.applyEdits(reviewBatch('plugin')); });
+    });
+    expect(acknowledge).toHaveBeenCalled();
+    expect(host.editMethods.applyEdits).not.toHaveBeenCalled();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} plugins={plugins} pluginGrants={pluginGrants} />);
+    await act(async () => acknowledgment.resolve());
+    await advance();
+    expect(applied).toMatchObject({ ok: false, failure: { code: 'read-only' } });
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+    expect(host.editMethods.applyEdits).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  for (const kind of ['paste', 'cut'] as const) {
+    it(`refuses ${kind} awaiting clipboard completion across a readOnly flip and discards its preview`, async () => {
+      const host = harness();
+      const completion = deferred<void>();
+      const reading = deferred<string>();
+      if (kind === 'paste') {
+        const read = spyOn(navigator.clipboard, 'readText').mockReturnValue(reading.promise);
+        restorers.push(() => read.mockRestore());
+      } else promisedClipboard().write.mockReturnValue(completion.promise);
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+      await opened();
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: kind === 'paste' ? 'v' : 'x', ctrlKey: true });
+      await advance(3);
+      if (kind === 'cut') expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} />);
+      await act(async () => { reading.resolve('pasted'); completion.resolve(); });
+      await advance();
+      expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+      expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+      expect(host.editMethods.editCells).not.toHaveBeenCalled();
+      expect(host.cells.get('0:0:0')).toBe('initial');
+    });
+  }
+
+  for (const source of ['cell', 'formula'] as const) {
+    it(`closes an open ${source} draft on a readOnly flip without losing text or blocking navigation`, async () => {
+      const host = harness();
+      const toolbar = <EditorToolbar mode="commands"><EditorToolbar.FormulaBar /></EditorToolbar>;
+      let api!: XlsxWorkerEditorApi;
+      const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen toolbar={toolbar} onReady={onReady} />);
+      await opened();
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+      fireEvent.change(view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input'), { target: { value: 'recoverable text' } });
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly toolbar={toolbar} onReady={onReady} />);
+      expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+      expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+      expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).readOnly).toBe(true);
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+      expect(view.getByTestId('xlsx-selection').style.left).toBe('96px');
+      expect(await api.cellAsync(0, 0, 0)).toMatchObject({ input: 'initial' });
+      expect(host.editMethods.editCell).not.toHaveBeenCalled();
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen toolbar={toolbar} onReady={onReady} />);
+      expect((view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement).value).toBe('recoverable text');
+    });
+  }
+
+  it('hides the default toolbar while readOnly and keeps supplied toolbars visible', async () => {
+    harness();
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen />);
+    await opened();
+    expect(view.getByTestId('xlsx-toolbar')).toBeTruthy();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly />);
+    expect(view.queryByTestId('xlsx-toolbar')).toBeNull();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen />);
+    expect(view.getByTestId('xlsx-toolbar')).toBeTruthy();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly toolbar={<div>Host toolbar</div>} />);
+    expect(view.getByTestId('xlsx-toolbar').textContent).toBe('Host toolbar');
+  });
+
+  it('refuses clearing cells queued behind hydration across a readOnly flip', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+    await opened();
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'Delete' });
+    await advance(3);
+    expect(view.getByTestId('xlsx-commit-preview')).toBeTruthy();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} />);
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+    expect(view.queryByTestId('xlsx-commit-preview')).toBeNull();
+    expect(host.editMethods.editCells).not.toHaveBeenCalled();
+    expect(host.cells.get('0:0:0')).toBe('initial');
+  });
+
+  for (const pending of ['drag', 'nudge', 'queued move'] as const) {
+    it(`refuses a chart ${pending} across a readOnly flip`, async () => {
+      const host = harness();
+      host.charts.push({ id: 'chart:1', label: 'Chart', movable: true, rect: { x: 192, y: 96, w: 192, h: 96 } });
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);
+      await opened();
+      const acknowledgment = deferred<void>();
+      if (pending === 'queued move') workbookEditPeerInternals.get(host.edits)!.whenAcknowledged = () => acknowledgment.promise;
+      fireEvent.mouseDown(view.getByTestId('xlsx-scroll'), { button: 0, clientX: 200, clientY: 100 });
+      if (pending === 'nudge') {
+        fireEvent.mouseUp(window, { button: 0, clientX: 200, clientY: 100 });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+      } else fireEvent.mouseMove(view.getByTestId('xlsx-scroll'), { buttons: 1, clientX: 230, clientY: 120 });
+      if (pending === 'queued move') {
+        fireEvent.mouseUp(window, { button: 0, clientX: 230, clientY: 120 });
+        await act(async () => {});
+      }
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} />);
+      if (pending === 'drag') fireEvent.mouseUp(window, { button: 0, clientX: 230, clientY: 120 });
+      await act(async () => acknowledgment.resolve());
+      await advance();
+      expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+      expect(view.getByTestId('xlsx-chart-selection').style.transform).toBe('translate(0px, 0px)');
+      expect(host.editMethods.moveChart).not.toHaveBeenCalled();
+    });
+  }
+
+  it('refuses format painting queued across a readOnly flip', async () => {
+    const host = harness();
+    const applyFormat = mock(() => ({ applied: true, sheetInfo: host.peer.sheetInfo() }));
+    Object.assign(host.peer, { captureFormat: () => ({}) });
+    Object.assign(host.edits, { applyFormat });
+    let api!: XlsxWorkerEditorApi;
+    const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={onReady} />);
+    await opened();
+    await act(async () => { expect(await api.commands.execute('paintFormat', null)).toMatchObject({ ok: true }); });
+    const acknowledgment = deferred<void>();
+    const acknowledge = mock(() => acknowledgment.promise);
+    workbookEditPeerInternals.get(host.edits)!.whenAcknowledged = acknowledge;
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'ArrowRight' });
+    await act(async () => {});
+    expect(acknowledge).toHaveBeenCalled();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} onReady={onReady} />);
+    await act(async () => acknowledgment.resolve());
+    await advance();
+    expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+    expect(applyFormat).not.toHaveBeenCalled();
+  });
+
+  for (const source of ['cell', 'formula'] as const) {
+    it(`refuses a save waiting on ${source} composition across a readOnly flip without blocking later reads`, async () => {
+      const host = harness();
+      let api!: XlsxWorkerEditorApi;
+      const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={onReady} />);
+      await opened();
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input');
+      fireEvent.compositionStart(input);
+      fireEvent.change(input, { target: { value: 'composed text' } });
+      let failure: unknown;
+      act(() => { void api.saveAsync().catch((error) => { failure = error; }); });
+      (input as HTMLInputElement).value = 'latest composed text';
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly onReady={onReady} />);
+      await waitFor(() => expect(failure).toMatchObject({ message: 'The editor is read-only' }));
+      expect(view.getByTestId('xlsx-input-refusal').textContent).toMatch(/read-only/i);
+      expect(await api.cellAsync(0, 0, 0)).toMatchObject({ input: 'initial' });
+      expect(host.editMethods.editCell).not.toHaveBeenCalled();
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen onReady={onReady} />);
+      expect((view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement).value).toBe('latest composed text');
+    });
+  }
+
+  for (const route of ['cell', 'batch'] as const) {
+    it(`refuses a pending API ${route} edit after a readOnly flip even while retiring`, async () => {
+      const host = harness();
+      const hydration = deferred<WorkbookHandle>();
+      host.hydrate.mockReturnValue(hydration.promise);
+      let api!: XlsxWorkerEditorApi;
+      const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={onReady} />);
+      await opened();
+      let outcome: unknown;
+      act(() => {
+        void (route === 'cell' ? api.editCellAsync(0, 0, 0, 'host') : api.applyEdits(reviewBatch('host')))
+          .then((value) => { outcome = value; }, (error) => { outcome = error; });
+      });
+      await advance(3);
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} onReady={onReady} />);
+      view.unmount();
+      await act(async () => hydration.resolve(host.peer));
+      await advance();
+      expect(outcome).toMatchObject({ code: 'document-replaced' });
+      expect(host.editMethods.editCell).not.toHaveBeenCalled();
+      expect(host.editMethods.applyEdits).not.toHaveBeenCalled();
+      expect(host.cells.get('0:0:0')).toBe('initial');
+    });
+  }
+
   it('starts read-only files in the viewer and resets the choice on file replacement', async () => {
     const host = harness();
     const viewerOpen = spyOn(workbookSessionOpener, 'open').mockResolvedValue(host.session);
