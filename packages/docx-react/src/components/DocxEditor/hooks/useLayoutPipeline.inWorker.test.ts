@@ -1119,3 +1119,108 @@ test('a new session lays out while the replaced one still has a worker pass queu
   expect(doc.laidOutHere).toEqual([]);
   expect(errors).toEqual([]);
 });
+
+test('ready editor layout settles with both registries even when proposal ids match', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  const paragraph = { kind: 'session', sessionId: 'session', story: 'body', paraId: 'p1' } as const;
+  const local = {
+    version: '1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['100:1'], state: 'rejected' as const, changed: true }],
+  };
+  const remote = {
+    version: 'worker-1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['200:1'], state: 'accepted' as const, changed: true }],
+  };
+  Object.assign(h.session, {
+    getProposals: () => local, mirrorWorkerDocument: () => {},
+    encodeStateVector: () => new Uint8Array(), storyIds: () => ['body'],
+  });
+  const reply: ResidentProposalReply = {
+    mirror: {
+      version: remote.version,
+      proposals: { previewVersion: remote.previewVersion, entries: remote.proposals.map((record) => ({
+        record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      })) },
+    },
+    result: { ok: true, snapshot: remote },
+    changedStories: [], updates: [], stateVector: new Uint8Array(),
+    geometry: { version: remote.version, previewVersion: 1, proposals: proposalSetIdentity(remote), targets: {}, hidden: [] },
+  };
+  const authority = registerWorkerProposalAuthority(h.session, {
+    proposal: async () => reply,
+    documentRead: async () => { throw new Error('unexpected document read'); },
+    handOver: async () => { throw new Error('unexpected snapshot'); },
+    syncUpdate: async () => ({ version: remote.version, stateVector: new Uint8Array(), repair: null }),
+    integrateProposalUpdate: () => {},
+  }, {
+    editorPeer: true, current: () => true, laidOut: async () => {}, relayout: () => {},
+    adopted: () => {}, contentChanged: () => {},
+  });
+  await authority.initialize();
+  expect(await authority.setStates({ expectVersion: h.session.version(), expectPreviewVersion: 1, changes: [] },
+    async () => { throw new Error('unexpected peer decision'); })).toMatchObject({ ok: true });
+  act(() => h.hook.result.current.runLayoutPipeline());
+  const preview = { '100:1': 'rejected', '200:1': 'accepted' };
+  expect(JSON.parse(h.worker[1]!.request).renderEnv.revisionPreview).toEqual(preview);
+  expect(Object.keys(authority.revisionPreview()!)).toHaveLength(2);
+  expect(h.session.getProposals().proposals).toEqual(local.proposals);
+  expect(authority.snapshot()!.proposals).toEqual(remote.proposals);
+  await h.answer(1);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.shown()).toBe(h.session.version());
+  expect(h.errors).toEqual([]);
+});
+
+test('replacement layout retains both registry decisions while initialization is pending', async () => {
+  const h = await opened({ experimentalWorkerOpen: true, ownsDocument: true });
+  const paragraph = { kind: 'session', sessionId: 'session', story: 'body', paraId: 'p1' } as const;
+  const local = {
+    version: '1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['100:1'], state: 'rejected' as const, changed: true }],
+  };
+  const remote = {
+    version: 'worker-1', previewVersion: 1,
+    proposals: [{ id: 'same', paragraph, revisionIds: ['200:1'], state: 'accepted' as const, changed: true }],
+  };
+  Object.assign(h.session, {
+    getProposals: () => local, mirrorWorkerDocument: () => {},
+    encodeStateVector: () => new Uint8Array(), storyIds: () => ['body'],
+  });
+  const reply: ResidentProposalReply = {
+    mirror: {
+      version: remote.version,
+      proposals: { previewVersion: remote.previewVersion, entries: remote.proposals.map((record) => ({
+        record, key: record.id, suggest: { author: 'Host', date: '2026-10-05T00:00:00Z' },
+      })) },
+    },
+    result: { ok: true, snapshot: remote },
+    changedStories: [], updates: [], stateVector: new Uint8Array(),
+    geometry: { version: remote.version, previewVersion: 1, proposals: proposalSetIdentity(remote), targets: {}, hidden: [] },
+  };
+  const authority = registerWorkerProposalAuthority(h.session, {
+    proposal: async () => reply,
+    documentRead: async () => { throw new Error('unexpected document read'); },
+    handOver: async () => { throw new Error('unexpected snapshot'); },
+    syncUpdate: async () => ({ version: remote.version, stateVector: new Uint8Array(), repair: null }),
+    integrateProposalUpdate: () => {},
+  }, {
+    editorPeer: true, current: () => true, laidOut: async () => {}, relayout: () => {},
+    adopted: () => {}, contentChanged: () => {},
+  });
+  await authority.initialize();
+  expect(await authority.setStates({ expectVersion: h.session.version(), expectPreviewVersion: 1, changes: [] },
+    async () => { throw new Error('unexpected peer decision'); })).toMatchObject({ ok: true });
+  authority.restart();
+  expect(authority.initialized).toBe(false);
+  act(() => h.hook.result.current.runLayoutPipeline());
+  const preview = { '100:1': 'rejected', '200:1': 'accepted' };
+  expect(JSON.parse(h.worker[1]!.request).renderEnv.revisionPreview).toEqual(preview);
+  expect(Object.keys(authority.revisionPreview()!)).toHaveLength(2);
+  expect(h.session.getProposals().proposals).toEqual(local.proposals);
+  expect(authority.snapshot()!.proposals).toEqual(remote.proposals);
+  await h.answer(1);
+  expect(authority.initialized).toBe(false);
+  expect(isLayoutQueued(h.session)).toBe(false);
+  expect(h.shown()).toBe(h.session.version());
+  expect(h.errors).toEqual([]);
+});

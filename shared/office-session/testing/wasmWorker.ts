@@ -35,10 +35,22 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const initWasm = (source) => testHarness.initialize(source);
               export const openPresentation = (bytes) => testHarness.open(bytes);
               export const openWorkbook = (bytes) => testHarness.open(bytes);
+              export const openWorkbookPeer = openWorkbook;
+              export class StaleProposalError extends Error {
+                constructor(cells, targets = []) {
+                  super('stale: ' + cells.join(', '));
+                  this.name = 'StaleProposalError';
+                  this.cells = cells;
+                  this.targets = targets;
+                }
+              }
               export const decodeTiffImage = () => { throw new Error('decodeTiffImage is not stubbed'); };
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
+              export const workbookPeerHydration = () => { throw new Error('workbookPeerHydration is not stubbed'); };
+              export const workbookPeerSnapshot = () => { throw new Error('workbookPeerSnapshot is not stubbed'); };
+              export const createWorkbookSnapshotBuilder = () => { throw new Error('createWorkbookSnapshotBuilder is not stubbed'); };
             `,
             loader: 'js',
           }));

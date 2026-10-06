@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use betteroffice_xlsx::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, UpdateEvent, UpdateOrigin,
-    UpdateSubscription,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, SnapshotBudget, UpdateEvent,
+    UpdateOrigin, UpdateSubscription, WorkbookSnapshotBuilder,
 };
 use wasm_bindgen::prelude::*;
 
@@ -52,7 +52,104 @@ struct PendingUpdateEvents {
 }
 
 #[wasm_bindgen]
+pub struct XlsxSnapshotBuilder {
+    builder: WorkbookSnapshotBuilder,
+}
+
+#[wasm_bindgen]
+impl XlsxSnapshotBuilder {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> XlsxSnapshotBuilder {
+        Self {
+            builder: WorkbookSnapshotBuilder::new(),
+        }
+    }
+
+    pub fn push(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
+        self.builder
+            .push(chunk)
+            .map(|_| ())
+            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+    }
+
+    pub fn advance(&mut self, records: usize, bytes: usize) -> Result<bool, JsValue> {
+        let budget = SnapshotBudget::new(records, bytes)
+            .map_err(|error| JsValue::from(js_sys::Error::new(&error.to_string())))?;
+        self.builder
+            .advance(budget)
+            .map(|progress| progress.is_ready())
+            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+    }
+
+    pub fn finish(self) -> Result<XlsxDocument, JsValue> {
+        self.builder
+            .finish()
+            .map(|hydrated| XlsxDocument {
+                session: Session::from_hydrated_workbook(hydrated),
+                update_observer: None,
+            })
+            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+    }
+}
+
+impl Default for XlsxSnapshotBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[wasm_bindgen]
 impl XlsxDocument {
+    #[wasm_bindgen(js_name = beginPeerSnapshot)]
+    pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
+        self.session
+            .begin_peer_snapshot(records, bytes)
+            .map_err(|error| js_sys::Error::new(&error).into())
+    }
+
+    #[wasm_bindgen(js_name = nextPeerSnapshotChunk)]
+    pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
+        self.session
+            .next_peer_snapshot_chunk()
+            .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
+            .map_err(|error| js_sys::Error::new(&error).into())
+    }
+
+    #[wasm_bindgen(js_name = endPeerSnapshot)]
+    pub fn end_peer_snapshot(&mut self) {
+        self.session.end_peer_snapshot();
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = adoptPeerVersion)]
+    pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), JsValue> {
+        self.session
+            .adopt_peer_version(version)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = peerHydrationJson)]
+    pub fn peer_hydration_json(&self) -> Result<String, JsValue> {
+        self.session
+            .peer_hydration_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[doc(hidden)]
+    #[wasm_bindgen(js_name = openWithPeerHydrationJson)]
+    pub fn open_with_peer_hydration_json(
+        bytes: &[u8],
+        hydration: &str,
+    ) -> Result<XlsxDocument, JsValue> {
+        Session::open_with_peer_hydration_json(bytes, hydration)
+            .map(|session| XlsxDocument {
+                session,
+                update_observer: None,
+            })
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// open a workbook from raw `.xlsx` bytes.
     pub fn open(bytes: &[u8]) -> Result<XlsxDocument, JsValue> {
         Session::open(bytes, now_serial())

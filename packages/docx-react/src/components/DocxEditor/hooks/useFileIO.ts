@@ -20,9 +20,9 @@ import {
   workerOpenDocumentHeld,
   workerOpenReplicaStarted,
 } from '../internals/workerOpenReplica';
-import { registeredWorkerProposalAuthority } from '../internals/workerProposalAuthority';
 import { workerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave';
 import { isWorkerViewer } from '../internals/workerViewer';
+import { registeredWorkerProposalAuthority, hasEditorWorkerProposalRounds } from '../internals/workerProposalAuthority';
 import type { DocxEditorProps } from '../../DocxEditor';
 import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
@@ -69,7 +69,7 @@ async function saveWithWorker(
     return saver.save(comments, peer);
   };
   try {
-    const authority = registeredWorkerProposalAuthority(session);
+    const authority = hasEditorWorkerProposalRounds(session) ? null : registeredWorkerProposalAuthority(session);
     const buffer = await (authority ? authority.save(task) : task());
     assertCurrent();
     return buffer;
@@ -216,6 +216,27 @@ export function useFileIO({
             await requestWorkerOpenReplica(initialSession);
             assertCurrent();
           }
+        }
+        const authority = initialSession && hasEditorWorkerProposalRounds(initialSession)
+          ? registeredWorkerProposalAuthority(initialSession) : null;
+        if (authority) {
+          const task = async (): Promise<ArrayBuffer | null> => {
+            const { editor, session } = await flushedSession(pagedEditorRef);
+            assertCurrent();
+            if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
+            const projected = editor.getDocument();
+            if (!projected) return null;
+            const buffer = await saveEditorDocument(session, projected, comments);
+            if (pagedEditorRef.current?.getYrsSession() !== session) {
+              throw new Error('The document changed while saving');
+            }
+            projected.originalBuffer = buffer;
+
+            return buffer;
+          };
+          const buffer = await authority.save(task);
+          if (buffer) onSave?.(buffer);
+          return buffer;
         }
         const { editor, session } = await flushedSession(pagedEditorRef);
         assertCurrent();

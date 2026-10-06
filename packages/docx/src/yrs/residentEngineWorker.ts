@@ -551,13 +551,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       let projectionStories: string[] = [];
       switch (request.operation.kind) {
         case 'propose':
-          result = registry.propose(request.operation.request);
+          result = registry.propose(request.operation.peerStateVector
+            ? { ...request.operation.request, expectVersion: session.proposalEngine.version() }
+            : request.operation.request);
           break;
         case 'setStates':
-          result = registry.setStates(request.operation.request);
+          result = registry.setStates(request.operation.peerStateVector
+            ? { ...request.operation.request, expectVersion: session.proposalEngine.version() }
+            : request.operation.request);
           break;
         case 'withdraw':
-          result = registry.withdraw(request.operation.request);
+          result = registry.withdraw(request.operation.peerStateVector
+            ? { ...request.operation.request, expectVersion: session.proposalEngine.version() }
+            : request.operation.request);
           break;
         case 'removeComment':
           try {
@@ -575,6 +581,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       session.markProjectionStories(projectionStories);
       if (changedStories.length > 0) completedLayout = null;
       const updates = pendingUpdates.map(exactBuffer);
+      const peerDiff = 'peerStateVector' in request.operation && request.operation.peerStateVector
+        ? exactBuffer(session.encodeStateAsUpdate(request.operation.peerStateVector))
+        : undefined;
       const stateVector = exactBuffer(session.encodeStateVector());
       const snapshot = registry.snapshot();
       const version = snapshot.version;
@@ -622,6 +631,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
             changedStories,
             projectionStories,
             updates,
+            ...(peerDiff === undefined ? {} : { peerDiff }),
             stateVector,
             geometry,
             ...(fontRequirements
@@ -632,7 +642,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               : {}),
           },
         },
-        [...updates, stateVector]
+        [...updates, stateVector, ...(peerDiff === undefined ? [] : [peerDiff])]
       );
     } catch (error) {
       if (trap) throw trap;

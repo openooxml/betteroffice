@@ -51,7 +51,7 @@ import { isLayoutQueued, markPresented, presentedWorkerVersion, revisionPreviewK
 import { workerOpenSave } from '../internals/workerOpenSave';
 import { workerOpenExport } from '../internals/workerOpenExport';
 import * as replicaHelpers from '../internals/workerOpenReplica';
-import { registeredWorkerProposalAuthority, workerProposalAuthority } from '../internals/workerProposalAuthority';
+import { registeredWorkerProposalAuthority, workerProposalAuthority, workerProposalFailure } from '../internals/workerProposalAuthority';
 import type { DocxEditorRef } from '../../DocxEditor';
 import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { createDocxCommandController, DocxCommandAdmissionError, UNAVAILABLE_DOCX_COMMANDS } from '../../../commands/createDocxCommandStore';
@@ -4760,27 +4760,184 @@ test('a hand-over queued behind a recovery snapshot that fails still hydrates th
   }
 }, 15_000);
 
-test('without worker proposals the ref waits for hydration before applying a proposal', async () => {
+test('without worker proposals the first editor round waits for hydration and then uses the worker', async () => {
   const { posted, workers } = installWorker({ holdState: true });
   const { result } = renderHook(useHarness, {
     initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   const session = result.current.core.session!;
+  expect(registeredWorkerProposalAuthority(session)).toBeNull();
+  const peerPropose = spyOn(session, 'proposeChanges');
   let settled = false;
   const call = result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] });
   void call.then(() => { settled = true; });
+  expect(registeredWorkerProposalAuthority(session)).toBeNull();
   expect(posted.some((request) => request.type === 'proposal')).toBe(false);
   expect(posted.some((request) => request.type === 'encodeState')).toBe(false);
   expect(result.current.mainOpens).toEqual([]);
   expect(settled).toBe(false);
-  act(() => { requestWorkerOpenReplica(session); });
+  act(() => { requestWorkerOpenReplica(session); result.current.pipeline.runLayoutPipeline(); });
   await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
   expect(settled).toBe(false);
-  await act(async () => { workers[0].release(); await call; });
+  await act(async () => { workers[0].release(); expect(await call).toMatchObject({ ok: true }); });
   expect(settled).toBe(true);
   expect(result.current.mainOpens).toEqual([false]);
-  expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  expect(peerPropose).not.toHaveBeenCalled();
+  expect(posted.filter((request) => request.type === 'proposal').at(-1)?.operation.kind).toBe('propose');
+});
+
+test('a first editor round uses the base peer call when pending hydration falls back to source', async () => {
+  const { posted } = installWorker({ failState: true });
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+  });
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    const peerPropose = spyOn(session, 'proposeChanges');
+    const round = result.current.ref.current!.proposeChanges({ expectVersion: session.version(), proposals: [] });
+    expect(registeredWorkerProposalAuthority(session)).toBeNull();
+    expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+    await act(async () => {
+      await requestWorkerOpenReplica(session);
+      expect(await round).toMatchObject({ ok: true, snapshot: { proposals: [] } });
+    });
+    expect(peerPropose).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([true]);
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(registeredWorkerProposalAuthority(session)).toBeNull();
+    expect(posted.some((request) => request.type === 'proposal')).toBe(false);
+  } finally { unmount(); }
+});
+
+test('a font preflight OOM after a proposal mirrors retires without failing peer rounds or saves', async () => {
+  let holdMutation = false;
+  let holdRequirements = false;
+  const options: Parameters<typeof installWorker>[0] = {
+    holdReply: (request) => (holdMutation && request.type === 'proposal' && request.operation.kind === 'propose') ||
+      (holdRequirements && request.type === 'fontRequirements'),
+  };
+  const { posted, workers, received, reply, responses } = installWorker(options);
+  const { result, unmount } = renderHook(useHarness, {
+    initialProps: { ...initialProps, workerProposals: false, allowHostProposals: true },
+  });
+  const errorLog = spyOn(console, 'error').mockImplementation(() => {});
+  let frames: ReturnType<typeof holdFrames> | undefined;
+  let unmountPreflight: (() => void) | undefined;
+  let unmountIO: (() => void) | undefined;
+  try {
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    act(() => result.current.pipeline.runLayoutPipeline());
+    await waitFor(() => expect(result.current.renderer.status).toBe('ready'));
+    await act(async () => { await requestWorkerOpenReplica(session); });
+    const api = result.current.ref.current!;
+    await act(async () => {
+      expect(await api.proposeChanges({ expectVersion: session.version(), proposals: [] })).toMatchObject({ ok: true });
+      await api.whenLayoutComplete({ timeoutMs: 5000 });
+    });
+    const authority = registeredWorkerProposalAuthority(session)!;
+    expect(authority.initialized).toBe(true);
+    const paragraph = (await api.getParagraphIdentities()).paragraphs.find((entry) =>
+      entry.session?.story === 'body'
+    )!.session!;
+    const preflightErrors: Array<[Error, YrsSession]> = [];
+    const fontId = session.registerFont(font);
+    const preflight = renderHook(() => useLayoutPipeline({
+      document: result.current.host!.document, session, renderEnv: {}, pageGap: 24, zoom: 1,
+      residentMeasurementConfig: (requirements) => ({
+        fontChains: Object.fromEntries(requirements.map((requirement) => [requirement.key, [fontId]])),
+        defaults: { fontSize: 11, fontFamily: 'Calibri' },
+        compat: { noLeading: false, doNotExpandShiftReturn: false }, authoritativeShaping: true,
+      }),
+      deferLayoutPass: () => false,
+      pagesContainerRef: { current: null }, viewportLayoutRef: { current: null },
+      syncCoordinator: new LayoutSelectionGate(), getScrollContainer: () => null,
+      experimentalWorkerOpen: true,
+      fontRequirementsInWorker: result.current.renderer.fontRequirementsInWorker,
+      layoutInWorker: result.current.renderer.layoutInWorker,
+      onError: (error, owner) => preflightErrors.push([error, owner]),
+    }));
+    unmountPreflight = preflight.unmount;
+    frames = holdFrames();
+    holdMutation = true;
+    const previous = posted.at(-1)!.id;
+    const round = api.proposeChanges({
+      expectVersion: session.version(),
+      proposals: [{
+        id: 'before-font-oom', paragraph,
+        suggest: { author: 'Host', date: '2026-10-06T00:00:00Z' },
+        op: 'insertText', at: 'start', text: 'Mirrored ',
+      }],
+    });
+    void round.catch(() => {});
+    const mutation = await received('proposal', previous);
+    expect(authority.holdsWorkerState()).toBe(true);
+    holdRequirements = true;
+    options.oomStage = 'fontRequirements';
+    act(() => preflight.result.current.runLayoutPipeline());
+    const requirements = await received('fontRequirements', mutation.id);
+    expect(responses.get(requirements)).toMatchObject({ ok: false, outOfMemory: true });
+    await act(async () => { reply(mutation); expect(await round).toMatchObject({ ok: true }); });
+    expect(session.paragraphs('body')[0]!.text).toContain('Mirrored ');
+    expect(authority.holdsWorkerState()).toBe(false);
+    expect(authority.retirementReason()).toBeNull();
+    const peerRequirements = spyOn(session, 'layoutFontRequirementsJson');
+    const peerLayout = spyOn(session, 'layoutDocumentWithRegionsRetainedJson');
+    await act(async () => { reply(requirements); });
+    expect(authority.retirementReason()).toBe('source-fallback');
+    expect(workerProposalFailure(session)).toBeUndefined();
+    expect(preflightErrors).toHaveLength(1);
+    expect(preflightErrors[0]![0]).toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+    expect(preflightErrors[0]![1]).toBe(session);
+    await act(async () => { await frames!.until(result.current.renderer.settledDisplayList(null, null)); });
+    expect(peerRequirements).toHaveBeenCalled();
+    expect(peerLayout).toHaveBeenCalled();
+    expect(result.current.renderer.workerSurfacesActive).toBe(false);
+    expect(result.current.renderer.status).toBe('ready');
+    expect(sourceVersionOf(result.current.renderer.queries)).toBe(session.version());
+    const workerRounds = posted.filter((request) => request.type === 'proposal').length;
+    await act(async () => {
+      expect(await api.proposeChanges({
+        expectVersion: session.version(),
+        proposals: [{
+          id: 'after-font-oom', paragraph,
+          suggest: { author: 'Host', date: '2026-10-06T00:00:00Z' },
+          op: 'insertText', at: 'end', text: 'Recovered ',
+        }],
+      })).toMatchObject({ ok: true });
+    });
+    expect(authority.snapshot()!.proposals.map(({ id }) => id)).toEqual(['before-font-oom', 'after-font-oom']);
+    expect(session.getProposals().proposals).toEqual([]);
+    expect(session.paragraphs('body')[0]!.text).toBe('Mirrored Page mapRecovered ');
+    expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerRounds);
+    const saved: ArrayBuffer[] = [];
+    const saveErrors: Error[] = [];
+    const io = renderHook(() => useFileIO({
+      pagedEditorRef: result.current.pagedEditorRef, viewerSession: false,
+      resolveImage: () => null, comments: [], documentName: undefined,
+      onSave: (buffer) => saved.push(buffer), downloadOnSave: false,
+      onError: (error) => saveErrors.push(error),
+      onOpen: undefined, onPrint: undefined, onDocumentNameChange: undefined,
+      loadBuffer: async () => {}, focusActiveEditor: () => {},
+    }));
+    unmountIO = io.unmount;
+    let buffer: ArrayBuffer | null = null;
+    await act(async () => { buffer = await io.result.current.handleSave(); });
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    expect(saved).toEqual([buffer!]);
+    expect(saveErrors).toEqual([]);
+    expect(workerProposalFailure(session)).toBeUndefined();
+    expect(workers).toHaveLength(1);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    unmountIO?.();
+    unmountPreflight?.();
+    unmount();
+    frames?.restore();
+    errorLog.mockRestore();
+  }
 });
 
 test('the host proposal gate refuses before initializing the worker authority', async () => {
@@ -7252,6 +7409,77 @@ test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yiel
     });
     expect(load).toHaveBeenCalledTimes(1);
     expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    expect(result.current.errors).toEqual([]);
+  } finally {
+    try {
+      cleanup();
+    } finally {
+      restoreLoad();
+      visibility.restore();
+      tasks.restore();
+      frames.restore();
+      globalThis.Worker = originalWorker;
+    }
+  }
+});
+
+test.each([1, 2])('inactive editors keep base synchronous hydration and no proposal authority at yield %s through save and worker loss', async (boundary) => {
+  const { workers, posted } = installWorker({ holdState: true });
+  const frames = holdFrames(true);
+  const tasks = holdHydrationTasks();
+  const visibility = stubDocumentVisibility('visible');
+  const replicas: Array<YrsSession | null> = [];
+  let restoreLoad = () => {};
+  try {
+    const { result } = renderHook(useHarness, { initialProps: {
+      ...initialProps,
+      collaboration: { onReplica: (session) => replicas.push(session as YrsSession | null) },
+    } });
+    await waitFor(() => expect(result.current.host).not.toBeNull());
+    const session = result.current.core.session!;
+    expect(registeredWorkerProposalAuthority(session)).toBeNull();
+    const load = spyOn(session, 'loadState');
+    restoreLoad = registerRestore(() => load.mockRestore());
+    const pending = requestWorkerOpenReplica(session)!;
+    await waitFor(() => expect(posted.some((request) => request.type === 'encodeState')).toBe(true));
+    await act(async () => workers[0].release());
+    await waitFor(() => expect(tasks.tasks).toHaveLength(1));
+    if (boundary === 2) await act(async () => tasks.run());
+    act(() => {
+      expect(registeredWorkerProposalAuthority(session)).toBeNull();
+      ensureWorkerOpenReplica(session);
+      expect(registeredWorkerProposalAuthority(session)).toBeNull();
+      expect(session.hasStory('body')).toBe(true);
+      expect(result.current.core.replicaReadyRef?.current).toBe(true);
+      expect(load).toHaveBeenCalledTimes(1);
+    });
+    expect(result.current.core.replicaReady).toBe(true);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    await act(async () => {
+      await tasks.run();
+      await pending;
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current.mainOpens).toEqual([false]);
+    expect(replicas).toEqual([session]);
+    expect(registeredWorkerProposalAuthority(session)).toBeNull();
+    await act(async () => {
+      expect(await workerOpenSave(session)!.save([], session)).toBeInstanceOf(ArrayBuffer);
+    });
+    expect(registeredWorkerProposalAuthority(session)).toBeNull();
+    spyOn(console, 'error').mockImplementation(() => {});
+    await act(async () => {
+      workers[0]!.onerror?.({ message: 'inactive editor worker crashed' } as ErrorEvent);
+      expect(await result.current.renderer.layoutInWorker(session, JSON.stringify({
+        bodyStory: 'body', regions: { sections: [{ sectionId: 'main', properties: {} }] },
+        measurement: { defaults: { fontFamily: 'Calibri', fontSize: 11 } }, renderEnv: {},
+      }))).toBeNull();
+    });
+    expect(registeredWorkerProposalAuthority(session)).toBeNull();
+    expect(result.current.core.replicaReadyRef?.current).toBe(true);
+    expect(result.current.core.replicaReady).toBe(true);
     expect(replicas).toEqual([session]);
     expect(result.current.errors).toEqual([]);
   } finally {

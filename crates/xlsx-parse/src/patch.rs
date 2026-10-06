@@ -4,7 +4,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::ops::Range;
 
-use quick_xml::events::{BytesEnd, BytesStart, Event};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{Cell, CellRange, CellRef, Sheet, Workbook};
@@ -13,12 +13,14 @@ use crate::axis::SheetAxes;
 use crate::package::{XmlAttribute, attributes, remove_attribute, set_attribute};
 use crate::read::SharedStringCells;
 use crate::write::{
-    SharedStringPlan, fmt_num, fragment, shared_string_index, write_cell, write_col, write_cols,
-    write_row,
+    SharedStringPlan, cell_value_markup, fmt_num, fragment, shared_string_index, write_cell,
+    write_col, write_cols, write_row,
 };
 use crate::xml::{attr, xml_err};
 use crate::{MAX_DEPTH, ParseError};
 
+#[cfg(test)]
+mod cache_patch_tests;
 #[cfg(any(test, feature = "test-oracle"))]
 #[cfg_attr(not(test), allow(dead_code))]
 mod oracle;
@@ -168,7 +170,7 @@ impl SheetPatch<'_> {
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
         };
-        let dirty = self.dirty_formulas(&rows);
+        let dirty = self.dirty_formulas(source, &rows)?;
         let mut out = Vec::with_capacity(source.len());
         out.extend_from_slice(&element.prefix);
         let mut source_rows = rows
@@ -415,7 +417,17 @@ impl SheetPatch<'_> {
                         continue;
                     };
                     body.extend_from_slice(&data[source_cell.before.clone()]);
-                    self.emit_cell(&mut body, at, cell, original)?;
+                    if !self.emit_cached_cell(
+                        &mut body,
+                        data,
+                        source_cell,
+                        at,
+                        cell,
+                        original,
+                        dirty,
+                    )? {
+                        self.emit_cell(&mut body, at, cell, original)?;
+                    }
                 }
                 None => self.emit_cell(
                     &mut body,
@@ -500,6 +512,16 @@ impl SheetPatch<'_> {
         let Some(formula) = &cell.formula else {
             return true;
         };
+        self.formula_clean(cell, at, formula, dirty)
+    }
+
+    fn formula_clean(
+        &self,
+        cell: &SourceCell,
+        at: CellRef,
+        formula: &FormulaMarkup,
+        dirty: &DirtyFormulas,
+    ) -> bool {
         if cell.at != at && formula.positional {
             return false;
         }
@@ -523,8 +545,20 @@ impl SheetPatch<'_> {
         let (name, mut attributes) = start_tag(&data[cell.tag.clone()])?;
         set_attribute(&mut attributes, "r", "r", at.to_a1());
         write_start_tag(out, &name, &attributes, cell.empty)?;
+        self.emit_source_cell_content(out, data, cell, at, cell.span.end)
+    }
+
+    fn emit_source_cell_content(
+        &self,
+        out: &mut Vec<u8>,
+        data: &[u8],
+        cell: &SourceCell,
+        at: CellRef,
+        end: usize,
+    ) -> Result<(), ParseError> {
         let mut cursor = cell.tag.end;
-        if let Some(formula) = &cell.formula
+        if cell.at != at
+            && let Some(formula) = &cell.formula
             && let Some(reference) = formula.reference
             && let Some(remapped) = self.remap_range(reference)
             && remapped != reference
@@ -535,8 +569,112 @@ impl SheetPatch<'_> {
             write_start_tag(out, &name, &attributes, formula.empty)?;
             cursor = formula.tag.end;
         }
-        out.extend_from_slice(&data[cursor..cell.span.end]);
+        out.extend_from_slice(&data[cursor..end]);
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_cached_cell(
+        &self,
+        out: &mut Vec<u8>,
+        data: &[u8],
+        source: &SourceCell,
+        at: CellRef,
+        cell: &Cell,
+        original: Option<&Cell>,
+        dirty: &DirtyFormulas,
+    ) -> Result<bool, ParseError> {
+        let (Some(formula), Some(original)) = (&source.formula, original) else {
+            return Ok(false);
+        };
+        if cell.formula.is_none()
+            || cell.formula != original.formula
+            || !self.formula_clean(source, at, formula, dirty)
+        {
+            return Ok(false);
+        }
+        let Some(slot) = self.cache_patch_slot(data, source, at)? else {
+            return Ok(false);
+        };
+        let (name, mut attributes) = start_tag(&data[source.tag.clone()])?;
+        if source.at != at {
+            set_attribute(&mut attributes, "r", "r", at.to_a1());
+        }
+        let style = self.styles.written(original.style, cell.style);
+        if style != original.style {
+            attributes.retain(|attribute| attribute.name != "s");
+            if let Some(style) = style {
+                attributes.push(XmlAttribute {
+                    name: "s".to_owned(),
+                    value: style.to_string(),
+                });
+            }
+        }
+        let markup = cell_value_markup(cell, self.sst_index, None);
+        match markup.ty {
+            Some(ty) => {
+                if let Some(attribute) = attributes
+                    .iter_mut()
+                    .find(|attribute| attribute.name == "t")
+                {
+                    attribute.value = ty.to_owned();
+                } else {
+                    attributes.push(XmlAttribute {
+                        name: "t".to_owned(),
+                        value: ty.to_owned(),
+                    });
+                }
+            }
+            None => attributes.retain(|attribute| attribute.name != "t"),
+        }
+        write_start_tag(out, &name, &attributes, false)?;
+        self.emit_source_cell_content(out, data, source, at, slot.start)?;
+        if let Some(value) = markup.value {
+            let mut writer = Writer::new(std::mem::take(out));
+            writer
+                .create_element("v")
+                .write_text_content(BytesText::new(&value))
+                .map_err(xml_err)?;
+            *out = writer.into_inner();
+        }
+        out.extend_from_slice(&data[slot.end..source.span.end]);
+        Ok(true)
+    }
+
+    fn cache_patch_slot(
+        &self,
+        data: &[u8],
+        source: &SourceCell,
+        at: CellRef,
+    ) -> Result<Option<Range<usize>>, ParseError> {
+        let Some(formula) = &source.formula else {
+            return Ok(None);
+        };
+        let (name, attributes) = start_tag(&data[source.tag.clone()])?;
+        if name != "c"
+            || attributes
+                .iter()
+                .any(|attribute| attribute.name.contains(':') || attribute.name == "xmlns")
+        {
+            return Ok(None);
+        }
+        let (_, formula_attributes) = start_tag(&data[formula.tag.clone()])?;
+        let metadata = attributes
+            .iter()
+            .any(|attribute| matches!(attribute.local_name(), "cm" | "vm"));
+        let array = formula_attributes
+            .iter()
+            .any(|attribute| attribute.local_name() == "t" && attribute.value == "array");
+        if metadata || array {
+            let source_range = self.original.array_formula(source.at);
+            if source_range.is_none()
+                || source_range != formula.reference
+                || source_range != self.sheet.array_formula(at)
+            {
+                return Ok(None);
+            }
+        }
+        cached_value_slot(data, source)
     }
 
     fn emit_cell(
@@ -572,8 +710,9 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn dirty_formulas(&self, rows: &[SourceRow]) -> DirtyFormulas {
+    fn dirty_formulas(&self, data: &[u8], rows: &[SourceRow]) -> Result<DirtyFormulas, ParseError> {
         let mut changed = self.changed_source_cells();
+        let mut arrays = BTreeSet::new();
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
@@ -590,11 +729,24 @@ impl SheetPatch<'_> {
                     .and_then(|mapped| self.sheet.array_formula(mapped))
             {
                 changed.insert(key);
+                arrays.insert(key);
             }
             match formula.group {
                 Some(group) => {
                     let entry = groups.entry(group).or_insert((false, None));
-                    entry.0 |= changed.contains(&key);
+                    entry.0 |= self
+                        .mapped(cell.at)
+                        .is_none_or(|at| self.inverse(at) != Some(cell.at))
+                        || (changed.contains(&key) && self.source_formula_changed(cell.at));
+                    entry.0 |= arrays.contains(&key);
+                    if !entry.0
+                        && formula.reference.is_some()
+                        && let Some(at) = self.mapped(cell.at)
+                    {
+                        entry.0 |= (cell.at != at && formula.positional)
+                            || (changed.contains(&key)
+                                && self.cache_patch_slot(data, cell, at)?.is_none());
+                    }
                     if let Some(reference) = formula.reference
                         && entry.1.replace(reference).is_some()
                     {
@@ -606,7 +758,7 @@ impl SheetPatch<'_> {
                 }
             }
         }
-        DirtyFormulas {
+        Ok(DirtyFormulas {
             groups: groups
                 .into_iter()
                 .filter(|(_, (dirty, master))| {
@@ -617,13 +769,27 @@ impl SheetPatch<'_> {
             masters: masters
                 .into_iter()
                 .filter(|(key, reference)| {
-                    changed.contains(key)
+                    arrays.contains(key)
+                        || (reference.is_some() && changed.contains(key))
                         || reference.is_some_and(|reference| {
                             !self.moves_uniformly(reference) || range_changed(reference, &changed)
                         })
                 })
                 .map(|(key, _)| key)
                 .collect(),
+        })
+    }
+
+    fn source_formula_changed(&self, source: CellRef) -> bool {
+        let Some(at) = self.mapped(source) else {
+            return true;
+        };
+        if self.inverse(at) != Some(source) {
+            return true;
+        }
+        match (self.original.cell(source), self.sheet.cell(at)) {
+            (Some(original), Some(cell)) => original.formula != cell.formula,
+            _ => true,
         }
     }
 
@@ -736,6 +902,70 @@ fn range_changed(reference: CellRange, changed: &BTreeSet<(u32, u32)>) -> bool {
     changed
         .range((reference.start.row, 0)..=(reference.end.row, u32::MAX))
         .any(|&(_, col)| col >= reference.start.col && col <= reference.end.col)
+}
+
+fn cached_value_slot(data: &[u8], cell: &SourceCell) -> Result<Option<Range<usize>>, ParseError> {
+    let mut reader = Reader::from_reader(&data[cell.span.clone()]);
+    reader.config_mut().expand_empty_elements = false;
+    let mut depth = 0_usize;
+    let mut child_start = cell.tag.end;
+    let mut formula_end = None;
+    let mut value = None;
+    loop {
+        let before = cell.span.start + reader.buffer_position() as usize;
+        let event = reader.read_event().map_err(xml_err)?;
+        let after = cell.span.start + reader.buffer_position() as usize;
+        if let Event::Start(element) | Event::Empty(element) = &event {
+            if depth > 1 {
+                return Ok(None);
+            }
+            if depth == 1
+                && (!matches!(element.name().as_ref(), b"f" | b"v" | b"is")
+                    || attributes(element)?.iter().any(|attribute| {
+                        attribute.name == "xmlns" || attribute.name.starts_with("xmlns:")
+                    }))
+            {
+                return Ok(None);
+            }
+        }
+        match event {
+            Event::Start(element) => {
+                if depth == 1 {
+                    child_start = before;
+                    if element.name().as_ref() == b"is" {
+                        return Ok(None);
+                    }
+                }
+                depth += 1;
+            }
+            Event::Empty(element) if depth == 1 => match element.name().as_ref() {
+                b"f" if formula_end.replace(after).is_some() => return Ok(None),
+                b"v" if value.replace(before..after).is_some() => return Ok(None),
+                b"is" => return Ok(None),
+                _ => {}
+            },
+            Event::End(element) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                if depth == 1 {
+                    match element.name().as_ref() {
+                        b"f" if formula_end.replace(after).is_some() => return Ok(None),
+                        b"v" if value.replace(child_start..after).is_some() => return Ok(None),
+                        _ => {}
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(formula_end.and_then(|end| match value {
+        Some(value) if value.start >= end => Some(value),
+        None => Some(end..end),
+        _ => None,
+    }))
 }
 
 fn set_row_height(attributes: &mut Vec<XmlAttribute>, height: Option<f64>) {

@@ -81,8 +81,8 @@ import {
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
-import { awaitWorkerOpenReplica } from './DocxEditor/internals/workerOpenReplica';
-import { registeredWorkerProposalAuthority } from './DocxEditor/internals/workerProposalAuthority';
+import { awaitWorkerOpenReplica, workerOpenDocumentHeld } from './DocxEditor/internals/workerOpenReplica';
+import { hasEditorWorkerProposalRounds, registeredWorkerProposalAuthority } from './DocxEditor/internals/workerProposalAuthority';
 import { isWorkerViewer } from './DocxEditor/internals/workerViewer';
 import { warnDeprecatedViewerMember } from './DocxEditor/internals/deprecatedViewerMembers';
 import type { ViewerCommentRanges } from './DocxEditor/internals/viewerSidebarReads';
@@ -791,7 +791,8 @@ function displayRangeToYrsRange(
 /** Sidebar anchor keys of host proposals' revisions, which never open the sidebar themselves. */
 function proposalAnchorKeys(session: YrsSession | null): Set<string> {
   const keys = new Set<string>();
-  for (const proposal of session?.getProposals().proposals ?? []) {
+  const worker = session && hasEditorWorkerProposalRounds(session) ? registeredWorkerProposalAuthority(session)?.snapshot() : null;
+  for (const proposal of [...(session?.getProposals().proposals ?? []), ...(worker?.proposals ?? [])]) {
     for (const revisionId of proposal.revisionIds) {
       keys.add(`revision-${yrsIdToNumericId(revisionId)}`);
     }
@@ -1280,6 +1281,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
             pendingCompletion: canvasRenderer.pendingCompletion,
             layoutCompleteSession: canvasRenderer.layoutCompleteSession,
             onWorkerContentChange: () => workerContentChangeRef.current(),
+            onPeerUpdate: (stories) => pagedEditorRef.current?.syncYrsInputState(true, stories, { inWorker: true }),
             onWorkerRevisions: () => workerRevisionsRef.current(),
           }
         : undefined,
@@ -1870,7 +1872,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const pluginHostSession =
     yrsCore.session &&
     !opening &&
-    (yrsCore.replicaReady || yrsCore.workerProposalsReady) &&
+    (yrsCore.replicaReady || (hasEditorWorkerProposalRounds(yrsCore.session) ? workerOpenDocumentHeld(yrsCore.session) && yrsCore.workerProposalsReady : yrsCore.workerProposalsReady)) &&
     yrsCore.sessionGeneration === yrsSeedGeneration &&
     history.state &&
     !state.isLoading &&

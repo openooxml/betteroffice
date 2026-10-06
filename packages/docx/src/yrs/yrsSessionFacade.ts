@@ -54,7 +54,7 @@ import type {
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
-import { createProposalRegistry } from './proposals';
+import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
   DocxExportFailure,
@@ -367,7 +367,7 @@ export function wrapSession(
   };
 
   let workerDocumentVersion: string | null = null;
-  const proposals = createProposalRegistry({
+  const proposalHooks: DocxProposalSession = {
     version: () => session.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
@@ -393,7 +393,9 @@ export function wrapSession(
           },
         }
       : {}),
-  });
+  };
+  const proposals = createProposalRegistry(proposalHooks);
+  const detachedProposals = new Set<ReturnType<typeof createProposalRegistry>>();
 
   const facade: YrsSession = {
     clientId,
@@ -1329,6 +1331,19 @@ export function wrapSession(
     setProposalStates: (request) => proposals.setStates(request),
     withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
+    createWorkerProposalRegistry: (state) => {
+      if (destroyed) throw new Error('yrs session is destroyed');
+      const registry = createProposalRegistry(proposalHooks);
+      registry.mirror({ version: session.version(), proposals: state });
+      registry.mirror(null);
+      detachedProposals.add(registry);
+      return {
+        ...registry,
+        propose: (request) => mutate(() => registry.propose(request)),
+        withdraw: (request) => mutate(() => registry.withdraw(request)),
+        destroy: () => { registry.destroy(); detachedProposals.delete(registry); },
+      };
+    },
     mirrorWorkerDocument: (mirror) => {
       workerDocumentVersion = mirror?.version ?? null;
       proposals.mirror(mirror);
@@ -1379,6 +1394,8 @@ export function wrapSession(
       resetMedia();
       listeners.clear();
       proposals.destroy();
+      for (const registry of detachedProposals) registry.destroy();
+      detachedProposals.clear();
       pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();

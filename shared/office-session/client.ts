@@ -1,4 +1,4 @@
-import { hasOwn, isHostMessage } from './protocol';
+import { hasOwn, isHostMessage, type HostMessage } from './protocol';
 import type { SessionTransport } from './transport';
 import { SessionFailure, type Promisified, type SessionEvents, type SessionMethods } from './types';
 
@@ -19,6 +19,7 @@ export interface SessionClientOptions<M extends SessionMethods> {
   now?(): number;
   timer?(callback: () => void, ms: number): () => void;
   onWasmModule?(url: string, module: WebAssembly.Module): void;
+  onWasmModuleMessage?(message: Extract<HostMessage, { kind: 'wasm-module' }>): void;
 }
 
 export interface SessionClient<M extends SessionMethods, E extends SessionEvents> {
@@ -115,7 +116,10 @@ export function createSessionClient<M extends SessionMethods, E extends SessionE
     } else if (message.kind === 'failure') {
       end(new SessionFailure(message.code, message.message, message.diagnostics));
     } else if (message.kind === 'wasm-module') {
-      try { options.onWasmModule?.(message.url, message.module); } catch {}
+      try {
+        options.onWasmModule?.(message.url, message.module);
+      } catch {}
+      try { options.onWasmModuleMessage?.(message); } catch {}
     } else if (message.kind === 'event') {
       const listeners = events.get(message.name);
       if (listeners) notify(listeners, message.payload, true);
