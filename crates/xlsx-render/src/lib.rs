@@ -252,6 +252,168 @@ impl AxisLayout {
     }
 }
 
+fn emit_grid_segments(
+    merges: &[CellRange],
+    geometry: &GridGeometry,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+    viewport: &Viewport,
+    print: Option<&PrintMetrics>,
+    color: Arc<str>,
+) -> Vec<DrawCmd> {
+    let merges: Vec<_> = merges
+        .iter()
+        .filter(|range| {
+            rows.intersects(range.start.row, range.end.row)
+                && cols.intersects(range.start.col, range.end.col)
+        })
+        .collect();
+    let offset = print.map_or(0.0, |metrics| 48.0 / metrics.dpi);
+    let width = print.map_or(GRIDLINE_WIDTH, |metrics| 96.0 / metrics.dpi);
+    let mut commands = Vec::new();
+    for vertical in [true, false] {
+        let (axis, across, extent, across_extent) = if vertical {
+            (cols, rows, viewport.width, viewport.height)
+        } else {
+            (rows, cols, viewport.height, viewport.width)
+        };
+        let edge = |index| {
+            if vertical {
+                geometry.col_x(index)
+            } else {
+                geometry.row_y(index)
+            }
+        };
+        let across_edge = |index| {
+            if vertical {
+                geometry.row_y(index)
+            } else {
+                geometry.col_x(index)
+            }
+        };
+        let split = across.tracks.partition_point(|track| track.pinned);
+        let bands: Vec<_> = [&across.tracks[..split], &across.tracks[split..]]
+            .into_iter()
+            .filter_map(|tracks| {
+                let first = tracks.first()?;
+                let last = tracks.last()?;
+                let lower = if first.pinned {
+                    0.0
+                } else {
+                    across.divider.unwrap_or(0.0)
+                };
+                let upper = if first.pinned {
+                    across.divider.unwrap_or(across_extent)
+                } else {
+                    across_extent
+                };
+                let start = first.start.max(lower);
+                let end = last.end.min(upper);
+                (end > start).then_some((first.index, last.index, start, end, first.pinned))
+            })
+            .collect();
+        let split = axis.tracks.partition_point(|track| track.pinned);
+        let mut previous = None;
+        let mut blocked = Vec::new();
+        for tracks in [&axis.tracks[..split], &axis.tracks[split..]] {
+            let Some(first) = tracks.first() else {
+                continue;
+            };
+            let lower = if first.pinned {
+                0.0
+            } else {
+                axis.divider.unwrap_or(0.0)
+            };
+            let upper = if first.pinned {
+                axis.divider.unwrap_or(extent)
+            } else {
+                extent
+            };
+            let scroll = if first.pinned { 0.0 } else { axis.scroll };
+            let boundaries = std::iter::once((first.index, first.raw_start))
+                .chain(tracks.iter().map(|track| (track.index + 1, track.end)));
+            for (index, position) in boundaries {
+                if position < lower || position > upper || previous == Some(position) {
+                    continue;
+                }
+                previous = Some(position);
+                blocked.clear();
+                for range in &merges {
+                    let (start, end, across_start, across_end) = if vertical {
+                        (
+                            range.start.col,
+                            range.end.col,
+                            range.start.row,
+                            range.end.row,
+                        )
+                    } else {
+                        (
+                            range.start.row,
+                            range.end.row,
+                            range.start.col,
+                            range.end.col,
+                        )
+                    };
+                    if start >= index || index > end {
+                        continue;
+                    }
+                    // Hidden tracks can collapse an interior boundary onto an outer edge.
+                    if position <= edge(start) - scroll || position >= edge(end + 1) - scroll {
+                        continue;
+                    }
+                    for &(first, last, lower, upper, pinned) in &bands {
+                        if across_start > last || across_end < first {
+                            continue;
+                        }
+                        let scroll = if pinned { 0.0 } else { across.scroll };
+                        let start = (across_edge(across_start.max(first)) - scroll).max(lower);
+                        let end =
+                            (across_edge((across_end + 1).min(last + 1)) - scroll).min(upper);
+                        if end > start {
+                            blocked.push((start, end));
+                        }
+                    }
+                }
+                blocked.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+                let mut emit = |start: f32, end: f32| {
+                    if end <= start {
+                        return;
+                    }
+                    let (x1, y1, x2, y2) = if vertical {
+                        (position, start, position, end)
+                    } else {
+                        (start, position, end, position)
+                    };
+                    commands.push(DrawCmd::Line {
+                        x1: x1 + offset,
+                        y1: y1 + offset,
+                        x2: x2 + offset,
+                        y2: y2 + offset,
+                        width,
+                        color: color.clone(),
+                        style: None,
+                        clip: None,
+                    });
+                };
+                for &(_, _, start, end, _) in &bands {
+                    let mut cursor = start;
+                    for &(lower, upper) in &blocked {
+                        if lower >= end {
+                            break;
+                        }
+                        if upper > cursor {
+                            emit(cursor, lower.min(end));
+                            cursor = cursor.max(upper);
+                        }
+                    }
+                    emit(cursor, end);
+                }
+            }
+        }
+    }
+    commands
+}
+
 fn viewport_axes(
     sheet: &Sheet,
     viewport: &Viewport,
@@ -541,38 +703,15 @@ where
         .map(|g| (g.row, g.col))
         .collect();
 
-    let mut grid_commands = Vec::new();
-    let grid_offset = print.map_or(0.0, |(m, _)| 48.0 / m.dpi);
-    let row_offsets = rows.offsets();
-    let col_offsets = cols.offsets();
-    let top = row_offsets.first().copied().unwrap_or(0.0);
-    let bottom = row_offsets.last().copied().unwrap_or(0.0);
-    let left = col_offsets.first().copied().unwrap_or(0.0);
-    let right = col_offsets.last().copied().unwrap_or(0.0);
-    for &x in &col_offsets {
-        grid_commands.push(DrawCmd::Line {
-            x1: x + grid_offset,
-            y1: top + grid_offset,
-            x2: x + grid_offset,
-            y2: bottom + grid_offset,
-            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
-            color: gridline_color.clone(),
-            style: None,
-            clip: None,
-        });
-    }
-    for &y in &row_offsets {
-        grid_commands.push(DrawCmd::Line {
-            x1: left + grid_offset,
-            y1: y + grid_offset,
-            x2: right + grid_offset,
-            y2: y + grid_offset,
-            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
-            color: gridline_color.clone(),
-            style: None,
-            clip: None,
-        });
-    }
+    let grid_commands = emit_grid_segments(
+        &sheet_ref.merges,
+        geom,
+        &rows,
+        &cols,
+        viewport,
+        print.map(|(metrics, _)| metrics),
+        gridline_color,
+    );
 
     if let Some((metrics, gridlines)) = print {
         if gridlines {
