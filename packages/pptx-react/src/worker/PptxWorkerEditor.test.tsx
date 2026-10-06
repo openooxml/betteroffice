@@ -291,7 +291,8 @@ test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () =>
   const errors = mock((_error: Error) => {});
   const originalImage = globalThis.Image;
   const image = new Image();
-  Object.defineProperties(image, { naturalWidth: { value: 400 }, naturalHeight: { value: 200 } });
+  Object.defineProperties(image, { src: { value: '', writable: true },
+    naturalWidth: { value: 400 }, naturalHeight: { value: 200 } });
   globalThis.Image = function () { return image; } as unknown as typeof Image;
   restorers.push(() => { globalThis.Image = originalImage; });
   const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} onError={errors} />);
@@ -307,6 +308,7 @@ test('readOnly_flip_visibly_refuses_an_image_finishing_preparation', async () =>
   await waitFor(() => expect(errors).toHaveBeenCalledWith(
     expect.objectContaining({ message: 'The presentation changed before the image was inserted' })
   ));
+  expect(view.getByText('The presentation changed before the image was inserted')).toBeDefined();
   expect(value.methods).toEqual([]);
   expect(new TextDecoder().decode(await api.saveAsync())).toBe('x');
   expect(await api.readContent()).toMatchObject({ stories: [{ text: 'x' }] });
@@ -322,7 +324,7 @@ test('readOnly_flip_refuses_a_pending_plugin_batch', async () => {
   };
   const plugin = definePptxPlugin({ id: 'writer', createState: () => null, initialize(ctx) { context = ctx; } });
   const plugins = [plugin];
-  const grants = { writer: { document: 'write' as const, editBatches: true } };
+  const grants = { writer: { document: 'write' as const, editBatches: true as const } };
   const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen plugins={plugins}
     pluginGrants={grants} onReady={ready} />);
   await waitFor(() => expect(api).toBeDefined());
