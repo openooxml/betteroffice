@@ -41,9 +41,6 @@ export interface WorkbookReplayReply {
 }
 
 export type WorkbookInternalSessionMethods = {
-  beginPeerSnapshot(records: number, bytes: number): { version: string; sequence: number };
-  pullPeerSnapshot(): ArrayBuffer[] | undefined;
-  endPeerSnapshot(discard: boolean): void;
   attachPeer(version: string, sequence: number): void;
   detachPeer(): void;
   replay(envelope: WorkbookReplayEnvelope): WorkbookReplayReply;
@@ -51,14 +48,10 @@ export type WorkbookInternalSessionMethods = {
 };
 
 export const WORKBOOK_INTERNAL_SESSION_METHODS = {
-  beginPeerSnapshot: true, pullPeerSnapshot: true, endPeerSnapshot: true,
   attachPeer: true, detachPeer: true, replay: true, preview: true,
 } as const;
 
 export const WORKBOOK_INTERNAL_SESSION_POLICIES: MethodPolicies<WorkbookInternalSessionMethods> = {
-  beginPeerSnapshot: { lane: 'interactive', reorderable: false },
-  pullPeerSnapshot: { lane: 'interactive', reorderable: false },
-  endPeerSnapshot: { lane: 'interactive', reorderable: false },
   preview: { lane: 'input', reorderable: false },
   attachPeer: { lane: 'input', reorderable: false },
   detachPeer: { lane: 'input', reorderable: false },

@@ -85,7 +85,7 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('editable session workbook', () => {
-  test('opens a retained session and starts eager hydration only after the first paint', async () => {
+  test('opens a retained session and starts hydration before the first paint', async () => {
     const { value } = session();
     const opener = open(value);
     const { peer, hydrate, attach } = resources();
@@ -105,10 +105,10 @@ describe('editable session workbook', () => {
     const { result } = renderHook(() => useEditableSessionWorkbook({ file, onReady: ready }, commands, controls));
     await waitFor(() => expect(result.current.run).not.toBeNull());
     expect(opener).toHaveBeenCalledWith(file, { signal: expect.any(AbortSignal), retainPeerHydration: true });
-    expect(hydrate).not.toHaveBeenCalled();
+    expect(hydrate).toHaveBeenCalledTimes(1);
     const run = result.current.run!;
     await act(async () => run.firstPaint());
-    expect(log).toEqual(['ready', 'hydrate']);
+    expect(log).toEqual(['hydrate', 'ready']);
     expect(run.peer).toBeNull();
     await act(async () => pending.resolve(peer));
     expect(run.ready).toBe(true);
@@ -143,8 +143,7 @@ describe('editable session workbook', () => {
     const error = new xlsx.WorkbookPeerHydrationError('missing-hydration', 'Worker hydration is missing');
     hydrate.mockRejectedValue(error);
     const errors = mock((_error: Error) => {});
-    let api!: XlsxWorkerEditorApi;
-    const ready = mock((value: XlsxWorkerEditorApi) => { api = value; });
+    const ready = mock((_value: XlsxWorkerEditorApi) => {});
     const commands = createXlsxCommandController().store;
     const { result } = renderHook(() => useEditableSessionWorkbook({ file, onError: errors, onReady: ready }, commands, bridge()));
     await waitFor(() => expect(result.current.run).not.toBeNull());
@@ -152,11 +151,11 @@ describe('editable session workbook', () => {
     await act(async () => run.firstPaint());
     await waitFor(() => expect(result.current.error).toBe(error));
     expect(result.current.run).toBe(run);
-    expect(api.failure).toBe(error);
-    await expect(api.whenHydrated()).rejects.toBeInstanceOf(xlsx.WorkbookPeerHydrationError);
+    expect(run.failure).toBe(error);
+    await expect(run.whenHydrated()).rejects.toBeInstanceOf(xlsx.WorkbookPeerHydrationError);
     await act(async () => { run.fail(new Error('Second failure')); run.firstPaint(); });
     expect(errors).toHaveBeenCalledTimes(1);
-    expect(ready).toHaveBeenCalledTimes(1);
+    expect(ready).not.toHaveBeenCalled();
   });
 
   test('retains a peer hydrated after worker failure for recovery', async () => {
@@ -252,6 +251,7 @@ describe('editable session workbook', () => {
   });
 
   test('aborts a pending open and disposes its session after replacement', async () => {
+    resources();
     const old = session();
     const next = session();
     const pending = deferred<WorkbookSession>();
@@ -331,6 +331,7 @@ describe('editable session workbook', () => {
   });
 
   test('contains a throwing open-error callback and clears loading before replacement', async () => {
+    resources();
     const next = session();
     const failure = new Error('Open failed');
     const opener = open(next.value).mockRejectedValueOnce(failure);

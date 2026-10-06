@@ -19,7 +19,7 @@ test('cold hydration instantiates exactly the worker module without main-thread 
   const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
   const modules: WebAssembly.Module[] = [];
   worker.addEventListener('message', (event: MessageEvent) => {
-    if (isHostMessage(event.data) && event.data.kind === 'wasm-module') modules.push(event.data.module);
+    if (isHostMessage(event.data) && event.data.kind === 'wasm-module' && event.data.hydration === undefined) modules.push(event.data.module);
   });
   let session: Awaited<ReturnType<typeof openWorkbookSession>> | undefined;
   let peer: WorkbookHandle | undefined;
@@ -27,7 +27,7 @@ test('cold hydration instantiates exactly the worker module without main-thread 
     session = await openWorkbookSession(bytes, { worker: () => worker, retainPeerHydration: true });
     expect(modules).toHaveLength(1);
     expect(modules[0]).toBeInstanceOf(WebAssembly.Module);
-    expect(instantiating).not.toHaveBeenCalled();
+    expect(instantiating).toHaveBeenCalledTimes(1);
     peer = await hydratePeer(session);
     expect(instantiating).toHaveBeenCalledTimes(1);
     expect(instantiating.mock.calls[0][0]).toBe(modules[0]);

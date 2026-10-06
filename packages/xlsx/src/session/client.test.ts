@@ -43,6 +43,182 @@ function crashableHost(): {
 }
 
 describe('workbook peer hydration', () => {
+  test('starts source opening at session creation and receives the module before worker open and hydration', async () => {
+    const log: string[] = [];
+    const opening = workbookWasm.openWorkbook;
+    const creating = workbookWasm.createWorkbookPeerOpener;
+    const workerOpen = spyOn(workbookWasm, 'openWorkbook').mockImplementation((...args) => {
+      log.push('worker-open');
+      return opening(...args);
+    });
+    const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation((...args) => {
+      log.push('peer-open');
+      return creating(...args);
+    });
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, (transport) => ({
+        ...transport,
+        listen: (listener) => transport.listen((message) => {
+          if (isClientMessage(message) && message.kind === 'call') log.push(message.method);
+          listener(message);
+        }),
+        post(message, transfer) {
+          if (isHostMessage(message) && message.kind === 'wasm-module') {
+            log.push(message.hydration === undefined ? 'module' : 'hydration');
+          }
+          transport.post(message, transfer);
+        },
+      }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+      expect(peerOpen).toHaveBeenCalledTimes(1);
+      expect(log.indexOf('peer-open')).toBeLessThan(log.indexOf('worker-open'));
+      expect(log.indexOf('module')).toBeLessThan(log.indexOf('worker-open'));
+      expect(log.indexOf('worker-open')).toBeLessThan(log.indexOf('hydration'));
+      const peer = await hydratePeer(session);
+      expect(peer.version()).toBe(await session.call.version());
+      expect(log).not.toContain('frame');
+    } finally {
+      peerOpen.mockRestore();
+      workerOpen.mockRestore();
+      await session?.dispose();
+    }
+  });
+
+  test('fails source opener errors loudly without another workbook open or hydration retry', async () => {
+    const ordinaryOpen = spyOn(workbookWasm, 'openWorkbook');
+    const finish = () => { throw new Error('Unexpected opener finish'); };
+    const freeing = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
+      pushHydration() {}, advance() { throw new Error('Source parse failed'); }, finish, dispose() {},
+    }));
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      const opened = ordinaryOpen.mock.calls.length;
+      const failure = await hydratePeer(session).catch((error) => error);
+      expect(failure).toBeInstanceOf(WorkbookPeerHydrationError);
+      expect(failure.message).toContain('Source parse failed');
+      await expect(hydratePeer(session)).rejects.toBe(failure);
+      expect(freeing).toHaveBeenCalledTimes(1);
+      expect(ordinaryOpen.mock.calls.length).toBe(opened);
+    } finally {
+      freeing.mockRestore();
+      ordinaryOpen.mockRestore();
+      await session?.dispose();
+    }
+  });
+
+  test('rejects a source peer with a different version and frees it', async () => {
+    const creating = workbookWasm.createWorkbookPeerOpener;
+    let released = false;
+    const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation((...args) => {
+      const opener = creating(...args);
+      return {
+        ...opener,
+        finish() {
+          const peer = opener.finish();
+          const dispose = peer.dispose;
+          peer.version = () => 'different-version';
+          peer.dispose = () => { released = true; dispose(); };
+          return peer;
+        },
+      };
+    });
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      await expect(hydratePeer(session)).rejects.toMatchObject({
+        name: 'WorkbookPeerHydrationError', code: 'version-mismatch',
+      });
+      expect(released).toBe(true);
+    } finally {
+      peerOpen.mockRestore();
+      await session?.dispose();
+    }
+  });
+
+  test('yields through the scheduler and stops and frees an opener disposed mid-open', async () => {
+    let advances = 0;
+    let frees = 0;
+    let yieldCount = 0;
+    let resume!: () => void;
+    const scheduled = new Promise<void>((resolve) => { resume = resolve; });
+    const scheduler = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
+    Object.defineProperty(globalThis, 'scheduler', {
+      configurable: true, value: { yield: () => { yieldCount += 1; return scheduled; } },
+    });
+    let ticks = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(() => ticks += 5);
+    const timeout = spyOn(globalThis, 'setTimeout');
+    const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
+      pushHydration() {}, advance(units) { expect(units).toBe(256); advances += 1; return 0; },
+      finish() { throw new Error('Unexpected opener finish'); }, dispose() { frees += 1; },
+    }));
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      expect(yieldCount).toBeGreaterThan(0);
+      const pending = hydratePeer(session);
+      const before = advances;
+      await session.dispose();
+      resume();
+      await expect(pending).rejects.toMatchObject({ code: 'disposed' });
+      expect(advances).toBe(before);
+      expect(frees).toBe(1);
+      expect(timeout.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(0);
+    } finally {
+      resume();
+      peerOpen.mockRestore();
+      clock.mockRestore();
+      timeout.mockRestore();
+      if (scheduler) Object.defineProperty(globalThis, 'scheduler', scheduler);
+      else Reflect.deleteProperty(globalThis, 'scheduler');
+      await session?.dispose();
+    }
+  });
+
+  test('uses MessageChannel for slices when the scheduler is unavailable', async () => {
+    const scheduler = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
+    Reflect.deleteProperty(globalThis, 'scheduler');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'MessageChannel');
+    const Channel = globalThis.MessageChannel;
+    let channels = 0;
+    Object.defineProperty(globalThis, 'MessageChannel', {
+      configurable: true,
+      value: class extends Channel { constructor() { super(); channels += 1; } },
+    });
+    let ticks = 0;
+    let advances = 0;
+    const clock = spyOn(performance, 'now').mockImplementation(() => ticks += 5);
+    const timeout = spyOn(globalThis, 'setTimeout');
+    const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
+      pushHydration() {},
+      advance() { if (++advances > 2) throw new Error('End of sliced open'); return 0; },
+      finish() { throw new Error('Unexpected opener finish'); }, dispose() {},
+    }));
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      await expect(hydratePeer(session)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      expect(channels).toBeGreaterThan(0);
+      expect(timeout.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(0);
+    } finally {
+      peerOpen.mockRestore();
+      clock.mockRestore();
+      timeout.mockRestore();
+      if (scheduler) Object.defineProperty(globalThis, 'scheduler', scheduler);
+      if (descriptor) Object.defineProperty(globalThis, 'MessageChannel', descriptor);
+      await session?.dispose();
+    }
+  });
+
   test('refuses retained public mutations before attachment and after peer disposal without changing document state', async () => {
     const pair = createInProcessPair();
     createWorkbookSessionHost(pair.host);
@@ -329,7 +505,7 @@ describe('workbook peer hydration', () => {
         listener(message);
       }),
       post(message, transfer) {
-        if (isHostMessage(message) && message.kind === 'wasm-module') {
+        if (isHostMessage(message) && message.kind === 'wasm-module' && message.hydration !== undefined) {
           message = { ...message, hydration: 'opaque invalid JSON', version: 'wire-version', sequence: 7 };
         }
         transport.post(message, transfer);
@@ -403,7 +579,6 @@ describe('workbook peer hydration', () => {
           transport.post(legacy, transfer);
           return;
         }
-        if (isHostMessage(message) && message.kind === 'reply') return;
         transport.post(message, transfer);
       },
     }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
@@ -418,7 +593,7 @@ describe('workbook peer hydration', () => {
     }
   });
 
-  test('initializes hydration with the exact module received from the worker', async () => {
+  test('starts peer initialization during session creation with the supplied wasm', async () => {
     const pair = createInProcessPair();
     let module: WebAssembly.Module | undefined;
     const transport: SessionTransport = {
@@ -429,16 +604,15 @@ describe('workbook peer hydration', () => {
       }),
     };
     createWorkbookSessionHost(pair.host);
+    const initializing = spyOn(workbookWasm, 'initWasm');
     const session = await createWorkbookSession(fixture, {
       calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
     }, transport);
-    const initializing = spyOn(workbookWasm, 'initWasm');
     let peer: WorkbookHandle | undefined;
     try {
       if (!module) throw new Error('Missing worker module');
       peer = await hydratePeer(session);
-      expect(initializing).toHaveBeenCalledTimes(1);
-      expect(initializing).toHaveBeenCalledWith(module);
+      expect(initializing.mock.calls.some(([input]) => input instanceof ArrayBuffer)).toBe(true);
       expect(peer.version()).toBe(await session.call.version());
       expect(peer.save()).toEqual(await session.save());
     } finally {
@@ -634,14 +808,16 @@ describe('workbook peer hydration', () => {
     }
   });
 
-  test('rejects hydration after disposal and cancels an in-flight hydration', async () => {
+  test('rejects hydration after disposal and frees a completed source peer', async () => {
     const session = await createTestWorkbookSession(fixture, undefined, {
       calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
     });
-    const hydration = hydratePeer(session);
-    const disposal = session.dispose();
-    await expect(hydration).rejects.toMatchObject({ code: 'disposed' });
-    await disposal;
-    await expect(hydratePeer(session)).rejects.toMatchObject({ code: 'disposed' });
+    const peer = await hydratePeer(session);
+    const dispose = spyOn(peer, 'dispose');
+    try {
+      await session.dispose();
+      expect(dispose).toHaveBeenCalledTimes(1);
+      await expect(hydratePeer(session)).rejects.toMatchObject({ code: 'disposed' });
+    } finally { dispose.mockRestore(); await session.dispose(); }
   });
 });

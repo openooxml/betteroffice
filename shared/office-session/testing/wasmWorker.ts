@@ -35,7 +35,8 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const initWasm = (source) => testHarness.initialize(source);
               export const openPresentation = (bytes) => testHarness.open(bytes);
               export const openWorkbook = (bytes) => testHarness.open(bytes);
-              export const openWorkbookPeer = openWorkbook;
+              export const resolveCollaborativeClientId = (options) => options.collaborative ? options.clientId ?? 73 : undefined;
+              export const createWorkbookPeerOpener = () => { throw new Error('createWorkbookPeerOpener is not stubbed'); };
               export class StaleProposalError extends Error {
                 constructor(cells, targets = []) {
                   super('stale: ' + cells.join(', '));
@@ -48,9 +49,7 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
               export const presentationDisplayListJson = () => { throw new Error('presentationDisplayListJson is not stubbed'); };
               export const presentationMetadata = () => ({ slides: [], size: { width: 0, height: 0 } });
               export const workbookDisplayListJson = () => { throw new Error('workbookDisplayListJson is not stubbed'); };
-              export const workbookPeerHydration = () => { throw new Error('workbookPeerHydration is not stubbed'); };
-              export const workbookPeerSnapshot = () => { throw new Error('workbookPeerSnapshot is not stubbed'); };
-              export const createWorkbookSnapshotBuilder = () => { throw new Error('createWorkbookSnapshotBuilder is not stubbed'); };
+              export const workbookPeerHydrationChunks = () => { throw new Error('workbookPeerHydrationChunks is not stubbed'); };
             `,
             loader: 'js',
           }));

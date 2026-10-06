@@ -4,9 +4,9 @@ import type { SessionTransport } from '../../../../shared/office-session/transpo
 import { SessionFailure, type MethodHandlers, type MethodPolicy } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  initWasm, openWorkbook, openWorkbookPeer, StaleProposalError, workbookDisplayListJson, workbookPeerHydration,
-  workbookPeerSnapshot,
-  type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
+  createWorkbookPeerOpener, initWasm, openWorkbook, StaleProposalError, workbookDisplayListJson,
+  workbookPeerHydrationChunks,
+  type OpenWorkbookOptions, type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import {
   WORKBOOK_SESSION_POLICIES,
@@ -49,10 +49,7 @@ export function createWorkbookSessionHost(
   let revision = 0;
   let retainedHydration = false;
   let peerAttached = false;
-  let previewSource: { bytes: Uint8Array; hydration: string } | undefined;
-  let peerSnapshot: {
-    version: string; sequence: number; records: number; bytes: number; pending?: Uint8Array;
-  } | undefined;
+  let previewSource: { bytes: Uint8Array; hydration: string[]; options: OpenWorkbookOptions } | undefined;
   const committed: WorkbookReplayEnvelope[] = [];
   const encoder = new TextEncoder();
 
@@ -68,7 +65,6 @@ export function createWorkbookSessionHost(
     handle = undefined;
     opened?.dispose();
     previewSource = undefined;
-    peerSnapshot = undefined;
     committed.length = 0;
   }
 
@@ -79,64 +75,17 @@ export function createWorkbookSessionHost(
   }
 
   const internalHandlers: MethodHandlers<WorkbookInternalSessionMethods, null> = {
-    beginPeerSnapshot(_, records, bytes) {
-      const opened = workbook();
-      peerSnapshot = undefined;
-      if (!retainedHydration || peerAttached) throw new Error('Worker peer snapshot requires pending retained hydration');
-      try {
-        workbookPeerSnapshot(opened).begin(records, bytes);
-        peerSnapshot = { version: opened.version(), sequence, records, bytes };
-        return { version: peerSnapshot.version, sequence };
-      } catch (error) {
-        try { workbookPeerSnapshot(opened).end(); } catch {}
-        throw new Error(error instanceof Error ? error.message : String(error));
-      }
-    },
-    pullPeerSnapshot() {
-      const opened = workbook();
-      try {
-        const snapshot = checkPeerSnapshot(opened);
-        const buffers: ArrayBuffer[] = [];
-        let bytes = 0;
-        while (buffers.length < snapshot.records && bytes < snapshot.bytes) {
-          const chunk = snapshot.pending ?? workbookPeerSnapshot(opened).next();
-          snapshot.pending = undefined;
-          if (chunk === undefined) break;
-          const buffer = chunk.buffer;
-          if (!(buffer instanceof ArrayBuffer) || chunk.byteOffset !== 0 || chunk.byteLength !== buffer.byteLength) {
-            throw new Error('Worker peer snapshot chunk is not transferable');
-          }
-          if (buffers.length > 0 && bytes + chunk.byteLength > snapshot.bytes) {
-            snapshot.pending = chunk;
-            break;
-          }
-          buffers.push(buffer);
-          bytes += chunk.byteLength;
-        }
-        return buffers.length === 0 ? undefined : transferable(buffers, buffers);
-      } catch (error) {
-        peerSnapshot = undefined;
-        try { workbookPeerSnapshot(opened).end(); } catch {}
-        throw new Error(error instanceof Error ? error.message : String(error));
-      }
-    },
-    endPeerSnapshot(_, discard) {
-      const opened = workbook();
-      try {
-        if (!discard) checkPeerSnapshot(opened);
-        workbookPeerSnapshot(opened).end();
-      } catch (error) {
-        try { workbookPeerSnapshot(opened).end(); } catch {}
-        throw new Error(error instanceof Error ? error.message : String(error));
-      } finally {
-        peerSnapshot = undefined;
-      }
-    },
     preview(_, viewport, sheet, ops) {
       const opened = workbook();
       checkSheet(opened, sheet);
       if (!previewSource) throw new Error('Worker preview requires retained hydration');
-      const speculative = openWorkbookPeer(previewSource.bytes, {}, previewSource.hydration);
+      const opener = createWorkbookPeerOpener(previewSource.bytes, previewSource.options);
+      let speculative: WorkbookHandle;
+      try {
+        for (const chunk of previewSource.hydration) opener.pushHydration(chunk);
+        while (opener.advance(256) !== 2) {}
+        speculative = opener.finish();
+      } finally { opener.dispose(); }
       try {
         for (const envelope of committed) {
           speculative.setCalculationContext(envelope.calculation);
@@ -216,14 +165,6 @@ export function createWorkbookSessionHost(
     },
   };
 
-  function checkPeerSnapshot(opened: WorkbookHandle) {
-    if (!peerSnapshot) throw new Error('Worker peer snapshot is not active');
-    if (peerSnapshot.version !== opened.version() || peerSnapshot.sequence !== sequence) {
-      throw new Error('Workbook changed during peer snapshot');
-    }
-    return peerSnapshot;
-  }
-
   const handlers: MethodHandlers<WorkbookSessionMethods, null> = {
     async open(_, bytes, input = {}) {
       if (disposed) throw new Error('Workbook session is disposed');
@@ -235,6 +176,9 @@ export function createWorkbookSessionHost(
       await (options.initWasm ?? initWasm)(wasm);
       wasm ??= options.wasmModule?.();
       if (disposed) throw new Error('Workbook session is disposed');
+      if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
+        transport.post({ protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm });
+      }
       const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
         nowSerial: Date.now() / 86_400_000 + 25_569,
         randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
@@ -247,19 +191,20 @@ export function createWorkbookSessionHost(
       try {
         let initialCalculation: WorkbookCalculationContext | null | undefined;
         if (retainPeerHydration) previewSource = {
-          bytes: new Uint8Array(bytes).slice(), hydration: workbookPeerHydration(opened),
+          bytes: new Uint8Array(bytes).slice(), hydration: workbookPeerHydrationChunks(opened),
+          options: { collaborative: input.collaborative, clientId: input.clientId, calculation },
         };
         if (previewSource) {
-          const hydration = JSON.parse(previewSource.hydration);
+          const hydration = JSON.parse(previewSource.hydration[0]);
           initialCalculation = hydration.calculation_context === undefined ? undefined :
             hydration.calculation_context === null ? null : {
-              nowSerial: hydration.calculation_context.now_serial, randSeed: hydration.workbook.rand_seed,
+              nowSerial: hydration.calculation_context.now_serial, randSeed: hydration.workbook.header.rand_seed,
             };
         }
         if (retainPeerHydration && wasm instanceof WebAssembly.Module) {
-          transport.post({
+          for (const hydration of previewSource!.hydration) transport.post({
             protocol: 1, kind: 'wasm-module', url: wasmAssetUrl().href, module: wasm,
-            hydration: previewSource!.hydration, version: opened.version(), sequence,
+            hydration, version: opened.version(), sequence,
           });
         }
         const info = opened.sheetInfo();

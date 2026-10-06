@@ -582,60 +582,52 @@ export function openWorkbook(
   return openWorkbookInternal(bytes, options);
 }
 
-const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string>();
+const peerHydrationReaders = new WeakMap<WorkbookHandle, () => string[]>();
 const peerVersionAdopters = new WeakMap<WorkbookHandle, (version: string) => void>();
-const peerSnapshotAccess = new WeakMap<WorkbookHandle, {
-  begin(records: number, bytes: number): void;
-  next(): Uint8Array | undefined;
-  end(): void;
-}>();
 
-export function workbookPeerSnapshot(handle: WorkbookHandle) {
-  const snapshot = peerSnapshotAccess.get(handle);
-  if (!snapshot) throw new TypeError('Workbook does not support peer snapshots');
-  return snapshot;
-}
-
-type SnapshotBuilder = {
-  push(chunk: Uint8Array): void;
-  advance(records: number, bytes: number): boolean;
+type PeerOpener = {
+  pushHydration(chunk: string): void;
+  advance(units: number): number;
   finish(): XlsxDocument;
   free(): void;
 };
 
-export function createWorkbookSnapshotBuilder(options: OpenWorkbookOptions) {
+export function createWorkbookPeerOpener(bytes: Uint8Array, options: OpenWorkbookOptions = {}) {
   requireInitialized();
+  const clientId = resolveCollaborativeClientId(options);
+  const resolved = clientId === undefined ? options : { ...options, clientId };
   const Constructor = (xlsxWasm as unknown as {
-    XlsxSnapshotBuilder?: new () => SnapshotBuilder;
-  }).XlsxSnapshotBuilder;
-  if (!Constructor) throw new Error('Workbook wasm does not support peer snapshots');
-  let builder: SnapshotBuilder | undefined = new Constructor();
-  function active(): SnapshotBuilder {
-    if (!builder) throw new Error('Workbook snapshot builder is disposed');
-    return builder;
+    XlsxPeerOpener?: new (bytes: Uint8Array, clientId?: number) => PeerOpener;
+  }).XlsxPeerOpener;
+  if (!Constructor) throw new Error('Workbook wasm does not support sliced peer opening');
+  let opener: PeerOpener | undefined;
+  try { opener = new Constructor(bytes, clientId); } catch (error) { throw toError(error); }
+  function active(): PeerOpener {
+    if (!opener) throw new Error('Workbook peer opener is disposed');
+    return opener;
   }
   return {
-    push(chunk: Uint8Array): void {
-      try { active().push(chunk); } catch (error) { throw toError(error); }
+    pushHydration(chunk: string): void {
+      try { active().pushHydration(chunk); } catch (error) { throw toError(error); }
     },
-    advance(records: number, bytes: number): boolean {
-      try { return active().advance(records, bytes); } catch (error) { throw toError(error); }
+    advance(units: number): number {
+      try { return active().advance(units); } catch (error) { throw toError(error); }
     },
     finish(): WorkbookHandle {
       const finishing = active();
-      builder = undefined;
-      try { return wrapWorkbookDocument(finishing.finish(), options, true); }
+      opener = undefined;
+      try { return wrapWorkbookDocument(finishing.finish(), resolved, true); }
       catch (error) { throw toError(error); }
     },
     dispose(): void {
-      const disposing = builder;
-      builder = undefined;
+      const disposing = opener;
+      opener = undefined;
       disposing?.free();
     },
   };
 }
 
-export function workbookPeerHydration(handle: WorkbookHandle): string {
+export function workbookPeerHydrationChunks(handle: WorkbookHandle): string[] {
   const read = peerHydrationReaders.get(handle);
   if (!read) throw new TypeError('Workbook does not support peer hydration');
   return read();
@@ -647,14 +639,8 @@ export function adoptWorkbookPeerVersion(handle: WorkbookHandle, version: string
   adopt(version);
 }
 
-export function openWorkbookPeer(
-  bytes: Uint8Array, options: OpenWorkbookOptions, hydration: string
-): WorkbookHandle {
-  return openWorkbookInternal(bytes, options, hydration);
-}
-
 function openWorkbookInternal(
-  bytes: Uint8Array, options: OpenWorkbookOptions, hydration?: string
+  bytes: Uint8Array, options: OpenWorkbookOptions
 ): WorkbookHandle {
   if (options.calculation !== undefined) {
     validateCalculationContext(options.calculation);
@@ -666,9 +652,7 @@ function openWorkbookInternal(
   const collaborativeClientId = resolveCollaborativeClientId(options);
   let doc: XlsxDocument;
   try {
-    if (hydration !== undefined) {
-      doc = (XlsxDocument as PeerDocumentConstructor).openWithPeerHydrationJson(bytes, hydration);
-    } else if (options.calculation !== undefined) {
+    if (options.calculation !== undefined) {
       doc = (XlsxDocument as CalculationDocumentConstructor).openWithCalculationJson(
         bytes, JSON.stringify(options.calculation)
       );
@@ -681,7 +665,7 @@ function openWorkbookInternal(
     throw toError(e);
   }
 
-  return wrapWorkbookDocument(doc, options, hydration !== undefined);
+  return wrapWorkbookDocument(doc, options, false);
 }
 
 function wrapWorkbookDocument(
@@ -1105,29 +1089,14 @@ function wrapWorkbookDocument(
     },
   };
   displayListJsonReaders.set(handle, (viewport, sheet) => wasmCall(() => displayListJson(viewport, sheet)));
-  peerHydrationReaders.set(handle, () => wasmCall(() => (doc as PeerDocument).peerHydrationJson()));
+  peerHydrationReaders.set(handle, () => wasmCall(() => [...(doc as PeerDocument).peerHydrationChunksJson()]));
   peerVersionAdopters.set(handle, (version) => wasmCall(() => (doc as PeerDocument).adoptPeerVersion(version)));
-  peerSnapshotAccess.set(handle, {
-    begin: (records, bytes) => wasmCall(() => (doc as SnapshotDocument).beginPeerSnapshot(records, bytes)),
-    next: () => wasmCall(() => (doc as SnapshotDocument).nextPeerSnapshotChunk()),
-    end: () => wasmCall(() => (doc as SnapshotDocument).endPeerSnapshot()),
-  });
   return handle;
 }
 
-type SnapshotDocument = XlsxDocument & {
-  beginPeerSnapshot(records: number, bytes: number): void;
-  nextPeerSnapshotChunk(): Uint8Array | undefined;
-  endPeerSnapshot(): void;
-};
-
 type PeerDocument = XlsxDocument & {
-  peerHydrationJson(): string;
+  peerHydrationChunksJson(): string[];
   adoptPeerVersion(version: string): void;
-};
-
-type PeerDocumentConstructor = typeof XlsxDocument & {
-  openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): PeerDocument;
 };
 
 type CalculationDocument = XlsxDocument & {
@@ -1169,7 +1138,7 @@ function validateCalculationOverride(calculation: unknown): void {
   }
 }
 
-function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | undefined {
+export function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | undefined {
   if (!options.collaborative) {
     if (options.clientId !== undefined) {
       throw new TypeError('clientId requires collaborative mode');

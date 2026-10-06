@@ -5,7 +5,7 @@ import { createWorkerTransport, type SessionTransport } from '../../../../shared
 import { SessionFailure, type MethodPolicy, type Promisified } from '../../../../shared/office-session/types';
 import { wasmAssetUrl } from '../wasm/asset';
 import {
-  createWorkbookSnapshotBuilder, initWasm, openWorkbookPeer,
+  createWorkbookPeerOpener, initWasm, resolveCollaborativeClientId,
   type OpenWorkbookOptions, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import {
@@ -33,8 +33,8 @@ type Events = { [K in keyof WorkbookSessionEvents]: WorkbookSessionEvents[K] } &
 };
 type Methods = WorkbookSessionMethods & WorkbookInternalSessionMethods;
 const wasmModules = new Map<string, WebAssembly.Module>();
-const PEER_SNAPSHOT_BUDGET = { records: 256, bytes: 16 * 1024 } as const;
-const PEER_SNAPSHOT_SLICE_MS = 8;
+const PEER_OPEN_UNITS = 256;
+const PEER_OPEN_SLICE_MS = 8;
 
 /**
  * Options for opening a workbook in a dedicated worker.
@@ -93,7 +93,7 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
   const transfer: Transferable[] = [document];
   const input: WorkbookSessionOpenOptions & { retainPeerHydration?: boolean } = {
     collaborative: options.collaborative,
-    clientId: options.clientId,
+    clientId: resolveCollaborativeClientId(options),
     calculation: options.calculation === undefined ? undefined : { ...options.calculation },
     retainPeerHydration: options.retainPeerHydration,
   };
@@ -106,64 +106,93 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
   return { document, input, transfer };
 }
 
+function peerYield(): Promise<void> {
+  const scheduler = (globalThis as typeof globalThis & {
+    scheduler?: { yield(): Promise<void> };
+  }).scheduler;
+  if (scheduler?.yield) return scheduler.yield();
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => {
+      channel.port1.close();
+      channel.port2.close();
+      resolve();
+    };
+    channel.port2.postMessage(undefined);
+  });
+}
+
+function waitForPeerInput(source: WorkbookPeerSource): Promise<void> {
+  return new Promise((resolve) => { source.wake = resolve; });
+}
+
+function stopPeerOpen(source: WorkbookPeerSource): void {
+  source.disposed = true;
+  source.bytes = undefined;
+  source.hydration.length = 0;
+  source.opener?.dispose();
+  source.opener = undefined;
+  source.wake?.();
+  source.wake = undefined;
+  void source.pending?.then((peer) => peer.dispose(), () => {});
+}
+
 async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookHandle> {
-  if (!source.module) throw new WorkbookPeerHydrationError('missing-module',
-    'Workbook peer hydration requires a worker-compiled module');
-  await initWasm(source.module);
-  if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-  if (source.hydration === undefined) throw new WorkbookPeerHydrationError('missing-hydration',
-    'Workbook worker did not retain peer calculation state');
-  if (source.snapshot) {
-    const snapshot = source.snapshot;
-    let builder: ReturnType<typeof createWorkbookSnapshotBuilder> | undefined;
-    let peer: WorkbookHandle | undefined;
-    try {
-      const pinned = await snapshot.beginPeerSnapshot(PEER_SNAPSHOT_BUDGET.records, PEER_SNAPSHOT_BUDGET.bytes);
-      if (pinned.version !== source.version || pinned.sequence !== source.sequence) {
-        throw new Error('Workbook snapshot differs from retained peer hydration');
-      }
-      builder = createWorkbookSnapshotBuilder(source.options);
-      for (;;) {
-        if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-        const chunks = await snapshot.pullPeerSnapshot();
-        if (chunks === undefined) break;
-        for (const chunk of chunks) builder.push(new Uint8Array(chunk));
-      }
-      let ready = false;
-      for (;;) {
-        await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        const deadline = performance.now() + PEER_SNAPSHOT_SLICE_MS;
-        do {
-          if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-          ready = builder.advance(PEER_SNAPSHOT_BUDGET.records, PEER_SNAPSHOT_BUDGET.bytes);
-        } while (!ready && performance.now() < deadline);
-        if (ready) break;
-      }
-      peer = builder.finish();
-      if (peer.version() !== pinned.version) throw new Error('Workbook snapshot peer version differs from worker');
-      await snapshot.endPeerSnapshot(false);
-      if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-      source.bytes = undefined;
-      source.hydration = undefined;
-      return peer;
-    } catch (error) {
-      try { peer?.dispose(); } catch {}
-      try { await snapshot.endPeerSnapshot(true); } catch {}
-      if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
-      try {
-        console.warn(`xlsx worker editor: snapshot hydration fell back: ${error instanceof Error ? error.message : String(error)}`);
-      } catch {}
-    } finally {
-      try { builder?.dispose(); } catch {}
+  let peer: WorkbookHandle | undefined;
+  function check(): void {
+    if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+    if (source.failure) throw source.failure;
+  }
+  try {
+    while (!source.wasm && !source.module) {
+      check();
+      await waitForPeerInput(source);
     }
-  }
-  if (source.bytes === undefined || source.hydration === undefined) {
-    throw new WorkbookPeerHydrationError('missing-hydration',
-      'Workbook worker did not retain peer source bytes or calculation state');
-  }
-  try { return openWorkbookPeer(source.bytes, source.options, source.hydration); } catch (error) {
-    throw new WorkbookPeerHydrationError('missing-hydration',
-      `Workbook worker supplied invalid peer hydration: ${error instanceof Error ? error.message : String(error)}`);
+    check();
+    await initWasm(source.wasm ?? source.module!);
+    check();
+    if (!source.bytes) throw new Error('Workbook peer source bytes are missing');
+    const opener = createWorkbookPeerOpener(source.bytes, source.options);
+    source.opener = opener;
+    source.bytes = undefined;
+    source.wasm = undefined;
+    let ready = false;
+    while (!ready) {
+      check();
+      const deadline = performance.now() + PEER_OPEN_SLICE_MS;
+      while (source.hydration.length > 0 && performance.now() < deadline) {
+        opener.pushHydration(source.hydration.shift()!);
+      }
+      let state: number;
+      do {
+        check();
+        state = opener.advance(PEER_OPEN_UNITS);
+        ready = state === 2;
+      } while (!ready && state !== 1 && performance.now() < deadline);
+      if (ready) break;
+      if (state === 1 && source.hydration.length === 0) await waitForPeerInput(source);
+      else await peerYield();
+    }
+    check();
+    peer = opener.finish();
+    if (peer.version() !== source.version) throw new WorkbookPeerHydrationError('version-mismatch',
+      'Workbook source peer version differs from worker hydration');
+    check();
+    return peer;
+  } catch (error) {
+    peer?.dispose();
+    if (source.disposed) throw new SessionFailure('disposed', 'Workbook session was disposed');
+    const failure = error instanceof WorkbookPeerHydrationError ? error :
+      new WorkbookPeerHydrationError('missing-hydration',
+        `Workbook peer opening failed: ${error instanceof Error ? error.message : String(error)}`);
+    source.failure = failure;
+    throw failure;
+  } finally {
+    source.opener?.dispose();
+    source.opener = undefined;
+    source.bytes = undefined;
+    source.hydration.length = 0;
+    source.wake = undefined;
   }
 }
 
@@ -172,14 +201,7 @@ export function hydratePeer(session: WorkbookSession): Promise<WorkbookHandle> {
   const source = peerSources.get(session);
   if (!source) return Promise.reject(new TypeError('Workbook session does not retain peer hydration state'));
   if (source.disposed) return Promise.reject(new SessionFailure('disposed', 'Workbook session was disposed'));
-  if (!source.pending) {
-    const pending = openPeerFromSource(source);
-    source.pending = pending;
-    void pending.catch(() => {
-      if (source.pending === pending) source.pending = undefined;
-    });
-  }
-  return source.pending;
+  return source.pending!;
 }
 
 /**
@@ -222,7 +244,8 @@ export async function createWorkbookSession(
           collaborative: input.collaborative, clientId: input.clientId, calculation: input.calculation,
         },
         module: input.wasm instanceof WebAssembly.Module ? input.wasm : undefined,
-        disposed: false,
+        wasm: input.wasm instanceof ArrayBuffer ? input.wasm.slice(0) : undefined,
+        hydration: [], receivedHydration: false, disposed: false,
       };
     }
     client = createSessionClient<Methods, Events>(transport, {
@@ -230,28 +253,41 @@ export async function createWorkbookSession(
       onWasmModuleMessage: ({ url, module, hydration, version, sequence }) => {
         if (url !== wasmAssetUrl().href) return;
         if (peerSource) {
-          if (hydration === undefined) {
-            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
-              'Workbook worker did not retain peer calculation state'));
-            return;
-          }
-          if (typeof version !== 'string' || typeof sequence !== 'number' ||
-            !Number.isSafeInteger(sequence) || sequence < 0) {
-            rejectHydration(new WorkbookPeerHydrationError('missing-hydration',
-              'Workbook worker hydration is missing its committed version or sequence'));
-            return;
-          }
           peerSource.module = module;
-          peerSource.hydration = hydration;
-          peerSource.version = version;
-          peerSource.sequence = sequence;
+          if (hydration !== undefined) {
+            if (typeof version !== 'string' || typeof sequence !== 'number' ||
+              !Number.isSafeInteger(sequence) || sequence < 0) {
+              const error = new WorkbookPeerHydrationError('missing-hydration',
+                'Workbook worker hydration is missing its committed version or sequence');
+              peerSource.failure = error;
+              rejectHydration(error);
+            } else if (peerSource.version !== undefined &&
+              (peerSource.version !== version || peerSource.sequence !== sequence)) {
+              const error = new WorkbookPeerHydrationError('version-mismatch',
+                'Workbook worker hydration identity changed during opening');
+              peerSource.failure = error;
+              rejectHydration(error);
+            } else {
+              peerSource.hydration.push(hydration);
+              peerSource.receivedHydration = true;
+              peerSource.version = version;
+              peerSource.sequence = sequence;
+            }
+          }
+          peerSource.wake?.();
+          peerSource.wake = undefined;
         }
         if (options.wasm === undefined && !options.worker && !wasmModules.has(url)) {
           wasmModules.set(url, module);
         }
       },
     });
+    if (peerSource) {
+      peerSource.pending = openPeerFromSource(peerSource);
+      void peerSource.pending.catch(() => {});
+    }
   } catch (error) {
+    if (peerSource) stopPeerOpen(peerSource);
     try { transport.close(); } catch {}
     throw error;
   }
@@ -265,7 +301,7 @@ export async function createWorkbookSession(
   client.onFailure(() => { state = { ...state, stage: 'failed' }; });
   const signal = options.signal;
   const abort = () => {
-    if (peerSource) peerSource.disposed = true;
+    if (peerSource) stopPeerOpen(peerSource);
     void client.dispose().catch(() => {});
     try { transport.close(); } catch {}
   };
@@ -276,15 +312,16 @@ export async function createWorkbookSession(
       client.callWithTransfer('open', [document, input], transfer), hydrationFailure,
     ]);
     if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
-    if (peerSource && !peerSource.module) {
+    if (peerSource && !peerSource.module && !peerSource.wasm && !peerSource.opener) {
       throw new WorkbookPeerHydrationError('missing-module',
         'Workbook worker did not retain a compiled module for peer hydration');
     }
-    if (peerSource && peerSource.hydration === undefined) {
+    if (peerSource && !peerSource.receivedHydration) {
       throw new WorkbookPeerHydrationError('missing-hydration',
         'Workbook worker did not retain peer calculation state');
     }
   } catch (error) {
+    if (peerSource) stopPeerOpen(peerSource);
     await client.dispose();
     throw error;
   } finally { signal?.removeEventListener('abort', abort); }
@@ -324,7 +361,7 @@ export async function createWorkbookSession(
     onFailure: (listener) => client.onFailure(listener),
     get failure() { return client.failure; },
     dispose: () => {
-      if (peerSource) peerSource.disposed = true;
+      if (peerSource) stopPeerOpen(peerSource);
       return client.dispose();
     },
   };
@@ -347,11 +384,6 @@ export async function createWorkbookSession(
     return reply;
   };
   const source = peerSource;
-  if (source) source.snapshot = {
-    beginPeerSnapshot: (...args) => client.call.beginPeerSnapshot(...args),
-    pullPeerSnapshot: () => client.call.pullPeerSnapshot(),
-    endPeerSnapshot: (discard) => client.call.endPeerSnapshot(discard),
-  };
   const attachPeer = source ? async (peerVersion: string) => {
     try {
       await client.call.attachPeer(peerVersion, source.sequence!);

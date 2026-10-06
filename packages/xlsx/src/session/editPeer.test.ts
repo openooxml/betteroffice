@@ -3,7 +3,7 @@ import JSZip from 'jszip';
 import { isClientMessage, isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
 import type { XlsxEditRequest, XlsxRangeTarget } from '../edits';
 import {
-  openWorkbook, workbookPeerHydration, StaleProposalError, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
+  openWorkbook, workbookPeerHydrationChunks, StaleProposalError, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
 import { hydratePeer, type WorkbookSession } from './client';
 import {
@@ -1331,11 +1331,11 @@ test('keeps calculation context equal after a refused hydrated mutation', async 
   zip.file('xl/_rels/workbook.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>');
   zip.file('xl/worksheets/sheet1.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>NOW()</f><v>0</v></c><c r="B1"><f>TODAY()</f><v>0</v></c><c r="C1"><f>RANDBETWEEN(1,1000000)</f><v>0</v></c></row></sheetData></worksheet>');
   const bytes = await zip.generateAsync({ type: 'uint8array' });
-  let retained = '';
+  const retained: string[] = [];
   const session = await createTestWorkbookSession(bytes, (transport) => ({
     ...transport,
     post(message, transfer) {
-      if (isHostMessage(message) && message.kind === 'wasm-module') retained = message.hydration ?? '';
+      if (isHostMessage(message) && message.kind === 'wasm-module' && message.hydration !== undefined) retained.push(message.hydration);
       transport.post(message, transfer);
     },
   }), { wasm: wasmBytes.buffer, retainPeerHydration: true, calculation: { nowSerial: 46000.5, randSeed: 41 } });
@@ -1343,18 +1343,18 @@ test('keeps calculation context equal after a refused hydrated mutation', async 
   const edits = createWorkbookEditPeer({ session, peer,
     now: () => (46001.75 - 25569) * 86400000, randomSeed: () => 42 });
   try {
-    const original = JSON.parse(retained);
-    expect(JSON.parse(workbookPeerHydration(peer))).toEqual(original);
+    const original = retained.map((chunk) => JSON.parse(chunk));
+    expect(workbookPeerHydrationChunks(peer).map((chunk) => JSON.parse(chunk))).toEqual(original);
     const before = await session.call.readCells({ ranges: [target('A1:C1')] });
     if (!before.ok) throw new Error(before.failure.message);
     expect(before.ranges[0].cells[0].map((cell) => cell.value.kind)).toEqual(['number', 'number', 'number']);
     expect(edits.applyEdits({ ...request(peer, 'A1', 'refused'), expectVersion: 'stale' })).toMatchObject({ ok: false });
     await edits.flush();
-    expect(JSON.parse(workbookPeerHydration(peer))).toEqual(original);
+    expect(workbookPeerHydrationChunks(peer).map((chunk) => JSON.parse(chunk))).toEqual(original);
     expect(peer.version()).toBe(await session.call.version());
     expect(peer.readCells({ ranges: [target('A1:C1')] })).toEqual(before);
     expect(peer.listProposals()).toEqual([]);
-    expect(JSON.parse(workbookPeerHydration(peer)).workbook.proposal_id_counter).toBe(original.workbook.proposal_id_counter);
+    expect(workbookPeerHydrationChunks(peer).map((chunk) => JSON.parse(chunk))[0].workbook.header.proposal_id_counter).toBe(original[0].workbook.header.proposal_id_counter);
     expect(edits.sentSequence).toBe(0);
     expect(edits.acknowledgedSequence).toBe(0);
     expect(await digest(peer.save())).toBe(await digest(await session.save()));

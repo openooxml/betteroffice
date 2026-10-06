@@ -66,6 +66,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
     void this.hydrated.catch(() => {});
     this.offFailure = session.onFailure((error) => this.fail(error));
     if (session.failure) this.fail(session.failure);
+    if (!this.failure) void this.requestHydration('session-created').catch(() => {});
   }
 
   get current(): boolean { return this.alive && (this.retiring || this.options.isCurrent()); }
@@ -96,7 +97,6 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
       if (!this.current && typeof cleanup === 'function') cleanup();
       else this.cleanup = cleanup;
     } catch (error) { this.fail(error); }
-    if (this.current && !this.failure) void this.requestHydration('first-paint').catch(() => {});
   }
 
   requestHydration(reason: string): Promise<void> {
