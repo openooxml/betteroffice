@@ -185,6 +185,127 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
             }
         }
     }
+
+    for claimed in [true, false] {
+        let mut parts = parts.clone();
+        let chart_path = if claimed {
+            "xl/charts/chart1.xml"
+        } else {
+            "xl/charts/unclaimed.xml"
+        };
+        let chart_xml = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:ser><c:val><c:numRef><c:f>B2:D7</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val><c:cat><c:strRef><c:f>Sheet1!F3:F11</c:f><c:strCache><c:pt idx="0"><c:v>label</c:v></c:pt></c:strCache></c:strRef></c:cat></c:ser></c:chart></c:chartSpace>"#;
+        if claimed {
+            parts
+                .iter_mut()
+                .find(|(path, _)| path == chart_path)
+                .unwrap()
+                .1 = chart_xml.to_vec();
+        } else {
+            parts.push((chart_path.into(), chart_xml.to_vec()));
+        }
+        let types = &mut parts
+            .iter_mut()
+            .find(|(path, _)| path == "[Content_Types].xml")
+            .unwrap()
+            .1;
+        *types = String::from_utf8(std::mem::take(types))
+            .unwrap()
+            .replace(
+                "</Types>",
+                &format!(
+                    r#"<Override PartName="/{chart_path}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#,
+                ),
+            )
+            .into_bytes();
+        let content_types = vec![crate::package::PartContentType {
+            path: chart_path.into(),
+            content_type: "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+                .into(),
+        }];
+        let expected = crate::parse_workbook_with_owned_package(parts.clone()).unwrap();
+        let expected_charts =
+            crate::chart::unmodelled_chart_parts(&parts, &content_types, &expected.workbook)
+                .unwrap()
+                .into_iter()
+                .map(|chart| (chart.path, chart.claimed, chart.owner))
+                .collect::<Vec<_>>();
+        assert_eq!(
+            expected_charts,
+            vec![(chart_path.into(), claimed, claimed.then(|| "Sheet1".into()))]
+        );
+        let area = |address| crate::package_facts::ReferenceAreaFacts {
+            sheet: "Sheet1".into(),
+            end: CellRef::parse_a1(address).unwrap(),
+        };
+        let references = vec![
+            crate::package_facts::ReferenceFacts {
+                part: "xl/pivotCache/cache1.xml".into(),
+                areas: Some(vec![area("B20")]),
+            },
+            crate::package_facts::ReferenceFacts {
+                part: "xl/pivotTables/pivot1.xml".into(),
+                areas: Some(vec![area("E21")]),
+            },
+            crate::package_facts::ReferenceFacts {
+                part: chart_path.into(),
+                areas: claimed.then(|| vec![area("D7"), area("F11")]),
+            },
+        ];
+        assert_eq!(
+            crate::PackageFacts::from_package(&expected.package).references,
+            references
+        );
+        for units in [1, 256, usize::MAX] {
+            crate::reference::SYNC_REFERENCE_OPENS.set(0);
+            crate::chart::SYNC_CHART_OPENS.set(0);
+            let work = ooxml_opc::WorkBudget::default();
+            let mut opening = Box::pin(async {
+                let actual = crate::parse_workbook_with_owned_package_sliced(parts.clone(), &work)
+                    .await
+                    .unwrap();
+                let charts = crate::chart::unmodelled_chart_parts_sliced(
+                    &parts,
+                    &content_types,
+                    &actual.workbook,
+                    &work,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|chart| (chart.path, chart.claimed, chart.owner))
+                .collect::<Vec<_>>();
+                (actual, charts)
+            });
+            let mut context = Context::from_waker(Waker::noop());
+            let mut charged = 0;
+            let (actual, charts) = loop {
+                work.reset(units);
+                let state = opening.as_mut().poll(&mut context);
+                assert!(work.touched() <= units);
+                charged += work.touched();
+                if let Poll::Ready(result) = state {
+                    break result;
+                }
+            };
+            assert_eq!(crate::reference::SYNC_REFERENCE_OPENS.get(), 0);
+            assert_eq!(crate::chart::SYNC_CHART_OPENS.get(), 0);
+            assert_eq!(actual.workbook, expected.workbook);
+            assert_eq!(charts, expected_charts);
+            assert_eq!(
+                charts,
+                vec![(chart_path.into(), claimed, claimed.then(|| "Sheet1".into()))]
+            );
+            assert_eq!(
+                crate::PackageFacts::from_package(&actual.package),
+                crate::PackageFacts::from_package(&expected.package)
+            );
+            assert_eq!(
+                crate::PackageFacts::from_package(&actual.package).references,
+                references
+            );
+            assert!(charged > 1024);
+        }
+    }
 }
 
 #[test]
