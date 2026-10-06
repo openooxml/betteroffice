@@ -84,9 +84,7 @@ pub(crate) fn entropy() -> [u64; 2] {
 }
 
 /// Kind of Word story a source part holds.
-#[derive(
-    Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum SourceStoryKind {
     Body,

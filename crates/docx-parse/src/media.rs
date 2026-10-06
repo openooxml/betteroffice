@@ -101,9 +101,7 @@ impl MediaTable {
         let mut parts = Vec::with_capacity(descriptors.len());
         let mut total = 0u64;
         for (descriptor, (position, (path, size))) in descriptors.into_iter().zip(entries) {
-            if descriptor.path != path
-                || descriptor.position != position
-                || descriptor.size != size
+            if descriptor.path != path || descriptor.position != position || descriptor.size != size
             {
                 return Err("media descriptor differs from retained package".to_owned());
             }

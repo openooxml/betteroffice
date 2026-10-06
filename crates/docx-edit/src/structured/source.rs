@@ -641,9 +641,7 @@ impl ReadSource {
         }
         self.story_index.clear();
         for (index, story) in self.stories.iter().enumerate() {
-            self.story_index
-                .entry(story.story.clone())
-                .or_insert(index);
+            self.story_index.entry(story.story.clone()).or_insert(index);
         }
         for record in &self.provenance.inline {
             if let Witness::Embed(index) = record.witness
