@@ -30,6 +30,7 @@ export class PptxCommandAdmissionError extends Error {
       | 'target-changed'
       | 'gesture-active'
       | 'editor-unavailable'
+      | 'read-only'
     >
   ) {
     super(code);

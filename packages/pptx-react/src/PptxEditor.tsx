@@ -485,8 +485,12 @@ const initialStyle: EffectiveTextStyle = {
   fontFamily: 'Arial',
 };
 
-export function PptxEditor(props: PptxWorkerEditorProps): JSX.Element;
+export function PptxEditor(props: PptxWorkerEditorProps & { readOnly?: false }): JSX.Element;
 export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
+export function PptxEditor(props: Omit<PptxWorkerEditorProps, 'onReady'> & {
+  onReady?: (api: PptxWorkerEditorApi | PptxWorkerViewerApi) => void;
+}): JSX.Element;
+export function PptxEditor(props: PptxWorkerEditorProps): JSX.Element;
 export function PptxEditor(props: PptxEditorProps): JSX.Element;
 export function PptxEditor({
   i18n,
@@ -494,14 +498,24 @@ export function PptxEditor({
 }: PptxWorkerEditorProps | PptxWorkerViewerProps | PptxEditorProps): JSX.Element {
   return (
     <LocaleProvider i18n={i18n}>
-      {'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && !props.readOnly ? (
-        <PptxWorkerEditor {...props as PptxWorkerEditorProps} i18n={i18n} />
-      ) : 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && props.readOnly ? (
-        <PptxSessionViewer {...props} i18n={i18n} />
-      ) : (
-        <PptxEditorContent {...props as PptxEditorProps} i18n={i18n} />
-      )}
+      <PptxEditorSession {...props} i18n={i18n} />
     </LocaleProvider>
+  );
+}
+
+function PptxEditorSession(props: PptxWorkerEditorProps | PptxWorkerViewerProps | PptxEditorProps) {
+  const fonts = useStableFontFaces(props.fonts);
+  const workerOpen = 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen;
+  const identity = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration, workerOpen]);
+  const [choice, setChoice] = useState({ identity, editable: !props.readOnly });
+  const editable = choice.identity === identity ? choice.editable || !props.readOnly : !props.readOnly;
+  if (choice.identity !== identity || choice.editable !== editable) setChoice({ identity, editable });
+  return workerOpen && editable ? (
+    <PptxWorkerEditor {...props as PptxWorkerEditorProps} />
+  ) : workerOpen ? (
+    <PptxSessionViewer {...props as PptxWorkerViewerProps} />
+  ) : (
+    <PptxEditorContent {...props as PptxEditorProps} />
   );
 }
 
@@ -548,10 +562,12 @@ export function PptxEditorContent({
   const [backendRevision, setBackendRevision] = useState(0);
   const workerReadyRef = useRef(onWorkerReady);
   workerReadyRef.current = onWorkerReady;
+  const readOnlyRef = useRef(readOnly);
   const [coordinator] = useState(() => {
     if (backend) return createWorkerInputCoordinator({
       session: () => workerRef.current?.current ? workerRef.current.owner : null,
       gestureActive: () => Boolean(pointerGestureRef.current || resizeRef.current),
+      readOnly: () => readOnlyRef.current,
       changed: () => workerRefreshRef.current(),
     });
     const created = createInputCoordinator(() => {
@@ -605,7 +621,6 @@ export function PptxEditorContent({
       : afterInput(opened, () => {}),
     [afterInput, backend, coordinator]
   );
-  const readOnlyRef = useRef(readOnly);
   const readOnlyRefusal = useCallback((opened: PresentationHandle): PptxEditRefusal | null =>
     readOnlyRef.current
       ? { ok: false, version: opened.version(), failure: { code: 'read-only', message: 'The editor is read-only' } }
@@ -1176,7 +1191,8 @@ export function PptxEditorContent({
               if (!owner.show(slide)) return false;
               showSlide(slide - 1, false);
               return owner.showAsync(slide);
-            }, () => Boolean(pointerGestureRef.current || resizeRef.current), () => owner.current);
+            }, () => Boolean(pointerGestureRef.current || resizeRef.current), () => owner.current,
+            () => readOnlyRef.current);
             owner.onFirstPaint = () => workerReadyRef.current?.(workerApi);
             setBackendRevision((value) => value + 1);
           } else onReadyRef.current?.(api);
