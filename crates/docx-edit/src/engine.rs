@@ -2748,19 +2748,25 @@ fn shape_measurement_counts_match(next: &LayoutBlock, previous: &LayoutBlock) ->
         (LayoutBlock::Shape(next), LayoutBlock::Shape(previous)) => shape(next, previous),
         (LayoutBlock::Table(next), LayoutBlock::Table(previous)) => {
             next.rows.len() == previous.rows.len()
-                && next.rows.iter().zip(&previous.rows).all(|(next, previous)| {
-                    next.cells.len() == previous.cells.len()
-                        && next.cells.iter().zip(&previous.cells).all(|(next, previous)| {
-                            next.blocks.len() == previous.blocks.len()
-                                && next
-                                    .blocks
-                                    .iter()
-                                    .zip(&previous.blocks)
-                                    .all(|(next, previous)| {
-                                        shape_measurement_counts_match(next, previous)
-                                    })
-                        })
-                })
+                && next
+                    .rows
+                    .iter()
+                    .zip(&previous.rows)
+                    .all(|(next, previous)| {
+                        next.cells.len() == previous.cells.len()
+                            && next
+                                .cells
+                                .iter()
+                                .zip(&previous.cells)
+                                .all(|(next, previous)| {
+                                    next.blocks.len() == previous.blocks.len()
+                                        && next.blocks.iter().zip(&previous.blocks).all(
+                                            |(next, previous)| {
+                                                shape_measurement_counts_match(next, previous)
+                                            },
+                                        )
+                                })
+                    })
         }
         _ => std::mem::discriminant(next) == std::mem::discriminant(previous),
     }
@@ -3910,9 +3916,10 @@ impl EngineSession {
                     patch.current_generation == lowered.generation
                         && patch.epochs == (pagination.doc_epoch, self.doc_epoch())
                         && patch.block_count_after == lowered.blocks.len()
-                        && pagination.input.as_ref().is_some_and(|input| {
-                            patch.block_count_before == input.measured.len()
-                        })
+                        && pagination
+                            .input
+                            .as_ref()
+                            .is_some_and(|input| patch.block_count_before == input.measured.len())
                         && pagination.moved_blocks.is_empty()
                 })
             })
@@ -5265,13 +5272,9 @@ impl EngineSession {
             if has_measurement_patch
                 && (pagination.measured_with != Some(measurement_fingerprint)
                     || pagination.measured_font_chains.as_ref() != Some(&measurement.font_chains)
-                    || self
-                        .regions
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|state| {
-                            state.fonts != fonts || state.request_json != input_json
-                        }))
+                    || self.regions.borrow().as_ref().is_some_and(|state| {
+                        state.fonts != fonts || state.request_json != input_json
+                    }))
             {
                 pagination.measurement_patch = None;
             }
@@ -14365,7 +14368,10 @@ mod tests {
         for snapshot in &engine.display.borrow().pages {
             let page = &retained[&snapshot.page_id];
             assert_eq!(page.fingerprint, snapshot.fingerprint);
-            assert_eq!(page.primitive_ids.as_slice(), snapshot.primitive_ids.as_ref());
+            assert_eq!(
+                page.primitive_ids.as_slice(),
+                snapshot.primitive_ids.as_ref()
+            );
         }
         let cold = EngineSession::new(9636);
         cold.doc()
@@ -14381,7 +14387,10 @@ mod tests {
         for snapshot in &cold.display.borrow().pages {
             let page = &cold_retained[&snapshot.page_id];
             assert_eq!(page.fingerprint, snapshot.fingerprint);
-            assert_eq!(page.primitive_ids.as_slice(), snapshot.primitive_ids.as_ref());
+            assert_eq!(
+                page.primitive_ids.as_slice(),
+                snapshot.primitive_ids.as_ref()
+            );
         }
         let canonical_frame = |list: &docx_layout::display_list::DisplayList| {
             encode_frame_delta(
@@ -14858,7 +14867,9 @@ mod tests {
                 "type": "run", "content": [{"type": "text", "text": format!("Text {index}.")}]
             })];
             if index == 3 || index == 27 {
-                content.push(json!({"type": "shape", "shape": rich.clone()}));
+                content.push(json!({
+                    "type": "run", "content": [{"type": "shape", "shape": rich.clone()}]
+                }));
             }
             blocks.push(json!({
                 "type": "paragraph", "paraId": format!("{:08X}", index + 1),
@@ -14871,7 +14882,10 @@ mod tests {
                         json!({
                             "type": "tableCell", "content": [{
                                 "type": "paragraph",
-                                "content": [{"type": "shape", "shape": leaf.clone()}]
+                                "content": [{
+                                    "type": "run",
+                                    "content": [{"type": "shape", "shape": leaf.clone()}]
+                                }]
                             }]
                         })
                     })
@@ -15111,7 +15125,13 @@ mod tests {
             let measured = &pagination.input.as_ref().unwrap().measured;
             for (index, entry) in measured.iter().enumerate() {
                 if pagination.moved_blocks.contains(&index) {
-                    assert!(matches!(entry.block, LayoutBlock::Unsupported));
+                    assert!(match &entry.block {
+                        LayoutBlock::Unsupported => true,
+                        LayoutBlock::Paragraph(paragraph) => {
+                            paragraph.runs.is_empty() && paragraph.pm_start == previous[index]
+                        }
+                        _ => false,
+                    });
                 } else {
                     assert_eq!(entry.block.pm_start(), previous[index]);
                 }
@@ -15427,8 +15447,8 @@ mod tests {
             "undo",
             "redo",
             "paragraph split",
-            "retention",
-            "retention reset",
+            "moved retention",
+            "moved retention reset",
             "measurement config",
             "placement",
         ] {
@@ -15500,8 +15520,12 @@ mod tests {
                         )
                         .unwrap();
                 }
-                "retention" => engine.clear_region_retention(),
-                "retention reset" => {
+                "moved retention" => {
+                    engine.pagination.borrow_mut().moved_blocks.insert(0);
+                    engine.clear_region_retention();
+                }
+                "moved retention reset" => {
+                    engine.pagination.borrow_mut().moved_blocks.insert(0);
                     engine.region_retention_valid.set(false);
                     engine.ensure_region_retention();
                     assert!(engine.pagination.borrow().lowered_generation.is_none());
@@ -15536,6 +15560,40 @@ mod tests {
                 engine.pagination.borrow().measurement_patch.is_none(),
                 "{case}"
             );
+        }
+    }
+
+    #[test]
+    fn resident_measurement_patch_survives_retention_without_moved_blocks() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for case in ["retention", "retention reset"] {
+            let (engine, request) = measurement_patch_engine(font);
+            let offset = measurement_patch_offset(&engine, 1);
+            measurement_patch_type(&engine, offset, "x");
+            let generation = engine.pagination.borrow().lowered_generation;
+            if case == "retention" {
+                engine.clear_region_retention();
+            } else {
+                engine.region_retention_valid.set(false);
+                engine.ensure_region_retention();
+            }
+            assert!(engine.measurement_patch().is_some(), "{case}");
+            {
+                let pagination = engine.pagination.borrow();
+                assert!(pagination.measurement_patch.is_some(), "{case}");
+                assert!(pagination.input.is_some(), "{case}");
+                assert_eq!(pagination.lowered_generation, generation, "{case}");
+            }
+            engine
+                .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
+                .unwrap();
+            assert!(
+                engine.pagination.borrow().measurement_patch.is_none(),
+                "{case}"
+            );
+            assert_local_patch_matches_cold(&engine, &request, case);
         }
     }
 
