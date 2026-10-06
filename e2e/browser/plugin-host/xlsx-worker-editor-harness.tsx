@@ -1,9 +1,10 @@
 import { StrictMode } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { XlsxEditor, defineXlsxPlugin, type XlsxPluginContext, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
 import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
-import { cellRect, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
+import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
 import { workbookSessionInternals, WORKBOOK_REPLAY_MUTATORS } from '../../../packages/xlsx/src/session/replay';
 import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
 
@@ -181,10 +182,18 @@ let current = deferred<XlsxWorkerEditorApi>();
 let api: XlsxWorkerEditorApi | null = null;
 let context: XlsxPluginContext<null> | null = null;
 const plugin = defineXlsxPlugin({ id: 'routes', createState: () => null, initialize(value) { context = value; } });
+let source: Uint8Array;
+let readOnly = false;
+let readyCount = 0;
 const open = (bytes: Uint8Array) => {
-  const editor = <XlsxEditor file={bytes} experimentalWorkerOpen plugins={[plugin]}
+  source = bytes;
+  const editor = <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
-    onReady={(value) => { api = value; current.resolve(value); }} />;
+    onReady={(value) => {
+      readyCount += 1;
+      if (!('whenHydrated' in value)) throw new Error('Expected worker editor session');
+      api = value; current.resolve(value);
+    }} />;
   root.render(parameters.has('strict') ? <StrictMode>{editor}</StrictMode> : editor);
 };
 const ready = (async () => {
@@ -197,6 +206,21 @@ const ready = (async () => {
 window.__xlsxWorkerEditor = {
   ready, errors, previews, previewFrames, commitOrder, peerEntries, replayEntries,
   generation: () => generation,
+  readyCount: () => readyCount,
+  setReadOnly(value) { readOnly = value; flushSync(() => open(source)); },
+  readOnlyEditRefusal() {
+    try { api!.editCell(0, 0, 0, 'blocked'); return ''; }
+    catch (error) { return (error as Error).message; }
+  },
+  async savedInputs() {
+    const bytes = await api!.saveAsync();
+    if (!bytes) throw new Error('Workbook save returned no bytes');
+    const session = await openWorkbookSession(bytes);
+    try {
+      const result = await session.call.cellInputs(0, 'A1:B2');
+      return [result.cells[0][0].input, result.cells[1][1].input];
+    } finally { await session.dispose(); }
+  },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
   async flush() { await api!.flush(); },
   async zoom(scale) { await api!.commands.execute('zoom', { scale }); },

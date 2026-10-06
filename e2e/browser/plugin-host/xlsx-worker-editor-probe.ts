@@ -3,6 +3,10 @@ export interface WorkerEditorProbe {
   peerEntries: { generation: number; method: string; args: unknown[] }[];
   replayEntries: { generation: number; sequence: number; method: string; args: unknown[] }[];
   generation(): number;
+  readyCount(): number;
+  setReadOnly(value: boolean): void;
+  readOnlyEditRefusal(): string;
+  savedInputs(): Promise<string[]>;
   releaseHydration(): void;
   flush(): Promise<void>;
   zoom(scale: number): Promise<void>;

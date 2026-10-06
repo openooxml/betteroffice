@@ -73,6 +73,31 @@ test('xlsx worker editor undo restores the original cell and canvas value', asyn
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
 });
 
+test('xlsx worker editor preserves edits and its session across readOnly toggles', async ({ page }) => {
+  await open(page);
+  await edit(page, 'first edit');
+  const generation = await page.evaluate(() => window.__xlsxWorkerEditor.generation());
+  const readyCount = await page.evaluate(() => window.__xlsxWorkerEditor.readyCount());
+  await page.evaluate(() => window.__xlsxWorkerEditor.setReadOnly(true));
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBe(generation);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.readyCount())).toBe(readyCount);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('first edit');
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('first edit');
+  await page.getByTestId('xlsx-scroll').focus();
+  await page.getByTestId('xlsx-scroll').press('F2');
+  await expect(page.getByTestId('xlsx-cell-editor')).toHaveCount(0);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.readOnlyEditRefusal())).toContain('read-only');
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('first edit');
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.savedInputs())).toEqual(['first edit', '']);
+  await page.evaluate(() => window.__xlsxWorkerEditor.setReadOnly(false));
+  await page.evaluate(() => window.__xlsxWorkerEditor.hostEdit('second edit'));
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('second edit');
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBe(generation);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.readyCount())).toBe(readyCount);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.savedInputs())).toEqual(['first edit', 'second edit']);
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.errors)).toEqual([]);
+});
+
 
 for (const dpr of [1, 2]) {
   for (const zoom of [1, 1.25]) {
