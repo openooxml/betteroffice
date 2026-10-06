@@ -8,7 +8,7 @@
 /** @experimental */
 export { openWorkbookSession } from './session/client';
 /** @internal */
-export { hydratePeer } from './session/client';
+export { holdPeerOpen, hydratePeer } from './session/client';
 /** @experimental */
 export { WorkbookPeerHydrationError } from './session/peerHydrationError';
 /** @experimental */

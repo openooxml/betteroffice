@@ -11,6 +11,7 @@ export interface WorkbookPeerSource {
   receivedHydration: boolean;
   opener?: ReturnType<typeof createWorkbookPeerOpener>;
   wake?: () => void;
+  holds: number;
   failure?: WorkbookPeerHydrationError;
   initialCalculation?: WorkbookCalculationContext | null;
   version?: string;

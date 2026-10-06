@@ -1,5 +1,5 @@
 import {
-  createWorkbookEditPeer, failWorkbookEditPeer, hydratePeer, openWorkbookSession,
+  createWorkbookEditPeer, failWorkbookEditPeer, holdPeerOpen, hydratePeer, openWorkbookSession,
   type WorkbookHandle, type WorkbookSession, type WorkbookEditPeer,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -14,6 +14,7 @@ import {
 
 export const editableWorkbookSessionBackend = {
   open: openWorkbookSession,
+  hold: holdPeerOpen,
   hydrate: hydratePeer,
   attach: createWorkbookEditPeer,
 };
@@ -53,6 +54,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   private offFailure = () => {};
   private cleanup: void | (() => void) = undefined;
   private input: WorkerInputCoordinator | null = null;
+  private releasePeerOpen: (() => void) | null = null;
 
   constructor(
     readonly session: WorkbookSession,
@@ -64,6 +66,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
       this.rejectHydrated = reject;
     });
     void this.hydrated.catch(() => {});
+    this.releasePeerOpen = editableWorkbookSessionBackend.hold(session);
     this.offFailure = session.onFailure((error) => this.fail(error));
     if (session.failure) this.fail(session.failure);
     if (!this.failure) void this.requestHydration('session-created').catch(() => {});
@@ -92,6 +95,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   firstPaint(): void {
     if (!this.current || this.failure || this.painted) return;
     this.painted = true;
+    this.releaseHold();
     try {
       const cleanup = this.options.onReady();
       if (!this.current && typeof cleanup === 'function') cleanup();
@@ -100,6 +104,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   }
 
   requestHydration(reason: string): Promise<void> {
+    if (reason !== 'session-created') this.releaseHold();
     if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
     if (this.failure && reason !== 'recovery') return Promise.reject(this.failure);
     if (this.editPeer) return Promise.resolve();
@@ -136,6 +141,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   }
 
   fail(value: unknown): void {
+    this.releaseHold();
     if (!this.current || this.failure) return;
     this.failure = asError(value);
     if (this.editPeer) failWorkbookEditPeer(this.editPeer, this.failure);
@@ -155,6 +161,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
   }
 
   dispose(): void {
+    this.releaseHold();
     if (!this.alive || this.retiring) return;
     this.retiring = true;
     try { this.beforeRetire?.(); } catch (error) { this.reportRefusal(error); }
@@ -163,6 +170,11 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
         this.reportRefusal(error);
       }).finally(() => this.destroy());
     } else this.destroy();
+  }
+
+  private releaseHold(): void {
+    this.releasePeerOpen?.();
+    this.releasePeerOpen = null;
   }
 
   private destroy(): void {

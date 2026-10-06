@@ -326,6 +326,53 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook worker editor', () => {
+  it('paints the first worker frame and fires onReady when the peer never finishes', async () => {
+    const host = harness();
+    host.hydrate.mockReturnValue(new Promise<WorkbookHandle>(() => {}));
+    const log: string[] = [];
+    const release = mock(() => {
+      expect(painted).toHaveLength(1);
+      expect(host.attached).toBeNull();
+      log.push('release');
+    });
+    const hold = spyOn(editableWorkbookSessionBackend, 'hold').mockImplementation((session) => {
+      expect(session).toBe(host.session);
+      expect(host.hydrate).not.toHaveBeenCalled();
+      expect(host.sessionMethods.frame).not.toHaveBeenCalled();
+      log.push('hold');
+      return release;
+    });
+    const frame = host.sessionMethods.frame.getMockImplementation()!;
+    host.sessionMethods.frame.mockImplementation((...args) => {
+      expect(hold).toHaveBeenCalledTimes(1);
+      expect(release).not.toHaveBeenCalled();
+      log.push('frame');
+      return frame(...args);
+    });
+    const paint = spyOn(xlsx, 'paintDisplayList').mockImplementation((_context, list) => {
+      expect(release).not.toHaveBeenCalled();
+      painted.push(list);
+      log.push('paint');
+    });
+    restorers.push(() => hold.mockRestore(), () => paint.mockRestore());
+    const ready = mock((api: XlsxWorkerEditorApi) => {
+      expect(api.hydrated).toBe(false);
+      expect(api.handle).toBeNull();
+      log.push('ready');
+    });
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={ready} />);
+    await waitFor(() => expect(animationFrames.size).toBeGreaterThan(0));
+    expect(log).toEqual(['hold']);
+    expect(release).not.toHaveBeenCalled();
+    await tick();
+    expect(log).toEqual(['hold', 'frame', 'paint', 'release', 'ready']);
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(host.hydrate).toHaveBeenCalledTimes(1);
+    expect(host.attached).toBeNull();
+    expect(view.container.querySelector('[data-paint-source="worker"]')).not.toBeNull();
+    expect(painted[0].commands.some((command) => command.op === 'text' && command.text === 'worker:initial')).toBe(true);
+  });
+
   it('delivers onReady and worker grid paints while peer hydration keeps advancing', async () => {
     const host = harness();
     const slices: (() => void)[] = [];

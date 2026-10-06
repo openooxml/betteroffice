@@ -85,6 +85,72 @@ afterEach(() => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('editable session workbook', () => {
+  test('keeps the session-created hydration hold until the first paint', async () => {
+    const { value } = session();
+    const { hydrate } = resources();
+    const release = mock(() => {});
+    const hold = spyOn(editableWorkbookSessionBackend, 'hold').mockReturnValue(release);
+    restorers.push(() => hold.mockRestore());
+    hydrate.mockImplementation(() => {
+      expect(hold).toHaveBeenCalledWith(value);
+      return new Promise<WorkbookHandle>(() => {});
+    });
+    const ready = mock(() => { expect(release).toHaveBeenCalledTimes(1); });
+    const run = owner(value, { onReady: ready });
+    void run.requestHydration('session-created').catch(() => {});
+    await Promise.resolve();
+    expect(hydrate).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    run.firstPaint();
+    run.firstPaint();
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    run.dispose();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  for (const reason of ['input', 'flush', 'save', 'recovery', 'command']) {
+    test(`releases the hold on ${reason} hydration before any paint`, async () => {
+      const { value } = session();
+      const { hydrate, peer } = resources();
+      const pending = deferred<WorkbookHandle>();
+      hydrate.mockReturnValue(pending.promise);
+      const release = mock(() => {});
+      const hold = spyOn(editableWorkbookSessionBackend, 'hold').mockReturnValue(release);
+      restorers.push(() => hold.mockRestore());
+      const ready = mock(() => {});
+      const run = owner(value, { onReady: ready });
+      expect(release).not.toHaveBeenCalled();
+      const waiting = run.requestHydration(reason);
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(ready).not.toHaveBeenCalled();
+      pending.resolve(peer);
+      await waiting;
+      expect(run.ready).toBe(true);
+      expect(hydrate).toHaveBeenCalledTimes(1);
+      run.dispose();
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  for (const action of ['fail', 'dispose'] as const) {
+    test(`releases the hold on ${action} before any paint`, () => {
+      const { value } = session();
+      const { hydrate } = resources();
+      hydrate.mockReturnValue(new Promise<WorkbookHandle>(() => {}));
+      const release = mock(() => {});
+      const hold = spyOn(editableWorkbookSessionBackend, 'hold').mockReturnValue(release);
+      restorers.push(() => hold.mockRestore());
+      const run = owner(value);
+      expect(release).not.toHaveBeenCalled();
+      if (action === 'fail') run.fail(new SessionFailure('crash', 'Worker stopped'));
+      else run.dispose();
+      expect(release).toHaveBeenCalledTimes(1);
+      run.dispose();
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+  }
+
   test('opens a retained session and starts hydration before the first paint', async () => {
     const { value } = session();
     const opener = open(value);

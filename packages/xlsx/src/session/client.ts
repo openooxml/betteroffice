@@ -157,9 +157,16 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
     source.bytes = undefined;
     source.wasm = undefined;
     let ready = false;
-    while (!ready) {
+    while (true) {
+      check();
+      if (source.holds > 0) {
+        await waitForPeerInput(source);
+        continue;
+      }
+      if (ready) break;
       const state = await schedulePeerSlice(() => {
         check();
+        if (source.holds > 0) return;
         const deadline = performance.now() + PEER_OPEN_SLICE_MS;
         while (source.hydration.length > 0 && performance.now() < deadline) {
           opener.pushHydration(source.hydration.shift()!);
@@ -173,7 +180,6 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
       });
       check();
       ready = state === 2;
-      if (ready) break;
       if (state === 1 && source.hydration.length === 0) await waitForPeerInput(source);
     }
     check();
@@ -197,6 +203,21 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
     source.hydration.length = 0;
     source.wake = undefined;
   }
+}
+
+/** @internal */
+export function holdPeerOpen(session: WorkbookSession): () => void {
+  const source = peerSources.get(session);
+  if (!source || source.disposed) return () => {};
+  source.holds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    source.holds -= 1;
+    source.wake?.();
+    source.wake = undefined;
+  };
 }
 
 /** @internal */
@@ -248,7 +269,7 @@ export async function createWorkbookSession(
         },
         module: input.wasm instanceof WebAssembly.Module ? input.wasm : undefined,
         wasm: input.wasm instanceof ArrayBuffer ? input.wasm.slice(0) : undefined,
-        hydration: [], receivedHydration: false, disposed: false,
+        hydration: [], receivedHydration: false, holds: 0, disposed: false,
       };
     }
     client = createSessionClient<Methods, Events>(transport, {
