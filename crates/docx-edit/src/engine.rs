@@ -1297,12 +1297,10 @@ impl PaginationState {
 
     fn clear_display_damage(&mut self) {
         self.position_deltas.clear();
-        if self.display_uses_region_path {
-            self.display_rebuilt_pages.clear();
-            self.display_layout_pending = false;
-            self.display_full_rebuild = false;
-            self.note_changed_pages.clear();
-        }
+        self.display_rebuilt_pages.clear();
+        self.display_layout_pending = false;
+        self.display_full_rebuild = false;
+        self.note_changed_pages.clear();
         self.restamped_pages = Some(BTreeSet::new());
     }
 }
@@ -6783,7 +6781,9 @@ impl EngineSession {
             pagination.revision_preview = preview.clone();
         }
         if trigger.uses_region_path() {
-            pagination.display_full_rebuild |= !incremental || !same_page_count;
+            pagination.display_full_rebuild |= !incremental
+                || !same_page_count
+                || (pagination.display_layout_pending && !pagination.display_uses_region_path);
             if !pagination.display_full_rebuild {
                 let state = &mut *pagination;
                 if state.display_layout_pending {
@@ -6810,10 +6810,11 @@ impl EngineSession {
             }
             pagination.limit_display_damage();
         } else {
+            pagination.display_full_rebuild |= pagination.display_layout_pending;
             pagination.position_deltas = deltas;
             pagination.note_changed_pages.clear();
             pagination.display_rebuilt_pages.clear();
-            pagination.display_full_rebuild = false;
+            pagination.limit_display_damage();
         }
         pagination.display_uses_region_path = trigger.uses_region_path();
         pagination.rebuilt_page_start = run.rebuilt_page_start;
@@ -8132,8 +8133,8 @@ impl EngineSession {
             };
             let font_cache_identity =
                 docx_layout::measure_font_cache_identity(&display.font_chains);
-            let build = if pagination.last_incremental
-                && (!pagination.display_uses_region_path || !pagination.display_full_rebuild)
+            let build = if (pagination.last_incremental || !pagination.display_layout_pending)
+                && !pagination.display_full_rebuild
                 && display.extras_fingerprint == extras_fingerprint
                 && display.font_cache_identity == Some(font_cache_identity)
             {
@@ -8141,7 +8142,9 @@ impl EngineSession {
                 // but later ranges, the pages elsewhere whose notes anchor to
                 // references the edit moved, and retained pages whose section or
                 // numbering stamps changed are rebuilt too.
-                let first = if pagination.display_uses_region_path {
+                let first = if !pagination.display_layout_pending {
+                    0..0
+                } else if pagination.display_uses_region_path {
                     pagination
                         .pending_display_pages()
                         .min()
@@ -8188,6 +8191,7 @@ impl EngineSession {
                     pagination
                         .rebuilt_page_ranges
                         .iter()
+                        .filter(|_| pagination.display_layout_pending)
                         .skip(1)
                         .flat_map(Clone::clone)
                         .chain(pagination.note_changed_pages.iter().copied())
@@ -10668,14 +10672,30 @@ mod tests {
 
     /// The retained region state equals a cold full pass of `request` over the same document.
     fn assert_region_state_matches_cold(engine: &EngineSession, request: &str, label: &str) {
-        let snapshot = |engine: &EngineSession| {
+        let extras = engine
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .unwrap_or_else(|| "{}".to_owned());
+        let snapshot = |engine: &EngineSession, epoch| {
+            engine.build_display_list_frame(&extras, epoch).unwrap();
             (
                 engine.retained_layout_json().unwrap(),
                 engine.retained_kernel_inputs_json().unwrap(),
                 engine.pagination.borrow().block_fingerprints.clone(),
+                engine.with_display_list(Clone::clone).unwrap(),
             )
         };
-        let resident = snapshot(engine);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let resident = snapshot(engine, epoch);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_list_frame(&extras, epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            resident.3,
+            "{label}: repeated display build"
+        );
         let trigger = engine.relayout_trigger.replace(RelayoutTrigger::Open);
         let interactive = engine.interactive_pending.replace(false);
         let retention = engine.region_retention_valid.replace(false);
@@ -10702,7 +10722,7 @@ mod tests {
             engine.preview_font_requirements.replace(None),
         );
         engine.layout_document_with_regions_json(request).unwrap();
-        assert_eq!(resident, snapshot(engine), "{label}");
+        assert_eq!(resident, snapshot(engine, 0), "{label}");
         engine.render.replace(render);
         engine.measurement.replace(measurement);
         engine.pagination.replace(pagination);
@@ -11186,8 +11206,15 @@ mod tests {
                     expected.checkpointed.rebuilt_page_end
                 );
             }
-            let (expected_frame, expected_list, expected_rebuilt) =
-                main_frame_oracle(&engine, &extras, reference_display);
+            let (expected_frame, expected_list, expected_rebuilt) = if layouts == 1 {
+                main_frame_oracle(&engine, &extras, reference_display)
+            } else {
+                interactive_layout_regression_tests::full_display_frame(
+                    &engine,
+                    &extras,
+                    reference_display,
+                )
+            };
             let before = engine.stats().rebuilt_display_pages;
             let frame = engine.build_display_list_frame(&extras, epoch).unwrap();
             assert_eq!(frame, expected_frame, "{layouts} layouts");
@@ -11244,7 +11271,11 @@ mod tests {
             );
         }
         let (expected_frame, expected_list, expected_rebuilt) =
-            main_frame_oracle(&engine, &extras, reference_display);
+            interactive_layout_regression_tests::full_display_frame(
+                &engine,
+                &extras,
+                reference_display,
+            );
         let before = engine.stats().rebuilt_display_pages;
         assert_eq!(
             engine.build_display_list_frame(&extras, epoch).unwrap(),
@@ -13594,8 +13625,22 @@ mod tests {
                 lowered.local.snapshot(engine.doc()),
             )
         };
-        engine.build_display_list_frame("{}", 0).unwrap();
+        let extras = engine
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .unwrap_or_else(|| "{}".to_owned());
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_list_frame(&extras, epoch).unwrap();
         let incremental = snapshot(engine);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_list_frame(&extras, epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            incremental.0.6,
+            "{label}: repeated display build"
+        );
         macro_rules! cold {
             ($($field:ident)+) => {{
                 let ($($field,)+) = ($(engine.$field.replace(Default::default()),)+);
@@ -13603,7 +13648,7 @@ mod tests {
                 let interactive = engine.interactive_pending.replace(false);
                 let retention = engine.region_retention_valid.replace(false);
                 engine.layout_document_with_regions_json(request).unwrap();
-                engine.build_display_list_frame("{}", 0).unwrap();
+                engine.build_display_list_frame(&extras, 0).unwrap();
                 let result = snapshot(engine);
                 $(engine.$field.replace($field);)+
                 engine.relayout_trigger.set(trigger);
