@@ -20,7 +20,13 @@ export type { WorkbookEditPeer, WorkbookEditPeerOptions } from './session/editPe
 /** @experimental */
 export { WorkbookEditPeerFailedError } from './session/editPeer';
 /** @internal */
-export { createWorkbookRecoveryMutators, failWorkbookEditPeer } from './session/editPeerInternals';
+export {
+  createWorkbookRecoveryMutators, failWorkbookEditPeer, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+} from './session/editPeerInternals';
+/** @internal */
+export { workbookSessionInternals } from './session/replay';
+/** @internal */
+export type { WorkbookReplayOp } from './session/replay';
 /** @experimental */
 export type {
   WorkbookCellGeometry,

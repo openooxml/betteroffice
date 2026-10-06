@@ -1,9 +1,9 @@
 import type {
-  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
+  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, WorkbookReplayOp, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
 } from '@betteroffice/xlsx';
-import { WorkbookEditPeerFailedError, WorkbookPeerHydrationError } from '@betteroffice/xlsx';
-import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
-import type { WorkbookReplayOp } from '../../../xlsx/src/session/replay';
+import {
+  WorkbookEditPeerFailedError, WorkbookPeerHydrationError, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+} from '@betteroffice/xlsx';
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';

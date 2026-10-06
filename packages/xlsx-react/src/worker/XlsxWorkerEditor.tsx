@@ -2,11 +2,12 @@ import {
   buildA11yGrid, cellAtPoint, cellRect, chartRegionAtPoint, createWorkbookRecoveryMutators,
   extendTo, fromTsv, hyperlinkAtCell, isProposalsAvailable, moveFocus, normalizeRange,
   paintDisplayList, parseHyperlinkLocation, rangeRect, safeExternalHyperlink, selectionAt,
-  selectionKeyReducer, toTsv, WorkbookEditPeerFailedError,
+  selectionKeyReducer, toTsv, WorkbookEditPeerFailedError, WorkbookRecoveryRefusal,
+  workbookEditPeerOperations, workbookSessionInternals,
 } from '@betteroffice/xlsx';
 import type {
   CapturedFormat, CellAddr, CellEdit, CellInputEdit, Direction, EditResult, Proposal,
-  Selection, WorkbookFrame, WorkbookHandle, WorkbookSheetView, XlsxEditResult,
+  Selection, WorkbookFrame, WorkbookHandle, WorkbookReplayOp, WorkbookSheetView, XlsxEditResult,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, KeyboardEvent, MouseEvent, SetStateAction, SyntheticEvent } from 'react';
@@ -37,8 +38,6 @@ import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import {
   useEditableSessionWorkbook, type EditableSessionWorkbookProps, type EditableWorkbookSession,
 } from './useEditableSessionWorkbook';
-import { workbookSessionInternals, type WorkbookReplayOp } from '../../../xlsx/src/session/replay';
-import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
 import { WorkerPaintSource, type WorkerPaintRequest, type WorkerPaintResult } from './WorkerPaintSource';
 
 const BRAND = '#217346';
