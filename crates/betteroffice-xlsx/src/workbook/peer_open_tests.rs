@@ -5,6 +5,165 @@ use std::task::{Context, Poll, Waker};
 use super::edit_tests::{options, r};
 use super::*;
 
+fn sliced_authority(model: &WorkbookModel, units: usize) -> (WorkbookAuthority, usize) {
+    let work = ooxml_opc::WorkBudget::default();
+    let mut opening = Box::pin(WorkbookAuthority::from_source_with_projection_sliced(
+        model,
+        Some(73),
+        &[],
+        None,
+        &work,
+    ));
+    let mut context = Context::from_waker(Waker::noop());
+    let mut charged = 0;
+    loop {
+        work.reset(units);
+        let state = opening.as_mut().poll(&mut context);
+        assert!(work.touched() <= units);
+        charged += work.touched();
+        if let Poll::Ready(result) = state {
+            return (result.unwrap().0, charged);
+        }
+    }
+}
+
+#[test]
+fn indexed_palette_fingerprints_stay_sliced() {
+    let mut parts = ooxml_opc::unzip_parts(&source_bytes(24)).unwrap();
+    let styles = &mut parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/styles.xml")
+        .unwrap()
+        .1;
+    *styles = String::from_utf8(std::mem::take(styles))
+        .unwrap()
+        .replace(
+            "</styleSheet>",
+            &format!(
+                "<colors><indexedColors>{}</indexedColors></colors></styleSheet>",
+                "<rgbColor rgb=\"FF123456\"/>".repeat(66),
+            ),
+        )
+        .into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let model = xlsx_parse::parse_workbook(&parts).unwrap();
+    assert!(!model.styles.indexed_colors.is_empty());
+    let (expected, _, _) =
+        WorkbookAuthority::from_source_with_projection(&model, Some(73), &[], None).unwrap();
+    for units in [1, 256, usize::MAX] {
+        crate::authority::SYNC_FINGERPRINTS.set(0);
+        let (actual, _) = sliced_authority(&model, units);
+        assert_eq!(crate::authority::SYNC_FINGERPRINTS.get(), 0);
+        assert_eq!(
+            actual.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+        assert_eq!(
+            actual.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+        let worker = worker(&bytes, false, Some(73));
+        let mut actual = complete(&bytes, worker.peer_hydration().unwrap(), units, true);
+        let mut expected =
+            Workbook::open_with_peer_hydration_oracle(&bytes, worker.peer_hydration().unwrap())
+                .unwrap();
+        assert_equal(&mut actual, &mut expected);
+    }
+}
+
+#[test]
+fn seed_batches_charge_long_values_and_sheet_metadata() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Large");
+    for row in 0..40 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            xlsx_model::Cell {
+                value: CellValue::Text {
+                    value: "x".repeat(8192),
+                },
+                formula: None,
+                style: None,
+            },
+        );
+    }
+    for row in 0..8 {
+        let at = CellRef::new(row, 0);
+        sheet.hyperlinks.push(xlsx_model::Hyperlink {
+            range: CellRange { start: at, end: at },
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: Some("m".repeat(16 * 1024)),
+            display: None,
+        });
+    }
+    model.sheets.push(sheet);
+    let (expected, _, _) =
+        WorkbookAuthority::from_source_with_projection(&model, Some(73), &[], None).unwrap();
+    for units in [1, 256, usize::MAX] {
+        crate::authority::take_seed_batches();
+        let (actual, charged) = sliced_authority(&model, units);
+        let batches = crate::authority::take_seed_batches();
+        assert!(batches.len() > 4);
+        assert!(batches.iter().any(|(bytes, _)| *bytes > 64 * 1024));
+        for (bytes, count) in &batches {
+            assert!(*bytes <= 64 * 1024 || *count == 1);
+        }
+        assert!(
+            charged
+                >= batches
+                    .iter()
+                    .map(|(bytes, _)| bytes.div_ceil(64))
+                    .sum::<usize>()
+        );
+        assert_eq!(
+            actual.encode_state_as_update_v1(),
+            expected.encode_state_as_update_v1()
+        );
+        assert_eq!(
+            actual.encode_state_vector_v1(),
+            expected.encode_state_vector_v1()
+        );
+    }
+}
+
+#[test]
+fn hydration_chunks_bound_bytes_and_split_oversized_cells() {
+    let mut parts = ooxml_opc::unzip_parts(&source_bytes(0)).unwrap();
+    let sheet = &mut parts
+        .iter_mut()
+        .find(|(path, _)| path == "xl/worksheets/sheet1.xml")
+        .unwrap()
+        .1;
+    let text = "long🙂\"".repeat(32 * 1024);
+    *sheet = String::from_utf8(std::mem::take(sheet)).unwrap().replace(
+        "</sheetData>",
+        &format!("<row r=\"30\"><c r=\"A30\" t=\"inlineStr\"><is><t>{text}</t></is></c></row></sheetData>"),
+    ).into_bytes();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let worker = worker(&bytes, true, Some(73));
+    let chunks = worker.peer_hydration().unwrap().into_chunks();
+    let mut parts = 0;
+    for chunk in chunks {
+        let record = serde_json::json!({
+            "workbook": chunk, "calculation_context": null,
+        });
+        if record["workbook"]["kind"] == "cell-part" {
+            parts += 1;
+        }
+        let json = serde_json::to_vec(&record).unwrap();
+        assert!(json.len() <= 64 * 1024);
+    }
+    assert!(parts > 1);
+    for units in [1, 256, usize::MAX] {
+        let mut actual = complete(&bytes, worker.peer_hydration().unwrap(), units, true);
+        let mut expected =
+            Workbook::open_with_peer_hydration_oracle(&bytes, worker.peer_hydration().unwrap())
+                .unwrap();
+        assert_equal(&mut actual, &mut expected);
+    }
+}
+
 fn source_bytes(rows: usize) -> Vec<u8> {
     let mut parts = ooxml_opc::unzip_parts(&edit_tests::workbook_bytes()).unwrap();
     fn replace(parts: &mut [(String, Vec<u8>)], path: &str, from: &str, to: &str) {

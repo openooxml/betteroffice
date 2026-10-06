@@ -11,6 +11,23 @@ use xlsx_calc::graph::SnapshotGraphBuilder;
 use super::*;
 
 pub const PEER_HYDRATION_CHUNK_CELLS: usize = 512;
+pub const PEER_HYDRATION_CHUNK_BYTES: usize = 64 * 1024;
+
+async fn append_text(target: &mut String, source: &str, work: &WorkBudget) {
+    let mut offset = 0;
+    while offset < source.len() {
+        let count = work
+            .take((source.len() - offset).div_ceil(64).min(256))
+            .await
+            * 64;
+        let mut end = (offset + count).min(source.len());
+        while !source.is_char_boundary(end) {
+            end -= 1;
+        }
+        target.push_str(&source[offset..end]);
+        offset = end;
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OpenerState {
@@ -42,6 +59,13 @@ pub enum PeerHydrationChunk {
     Cells {
         sheet: usize,
         cells: Vec<PeerHydrationCell>,
+    },
+    CellPart {
+        sheet: usize,
+        cell: PeerHydrationCell,
+        text: String,
+        formula: String,
+        last: bool,
     },
     DeletedCells {
         sheet: usize,
@@ -79,16 +103,92 @@ impl PeerHydration {
                 proposal_id_counter: self.proposal_id_counter,
             },
         }];
-        fn split<T>(values: Vec<T>, mut emit: impl FnMut(Vec<T>)) {
-            let mut values = values.into_iter().peekable();
-            while values.peek().is_some() {
-                emit(values.by_ref().take(PEER_HYDRATION_CHUNK_CELLS).collect());
+        fn split<T: Serialize>(values: Vec<T>, mut emit: impl FnMut(Vec<T>)) {
+            let mut batch = Vec::new();
+            let mut bytes = 256;
+            for value in values {
+                let size = serde_json::to_vec(&value).expect("hydration record").len() + 1;
+                if !batch.is_empty()
+                    && (batch.len() == PEER_HYDRATION_CHUNK_CELLS
+                        || bytes + size > PEER_HYDRATION_CHUNK_BYTES)
+                {
+                    emit(std::mem::take(&mut batch));
+                    bytes = 256;
+                }
+                bytes += size;
+                batch.push(value);
+            }
+            if !batch.is_empty() {
+                emit(batch);
             }
         }
         for (sheet, cells) in self.cells.into_iter().enumerate() {
-            split(cells, |cells| {
-                chunks.push(PeerHydrationChunk::Cells { sheet, cells })
-            });
+            let mut batch = Vec::new();
+            let mut bytes = 256;
+            for mut cell in cells {
+                let size = serde_json::to_vec(&cell).expect("hydration cell").len() + 1;
+                if !batch.is_empty()
+                    && (batch.len() == PEER_HYDRATION_CHUNK_CELLS
+                        || bytes + size > PEER_HYDRATION_CHUNK_BYTES)
+                {
+                    chunks.push(PeerHydrationChunk::Cells {
+                        sheet,
+                        cells: std::mem::take(&mut batch),
+                    });
+                    bytes = 256;
+                }
+                if size + 256 <= PEER_HYDRATION_CHUNK_BYTES {
+                    bytes += size;
+                    batch.push(cell);
+                    continue;
+                }
+                let text = match &mut cell.1 {
+                    CellValue::Text { value } => std::mem::take(value),
+                    _ => String::new(),
+                };
+                let formula = cell.2.as_mut().map(std::mem::take).unwrap_or_default();
+                let mut text = text.chars().peekable();
+                let mut formula = formula.chars().peekable();
+                loop {
+                    let mut text_part = String::new();
+                    let mut formula_part = String::new();
+                    let mut size = 512;
+                    for (source, target) in [
+                        (&mut text, &mut text_part),
+                        (&mut formula, &mut formula_part),
+                    ] {
+                        while let Some(&ch) = source.peek() {
+                            let count = match ch {
+                                '"' | '\\' => 2,
+                                '\u{0}'..='\u{1f}' => 6,
+                                _ => ch.len_utf8(),
+                            };
+                            if size + count > PEER_HYDRATION_CHUNK_BYTES {
+                                break;
+                            }
+                            size += count;
+                            target.push(source.next().unwrap());
+                        }
+                    }
+                    let last = text.peek().is_none() && formula.peek().is_none();
+                    chunks.push(PeerHydrationChunk::CellPart {
+                        sheet,
+                        cell: cell.clone(),
+                        text: text_part,
+                        formula: formula_part,
+                        last,
+                    });
+                    if last {
+                        break;
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                chunks.push(PeerHydrationChunk::Cells {
+                    sheet,
+                    cells: batch,
+                });
+            }
         }
         for (sheet, cells) in self.deleted_cells.into_iter().enumerate() {
             split(cells, |cells| {
@@ -186,6 +286,7 @@ impl WorkbookPeerOpener {
             drop(bytes);
             progress.set(OpenerState::NeedsHydration);
             let mut header = None;
+            let mut partial: Option<(usize, PeerHydrationCell)> = None;
             loop {
                 let chunk = poll_fn(|_| match incoming.borrow_mut().pop_front() {
                     Some(chunk) => {
@@ -199,6 +300,11 @@ impl WorkbookPeerOpener {
                 })
                 .await;
                 budget.step().await;
+                if partial.is_some() && !matches!(&chunk, PeerHydrationChunk::CellPart { .. }) {
+                    return Err(Error::InvalidRequest(
+                        "Incomplete peer hydration cell".into(),
+                    ));
+                }
                 match chunk {
                     PeerHydrationChunk::Header { header: next } => {
                         if next.sheet_count != workbook.model.sheets.len()
@@ -239,6 +345,50 @@ impl WorkbookPeerOpener {
                         for (at, value, formula, style) in cells {
                             budget.step().await;
                             sheet.set_cell(
+                                at,
+                                xlsx_model::Cell {
+                                    value,
+                                    formula,
+                                    style,
+                                },
+                            );
+                        }
+                    }
+                    PeerHydrationChunk::CellPart {
+                        sheet,
+                        cell,
+                        text,
+                        formula,
+                        last,
+                    } => {
+                        let (owner, current) = partial.get_or_insert((sheet, cell.clone()));
+                        if *owner != sheet || current.0 != cell.0 {
+                            return Err(Error::InvalidRequest(
+                                "Peer hydration cell parts differ".into(),
+                            ));
+                        }
+                        if let CellValue::Text { value } = &mut current.1 {
+                            append_text(value, &text, &budget).await;
+                        } else if !text.is_empty() {
+                            return Err(Error::InvalidRequest(
+                                "Unexpected peer hydration text".into(),
+                            ));
+                        }
+                        if let Some(value) = &mut current.2 {
+                            append_text(value, &formula, &budget).await;
+                        } else if !formula.is_empty() {
+                            return Err(Error::InvalidRequest(
+                                "Unexpected peer hydration formula".into(),
+                            ));
+                        }
+                        if last {
+                            let (_, (at, value, formula, style)) = partial.take().unwrap();
+                            let target = workbook
+                                .model
+                                .sheets
+                                .get_mut(sheet)
+                                .ok_or(Error::SheetOutOfRange(SheetId(sheet as u32)))?;
+                            target.set_cell(
                                 at,
                                 xlsx_model::Cell {
                                     value,
@@ -377,6 +527,7 @@ impl WorkbookPeerOpener {
                 0
             }
             PeerHydrationChunk::Cells { cells, .. } => cells.len(),
+            PeerHydrationChunk::CellPart { .. } => 1,
             PeerHydrationChunk::DeletedCells { cells, .. } => cells.len(),
             PeerHydrationChunk::Arrays { arrays, .. } => arrays.len(),
             PeerHydrationChunk::Changed { cells }

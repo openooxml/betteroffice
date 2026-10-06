@@ -2,8 +2,42 @@ use super::*;
 use ooxml_opc::WorkBudget;
 use yrs::block::HAS_PARENT_SUB;
 
-const SEED_ENTRIES_PER_UNIT: usize = 4;
-const SEED_CHUNK_ENTRIES: usize = 256 * SEED_ENTRIES_PER_UNIT;
+const SEED_CHUNK_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static SEED_BATCHES: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+async fn charge_bytes(mut bytes: usize, work: &WorkBudget) {
+    while bytes > 0 {
+        bytes = bytes.saturating_sub(work.take(bytes.div_ceil(64).min(256)).await * 64);
+    }
+}
+
+async fn charge_any(value: &Any, work: &WorkBudget) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        work.step().await;
+        match value {
+            Any::String(value) => charge_bytes(value.len(), work).await,
+            Any::Buffer(value) => charge_bytes(value.len(), work).await,
+            Any::Array(values) => {
+                for value in values.iter() {
+                    work.step().await;
+                    pending.push(value);
+                }
+            }
+            Any::Map(values) => {
+                for (key, value) in values.iter() {
+                    charge_bytes(key.len(), work).await;
+                    pending.push(value);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 pub(super) async fn json_list<T: Serialize>(
     values: &[T],
@@ -16,6 +50,7 @@ pub(super) async fn json_list<T: Serialize>(
             bytes.push(b',');
         }
         let encoded = serde_json::to_vec(value).map_err(|error| error.to_string())?;
+        charge_bytes(encoded.len(), work).await;
         work.append_bytes(&mut bytes, &encoded).await;
     }
     bytes.push(b']');
@@ -104,9 +139,8 @@ impl SeedContent {
 }
 
 struct SeedEntry {
-    parent: SeedParent,
-    key: Option<String>,
-    content: SeedContent,
+    bytes: Vec<u8>,
+    len: u32,
 }
 
 struct SeedEncoder<'a> {
@@ -115,6 +149,7 @@ struct SeedEncoder<'a> {
     clock: u32,
     imported_clock: u32,
     entries: Vec<SeedEntry>,
+    bytes: usize,
 }
 
 impl<'a> SeedEncoder<'a> {
@@ -124,7 +159,8 @@ impl<'a> SeedEncoder<'a> {
             client: ClientID::new(client),
             clock: 0,
             imported_clock: 0,
-            entries: Vec::with_capacity(SEED_CHUNK_ENTRIES),
+            entries: Vec::new(),
+            bytes: 0,
         }
     }
 
@@ -138,16 +174,62 @@ impl<'a> SeedEncoder<'a> {
         let id = ID::new(self.client, self.clock);
         let len = u32::try_from(content.len())
             .map_err(|_| "bootstrap content is too large".to_owned())?;
+        if let Some(key) = &key {
+            charge_bytes(key.len(), work).await;
+        }
+        match &content {
+            SeedContent::Value(value) => charge_any(value, work).await,
+            SeedContent::Order(values) => {
+                for value in values {
+                    charge_any(value, work).await;
+                }
+            }
+            SeedContent::Map => work.step().await,
+        }
+        let mut encoder = EncoderV1::new();
+        let content_ref = match &content {
+            SeedContent::Map => BLOCK_ITEM_TYPE_REF_NUMBER,
+            _ => BLOCK_ITEM_ANY_REF_NUMBER,
+        };
+        encoder.write_info(content_ref | if key.is_some() { HAS_PARENT_SUB } else { 0 });
+        match parent {
+            SeedParent::Root(name) => {
+                encoder.write_parent_info(true);
+                encoder.write_string(name);
+            }
+            SeedParent::Item(id) => {
+                encoder.write_parent_info(false);
+                encoder.write_left_id(&id);
+            }
+        }
+        if let Some(key) = key {
+            encoder.write_string(&key);
+        }
+        match content {
+            SeedContent::Value(value) => {
+                encoder.write_len(1);
+                encoder.write_any(&value);
+            }
+            SeedContent::Map => encoder.write_type_ref(TYPE_REFS_MAP),
+            SeedContent::Order(values) => {
+                encoder.write_len(values.len() as u32);
+                for value in values {
+                    encoder.write_any(&value);
+                }
+            }
+        }
+        let bytes = encoder.to_vec();
+        charge_bytes(bytes.len(), work).await;
+        if !self.entries.is_empty() && self.bytes + bytes.len() + 32 > SEED_CHUNK_BYTES {
+            self.flush(work).await?;
+        }
         self.clock = self
             .clock
             .checked_add(len)
             .ok_or_else(|| "bootstrap clock overflow".to_owned())?;
-        self.entries.push(SeedEntry {
-            parent,
-            key,
-            content,
-        });
-        if self.entries.len() == SEED_CHUNK_ENTRIES {
+        self.bytes += bytes.len();
+        self.entries.push(SeedEntry { bytes, len });
+        if self.bytes + 32 >= SEED_CHUNK_BYTES {
             self.flush(work).await?;
         }
         Ok(id)
@@ -182,57 +264,27 @@ impl<'a> SeedEncoder<'a> {
     }
 
     async fn flush(&mut self, work: &WorkBudget) -> Result<(), String> {
-        let mut entries = std::mem::take(&mut self.entries).into_iter();
-        while !entries.as_slice().is_empty() {
-            let count = (work.take(256).await * SEED_ENTRIES_PER_UNIT).min(entries.len());
-            let mut encoder = EncoderV1::new();
-            encoder.write_var(1_u32);
-            encoder.write_var(count);
-            encoder.write_client(self.client);
-            encoder.write_var(self.imported_clock);
-            for entry in entries.by_ref().take(count) {
-                let content_ref = match &entry.content {
-                    SeedContent::Map => BLOCK_ITEM_TYPE_REF_NUMBER,
-                    _ => BLOCK_ITEM_ANY_REF_NUMBER,
-                };
-                let info = content_ref
-                    | if entry.key.is_some() {
-                        HAS_PARENT_SUB
-                    } else {
-                        0
-                    };
-                encoder.write_info(info);
-                match entry.parent {
-                    SeedParent::Root(name) => {
-                        encoder.write_parent_info(true);
-                        encoder.write_string(name);
-                    }
-                    SeedParent::Item(id) => {
-                        encoder.write_parent_info(false);
-                        encoder.write_left_id(&id);
-                    }
-                }
-                if let Some(key) = entry.key {
-                    encoder.write_string(&key);
-                }
-                self.imported_clock += entry.content.len() as u32;
-                match entry.content {
-                    SeedContent::Value(value) => {
-                        encoder.write_len(1);
-                        encoder.write_any(&value);
-                    }
-                    SeedContent::Map => encoder.write_type_ref(TYPE_REFS_MAP),
-                    SeedContent::Order(values) => {
-                        encoder.write_len(values.len() as u32);
-                        for value in values {
-                            encoder.write_any(&value);
-                        }
-                    }
-                }
-            }
-            encoder.write_var(0_u32);
-            hydrate_local_doc(self.local, &encoder.to_vec())?;
+        if self.entries.is_empty() {
+            return Ok(());
         }
+        let mut encoder = EncoderV1::new();
+        encoder.write_var(1_u32);
+        encoder.write_var(self.entries.len());
+        encoder.write_client(self.client);
+        encoder.write_var(self.imported_clock);
+        let mut bytes = encoder.to_vec();
+        #[cfg(test)]
+        let count = self.entries.len();
+        for entry in std::mem::take(&mut self.entries) {
+            work.append_bytes(&mut bytes, &entry.bytes).await;
+            self.imported_clock += entry.len;
+        }
+        bytes.push(0);
+        charge_bytes(bytes.len(), work).await;
+        #[cfg(test)]
+        SEED_BATCHES.with(|batches| batches.borrow_mut().push((bytes.len(), count)));
+        hydrate_local_doc(self.local, &bytes)?;
+        self.bytes = 0;
         Ok(())
     }
 }
@@ -284,6 +336,7 @@ pub(super) async fn seed_sliced(
         let mut order = Vec::with_capacity(keys.len());
         for key in keys {
             work.step().await;
+            charge_bytes(key.len(), work).await;
             order.push(Any::from(key.clone()));
         }
         encoder
@@ -315,9 +368,18 @@ pub(super) async fn seed_sliced(
             .await?;
         encoder.value(map, HYPERLINKS, hyperlinks, work).await?;
         encoder.value(map, CHARTS, charts, work).await?;
+        let mut merges = Vec::new();
+        for range in &sheet.merges {
+            work.step().await;
+            let Any::Array(value) = merges_to_any(std::slice::from_ref(range)) else {
+                unreachable!()
+            };
+            merges.push(value[0].clone());
+        }
         encoder
-            .value(map, MERGES, merges_to_any(&sheet.merges), work)
+            .value(map, MERGES, Any::Array(Arc::from(merges)), work)
             .await?;
+        charge_bytes(sheet.name.len(), work).await;
         encoder.value(map, NAME, sheet.name.as_str(), work).await?;
         let row_heights = encoder.map(map, ROW_HEIGHTS, work).await?;
         let styles = encoder.map(map, STYLES, work).await?;
@@ -330,6 +392,12 @@ pub(super) async fn seed_sliced(
         let mut style_values = BTreeMap::new();
         for (at, cell) in sheet.iter_cells() {
             work.step().await;
+            if let Some(formula) = &cell.formula {
+                charge_bytes(formula.len(), work).await;
+            }
+            if let CellValue::Text { value } = &cell.value {
+                charge_bytes(value.len(), work).await;
+            }
             if let Some(value) = content_to_any(cell) {
                 values.insert(cell_key(at), value);
             }

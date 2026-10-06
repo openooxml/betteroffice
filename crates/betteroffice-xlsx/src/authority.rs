@@ -74,8 +74,14 @@ pub(crate) const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static SYNC_FINGERPRINTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FORCE_FULL_MATERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAST_SET_CELL_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_seed_batches() -> Vec<(usize, usize)> {
+    peer_open::SEED_BATCHES.with(|batches| std::mem::take(&mut *batches.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -4625,6 +4631,8 @@ impl<'a> FingerprintBuilder<'a> {
         styles: FingerprintStyles<'a>,
         legacy_styles: Option<&'a Stylesheet>,
     ) -> Result<BTreeMap<i64, Vec<String>>, String> {
+        #[cfg(test)]
+        SYNC_FINGERPRINTS.set(SYNC_FINGERPRINTS.get() + 1);
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
             let (fingerprint, _) = self.fingerprint(styles, version, version >= 4, true, false)?;
@@ -4726,8 +4734,12 @@ impl<'a> FingerprintBuilder<'a> {
             }
         }
         if !styles.indexed_colors.is_empty() {
-            let legacy_fingerprints =
-                self.accepted_fingerprints(styles.without_indexed_colors(), legacy_styles)?;
+            let legacy_fingerprints = Box::pin(self.accepted_fingerprints_sliced(
+                styles.without_indexed_colors(),
+                legacy_styles,
+                work,
+            ))
+            .await?;
             for (version, accepted) in legacy_fingerprints {
                 for fingerprint in accepted {
                     append_fingerprint(&mut fingerprints, version, fingerprint);

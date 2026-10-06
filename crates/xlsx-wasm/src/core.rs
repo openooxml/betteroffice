@@ -7,7 +7,11 @@ use betteroffice_xlsx::{
     ProposalRequest, SheetId, StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook,
     WorkbookPeerOpener,
 };
+use std::collections::VecDeque;
+
 use serde::{Deserialize, Serialize};
+
+const PEER_HYDRATION_CHUNK_BYTES: usize = 64 * 1024;
 
 pub struct Session {
     workbook: Workbook,
@@ -23,6 +27,7 @@ struct PeerHydration {
 pub struct PeerOpener {
     opener: WorkbookPeerOpener,
     calculation_context: Option<CalculationOptions>,
+    hydration: VecDeque<String>,
 }
 
 impl PeerOpener {
@@ -30,24 +35,40 @@ impl PeerOpener {
         Self {
             opener: WorkbookPeerOpener::new(bytes, client_id),
             calculation_context: None,
+            hydration: VecDeque::new(),
         }
     }
 
     pub fn advance(&mut self, units: usize) -> Result<OpenerState, String> {
-        self.opener
+        if let Some(json) = self.hydration.pop_front() {
+            let hydration: PeerHydration =
+                serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            if matches!(&hydration.workbook, PeerHydrationChunk::Header { .. }) {
+                self.calculation_context = hydration.calculation_context;
+            }
+            self.opener
+                .push_hydration(hydration.workbook)
+                .map_err(|error| error.to_string())?;
+        }
+        let state = self
+            .opener
             .advance(units)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(
+            if state == OpenerState::NeedsHydration && !self.hydration.is_empty() {
+                OpenerState::Parsing
+            } else {
+                state
+            },
+        )
     }
 
     pub fn push_hydration(&mut self, json: &str) -> Result<(), String> {
-        let hydration: PeerHydration =
-            serde_json::from_str(json).map_err(|error| error.to_string())?;
-        if matches!(&hydration.workbook, PeerHydrationChunk::Header { .. }) {
-            self.calculation_context = hydration.calculation_context;
+        if json.len() > PEER_HYDRATION_CHUNK_BYTES {
+            return Err("Peer hydration chunk is too large".into());
         }
-        self.opener
-            .push_hydration(hydration.workbook)
-            .map_err(|error| error.to_string())
+        self.hydration.push_back(json.to_owned());
+        Ok(())
     }
 
     pub fn finish(self) -> Result<Session, String> {
