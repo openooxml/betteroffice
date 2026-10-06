@@ -109,9 +109,11 @@ fn preview_touches_state_inner<T: ReadTxn>(
     txn: &T,
     active_stories: &mut BTreeSet<String>,
 ) -> bool {
-    if diff.attributes.as_deref().is_some_and(|attrs| {
-        attrs.iter().any(|(key, value)| stateful_value(key, value))
-    }) {
+    if diff
+        .attributes
+        .as_deref()
+        .is_some_and(|attrs| attrs.iter().any(|(key, value)| stateful_value(key, value)))
+    {
         return true;
     }
     match &diff.insert {
@@ -134,7 +136,8 @@ fn preview_touches_state_inner<T: ReadTxn>(
                         return true;
                     };
                     for cell in cells.iter() {
-                        let Some(story_id) = any_map(cell).and_then(|cell| map_string(cell, "story"))
+                        let Some(story_id) =
+                            any_map(cell).and_then(|cell| map_string(cell, "story"))
                         else {
                             return true;
                         };

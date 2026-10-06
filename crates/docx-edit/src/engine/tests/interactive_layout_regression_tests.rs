@@ -567,7 +567,8 @@ fn interactive_page_build_before_undo_matches_cold_frame_bytes() {
         .layout_document_with_regions_retained(&request)
         .unwrap();
     assert!(engine.pagination.borrow().display_rebuilt_pages.is_empty());
-    let (expected_bytes, expected_list, _) = full_display_frame(&engine, &extras, reference_display);
+    let (expected_bytes, expected_list, _) =
+        full_display_frame(&engine, &extras, reference_display);
     assert_eq!(
         engine
             .build_display_list_frame(&extras, epochs.frame_epoch)
