@@ -644,6 +644,7 @@ impl UnitRecorder {
         let previous = window
             .reused
             .map(|index| &self.units.refresh.as_ref().unwrap().previous.records[index]);
+        window.local_stateful |= !window.position.safe || !position.safe || reads.hidden_fields;
         if reads.ids.is_empty() && previous.is_none() {
             self.units.untracked_state |= window.local_stateful;
             return;
@@ -820,6 +821,7 @@ fn replace_positions<T>(
 
 pub(crate) fn targets(units: &PreviewUnits, changed: &BTreeSet<String>) -> bool {
     units.untracked_state
+        || units.records.is_empty()
         || units
             .records
             .iter()
@@ -834,7 +836,7 @@ pub(crate) fn replay(
     current: &[Rc<LayoutBlock>],
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
-    if local.enabled && units.untracked_state {
+    if local.enabled && (units.untracked_state || units.records.is_empty()) {
         return None;
     }
     let txn = doc.yrs_doc().transact();
@@ -855,7 +857,8 @@ pub(crate) fn replay(
             continue;
         }
         if local.enabled
-            && (record.local_stateful
+            && (record.stories.start != record.stories.end
+                || record.local_stateful
                 || record
                     .chunks
                     .iter()

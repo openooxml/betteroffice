@@ -13671,6 +13671,132 @@ mod tests {
     }
 
     #[test]
+    fn resident_duplicate_paragraph_display_positions_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", &run("Block")),
+            para("10000003", &run("Middle")),
+            para("10000004", &run("Block")),
+            para("10000005", &run("After")),
+        );
+        for enabled in [false, true] {
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&body).bytes(), 9627, enabled);
+            lowering_fixture::share_key(engine.doc(), "body", "10000004", "10000002");
+            engine.render.replace(Default::default());
+            engine.pagination.replace(Default::default());
+            engine.regions.replace(Default::default());
+            engine.display.replace(Default::default());
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            for paragraph in [0, 2, 4] {
+                local_patch_paragraph_edits(&engine, &request, paragraph, true);
+                let before = engine.with_display_list(Clone::clone).unwrap();
+                for _ in 0..2 {
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    engine.build_display_list_frame("{}", epoch).unwrap();
+                    assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+                }
+                assert_local_patch_matches_cold(
+                    &engine,
+                    &request,
+                    &format!("duplicate paragraph positions enabled={enabled}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resident_table_preview_replays_without_untracked_state() {
+        resident_adjacent_table_preview_matches_cold_full(false);
+    }
+
+    #[test]
+    fn resident_table_field_preview_falls_back_and_matches_cold_full() {
+        resident_adjacent_table_preview_matches_cold_full(true);
+    }
+
+    fn resident_adjacent_table_preview_matches_cold_full(field: bool) {
+        use super::lowering_fixture::{para, run};
+
+        let content = if field {
+            r#"<w:fldSimple w:instr=" REF mark "><w:r><w:t>Target</w:t></w:r></w:fldSimple>"#
+                .to_owned()
+        } else {
+            run("Cell")
+        };
+        let paragraph = para("10000001", &content);
+        let table = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{paragraph}</w:tc></w:tr></w:tbl>"#,
+        );
+        resident_adjacent_preview_matches_cold_full(&table, field);
+        let nested = format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{table}{}</w:tc></w:tr></w:tbl>"#,
+            para("10000003", &run("Tail")),
+        );
+        resident_adjacent_preview_matches_cold_full(&nested, field);
+    }
+
+    #[test]
+    fn resident_hyperlink_preview_replays_without_untracked_state() {
+        use super::lowering_fixture::para;
+
+        let hyperlink = para(
+            "10000001",
+            r#"<w:hyperlink w:anchor="target"><w:r><w:t>Link</w:t></w:r></w:hyperlink>"#,
+        );
+        resident_adjacent_preview_matches_cold_full(&hyperlink, false);
+    }
+
+    fn resident_adjacent_preview_matches_cold_full(content: &str, stateful: bool) {
+        use super::lowering_fixture::{Package, para};
+
+        let body = format!(
+            "{content}{}",
+            para(
+                "10000002",
+                r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Change</w:t></w:r></w:ins>"#,
+            ),
+        );
+        for enabled in [false, true] {
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&body).bytes(), 9628, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            local_patch_preview_warm_up(&engine, &mut request);
+            for decision in ["rejected", "accepted", "rejected", "accepted"] {
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                let fallback = enabled && stateful;
+                assert_eq!(
+                    engine.stats().lower_preview_fallbacks,
+                    before.lower_preview_fallbacks + u64::from(fallback),
+                );
+                assert_eq!(
+                    engine.stats().lower_cache_misses,
+                    before.lower_cache_misses + u64::from(fallback),
+                );
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches + u64::from(!fallback),
+                );
+                assert_local_patch_matches_cold(
+                    &engine,
+                    &request.to_string(),
+                    &format!("{decision} adjacent preview stateful={stateful} enabled={enabled}"),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resident_section_suffix_positions_shift_once_per_edit() {
         use super::lowering_fixture::{Package, para, run};
 
@@ -14064,7 +14190,7 @@ mod tests {
                         &request,
                         &format!("{kind} {instruction} preview enabled={enabled}"),
                     );
-                    local_patch_paragraph_edits(&engine, &request, 1, false);
+                    local_patch_paragraph_edits(&engine, &request, 1, content == &field);
                     local_patch_paragraph_edits(&engine, &request, 0, false);
                     local_patch_paragraph_edits(&engine, &request, 2, true);
                 }

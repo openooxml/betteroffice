@@ -82,14 +82,35 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
         }
 }
 
+fn stateful_value(key: &str, value: &Any) -> bool {
+    if matches!(value, Any::Null | Any::Undefined | Any::Bool(false)) {
+        return false;
+    }
+    match key {
+        "fieldCodeMarks" | "fieldResultBlocks" => !any_strings(Some(value)).is_empty(),
+        "fieldCodeTarget" => value_string(Some(value)).is_some(),
+        _ => match value {
+            Any::Map(map) => map.iter().any(|(key, value)| stateful_value(key, value)),
+            Any::Array(values) => values.iter().any(|value| stateful_value("", value)),
+            _ => false,
+        },
+    }
+}
+
 pub(super) fn preview_touches_state<T: ReadTxn>(
     diff: &yrs::types::text::Diff<YChange>,
     txn: &T,
 ) -> bool {
+    preview_touches_state_inner(diff, txn, &mut BTreeSet::new())
+}
+
+fn preview_touches_state_inner<T: ReadTxn>(
+    diff: &yrs::types::text::Diff<YChange>,
+    txn: &T,
+    active_stories: &mut BTreeSet<String>,
+) -> bool {
     if diff.attributes.as_deref().is_some_and(|attrs| {
-        attrs
-            .iter()
-            .any(|(key, value)| ![INS, DEL].contains(&key.as_ref()) && unsafe_value(key, value))
+        attrs.iter().any(|(key, value)| stateful_value(key, value))
     }) {
         return true;
     }
@@ -97,9 +118,44 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
         Out::Any(Any::String(_)) => false,
         Out::YMap(mark) if is_pilcrow(mark, txn) => pilcrow_values(mark, txn)
             .iter()
-            .any(|(key, value)| unsafe_value(key, value)),
+            .any(|(key, value)| stateful_value(key, value)),
         Out::YMap(mark) => {
             let values = pilcrow_values(mark, txn);
+            if values.iter().any(|(key, value)| stateful_value(key, value)) {
+                return true;
+            }
+            if value_string(values.get("_kind")).as_deref() == Some("table") {
+                let Some(Any::Array(rows)) = values.get("rows") else {
+                    return true;
+                };
+                for row in rows.iter() {
+                    let Some(Any::Array(cells)) = any_map(row).and_then(|row| row.get("cells"))
+                    else {
+                        return true;
+                    };
+                    for cell in cells.iter() {
+                        let Some(story_id) = any_map(cell).and_then(|cell| map_string(cell, "story"))
+                        else {
+                            return true;
+                        };
+                        if !active_stories.insert(story_id.clone()) {
+                            return true;
+                        }
+                        let Ok(story) = story_ref(txn, &story_id) else {
+                            return true;
+                        };
+                        let stateful = story
+                            .diff(txn, YChange::identity)
+                            .iter()
+                            .any(|chunk| preview_touches_state_inner(chunk, txn, active_stories));
+                        active_stories.remove(&story_id);
+                        if stateful {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
             let seed_only = [
                 "break",
                 "pageBreak",
@@ -117,10 +173,6 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
                     .as_str(),
             );
             !seed_only
-                || ["fieldCodeMarks", "fieldResultBlocks"]
-                    .iter()
-                    .any(|key| !any_strings(values.get(*key)).is_empty())
-                || value_string(values.get("fieldCodeTarget")).is_some()
         }
         _ => true,
     }

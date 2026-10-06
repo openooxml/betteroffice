@@ -11712,14 +11712,12 @@ fn refresh_resident_display_pages_reading(
     if selected_blocks.is_empty() {
         return Ok(());
     }
-    let current_indices: HashMap<String, usize> = input
-        .measured
-        .iter()
-        .enumerate()
-        .filter_map(|(index, measured)| {
-            measured_block_key(measured).map(|key| (key.into_owned(), index))
-        })
-        .collect();
+    let mut current_indices = HashMap::new();
+    for (index, measured) in input.measured.iter().enumerate() {
+        if let Some(key) = measured_block_key(measured) {
+            current_indices.entry(key.into_owned()).or_insert(index);
+        }
+    }
     let mut pending_blocks = selected_blocks;
     for measured in &pagination.measured {
         if pending_blocks.is_empty() {
