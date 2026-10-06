@@ -24,6 +24,11 @@ use crate::{MAX_DEPTH, ParseError};
 mod oracle;
 #[cfg(test)]
 mod oracle_tests;
+mod style_match;
+#[cfg(test)]
+mod style_match_tests;
+
+pub(crate) use style_match::{SourceStyles, StyleMatch};
 
 #[cfg(any(test, feature = "test-oracle"))]
 thread_local! {
@@ -40,6 +45,7 @@ pub(crate) struct SheetPatch<'a> {
     pub(crate) sst_index: &'a HashMap<&'a str, usize>,
     pub(crate) retained: &'a SharedStringCells,
     pub(crate) plan: Option<&'a SharedStringPlan>,
+    pub(crate) styles: &'a StyleMatch<'a>,
 }
 
 struct SourceElement {
@@ -339,6 +345,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             self.retained,
             self.plan,
+            None,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -385,8 +392,10 @@ impl SheetPatch<'_> {
                 (next_source == Some(col)).then(|| source_cells.next().expect("peeked").1);
             let model_cell = (next_model == Some(col)).then(|| cells.next().expect("peeked").1);
             let at = CellRef::new(row, col);
+            let mut original = None;
             let verbatim = source_cell.is_some_and(|source_cell| {
-                let (original, ordered) = originals.at(source_cell.at, at);
+                let (found, ordered) = originals.at(source_cell.at, at);
+                original = found;
                 let model = if ordered {
                     model_cell
                 } else {
@@ -394,7 +403,7 @@ impl SheetPatch<'_> {
                     EMISSION_LOOKUPS.with(|count| count.set(count.get() + 1));
                     self.sheet.cell(at)
                 };
-                self.verbatim(source_cell, at, model, original, dirty)
+                self.verbatim(source_cell, at, model, found, dirty)
             });
             match source_cell {
                 Some(source_cell) if verbatim => {
@@ -406,9 +415,14 @@ impl SheetPatch<'_> {
                         continue;
                     };
                     body.extend_from_slice(&data[source_cell.before.clone()]);
-                    self.emit_cell(&mut body, at, cell)?;
+                    self.emit_cell(&mut body, at, cell, original)?;
                 }
-                None => self.emit_cell(&mut body, at, model_cell.expect("one side is present"))?,
+                None => self.emit_cell(
+                    &mut body,
+                    at,
+                    model_cell.expect("one side is present"),
+                    None,
+                )?,
             }
             columns = Some(match columns {
                 Some((min, max)) => (min, max.max(col + 1)),
@@ -462,7 +476,7 @@ impl SheetPatch<'_> {
         original: Option<&Cell>,
         dirty: &DirtyFormulas,
     ) -> bool {
-        if model != original {
+        if !self.styles.same(original, model) {
             return false;
         }
         if cell.shared_string
@@ -491,9 +505,7 @@ impl SheetPatch<'_> {
         }
         match formula.group {
             Some(group) => !dirty.groups.contains(&group),
-            None => {
-                formula.reference.is_none() || !dirty.masters.contains(&(cell.at.row, cell.at.col))
-            }
+            None => !dirty.masters.contains(&(cell.at.row, cell.at.col)),
         }
     }
 
@@ -527,7 +539,13 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn emit_cell(&self, out: &mut Vec<u8>, at: CellRef, cell: &Cell) -> Result<(), ParseError> {
+    fn emit_cell(
+        &self,
+        out: &mut Vec<u8>,
+        at: CellRef,
+        cell: &Cell,
+        original: Option<&Cell>,
+    ) -> Result<(), ParseError> {
         let retained = shared_string_index(
             cell,
             at,
@@ -537,10 +555,14 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
+        let style = original.map_or(cell.style, |original| {
+            self.styles.written(original.style, cell.style)
+        });
         write_cell(
             &mut writer,
             at,
             cell,
+            style,
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
@@ -551,7 +573,7 @@ impl SheetPatch<'_> {
     }
 
     fn dirty_formulas(&self, rows: &[SourceRow]) -> DirtyFormulas {
-        let changed = self.changed_source_cells();
+        let mut changed = self.changed_source_cells();
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
@@ -559,6 +581,16 @@ impl SheetPatch<'_> {
                 continue;
             };
             let key = (cell.at.row, cell.at.col);
+            if self
+                .original
+                .array_formula(cell.at)
+                .and_then(|range| self.remap_range(range))
+                != self
+                    .mapped(cell.at)
+                    .and_then(|mapped| self.sheet.array_formula(mapped))
+            {
+                changed.insert(key);
+            }
             match formula.group {
                 Some(group) => {
                     let entry = groups.entry(group).or_insert((false, None));
@@ -570,9 +602,7 @@ impl SheetPatch<'_> {
                     }
                 }
                 None => {
-                    if let Some(reference) = formula.reference {
-                        masters.push((key, reference));
-                    }
+                    masters.push((key, formula.reference));
                 }
             }
         }
@@ -588,8 +618,9 @@ impl SheetPatch<'_> {
                 .into_iter()
                 .filter(|(key, reference)| {
                     changed.contains(key)
-                        || !self.moves_uniformly(*reference)
-                        || range_changed(*reference, &changed)
+                        || reference.is_some_and(|reference| {
+                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                        })
                 })
                 .map(|(key, _)| key)
                 .collect(),
@@ -626,7 +657,7 @@ impl SheetPatch<'_> {
             let current = cells
                 .next_if(|(at, _)| (at.row, at.col) == key)
                 .map(|(_, cell)| cell);
-            if current != Some(original) {
+            if !self.styles.same(Some(original), current) {
                 changed.insert((source.row, source.col));
             }
         }
@@ -656,7 +687,7 @@ impl SheetPatch<'_> {
                 DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
                 self.sheet.cell(mapped)
             });
-            if current != Some(cell) {
+            if !self.styles.same(Some(cell), current) {
                 changed.insert((at.row, at.col));
             }
         }
@@ -664,7 +695,7 @@ impl SheetPatch<'_> {
             if let Some(source) = self.inverse(at) {
                 #[cfg(test)]
                 DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
-                if self.original.cell(source) != Some(cell) {
+                if !self.styles.same(self.original.cell(source), Some(cell)) {
                     changed.insert((source.row, source.col));
                 }
             }

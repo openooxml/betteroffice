@@ -3,6 +3,8 @@ pub(crate) mod batch;
 mod edit_tests;
 #[cfg(test)]
 mod save_oracle_tests;
+#[path = "snapshot/assembly.rs"]
+pub(crate) mod snapshot_assembly;
 mod staging;
 pub(crate) mod target;
 
@@ -48,6 +50,7 @@ use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
+use crate::snapshot::package::PackageSlot;
 use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
@@ -110,16 +113,16 @@ enum WorkbookMode {
 /// sheet it came from and the shared-string entry each of its cells was
 /// authored against.
 #[derive(Default)]
-struct PreservedSheetState {
-    origins: Vec<Option<usize>>,
-    shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
+pub(crate) struct PreservedSheetState {
+    pub(crate) origins: Vec<Option<usize>>,
+    pub(crate) shared_string_cells: Arc<Vec<xlsx_parse::SharedStringCells>>,
     /// Where each sheet's source rows and columns sit after the row and column
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
-    axes: Vec<Option<xlsx_parse::SheetAxes>>,
+    pub(crate) axes: Vec<Option<xlsx_parse::SheetAxes>>,
     /// Whether each sheet was added in this session, so its properties are the
     /// defaults of a new sheet rather than unknown ones.
-    created: Vec<bool>,
+    pub(crate) created: Vec<bool>,
 }
 
 impl Clone for PreservedSheetState {
@@ -330,7 +333,8 @@ pub struct Workbook {
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
-    source_package: Option<xlsx_parse::PreservedPackage>,
+    source_package: Option<PackageSlot>,
+    snapshot_package_lineage: Option<snapshot_assembly::Lineage>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -438,6 +442,9 @@ impl Workbook {
     }
 
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
+        if self.rand_seed != seed {
+            self.snapshot_package_lineage = None;
+        }
         self.rand_seed = seed;
     }
 
@@ -553,7 +560,8 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package,
+            source_package: source_package.map(PackageSlot::Present),
+            snapshot_package_lineage: None,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -577,6 +585,16 @@ impl Workbook {
             chart_cache: Mutex::new(ChartCache::default()),
             source_part_hashes: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    fn require_snapshot_standalone(&self) -> crate::snapshot::SnapshotResult<()> {
+        if matches!(self.mode, WorkbookMode::Standalone) {
+            Ok(())
+        } else {
+            Err(crate::snapshot::SnapshotError::new(
+                "collaborative workbooks cannot be snapshotted",
+            ))
+        }
     }
 
     pub fn client_id(&self) -> u64 {
@@ -732,7 +750,12 @@ impl Workbook {
     /// an adopted snapshot are the same foreign bytes and get the same answer.
     fn gate_incoming(&self, model: &WorkbookModel) -> Result<()> {
         validate_model(model)?;
-        validate_chart_source(model, self.source_package.is_some())?;
+        validate_chart_source(
+            model,
+            self.source_package
+                .as_ref()
+                .is_some_and(|package| package.facts().source_present()),
+        )?;
         self.validate_incoming_anchors(model)
     }
 
@@ -920,6 +943,7 @@ impl Workbook {
         validate_chart_source(&self.model, self.source_package.is_some())?;
         match &self.source_package {
             Some(package) => {
+                let package = package.materialize()?;
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -954,20 +978,20 @@ impl Workbook {
     }
 
     fn has_uncached_source_formulas(&self) -> bool {
-        self.source_package.as_ref().is_some_and(|package| {
-            (0..package.source_sheet_count()).any(|index| {
-                package
-                    .source_cell_facts(index)
-                    .is_some_and(|facts| !facts.uncached_formulas.is_empty())
-            })
-        })
+        self.source_package
+            .as_ref()
+            .is_some_and(|package| package.facts().has_uncached_source_formulas())
     }
 
     /// The committed state a structured export reads.
-    pub(crate) fn export_source(&self) -> ExportSource<'_> {
-        ExportSource {
+    pub(crate) fn try_export_source(&self) -> Result<ExportSource<'_>> {
+        Ok(ExportSource {
             model: &self.model,
-            package: self.source_package.as_ref(),
+            package: self
+                .source_package
+                .as_ref()
+                .map(PackageSlot::materialize)
+                .transpose()?,
             origins: &self.preserved.origins,
             shared_string_cells: &self.preserved.shared_string_cells,
             axes: &self.preserved.axes,
@@ -976,11 +1000,39 @@ impl Workbook {
             edited: self.edited_since_open || self.recalculated_since_open,
             part_hashes: &self.source_part_hashes,
             sheet_ids: self.sheet_keys(),
-        }
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn export_source(&self) -> ExportSource<'_> {
+        self.try_export_source().unwrap()
     }
 
     pub fn into_model(self) -> WorkbookModel {
         self.model
+    }
+
+    #[cfg(test)]
+    pub(crate) fn defer_source_package_for_test(&mut self) -> Result<()> {
+        let source = self
+            .source_container
+            .as_ref()
+            .ok_or_else(|| Error::Package("source container is unavailable".to_owned()))?;
+        let package = self
+            .source_package
+            .as_ref()
+            .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
+        let facts = xlsx_parse::PackageFacts::from_package(package.materialize()?);
+        self.source_package = Some(PackageSlot::deferred(source.clone(), facts));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_package_is_unmaterialized_for_test(&self) -> bool {
+        matches!(
+            &self.source_package,
+            Some(PackageSlot::Deferred { rebuilt, .. }) if rebuilt.get().is_none()
+        )
     }
 
     pub fn sheet(&self, sheet: SheetId) -> Result<&Sheet> {
@@ -1001,6 +1053,9 @@ impl Workbook {
 
     pub fn set_active_sheet(&mut self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
+        if self.active_sheet != sheet {
+            self.snapshot_package_lineage = None;
+        }
         self.active_sheet = sheet;
         self.invalidate_sheet_info();
         Ok(())
@@ -2289,7 +2344,7 @@ impl Workbook {
     /// what the ops before it left behind rather than what the workbook opened
     /// with.
     fn ensure_references_stay_valid(&self, names: &[String], op: &Op) -> Result<()> {
-        let Some(package) = self.source_package.as_ref() else {
+        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
             return Ok(());
         };
         let at = |sheet: SheetId| {
@@ -2334,7 +2389,7 @@ impl Workbook {
     /// Whether an op moves cells a preserved part names and no save rewrites,
     /// which is what a save has to be told about.
     fn moves_referenced_cells(&self, names: &[String], op: &Op) -> bool {
-        let Some(package) = self.source_package.as_ref() else {
+        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
             return false;
         };
         let (sheet, at, by_rows) = match *op {
@@ -2368,7 +2423,7 @@ impl Workbook {
         if origin.is_some_and(|origin| {
             self.source_package
                 .as_ref()
-                .is_some_and(|package| !package.source_sheet_is_worksheet(origin))
+                .is_some_and(|package| !package.facts().source_sheet_is_worksheet(origin))
         }) {
             return Err(Error::InvalidOperation(format!(
                 "sheet {} is not an editable worksheet",
@@ -4048,15 +4103,16 @@ impl Workbook {
         } else {
             None
         };
-        let package =
-            self.source_package
-                .as_ref()
-                .ok_or_else(|| RenderError::ChartSourceUnavailable {
-                    part: chart.part.clone(),
-                })?;
+        let package = self
+            .source_package
+            .as_ref()
+            .ok_or_else(|| RenderError::ChartSourceUnavailable {
+                part: chart.part.clone(),
+            })?
+            .facts();
         let bytes =
             package
-                .part_bytes(&chart.part)
+                .chart_part_bytes(&chart.part)
                 .ok_or_else(|| RenderError::ChartPartMissing {
                     part: chart.part.clone(),
                 })?;
@@ -4301,7 +4357,8 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package,
+            source_package: source_package.map(PackageSlot::Present),
+            snapshot_package_lineage: None,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),

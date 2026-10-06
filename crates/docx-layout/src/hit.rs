@@ -62,6 +62,7 @@ thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static CARET_STOPS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RANGE_RECT_PAGE_VISITS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Vertical slack (px) added on each side of a run's band when testing a
@@ -1524,6 +1525,8 @@ fn collect_range_rects(
     to: i64,
     out: &mut Vec<RangeRect>,
 ) {
+    #[cfg(test)]
+    RANGE_RECT_PAGE_VISITS.with(|visits| visits.borrow_mut().push(page_index));
     let pending: Vec<(RectOwner<'_>, RangeRect)> = text_hits(prims)
         .iter()
         .filter_map(|hit| hit_rect(hit, page_index, from, to))
@@ -2020,6 +2023,31 @@ pub fn vertical_move_json(
 pub fn range_rects_json(display_list: &str, from: i64, to: i64) -> Result<String, String> {
     let dl: DisplayList = serde_json::from_str(display_list).map_err(|e| format!("parse: {e}"))?;
     serde_json::to_string(&range_rects(&dl, from, to)).map_err(|e| format!("serialize: {e}"))
+}
+
+pub fn page_window(first: f64, last: f64) -> Option<(usize, usize)> {
+    if first.is_nan() || last.is_nan() {
+        return None;
+    }
+    let lo = first.ceil().max(0.0);
+    let hi = last.floor();
+    if hi < lo {
+        return None;
+    }
+    Some((lo as usize, hi as usize))
+}
+
+pub fn range_rects_on_pages_json(
+    display_list: &str,
+    from: i64,
+    to: i64,
+    first_page: usize,
+    last_page: usize,
+) -> Result<String, String> {
+    let dl: DisplayList = serde_json::from_str(display_list).map_err(|e| format!("parse: {e}"))?;
+    let pages = first_page..last_page.saturating_add(1).min(dl.pages.len());
+    serde_json::to_string(&range_rects_on_pages(&dl, pages, from, to))
+        .map_err(|e| format!("serialize: {e}"))
 }
 
 /// `range_rects_in_region` over serialized inputs. `region` is
@@ -2862,6 +2890,183 @@ mod tests {
         assert_eq!(note.note_id, None);
         assert_eq!(note.pos, None);
         assert_eq!(note.target, HoverTarget::None);
+    }
+
+    #[test]
+    fn page_window_normalizes_float_bounds() {
+        for (first, last, expected) in [
+            (5.5, 5.5, None),
+            (4.2, 5.0, Some((5, 5))),
+            (f64::NAN, 5.0, None),
+            (0.0, f64::NAN, None),
+            (-3.0, 1.0, Some((0, 1))),
+            (2.0, f64::INFINITY, Some((2, usize::MAX))),
+            (5.0, 2.0, None),
+            (-5.0, -1.0, None),
+            (f64::NEG_INFINITY, f64::INFINITY, Some((0, usize::MAX))),
+            (f64::INFINITY, f64::INFINITY, Some((usize::MAX, usize::MAX))),
+            (0.0, f64::NEG_INFINITY, None),
+        ] {
+            assert_eq!(page_window(first, last), expected, "{first}..={last}");
+        }
+    }
+
+    #[test]
+    fn range_rects_on_pages_exports_normalize_float_bounds() {
+        let mut dl = page(Value::Null, vec![run(100.0, 100.0, 50.0, 1)]);
+        let template = dl.pages[0].clone();
+        dl.pages = (0..8)
+            .map(|page_index| DisplayPage {
+                page_index,
+                ..template.clone()
+            })
+            .collect();
+        let json = serde_json::to_string(&dl).unwrap();
+        let all: Vec<Value> =
+            serde_json::from_str(&range_rects_json(&json, 2, 4).unwrap()).unwrap();
+        assert_eq!(all.len(), dl.pages.len());
+        let handle = crate::session::open_display_list(&json).unwrap();
+        for (first, last) in [
+            (5.5, 5.5),
+            (4.2, 5.0),
+            (1.2, 4.8),
+            (f64::NAN, 5.0),
+            (0.0, f64::NAN),
+            (-3.0, 1.0),
+            (-3.2, 2.8),
+            (-5.0, -1.0),
+            (2.0, f64::INFINITY),
+            (5.0, 2.0),
+            (f64::NEG_INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::INFINITY),
+            (0.0, f64::NEG_INFINITY),
+            (0.0, 4294967296.0),
+            (4294967296.0, f64::INFINITY),
+        ] {
+            let expected: Vec<Value> = all
+                .iter()
+                .filter(|rect| {
+                    let index = rect["pageIndex"].as_u64().unwrap() as f64;
+                    index >= first.ceil() && index <= last.floor()
+                })
+                .cloned()
+                .collect();
+            let by_json: Vec<Value> = serde_json::from_str(
+                &crate::range_rects_on_pages_json(&json, 2.0, 4.0, first, last).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(by_json, expected, "JSON {first}..={last}");
+            let by_handle: Vec<Value> = serde_json::from_str(
+                &crate::range_rects_on_pages_by_handle(handle, 2.0, 4.0, first, last).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(by_handle, expected, "handle {first}..={last}");
+        }
+        crate::session::close_display_list(handle);
+    }
+
+    #[test]
+    fn empty_page_windows_skip_display_list_and_handle_access() {
+        for (first, last) in [(5.5, 5.5), (f64::NAN, 5.0), (0.0, f64::NAN), (5.0, 2.0)] {
+            assert_eq!(
+                crate::range_rects_on_pages_json("invalid", 2.0, 4.0, first, last).unwrap(),
+                "[]"
+            );
+            assert_eq!(
+                crate::range_rects_on_pages_by_handle(u32::MAX, 2.0, 4.0, first, last).unwrap(),
+                "[]"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_table_header_range_visits_only_page_five_zero_based() {
+        let mut rows = Vec::new();
+        let mut row_measures = Vec::new();
+        for row in 0..21 {
+            let height = if row == 0 { 20 } else { 40 };
+            let cells: Vec<_> = (0..2)
+                .map(|column| {
+                    let start = row * 100 + column * 10 + 1;
+                    serde_json::json!({
+                        "id": format!("cell-r{row}c{column}"),
+                        "blocks": [{
+                            "kind": "paragraph", "id": format!("r{row}c{column}"),
+                            "pmStart": start, "pmEnd": start + 4,
+                            "runs": [{"kind": "text", "text": "head", "pmStart": start, "pmEnd": start + 4}]
+                        }]
+                    })
+                })
+                .collect();
+            let cell_measures: Vec<_> = (0..2)
+                .map(|_| {
+                    serde_json::json!({
+                        "width": 80, "height": height,
+                        "blocks": [{"kind": "paragraph", "totalHeight": height,
+                            "lines": [{"headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                                "width": 40, "ascent": 8, "descent": 2, "lineHeight": height}]}]
+                    })
+                })
+                .collect();
+            rows.push(serde_json::json!({"id": row, "isHeader": row == 0, "cantSplit": true, "cells": cells}));
+            row_measures.push(serde_json::json!({"height": height, "cells": cell_measures}));
+        }
+        let mut input = serde_json::json!({
+            "measured": [{
+                "block": {"kind": "table", "id": "table", "columnWidths": [80, 80], "rows": rows},
+                "measure": {"kind": "table", "columnWidths": [80, 80], "totalWidth": 160,
+                    "totalHeight": 820, "rows": row_measures}
+            }],
+            "options": {"pageSize": {"w": 200, "h": 120},
+                "margins": {"top": 10, "right": 10, "bottom": 10, "left": 10}}
+        });
+        input["layout"] =
+            serde_json::from_str(&crate::layout_to_canonical_json(&input.to_string()).unwrap())
+                .unwrap();
+        let json = crate::display_list::build_display_list_json(&input.to_string()).unwrap();
+        let dl: DisplayList = serde_json::from_str(&json).unwrap();
+        assert!(dl.pages.len() >= 6);
+        assert!(dl.pages[5].primitives.iter().any(|primitive| {
+            let value = serde_json::to_value(primitive).unwrap();
+            value["cell"]["repeatedHeader"] == true && value["docStart"] == 1
+        }));
+        let all = range_rects(&dl, 2, 4);
+        assert_eq!(all.len(), dl.pages.len());
+        let expected: Vec<_> = all
+            .into_iter()
+            .filter(|rect| rect.page_index == 5)
+            .collect();
+        assert!(!expected.is_empty());
+
+        RANGE_RECT_PAGE_VISITS.with(|visits| visits.borrow_mut().clear());
+        assert_eq!(range_rects_on_pages(&dl, [5], 2, 4), expected);
+        RANGE_RECT_PAGE_VISITS.with(|visits| assert_eq!(*visits.borrow(), vec![5]));
+
+        let expected_json = serde_json::to_string(&expected).unwrap();
+        RANGE_RECT_PAGE_VISITS.with(|visits| visits.borrow_mut().clear());
+        assert_eq!(
+            range_rects_on_pages_json(&json, 2, 4, 5, 5).unwrap(),
+            expected_json
+        );
+        RANGE_RECT_PAGE_VISITS.with(|visits| assert_eq!(*visits.borrow(), vec![5]));
+        let handle = crate::session::open_display_list(&json).unwrap();
+        RANGE_RECT_PAGE_VISITS.with(|visits| visits.borrow_mut().clear());
+        assert_eq!(
+            crate::session::range_rects_on_pages_by_handle(handle, 2, 4, 5, 5).unwrap(),
+            expected_json
+        );
+        RANGE_RECT_PAGE_VISITS.with(|visits| assert_eq!(*visits.borrow(), vec![5]));
+        assert_eq!(
+            range_rects_on_pages_json(&json, 4, 2, 5, 5).unwrap(),
+            expected_json
+        );
+        assert_eq!(range_rects_on_pages_json(&json, 2, 4, 6, 5).unwrap(), "[]");
+        assert_eq!(
+            range_rects_on_pages_json(&json, 2, 4, dl.pages.len(), usize::MAX).unwrap(),
+            "[]"
+        );
+        crate::session::close_display_list(handle);
+        assert!(crate::session::range_rects_on_pages_by_handle(handle, 2, 4, 5, 5).is_err());
     }
 
     #[test]

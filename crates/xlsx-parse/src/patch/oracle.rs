@@ -1,6 +1,40 @@
 use super::*;
 
 impl SheetPatch<'_> {
+    fn equivalent_style_oracle(&self, source: Option<u32>, current: Option<u32>) -> bool {
+        if source == current {
+            return true;
+        }
+        let (Some(source), Some(current)) = (source, current) else {
+            return false;
+        };
+        let original = self.styles.original;
+        let written = &self.workbook.styles;
+        let Some(source_xf) = original.cell_xfs.get(source as usize) else {
+            return false;
+        };
+        if written.cell_xfs.get(source as usize) != Some(source_xf)
+            || written.cell_xfs.get(current as usize).is_none()
+        {
+            return false;
+        }
+        let format = original.resolved_format(Some(source));
+        format == written.resolved_format(Some(source))
+            && format == written.resolved_format(Some(current))
+    }
+
+    fn same_cell_oracle(&self, source: Option<&Cell>, current: Option<&Cell>) -> bool {
+        match (source, current) {
+            (Some(source), Some(current)) => {
+                source.value == current.value
+                    && source.formula == current.formula
+                    && self.equivalent_style_oracle(source.style, current.style)
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     pub(super) fn sheet_data_oracle(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
@@ -67,6 +101,7 @@ impl SheetPatch<'_> {
             self.sst_index,
             self.retained,
             self.plan,
+            None,
         )
         .map_err(xml_err)?;
         *out = writer.into_inner();
@@ -110,8 +145,9 @@ impl SheetPatch<'_> {
                 (next_source == Some(col)).then(|| source_cells.next().expect("peeked").1);
             let model_cell = (next_model == Some(col)).then(|| cells.next().expect("peeked").1);
             let at = CellRef::new(row, col);
+            let original = source_cell.and_then(|cell| self.original.cell(cell.at));
             match source_cell {
-                Some(source_cell) if self.verbatim_oracle(source_cell, at, dirty) => {
+                Some(source_cell) if self.verbatim_oracle(source_cell, at, original, dirty) => {
                     body.extend_from_slice(&data[source_cell.before.clone()]);
                     self.emit_source_cell_oracle(&mut body, data, source_cell, at)?;
                 }
@@ -120,11 +156,14 @@ impl SheetPatch<'_> {
                         continue;
                     };
                     body.extend_from_slice(&data[source_cell.before.clone()]);
-                    self.emit_cell_oracle(&mut body, at, cell)?;
+                    self.emit_cell_oracle(&mut body, at, cell, original)?;
                 }
-                None => {
-                    self.emit_cell_oracle(&mut body, at, model_cell.expect("one side is present"))?
-                }
+                None => self.emit_cell_oracle(
+                    &mut body,
+                    at,
+                    model_cell.expect("one side is present"),
+                    None,
+                )?,
             }
             columns = Some(match columns {
                 Some((min, max)) => (min, max.max(col + 1)),
@@ -169,10 +208,16 @@ impl SheetPatch<'_> {
         Ok(())
     }
 
-    fn verbatim_oracle(&self, cell: &SourceCell, at: CellRef, dirty: &DirtyFormulas) -> bool {
+    fn verbatim_oracle(
+        &self,
+        cell: &SourceCell,
+        at: CellRef,
+        original: Option<&Cell>,
+        dirty: &DirtyFormulas,
+    ) -> bool {
         EMISSION_LOOKUPS.with(|count| count.set(count.get() + 2));
         let model = self.sheet.cell(at);
-        if model != self.original.cell(cell.at) {
+        if !self.same_cell_oracle(original, model) {
             return false;
         }
         if cell.shared_string
@@ -201,9 +246,7 @@ impl SheetPatch<'_> {
         }
         match formula.group {
             Some(group) => !dirty.groups.contains(&group),
-            None => {
-                formula.reference.is_none() || !dirty.masters.contains(&(cell.at.row, cell.at.col))
-            }
+            None => !dirty.masters.contains(&(cell.at.row, cell.at.col)),
         }
     }
 
@@ -242,6 +285,7 @@ impl SheetPatch<'_> {
         out: &mut Vec<u8>,
         at: CellRef,
         cell: &Cell,
+        original: Option<&Cell>,
     ) -> Result<(), ParseError> {
         let retained = shared_string_index(
             cell,
@@ -252,10 +296,14 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
+        let style = original
+            .filter(|source| self.equivalent_style_oracle(source.style, cell.style))
+            .map_or(cell.style, |source| source.style);
         write_cell(
             &mut writer,
             at,
             cell,
+            style,
             self.sst_index,
             retained,
             self.sheet.array_formula(at),
@@ -266,7 +314,19 @@ impl SheetPatch<'_> {
     }
 
     fn dirty_formulas_oracle(&self, rows: &[SourceRow]) -> DirtyFormulas {
-        let changed = self.changed_source_cells_oracle();
+        let mut changed = self.changed_source_cells_oracle();
+        for cell in rows.iter().flat_map(|row| &row.cells) {
+            if cell.formula.is_none() {
+                continue;
+            }
+            let source_array = self.original.array_formula(cell.at);
+            let current_array = self
+                .mapped(cell.at)
+                .and_then(|at| self.sheet.array_formula(at));
+            if source_array.and_then(|range| self.remap_range(range)) != current_array {
+                changed.insert((cell.at.row, cell.at.col));
+            }
+        }
         let mut groups: HashMap<u32, (bool, Option<CellRange>)> = HashMap::new();
         let mut masters = Vec::new();
         for cell in rows.iter().flat_map(|row| &row.cells) {
@@ -285,9 +345,7 @@ impl SheetPatch<'_> {
                     }
                 }
                 None => {
-                    if let Some(reference) = formula.reference {
-                        masters.push((key, reference));
-                    }
+                    masters.push((key, formula.reference));
                 }
             }
         }
@@ -303,8 +361,9 @@ impl SheetPatch<'_> {
                 .into_iter()
                 .filter(|(key, reference)| {
                     changed.contains(key)
-                        || !self.moves_uniformly(*reference)
-                        || range_changed(*reference, &changed)
+                        || reference.is_some_and(|reference| {
+                            !self.moves_uniformly(reference) || range_changed(reference, &changed)
+                        })
                 })
                 .map(|(key, _)| key)
                 .collect(),
@@ -317,7 +376,10 @@ impl SheetPatch<'_> {
             if self.mapped(at).is_some() {
                 DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
             }
-            if self.mapped(at).and_then(|mapped| self.sheet.cell(mapped)) != Some(cell) {
+            if !self.same_cell_oracle(
+                Some(cell),
+                self.mapped(at).and_then(|mapped| self.sheet.cell(mapped)),
+            ) {
                 changed.insert((at.row, at.col));
             }
         }
@@ -326,7 +388,7 @@ impl SheetPatch<'_> {
                 DETECTOR_LOOKUPS.with(|count| count.set(count.get() + 1));
             }
             if let Some(source) = self.inverse(at)
-                && self.original.cell(source) != Some(cell)
+                && !self.same_cell_oracle(self.original.cell(source), Some(cell))
             {
                 changed.insert((source.row, source.col));
             }
