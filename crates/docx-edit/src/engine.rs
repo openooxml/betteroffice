@@ -3948,6 +3948,7 @@ impl EngineSession {
                     units,
                     &changed,
                     lowered.blocks.shared(),
+                    &lowered.map,
                     &lowered.local,
                 )?;
                 let mut units = units.as_ref().clone();
@@ -13768,8 +13769,113 @@ mod tests {
     }
 
     #[test]
+    fn resident_table_cell_insertion_preview_replays_and_matches_cold_full() {
+        resident_table_cell_preview_matches_cold_full("ins", false, false);
+    }
+
+    #[test]
+    fn resident_table_cell_deletion_preview_replays_and_matches_cold_full() {
+        resident_table_cell_preview_matches_cold_full("del", false, false);
+    }
+
+    #[test]
+    fn resident_nested_table_cell_insertion_preview_replays_and_matches_cold_full() {
+        resident_table_cell_preview_matches_cold_full("ins", true, false);
+    }
+
+    #[test]
+    fn resident_nested_table_cell_deletion_preview_replays_and_matches_cold_full() {
+        resident_table_cell_preview_matches_cold_full("del", true, false);
+    }
+
+    #[test]
     fn resident_table_field_preview_falls_back_and_matches_cold_full() {
         resident_adjacent_table_preview_matches_cold_full(true);
+        for kind in ["ins", "del"] {
+            for nested in [false, true] {
+                resident_table_cell_preview_matches_cold_full(kind, nested, true);
+            }
+        }
+    }
+
+    fn resident_table_cell_preview_matches_cold_full(kind: &str, nested: bool, field: bool) {
+        use super::lowering_fixture::{Package, para, run};
+
+        let change = if kind == "del" {
+            "<w:r><w:delText>Change</w:delText></w:r>".to_owned()
+        } else {
+            run("Change")
+        };
+        let field_content = if field {
+            r#"<w:fldSimple w:instr=" REF mark "><w:r><w:t>Target</w:t></w:r></w:fldSimple>"#
+        } else {
+            ""
+        };
+        let paragraph = para(
+            "10000002",
+            &format!(
+                r#"{}<w:{kind} w:id="1" w:author="A">{change}</w:{kind}>{}{field_content}"#,
+                run("Cell before"),
+                run("Cell after"),
+            ),
+        );
+        let table = |content: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr/>{content}</w:tc></w:tr></w:tbl>"#,
+            )
+        };
+        let mut content = table(&paragraph);
+        if nested {
+            content = table(&format!(
+                "{}{content}{}",
+                para("10000004", &run("Outer before")),
+                para("10000005", &run("Outer after")),
+            ));
+        }
+        let body = format!(
+            "{}{content}{}",
+            para("10000001", &run("Before")),
+            para("10000003", &run("After")),
+        );
+        let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9629, true);
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        local_patch_preview_warm_up(&engine, &mut request);
+        let stories = engine.render.borrow().stories["body"].map.stories.clone();
+        assert_eq!(stories.len(), if nested { 3 } else { 2 });
+        for decision in ["rejected", "accepted", "rejected", "accepted"] {
+            request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+            let request = request.to_string();
+            let before = engine.stats();
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            assert_eq!(
+                engine.stats().lower_preview_fallbacks,
+                before.lower_preview_fallbacks + u64::from(field),
+            );
+            assert_eq!(
+                engine.stats().lower_cache_misses,
+                before.lower_cache_misses + u64::from(field),
+            );
+            assert_eq!(
+                engine.stats().lower_preview_patches,
+                before.lower_preview_patches + u64::from(!field),
+            );
+            assert_eq!(engine.render.borrow().stories["body"].map.stories, stories);
+            assert_local_patch_matches_cold(
+                &engine,
+                &request,
+                &format!("{decision} cell preview kind={kind} nested={nested} field={field}"),
+            );
+            local_patch_paragraph_edits(&engine, &request, 0, true);
+            let at = {
+                let txn = engine.doc().yrs_doc().transact();
+                let story = crate::story_ref(&txn, "body").unwrap();
+                crate::op::para_bounds(&story, &txn).pop().unwrap().pilcrow - 1
+            };
+            local_patch_step(&engine, &request, "body", (at, at, Some("x")), true);
+            local_patch_step(&engine, &request, "body", (at, at + 1, None), true);
+        }
     }
 
     fn resident_adjacent_table_preview_matches_cold_full(field: bool) {
@@ -14278,11 +14384,11 @@ mod tests {
                 r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Before</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
             ),
         );
-        for (content, blocked, dependencies) in [
-            (&table, false, false),
-            (&control, false, false),
-            (&sectioned, true, false),
-            (&dependent, false, true),
+        for (content, blocked, dependencies, stateful) in [
+            (&table, false, false, false),
+            (&control, false, false, true),
+            (&sectioned, true, false, true),
+            (&dependent, false, true, true),
         ] {
             let body = format!(
                 "{}{content}{}",
@@ -14335,17 +14441,18 @@ mod tests {
                 engine
                     .layout_document_with_regions_retained_json(&request.to_string())
                     .unwrap();
+                let fallback = enabled && stateful;
                 assert_eq!(
                     engine.stats().lower_preview_fallbacks,
-                    before.lower_preview_fallbacks + u64::from(enabled),
+                    before.lower_preview_fallbacks + u64::from(fallback),
                 );
                 assert_eq!(
                     engine.stats().lower_cache_misses,
-                    before.lower_cache_misses + u64::from(enabled),
+                    before.lower_cache_misses + u64::from(fallback),
                 );
                 assert_eq!(
                     engine.stats().lower_preview_patches,
-                    before.lower_preview_patches + u64::from(!enabled),
+                    before.lower_preview_patches + u64::from(!fallback),
                 );
                 let request = request.to_string();
                 assert_local_patch_matches_cold(&engine, &request, "structural preview");

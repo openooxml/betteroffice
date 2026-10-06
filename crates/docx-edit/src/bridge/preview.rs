@@ -834,6 +834,7 @@ pub(crate) fn replay(
     units: &PreviewUnits,
     changed: &BTreeSet<String>,
     current: &[Rc<LayoutBlock>],
+    current_map: &LoweringMap,
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
     if local.enabled && (units.untracked_state || units.records.is_empty()) {
@@ -857,8 +858,7 @@ pub(crate) fn replay(
             continue;
         }
         if local.enabled
-            && (record.stories.start != record.stories.end
-                || record.local_stateful
+            && (record.local_stateful
                 || record
                     .chunks
                     .iter()
@@ -901,6 +901,7 @@ pub(crate) fn replay(
         let reads = READS.with(|reads| reads.borrow_mut().take().unwrap());
         if position != record.after.position
             || after != *record.after.context
+            || current_map.stories.get(record.stories.clone())? != output.stories.as_slice()
             || reads.hidden_fields
             || !local.replay_preserves_state(&replay_local)
             || output
