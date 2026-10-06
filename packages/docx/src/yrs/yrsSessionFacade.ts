@@ -36,6 +36,7 @@ import type { EditSession } from './wasm/index';
 import { resolveCommentMedia } from './hostMedia';
 import { registerSessionInternals } from './sessionInternals';
 import { editorSaveKeys } from './editorSaveKeys';
+import { checkPeerMetadataHeader, PeerMetadataError } from './peerMetadata';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import type {
   DocxParagraphAnchorResult,
@@ -123,6 +124,14 @@ function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
   return new Uint8Array(bytes).buffer as ArrayBuffer;
 }
 
+function peerMetadataFailure(error: unknown): unknown {
+  if (error instanceof Error && error.name === 'PeerMetadataError') {
+    const code = (error as Error & { code?: unknown }).code;
+    if (typeof code === 'string') return new PeerMetadataError(code, error.message);
+  }
+  return error;
+}
+
 /**
  * Decodes the host metadata a resident worker's `open` replied with, for the
  * package `source` it opened. @internal
@@ -172,6 +181,10 @@ export function wrapSession(
   clientId: number,
   opened?: { source: Uint8Array; host: YrsDocxHost }
 ): YrsSession {
+  const peerSession = session as EditSession & {
+    encode_peer_metadata?: () => Uint8Array;
+    bootstrap_peer?: (state: Uint8Array, metadata: Uint8Array, source?: Uint8Array) => void;
+  };
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -645,6 +658,49 @@ export function wrapSession(
         session.load(update);
         proposals.reset();
       });
+    },
+    encodePeerMetadata: () => {
+      if (typeof peerSession.encode_peer_metadata !== 'function') {
+        throw new PeerMetadataError('missing-capability', 'Editing wasm cannot encode peer metadata');
+      }
+      try {
+        return peerSession.encode_peer_metadata();
+      } catch (error) {
+        throw peerMetadataFailure(error);
+      }
+    },
+    bootstrapPeer: (state, metadata, bytes, workerHost, options = {}) => {
+      checkPeerMetadataHeader(metadata);
+      if (typeof peerSession.bootstrap_peer !== 'function') {
+        throw new PeerMetadataError('missing-capability', 'Editing wasm cannot bootstrap peers');
+      }
+      const source = bytes?.slice() ?? docxSource;
+      if (!source) {
+        throw new PeerMetadataError('source-required', 'Peer bootstrap requires retained source bytes');
+      }
+      const { wholeBody: _wholeBody, ...sourceHost } = workerHost;
+      const host: YrsDocxHost = {
+        ...sourceHost,
+        document: { ...workerHost.document, originalBuffer: docxSourceBuffer(source) },
+        unusedScriptFonts: [],
+      };
+      const keys = editorSaveKeys(host.document);
+      const bootstrap = peerSession.bootstrap_peer;
+      mutate(() => {
+        try {
+          bootstrap.call(session, state, metadata, bytes === undefined ? undefined : source);
+        } catch (error) {
+          throw peerMetadataFailure(error);
+        }
+        session.set_media_tokens(options.mediaTokens === true);
+        markDirty('all');
+        resetMedia();
+        docxSource = source;
+        docxSourceKeys = keys;
+        partialDocument = false;
+        proposals.reset();
+      });
+      return withHostMedia(host);
     },
     seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
     openDocx,

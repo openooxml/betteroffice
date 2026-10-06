@@ -1,4 +1,5 @@
 import { readRetainedLayoutMeta } from './layoutMeta';
+import { PeerMetadataError } from './peerMetadata';
 import { decodeEncodedSelection } from './encodedSelection';
 import type {
   YrsEngineApplyProfile,
@@ -112,6 +113,7 @@ export type ResidentEngineSession = Pick<
   openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): string | null;
   /** The whole document state as one yrs v1 update. */
   encodeState(): Uint8Array;
+  encodePeerMetadata?(): Uint8Array;
   /** Tracked changes in the document, leaving out the revisions in `excluding`. */
   revisionCount(excluding?: ReadonlySet<string>): number;
   /** The retained region layout pass without serializing its reply. */
@@ -382,6 +384,13 @@ export async function createResidentEngineSession(
           );
     },
     encodeState: () => session.encode_state(),
+    encodePeerMetadata: () => {
+      const peerSession = session as typeof session & { encode_peer_metadata?: () => Uint8Array };
+      if (!peerSession.encode_peer_metadata) {
+        throw new PeerMetadataError('missing-capability', 'Editing wasm cannot encode peer metadata');
+      }
+      return peerSession.encode_peer_metadata();
+    },
     encodeStateAsUpdate: (remoteStateVector) =>
       remoteStateVector === undefined
         ? session.encode_state()
