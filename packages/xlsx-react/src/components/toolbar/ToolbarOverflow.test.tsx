@@ -141,11 +141,25 @@ describe('xlsx toolbar overflow', () => {
     expect(screen().queryByTestId('xlsx-toolbar-more')).toBeNull();
   });
 
-  test('converges when hidden groups measure narrower', () => {
+  test.each([
+    ['converges when hidden groups measure narrower', false],
+    ['converges when groups measure narrower while More takes row space', true],
+  ] as const)('%s', (_name, rowDependent) => {
     const previousRect = HTMLElement.prototype.getBoundingClientRect;
     railWidth = 100;
     HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (rowDependent && this.hasAttribute('data-toolbar-items')) {
+        const trigger = this.parentElement?.querySelector<HTMLElement>(
+          '[data-testid="xlsx-toolbar-more"]'
+        )?.parentElement?.parentElement;
+        const moreWidth =
+          trigger && trigger.style.position !== 'absolute'
+            ? trigger.getBoundingClientRect().width
+            : 0;
+        return rect(railWidth - moreWidth);
+      }
       if (this.parentElement?.hasAttribute('data-toolbar-items')) {
+        if (rowDependent) return rect(this.parentElement.getBoundingClientRect().width * 0.6);
         return rect(this.style.position === 'absolute' ? 20 : 100);
       }
       if (this.querySelector(':scope > span > [data-testid="xlsx-toolbar-more"]')) return rect(28);
@@ -157,7 +171,7 @@ describe('xlsx toolbar overflow', () => {
       const tree = (
         <XlsxCommandProvider commands={controller.store}>
           <EditorToolbar mode="commands">
-            <EditorToolbar.Toolbar>
+            <EditorToolbar.Toolbar style={{ padding: 0 }}>
               <ToolbarGroup label="A">
                 <ToolbarCommandButton id="bold" />
               </ToolbarGroup>
@@ -170,19 +184,16 @@ describe('xlsx toolbar overflow', () => {
       );
       expect(() => render(tree)).not.toThrow();
       const groups = document.querySelectorAll('[data-toolbar-items] > [role="group"]');
-      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual([
-        'true',
-        'true',
-      ]);
+      const expectedHidden = [rowDependent ? null : 'true', 'true'];
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual(expectedHidden);
       const trigger = screen().getByRole('button', { name: 'More toolbar items' });
       expect(trigger).toBe(more());
+      expect(trigger.parentElement?.parentElement?.style.position).toBe('');
       expect(() => resize(100)).not.toThrow();
-      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual([
-        'true',
-        'true',
-      ]);
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual(expectedHidden);
       expect(screen().getByRole('button', { name: 'More toolbar items' })).toBe(trigger);
-      expect(labels(openWithKeyboard())).toEqual(['Bold', 'Italic']);
+      expect(trigger.parentElement?.parentElement?.style.position).toBe('');
+      expect(labels(openWithKeyboard())).toEqual(rowDependent ? ['Italic'] : ['Bold', 'Italic']);
     } finally {
       cleanup();
       HTMLElement.prototype.getBoundingClientRect = previousRect;
