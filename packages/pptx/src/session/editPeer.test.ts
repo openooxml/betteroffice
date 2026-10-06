@@ -35,9 +35,11 @@ async function setup() {
   let crash!: (cause: unknown) => void;
   let replayObserved!: () => void;
   const observed = new Promise<void>((resolve) => { replayObserved = resolve; });
+  let transportClosed!: () => void;
+  const closed = new Promise<void>((resolve) => { transportClosed = resolve; });
   const workerOpen = spyOn(PptxDocument, 'openReplayBaseline');
   const peerOpen = spyOn(PptxDocument, 'openPeerDeckJson');
-  createPresentationSessionHost({ ...pair.host, post(message, transfer) {
+  createPresentationSessionHost({ ...pair.host, close() { pair.host.close(); transportClosed(); }, post(message, transfer) {
     if (isHostMessage(message) && message.kind === 'reply' && message.ok &&
       typeof message.value === 'object' && message.value !== null && 'consumed' in message.value) {
       replayObserved();
@@ -82,7 +84,7 @@ async function setup() {
   workerOpen.mockRestore();
   peerOpen.mockRestore();
   const access = await owner.handleAsync();
-  return { owner, access, workerDoc, peerDoc, calls, controls, observed,
+  return { owner, access, workerDoc, peerDoc, calls, controls, observed, closed,
     get errors() { return errors; },
     crash: () => crash(new SessionFailure('crash', 'worker lost')),
     hostDispose: () => pair.client.post({ protocol: 1, kind: 'dispose' }),
@@ -332,7 +334,7 @@ test('recovery_survives_host_dispose', async () => {
     context.access.setSlideNotes(context.access.snapshot().slides[0].id, 'host dispose');
     await context.owner.flush();
     context.hostDispose();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await context.closed;
     await expect(context.owner.flush()).rejects.toMatchObject({ code: 'editor-failed' });
     await recovery(context, 'host dispose');
   } finally { await context.owner.dispose(); }
