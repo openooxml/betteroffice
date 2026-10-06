@@ -686,7 +686,7 @@ fn shiftable(block: &LayoutBlock) -> bool {
     }
 }
 
-fn shift_block(block: &mut LayoutBlock, delta: i64) {
+pub(crate) fn shift_block(block: &mut LayoutBlock, delta: i64) {
     match block {
         LayoutBlock::Paragraph(paragraph) => shift_paragraph(paragraph, delta),
         LayoutBlock::Table(table) => {
