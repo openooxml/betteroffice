@@ -51,7 +51,7 @@ const chartKeys: Record<string, [number, number] | undefined> = {
   ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1],
 };
 
-type WorkerCellDraft = InputDraft & { prefill?: boolean; modified?: boolean; revision?: number; unchanged?: boolean };
+type WorkerCellDraft = InputDraft & { prefill?: boolean; modified?: boolean; draftId?: number; revision?: number; unchanged?: boolean };
 type PreviewPredecessor = { operation?: WorkbookReplayOp; input?: string; index: number };
 
 function address(cell: CellAddr): string {
@@ -217,6 +217,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       },
       preview: (draft) => inputHooks.current!.preview(draft),
       resolveDraft: (draft) => inputHooks.current!.resolveDraft!(draft),
+      sameDraft: (a, b) => (a as WorkerCellDraft).draftId === (b as WorkerCellDraft).draftId,
       seal: () => inputHooks.current?.seal() ?? {},
       sync: () => inputHooks.current?.sync(),
       write: (draft, applied) => inputHooks.current?.write(draft, applied) ?? false,
@@ -798,7 +799,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     (scrollRef.current?.clientHeight ?? 0) / zoomRef.current);
   const draftFor = (source: InputDraft['source'], cell: CellAddr, value: string): WorkerCellDraft => ({
     generation: runRef.current!.generation, sheet: activeRef.current, ...cell, source, value,
-    revision: ++draftRevision.current,
+    revision: ++draftRevision.current, draftId: draftRevision.current,
   });
   const syncDraft = () => {
     const draft = coordinator.draft;
@@ -1406,7 +1407,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     setChartOffset(null);
     if (nudgeTimer.current !== null) clearTimeout(nudgeTimer.current);
     nudgeTimer.current = null;
-    void coordinator.drain().catch(reportInputError);
+    if (coordinator.draft || coordinator.pending) void coordinator.drain().catch(reportInputError);
     if (source === 'cell') focus();
     suppressFormulaBlur.current = false;
   }, [props.readOnly, coordinator]);
