@@ -106,17 +106,17 @@ function prepareOpen(bytes: Uint8Array | ArrayBuffer, options: OpenWorkbookSessi
   return { document, input, transfer };
 }
 
-function peerYield(): Promise<void> {
+function schedulePeerSlice<T>(slice: () => T): Promise<T> {
   const scheduler = (globalThis as typeof globalThis & {
-    scheduler?: { yield(): Promise<void> };
+    scheduler?: { postTask<T>(callback: () => T, options: { priority: 'background' }): Promise<T> };
   }).scheduler;
-  if (scheduler?.yield) return scheduler.yield();
-  return new Promise((resolve) => {
+  if (scheduler?.postTask) return scheduler.postTask(slice, { priority: 'background' });
+  return new Promise((resolve, reject) => {
     const channel = new MessageChannel();
     channel.port1.onmessage = () => {
       channel.port1.close();
       channel.port2.close();
-      resolve();
+      try { resolve(slice()); } catch (error) { reject(error); }
     };
     channel.port2.postMessage(undefined);
   });
@@ -158,20 +158,23 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
     source.wasm = undefined;
     let ready = false;
     while (!ready) {
-      check();
-      const deadline = performance.now() + PEER_OPEN_SLICE_MS;
-      while (source.hydration.length > 0 && performance.now() < deadline) {
-        opener.pushHydration(source.hydration.shift()!);
-      }
-      let state: number;
-      do {
+      const state = await schedulePeerSlice(() => {
         check();
-        state = opener.advance(PEER_OPEN_UNITS);
-        ready = state === 2;
-      } while (!ready && state !== 1 && performance.now() < deadline);
+        const deadline = performance.now() + PEER_OPEN_SLICE_MS;
+        while (source.hydration.length > 0 && performance.now() < deadline) {
+          opener.pushHydration(source.hydration.shift()!);
+        }
+        let state: number;
+        do {
+          check();
+          state = opener.advance(PEER_OPEN_UNITS);
+        } while (state !== 2 && state !== 1 && performance.now() < deadline);
+        return state;
+      });
+      check();
+      ready = state === 2;
       if (ready) break;
       if (state === 1 && source.hydration.length === 0) await waitForPeerInput(source);
-      else await peerYield();
     }
     check();
     peer = opener.finish();

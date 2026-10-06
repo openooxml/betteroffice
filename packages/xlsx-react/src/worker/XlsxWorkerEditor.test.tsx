@@ -326,6 +326,45 @@ afterEach(async () => {
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 describe('workbook worker editor', () => {
+  it('delivers onReady and worker grid paints while peer hydration keeps advancing', async () => {
+    const host = harness();
+    const slices: (() => void)[] = [];
+    let advances = 0;
+    const opener = { advance: mock(() => ++advances === 32 ? 2 : 0), finish: () => host.peer };
+    let hydrated = false;
+    host.hydrate.mockImplementation(async () => {
+      do {
+        await new Promise<void>((resolve) => { slices.push(resolve); });
+      } while (opener.advance() !== 2);
+      return opener.finish();
+    });
+    let api!: XlsxWorkerEditorApi;
+    const ready = mock((value: XlsxWorkerEditorApi) => { api = value; });
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onReady={ready} />);
+    await opened();
+    const pending = api.whenHydrated().then(() => { hydrated = true; });
+    expect(ready).toHaveBeenCalledTimes(1);
+    expect(painted.length).toBeGreaterThan(0);
+    expect(view.container.querySelector('[data-paint-source="worker"]')).not.toBeNull();
+    expect(hydrated).toBe(false);
+    for (let slice = 0; slice < 31; slice++) {
+      await act(async () => { slices.shift()!(); });
+      expect(opener.advance).toHaveBeenCalledTimes(slice + 1);
+      expect(hydrated).toBe(false);
+    }
+    const frames = painted.length;
+    fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'h' });
+    expect((view.getByTestId('xlsx-cell-editor') as HTMLInputElement).value).toBe('h');
+    fireEvent.scroll(view.getByTestId('xlsx-scroll'), { target: { scrollTop: 24 } });
+    await advance();
+    expect(painted.length).toBeGreaterThan(frames);
+    expect(hydrated).toBe(false);
+    expect(host.attached).toBeNull();
+    await act(async () => { slices.shift()!(); await pending; });
+    expect(hydrated).toBe(true);
+    expect(ready).toHaveBeenCalledTimes(1);
+  });
+
   it('shows visible ready commit text while the replacement frame is held without blocking input', async () => {
     const host = harness(true);
     const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} />);

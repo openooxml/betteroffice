@@ -140,15 +140,22 @@ describe('workbook peer hydration', () => {
     }
   });
 
-  test('yields through the scheduler and stops and frees an opener disposed mid-open', async () => {
+  test('schedules background slices and stops and frees an opener disposed mid-open', async () => {
     let advances = 0;
     let frees = 0;
-    let yieldCount = 0;
-    let resume!: () => void;
-    const scheduled = new Promise<void>((resolve) => { resume = resolve; });
+    let taskCount = 0;
+    let resume = () => {};
     const scheduler = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
     Object.defineProperty(globalThis, 'scheduler', {
-      configurable: true, value: { yield: () => { yieldCount += 1; return scheduled; } },
+      configurable: true, value: {
+        postTask<T>(callback: () => T, options: { priority: string }) {
+          expect(options.priority).toBe('background');
+          taskCount += 1;
+          return new Promise<T>((resolve, reject) => {
+            resume = () => { try { resolve(callback()); } catch (error) { reject(error); } };
+          });
+        },
+      },
     });
     let ticks = 0;
     const clock = spyOn(performance, 'now').mockImplementation(() => ticks += 5);
@@ -162,10 +169,17 @@ describe('workbook peer hydration', () => {
       session = await createTestWorkbookSession(fixture, undefined, {
         calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
       });
-      expect(yieldCount).toBeGreaterThan(0);
+      expect(taskCount).toBeGreaterThan(0);
       const pending = hydratePeer(session);
+      timeout.mockClear();
+      resume();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(advances).toBe(1);
+      expect(timeout.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(0);
       const before = advances;
       await session.dispose();
+      timeout.mockClear();
       resume();
       await expect(pending).rejects.toMatchObject({ code: 'disposed' });
       expect(advances).toBe(before);
@@ -182,15 +196,73 @@ describe('workbook peer hydration', () => {
     }
   });
 
+  test('handles worker frames between background peer slices before hydration finishes', async () => {
+    const scheduler = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
+    const tasks: (() => void)[] = [];
+    Object.defineProperty(globalThis, 'scheduler', {
+      configurable: true, value: {
+        postTask<T>(callback: () => T, options: { priority: string }) {
+          expect(options.priority).toBe('background');
+          return new Promise<T>((resolve, reject) => {
+            tasks.push(() => { try { resolve(callback()); } catch (error) { reject(error); } });
+          });
+        },
+      },
+    });
+    let ticks = 0;
+    let advances = 0;
+    let version = '';
+    let hydrated = false;
+    const clock = spyOn(performance, 'now').mockImplementation(() => ticks += 5);
+    const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
+      pushHydration() {}, advance() { return ++advances >= 20 ? 2 : 0; },
+      finish: () => ({ version: () => version, dispose() {} } as unknown as WorkbookHandle), dispose() {},
+    }));
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, {
+        calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+      });
+      version = await session.call.version();
+      const pending = hydratePeer(session).then((peer) => { hydrated = true; return peer; });
+      for (let slice = 0; slice < 20; slice++) {
+        expect(tasks).toHaveLength(1);
+        tasks.shift()!();
+        await Promise.resolve();
+        await Promise.resolve();
+        if (slice < 2) {
+          const frame = await session.call.frame({ x: 0, y: slice * 24, width: 800, height: 600 });
+          expect(frame.version).toBe(version);
+          expect(advances).toBe(slice + 1);
+          expect(hydrated).toBe(false);
+          expect(tasks).toHaveLength(1);
+        }
+      }
+      await pending;
+      expect(hydrated).toBe(true);
+    } finally {
+      await session?.dispose();
+      for (const task of tasks.splice(0)) task();
+      peerOpen.mockRestore();
+      clock.mockRestore();
+      if (scheduler) Object.defineProperty(globalThis, 'scheduler', scheduler);
+      else Reflect.deleteProperty(globalThis, 'scheduler');
+    }
+  });
+
   test('uses MessageChannel for slices when the scheduler is unavailable', async () => {
     const scheduler = Object.getOwnPropertyDescriptor(globalThis, 'scheduler');
     Reflect.deleteProperty(globalThis, 'scheduler');
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'MessageChannel');
-    const Channel = globalThis.MessageChannel;
     let channels = 0;
+    const tasks: (() => void)[] = [];
     Object.defineProperty(globalThis, 'MessageChannel', {
       configurable: true,
-      value: class extends Channel { constructor() { super(); channels += 1; } },
+      value: class {
+        port1 = { onmessage: null as (() => void) | null, close() {} };
+        port2 = { postMessage: () => { tasks.push(() => this.port1.onmessage?.()); }, close() {} };
+        constructor() { channels += 1; }
+      },
     });
     let ticks = 0;
     let advances = 0;
@@ -206,7 +278,15 @@ describe('workbook peer hydration', () => {
       session = await createTestWorkbookSession(fixture, undefined, {
         calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
       });
-      await expect(hydratePeer(session)).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
+      const pending = hydratePeer(session);
+      timeout.mockClear();
+      for (let slice = 0; slice < 3; slice++) {
+        expect(tasks).toHaveLength(1);
+        tasks.shift()!();
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+      await expect(pending).rejects.toBeInstanceOf(WorkbookPeerHydrationError);
       expect(channels).toBeGreaterThan(0);
       expect(timeout.mock.calls.filter(([, delay]) => delay === 0)).toHaveLength(0);
     } finally {
