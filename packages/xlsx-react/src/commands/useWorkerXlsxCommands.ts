@@ -396,24 +396,27 @@ export function createWorkerXlsxCommandBinding(
       );
     },
     refuse: (reason) => bridge().refuse?.(reason),
-    admit: (operation, id) => bridge().coordinator.runAfterPendingInput(async (_, applied) => {
-      const current = currentBridge();
-      const generation = current.generation();
-      await current.preview();
-      applied.check();
-      if (bridge().generation() !== generation) throw new XlsxCommandAdmissionError('document-replaced');
-      if (current.coordinator.error) throw current.coordinator.error;
-      markApplied = applied;
-      admittedBridge = current;
-      try {
-        const result = await operation();
-        if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === false) {
-          const reason = 'failure' in result ? result.failure as { message: string } : { message: 'Command was refused' };
-          applied.refuse(new WorkerInputRefusal(reason.message), id !== undefined && XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument);
-        }
-        return result;
-      } finally { markApplied = null; admittedBridge = null; }
-    }, { recover: id === undefined || XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument, barrier: id === 'save' }),
+    admit: (operation, id) => {
+      const readOnly = bridge().readOnly();
+      return bridge().coordinator.runAfterPendingInput(async (_, applied) => {
+        const current = currentBridge();
+        const generation = current.generation();
+        await current.preview();
+        applied.check();
+        if (bridge().generation() !== generation) throw new XlsxCommandAdmissionError('document-replaced');
+        if (current.coordinator.error) throw current.coordinator.error;
+        markApplied = applied;
+        admittedBridge = { ...current, readOnly: () => readOnly };
+        try {
+          const result = await operation();
+          if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === false) {
+            const reason = 'failure' in result ? result.failure as { message: string } : { message: 'Command was refused' };
+            applied.refuse(new WorkerInputRefusal(reason.message), id !== undefined && XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument);
+          }
+          return result;
+        } finally { markApplied = null; admittedBridge = null; }
+      }, { recover: id === undefined || XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument, barrier: id === 'save' });
+    },
     perform,
     capture(id) {
       const current = currentBridge();

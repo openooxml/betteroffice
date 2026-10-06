@@ -146,6 +146,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const paintWaiters = useRef<{ request: WorkerPaintRequest; sequence: number; resolve(value: boolean): void }[]>([]);
   const coordinatorRef = useRef<ReturnType<typeof createWorkerInputCoordinator> | null>(null);
   const draftRevision = useRef(0);
+  const settledDraftRevision = useRef(0);
   const focus = useCallback(() => scrollRef.current?.focus({ preventScroll: true }), []);
   const reportInputError = useCallback((error: unknown) => {
     const local = inputRefusal(error);
@@ -225,7 +226,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const message = error instanceof Error ? error.message : String(error);
         if (owner?.recovering) flushSync(() => setRefusal(message));
         else setRefusal(message);
-        if (draft && !propsRef.current.readOnly) {
+        inputHooks.current?.sync?.();
+        const revision = (draft as WorkerCellDraft | undefined)?.revision ?? 0;
+        if (draft && !propsRef.current.readOnly && revision > settledDraftRevision.current && revision === draftRevision.current) {
           input.setDraft(draft);
           if (draft.source === 'cell') setEditing(draft);
           else setFormulaDraft(draft.value);
@@ -1385,6 +1388,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
 
   useLayoutEffect(() => {
     if (!props.readOnly) return;
+    syncDraft();
+    settledDraftRevision.current = draftRevision.current;
     const source = coordinator.draft?.source;
     suppressBlur.current = true;
     suppressFormulaBlur.current = true;
@@ -1421,20 +1426,20 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     syncDraft(); composition.current?.settle(true); composition.current = null;
   };
   const attachCellInput = useCallback((input: HTMLInputElement | null) => {
-    if (!input && propsRef.current.readOnly) inputHooks.current?.sync?.();
+    if (!input) inputHooks.current?.sync?.();
     editorInputRef.current = input;
     if (input) suppressBlur.current = false;
     if (!input && composition.current?.source === 'cell') {
       composition.current.settle(true); composition.current = null;
     }
-  }, [inputHooks, props.readOnly]);
+  }, [inputHooks]);
   const attachFormulaInput = useCallback((input: HTMLInputElement | null) => {
-    if (!input && propsRef.current.readOnly) inputHooks.current?.sync?.();
+    if (!input) inputHooks.current?.sync?.();
     formulaInputRef.current = input;
     if (!input && composition.current?.source === 'formula') {
       composition.current.settle(true); composition.current = null;
     }
-  }, [inputHooks, props.readOnly]);
+  }, [inputHooks]);
   useLayoutEffect(() => {
     if (!editing || run?.failure) return;
     const input = editorInputRef.current;
@@ -1444,7 +1449,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [editing !== null]);
 
   const formulaBar: FormulaBarBinding = {
-    a1: selection ? address(selection.focus) : '', value: formulaDraft ?? focusedCell?.input ?? '',
+    a1: selection ? address(selection.focus) : '',
+    value: (composition.current?.source === 'formula' ? formulaInputRef.current?.value : undefined) ?? formulaDraft ?? focusedCell?.input ?? '',
     disabled: !view || !selection || Boolean(error), readOnly: !acceptInput() || selectedChart !== null,
     inputRef: attachFormulaInput,
     onChange(value) {
@@ -1551,7 +1557,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                     {chartRect && <div data-testid="xlsx-chart-selection" data-chart-id={selectedChart?.id} aria-hidden
                       style={{ ...outline(chartRect, `2px solid ${BRAND}`),
                         transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)`, boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
-                    {editing && editRect && <input ref={attachCellInput} data-testid="xlsx-cell-editor" value={editing.value}
+                    {editing && editRect && <input ref={attachCellInput} data-testid="xlsx-cell-editor"
+                      value={(composition.current?.source === 'cell' ? editorInputRef.current?.value : undefined) ?? editing.value}
                       disabled={Boolean(error) || props.readOnly}
                       onChange={(event) => {
                         if (!acceptInput()) return;
