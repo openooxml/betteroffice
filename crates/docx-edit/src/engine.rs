@@ -387,10 +387,10 @@ struct MovedArenaGuard<'a>(&'a RefCell<PaginationState>);
 impl Drop for MovedArenaGuard<'_> {
     fn drop(&mut self) {
         let mut pagination = self.0.borrow_mut();
+        pagination.measurement_patch = None;
         if !pagination.moved_blocks.is_empty() {
             pagination.input = None;
             pagination.measured_with = None;
-            pagination.measurement_patch = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.retain_matches.clear();
             pagination.moved_blocks.clear();
@@ -1470,6 +1470,7 @@ struct FontDependencyWork {
 pub struct EngineSession {
     doc: EditingDoc,
     doc_epoch: Rc<Cell<u64>>,
+    measurement_patch_invalidated: Rc<Cell<bool>>,
     relayout_trigger: Rc<Cell<RelayoutTrigger>>,
     interactive_pending: Rc<Cell<bool>>,
     region_retention_valid: Rc<Cell<bool>>,
@@ -3573,6 +3574,7 @@ impl EngineSession {
     pub fn new(client_id: u64) -> Self {
         let doc = EditingDoc::new(client_id);
         let doc_epoch = Rc::new(Cell::new(0_u64));
+        let measurement_patch_invalidated = Rc::new(Cell::new(false));
         let relayout_trigger = Rc::new(Cell::new(RelayoutTrigger::Open));
         let interactive_pending = Rc::new(Cell::new(false));
         let region_retention_valid = Rc::new(Cell::new(false));
@@ -3581,13 +3583,13 @@ impl EngineSession {
         let observer_trigger = Rc::clone(&relayout_trigger);
         let observer_interactive = Rc::clone(&interactive_pending);
         let observer_retention = Rc::clone(&region_retention_valid);
-        let observer_pagination = Rc::clone(&pagination);
+        let observer_measurement_patch = Rc::clone(&measurement_patch_invalidated);
         let host_edit_depth = Arc::clone(&doc.host_edit_depth);
         let observer = doc
             .yrs_doc()
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
-                    observer_pagination.borrow_mut().measurement_patch = None;
+                    observer_measurement_patch.set(true);
                     observer_epoch.set(observer_epoch.get().wrapping_add(1));
                     let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
                         || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
@@ -3606,6 +3608,7 @@ impl EngineSession {
         Self {
             doc,
             doc_epoch,
+            measurement_patch_invalidated,
             relayout_trigger,
             interactive_pending,
             region_retention_valid,
@@ -3790,6 +3793,14 @@ impl EngineSession {
         self.doc_epoch.get()
     }
 
+    fn measurement_patch(&self) -> std::cell::RefMut<'_, Option<MeasurementPatch>> {
+        let mut pagination = self.pagination.borrow_mut();
+        if self.measurement_patch_invalidated.replace(false) {
+            pagination.measurement_patch = None;
+        }
+        std::cell::RefMut::map(pagination, |pagination| &mut pagination.measurement_patch)
+    }
+
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub(crate) fn edit_resident_text(
         &self,
@@ -3829,7 +3840,7 @@ impl EngineSession {
             None
         };
         let mut attrs = None;
-        let measurement_patch = self.pagination.borrow_mut().measurement_patch.take();
+        let measurement_patch = self.measurement_patch().take();
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
             Some(text) => self.doc.insert_text_observed(
@@ -3922,17 +3933,16 @@ impl EngineSession {
                 && lowered.media == self.doc.media_sources()
                 && lowered.local.matches_source(&self.doc)
             {
-                self.pagination.borrow_mut().measurement_patch =
-                    measurement_patch.filter(|patch| {
-                        patch.current_generation == lowered.generation && patch.epochs.1 == before
-                    });
+                *self.measurement_patch() = measurement_patch.filter(|patch| {
+                    patch.current_generation == lowered.generation && patch.epochs.1 == before
+                });
             }
         }
         Ok(receipt)
     }
 
     fn patch_lowered_body(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
-        let previous_patch = self.pagination.borrow_mut().measurement_patch.take();
+        let previous_patch = self.measurement_patch().take();
         let mut render = self.render.borrow_mut();
         let generation = render.generation.wrapping_add(1);
         let lowered = render.stories.get_mut("body")?;
@@ -3953,7 +3963,7 @@ impl EngineSession {
         let slot = lowered.local.edit_slot(&edit)?;
         let replaced = slot..slot.checked_add(1)?;
         let block_count = lowered.blocks.len();
-        let old_blocks = vec![Rc::clone(lowered.blocks.shared().get(slot)?)];
+        let old_block = Rc::clone(lowered.blocks.shared().get(slot)?);
         let (origin_matches, previous_patch) = {
             let mut pagination = self.pagination.borrow_mut();
             let measured_matches = pagination.measured_with.is_some()
@@ -4005,7 +4015,7 @@ impl EngineSession {
                 block_count_before: block_count,
                 block_count_after: blocks.len(),
                 replaced,
-                old_blocks,
+                old_blocks: vec![old_block],
                 shift: crate::bridge::preview::ParagraphEdit {
                     raw: shift.raw.clone(),
                     pm: shift.pm.clone(),
@@ -4038,7 +4048,7 @@ impl EngineSession {
             }
         }
         render.generation = generation;
-        self.pagination.borrow_mut().measurement_patch = measurement_patch;
+        *self.measurement_patch() = measurement_patch;
         Some(())
     }
 
@@ -5048,9 +5058,10 @@ impl EngineSession {
         ))
         .map(|bytes| hash_bytes(&bytes))
         .map_err(|error| format!("fingerprint measurement config: {error}"))?;
+        let has_measurement_patch = self.measurement_patch().is_some();
         {
             let mut pagination = self.pagination.borrow_mut();
-            if pagination.measurement_patch.is_some()
+            if has_measurement_patch
                 && (pagination.measured_with != Some(measurement_fingerprint)
                     || pagination.measured_font_chains.as_ref() != Some(&measurement.font_chains)
                     || self
@@ -7169,6 +7180,9 @@ impl EngineSession {
                 ),
             )
         };
+        if !moved.is_empty() || !moved_blocks.is_empty() {
+            pagination.measurement_patch = None;
+        }
         let (resident_measure_calls, resident_reused_blocks) = match walked {
             Ok(counts) => counts,
             Err(error) => {
@@ -7512,6 +7526,7 @@ impl EngineSession {
                 }
             };
             if reused[index] {
+                pagination.measurement_patch = None;
                 entry.measure =
                     std::mem::replace(&mut previous_entry.measure, BlockExtent::Unsupported);
             }
@@ -7636,6 +7651,7 @@ impl EngineSession {
                     == matches!(next_block, LayoutBlock::Unsupported)
                 && lowered_from.is_none_or(|lowered| lowered.get(index) == Some(next_block));
             if width_clean && *next_block == previous_entry.block {
+                pagination.measurement_patch = None;
                 measured.push(MeasuredBlock {
                     block: next_block.clone(),
                     measure: std::mem::replace(
@@ -7677,6 +7693,7 @@ impl EngineSession {
                     && (owned == previous_entry.block
                         || section_breaks_match_but_margins(&owned, &previous_entry.block))
                 {
+                    pagination.measurement_patch = None;
                     measured.push(MeasuredBlock {
                         block: owned,
                         measure: std::mem::replace(
@@ -14058,6 +14075,10 @@ mod tests {
                 .pm_start(),
             suffix_start.map(|start| start + 3.0),
         );
+        drop(pagination);
+        let offset = measurement_patch_offset(&engine, 2);
+        measurement_patch_type(&engine, offset, "z");
+        assert!(engine.pagination.borrow().measurement_patch.is_none());
     }
 
     #[test]
@@ -14201,6 +14222,7 @@ mod tests {
                         .take()
                         .unwrap();
                     assert!(undo.undo());
+                    assert!(engine.measurement_patch().is_none());
                     assert!(engine.pagination.borrow().measurement_patch.is_none());
                     engine.pagination.borrow_mut().measurement_patch = Some(patch);
                     assert!(undo.redo());
@@ -14246,11 +14268,98 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
+            assert!(engine.measurement_patch().is_none(), "{case}");
             assert!(
                 engine.pagination.borrow().measurement_patch.is_none(),
                 "{case}"
             );
         }
+    }
+
+    #[test]
+    fn resident_measurement_patch_observer_invalidates_with_pagination_borrowed() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for case in ["edit", "undo"] {
+            let (engine, _) = measurement_patch_engine(font);
+            let undo = crate::UndoSession::new();
+            undo.track(engine.doc());
+            let offset = measurement_patch_offset(&engine, 1);
+            measurement_patch_type(&engine, offset, "x");
+            undo.add_undo_barrier();
+            let epoch = engine.doc_epoch();
+            let length = engine.doc().story_len("body").unwrap();
+            let pagination = engine.pagination.borrow_mut();
+            assert!(pagination.measurement_patch.is_some());
+            assert!(!engine.measurement_patch_invalidated.get());
+            match case {
+                "edit" => {
+                    engine
+                        .doc()
+                        .insert_text(
+                            &crate::EditCtx::local("", ""),
+                            crate::Position::new("body", offset),
+                            "y",
+                            crate::FormatPolicy::Inherit,
+                        )
+                        .unwrap();
+                    assert_eq!(engine.doc().story_len("body").unwrap(), length + 1);
+                }
+                "undo" => {
+                    assert!(undo.undo());
+                    assert_eq!(engine.doc().story_len("body").unwrap(), length - 1);
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(engine.doc_epoch(), epoch + 1);
+            assert!(engine.measurement_patch_invalidated.get());
+            drop(pagination);
+            assert!(engine.measurement_patch().is_none());
+            assert!(engine.pagination.borrow().measurement_patch.is_none());
+        }
+    }
+
+    #[test]
+    fn resident_measurement_patch_extent_only_reuse_clears_before_header_failure() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) = measurement_patch_engine(font);
+        let offset = measurement_patch_offset(&engine, 1);
+        measurement_patch_type(&engine, offset, "x");
+        assert!(engine.measurement_patch().is_some());
+        engine.pagination.borrow_mut().retain_matches.clear();
+        engine.region_retention_valid.set(true);
+        let reused = engine.stats().resident_reused_blocks;
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        request["regions"]["sections"][0]["headerFooterRefs"] =
+            json!({"headerDefault": "missing"});
+        let prepared = engine
+            .prepare_region_layout(&request.to_string(), None, RelayoutTrigger::Bulk)
+            .unwrap();
+        assert!(prepared.body.is_none());
+        assert!(engine.stats().resident_reused_blocks > reused);
+        {
+            let pagination = engine.pagination.borrow();
+            assert!(pagination.moved_blocks.is_empty());
+            assert!(
+                pagination
+                    .input
+                    .as_ref()
+                    .unwrap()
+                    .measured
+                    .iter()
+                    .any(|entry| {
+                        matches!(entry.measure, BlockExtent::Unsupported)
+                            && !matches!(entry.block, LayoutBlock::Unsupported)
+                    })
+            );
+            assert!(pagination.measurement_patch.is_none());
+        }
+        let error = engine.finish_region_layout(prepared).err().unwrap();
+        assert!(error.contains("hf:missing"), "{error}");
+        assert!(engine.pagination.borrow().measurement_patch.is_none());
     }
 
     #[test]
@@ -17897,6 +18006,72 @@ mod tests {
         docx_layout::clear_measure_fonts();
     }
 
+    fn assert_reentrant_profiler_document_mutations(engine: &EngineSession) {
+        for case in ["edit", "undo"] {
+            let undo = crate::UndoSession::new();
+            undo.track(engine.doc());
+            let before = engine.doc().paragraphs("body").unwrap()[0].text.clone();
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", 1),
+                    "!",
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            undo.add_undo_barrier();
+            let epoch = engine.doc_epoch();
+            let expected = if case == "edit" {
+                let mut text = engine.doc().paragraphs("body").unwrap()[0].text.clone();
+                text.insert_str(1, "clock");
+                text
+            } else {
+                before
+            };
+            let frame_epoch = engine.display.borrow().binary_frame_epoch;
+            let mut mutated = false;
+            let mut ticks = 0_u32;
+            let (frame, _) = engine
+                .apply_and_layout_profiled("body", frame_epoch, &mut || {
+                    ticks += 1;
+                    if !mutated && engine.pagination.try_borrow_mut().is_err() {
+                        match case {
+                            "edit" => {
+                                engine
+                                    .doc()
+                                    .insert_text(
+                                        &crate::EditCtx::local("", ""),
+                                        crate::Position::new("body", 1),
+                                        "clock",
+                                        crate::FormatPolicy::Inherit,
+                                    )
+                                    .unwrap();
+                            }
+                            "undo" => assert!(undo.undo()),
+                            _ => unreachable!(),
+                        }
+                        mutated = true;
+                    }
+                    ticks as f64
+                })
+                .unwrap();
+            assert!(!frame.is_empty(), "{case}");
+            assert!(mutated, "{case}");
+            assert_eq!(engine.doc_epoch(), epoch + 1, "{case}");
+            assert_eq!(
+                engine.doc().paragraphs("body").unwrap()[0].text,
+                expected,
+                "{case}"
+            );
+            assert!(engine.measurement_patch().is_none(), "{case}");
+            assert!(
+                engine.pagination.borrow().measurement_patch.is_none(),
+                "{case}"
+            );
+        }
+    }
+
     /// The profiler clock is host code: re-entering the engine from it must not
     /// abort an edit the document has already committed.
     #[test]
@@ -17985,6 +18160,7 @@ mod tests {
             "the edit keeps the environment it asked for, not the observer's"
         );
         drop(pagination);
+        assert_reentrant_profiler_document_mutations(&engine);
         docx_layout::clear_measure_fonts();
     }
 
@@ -18047,6 +18223,7 @@ mod tests {
             .apply_and_layout_profiled("body", 1, &mut clock)
             .unwrap();
         assert!(!frame.is_empty());
+        assert_reentrant_profiler_document_mutations(&engine);
         docx_layout::clear_measure_fonts();
     }
 
