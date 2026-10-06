@@ -8,6 +8,7 @@ import {
   workbookPeerSnapshot,
   type SheetInfo, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
+import { localNowSerial } from './calculationClock';
 import {
   WORKBOOK_SESSION_POLICIES,
   type WorkbookSessionEvents,
@@ -236,7 +237,7 @@ export function createWorkbookSessionHost(
       wasm ??= options.wasmModule?.();
       if (disposed) throw new Error('Workbook session is disposed');
       const calculation = input.calculation ?? (retainPeerHydration && !input.collaborative ? {
-        nowSerial: Date.now() / 86_400_000 + 25_569,
+        nowSerial: localNowSerial(Date.now()),
         randSeed: globalThis.crypto.getRandomValues(new Uint32Array(1))[0] >>> 0,
       } : undefined);
       const opened = openWorkbook(new Uint8Array(bytes), {

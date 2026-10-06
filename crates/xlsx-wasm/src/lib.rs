@@ -20,10 +20,12 @@ const MS_PER_DAY: f64 = 86_400_000.0;
 const MAX_QUEUED_UPDATE_EVENTS: usize = 4_097;
 const MAX_QUEUED_UPDATE_BYTES: usize = MAX_COLLABORATION_BYTES * 2 + MAX_QUEUED_UPDATE_EVENTS;
 
-/// current utc time as a 1900-system serial for volatile cells; computed only
+/// current local time as a 1900-system serial for volatile cells; computed only
 /// at the wasm boundary so the pure core stays deterministic and native-testable.
 fn now_serial() -> Option<f64> {
-    Some(js_sys::Date::now() / MS_PER_DAY + UNIX_EPOCH_SERIAL)
+    let ms = js_sys::Date::now();
+    let offset = js_sys::Date::new(&ms.into()).get_timezone_offset();
+    Some((ms - offset * 60_000.0) / MS_PER_DAY + UNIX_EPOCH_SERIAL)
 }
 
 #[wasm_bindgen]
