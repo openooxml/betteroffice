@@ -19,6 +19,8 @@ import {
   type DocxAnchorGeometryResult,
 } from '../../index';
 import { awaitWorkerOpenReplica, requestWorkerOpenReplica } from './internals/workerOpenReplica';
+import { hasEditorWorkerProposalRounds, registeredWorkerProposalAuthority } from './internals/workerProposalAuthority';
+import { resolveAnchorTarget } from '../../plugins/anchorGeometry';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -115,7 +117,7 @@ function installWorker() {
   } as unknown as typeof Worker;
 }
 
-function documentBuffer(): ArrayBuffer {
+function documentBuffer(firstParagraphText = 'Target 0'): ArrayBuffer {
   const parts = new Map<string, Uint8Array>();
   parts.set('[Content_Types].xml', toBytes(
     '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
@@ -132,7 +134,7 @@ function documentBuffer(): ArrayBuffer {
   const body = Array.from({ length: 20 }, (_, index) =>
     `<w:p w14:paraId="${(index + 1).toString(16).padStart(8, '0')}">` +
     `<w:pPr>${index ? '<w:pageBreakBefore/>' : ''}</w:pPr>` +
-    `<w:r><w:t>Target ${index}</w:t></w:r></w:p>`
+    `<w:r><w:t>${index ? `Target ${index}` : firstParagraphText}</w:t></w:r></w:p>`
   ).join('');
   parts.set('word/document.xml', toBytes(
     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">' +
@@ -152,6 +154,116 @@ type Sample = {
   pageRect: Anchor['pageRect'];
   clientY: number;
 };
+
+test('search inside a rejected peer-local insertion anchors after Hello when worker rounds activate', async () => {
+  installWorker();
+  const ref = createRef<DocxEditorRef>();
+  let geometry: DocxPluginGeometry | null = null;
+  const errors: unknown[] = [];
+  const bounds = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const page = this.closest<HTMLElement>('.canvas-page');
+    if (page) {
+      const height = Number.parseFloat(page.style.height) || 1056;
+      const width = Number.parseFloat(page.style.width) || 816;
+      return new DOMRect(0, 24 + Number(page.dataset.pageIndex) * (height + 16), width, height);
+    }
+    return new DOMRect(0, 0, 816, 20 * 1072 + 48);
+  });
+  restores.push(() => bounds.mockRestore());
+  const plugin = defineDocxPlugin({
+    id: 'test.peer-local-hidden-search',
+    createState: () => null,
+    onEvent(context, event) {
+      if (event.type === 'layout-change' && context.geometry) geometry = context.geometry;
+    },
+    overlay: function Overlay(props) {
+      geometry = props.geometry;
+      return null;
+    },
+  });
+  const host = document.createElement('div');
+  document.body.append(host);
+  restores.push(() => host.remove());
+  const provider = { resolve: () => () => Promise.resolve(font.buffer.slice(
+    font.byteOffset, font.byteOffset + font.byteLength
+  ) as ArrayBuffer) };
+  render(<DocxEditor
+    ref={ref} documentBuffer={documentBuffer('Hello world')} allowHostProposals experimentalWorkerOpen
+    measurementFontProvider={provider} plugins={[plugin]} onPluginError={(error) => errors.push(error)}
+  />, { container: host });
+  await step('wait for session', () => waitFor(() => expect(ref.current?.getEditorRef()?.getYrsSession()).toBeTruthy()));
+  await step('initial layout', () => ref.current!.whenLayoutComplete(), true);
+  const editor = ref.current!.getEditorRef()!;
+  const session = editor.getYrsSession()!;
+  sessions.push(session);
+  await step('hydrate worker replica', () => {
+    requestWorkerOpenReplica(session);
+    return awaitWorkerOpenReplica(session);
+  }, true);
+  expect(hasEditorWorkerProposalRounds(session)).toBe(false);
+  const paragraph = {
+    kind: 'persisted' as const,
+    story: { kind: 'body' as const, partUri: '/word/document.xml' }, paraId: '00000001',
+  };
+  act(() => {
+    const inserted = session.proposeChanges({
+      expectVersion: session.version(),
+      proposals: [{
+        id: 'peer-local', paragraph,
+        suggest: { author: 'Peer', date: '2026-10-05T00:00:00Z' },
+        op: 'insertText', at: { offset: 6 }, text: 'ABCDEFGHIJ',
+      }],
+    });
+    expect(inserted.ok).toBe(true);
+    if (!inserted.ok) throw new Error(inserted.failure.message);
+    expect(session.setProposalStates({
+      expectVersion: inserted.snapshot.version, expectPreviewVersion: inserted.snapshot.previewVersion,
+      changes: [{ id: 'peer-local', state: 'rejected' }],
+    }).ok).toBe(true);
+    editor.syncYrsInputState(true, ['body'], { inWorker: true });
+  });
+  expect(await step('activate empty worker round', () => ref.current!.proposeChanges({
+    expectVersion: session.version(), proposals: [],
+  }), true)).toMatchObject({ ok: true, snapshot: { proposals: [] } });
+  expect(hasEditorWorkerProposalRounds(session)).toBe(true);
+  const local = session.getProposals();
+  expect(local.proposals.map(({ id, state }) => ({ id, state }))).toEqual([{ id: 'peer-local', state: 'rejected' }]);
+  expect(registeredWorkerProposalAuthority(session)!.revisionPreview()).toEqual({
+    [local.proposals[0]!.revisionIds[0]!]: 'rejected',
+  });
+  const target = { kind: 'search' as const, paragraph, text: 'DEF' };
+  expect(resolveAnchorTarget(session, target, session.version())).toEqual({
+    ok: true,
+    ranges: [{
+      start: { story: 'body', paraId: '00000001', offset: 9 },
+      end: { story: 'body', paraId: '00000001', offset: 12 },
+    }],
+    paragraph: { story: 'body', paraId: '00000001', offset: 0 },
+  });
+  await step('combined preview layout', () => ref.current!.whenLayoutComplete(), true);
+  const { geometry: settledGeometry, hidden } = await step('settled search geometry', () => waitFor(() => {
+    const current = geometry;
+    const result = current?.getAnchorGeometry(target);
+    expect(result?.ok).toBe(true);
+    if (!current || !result?.ok) throw new Error('No settled search geometry');
+    return { geometry: current, hidden: result };
+  }));
+  const prefix = settledGeometry.getAnchorGeometry({ kind: 'search', paragraph, text: 'Hello ' });
+  const start = settledGeometry.getAnchorGeometry({
+    kind: 'range', version: session.version(),
+    range: { story: 'body', view: 'accepted', start: { paraId: '00000001', offset: 0 }, end: { paraId: '00000001', offset: 0 } },
+  });
+  expect(prefix.ok).toBe(true);
+  expect(start.ok).toBe(true);
+  if (!prefix.ok || !start.ok) throw new Error('No settled comparison geometry');
+  expect(hidden.rects).toEqual([]);
+  expect(hidden.anchor).toEqual(prefix.anchor);
+  expect(hidden.anchor).toEqual({ ...prefix.anchor, pageIndex: 0, width: 0 });
+  expect(prefix.anchor.x).not.toBe(start.anchor.x);
+  expect(hidden.layoutId).toBe(prefix.layoutId);
+  expect(errors).toEqual([]);
+  expect(ref.current!.getMemoryStats().worker).not.toBeNull();
+}, 30_000);
 
 test.each([0, 19])('Accept, Undo, Reject, Undo show only settled proposal geometry with a distant caret on page %s', async (caretPage) => {
   installWorker();
