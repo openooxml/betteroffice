@@ -5,13 +5,17 @@ use super::*;
 #[derive(Debug, Default)]
 pub(crate) struct LocalLowering {
     pub(crate) blocked: bool,
+    pub(crate) preview_blocked: bool,
+    pub(super) enabled: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
+    dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
 }
 
 #[derive(Debug, Default)]
 pub(super) struct ParagraphSeed {
+    tainted: bool,
     raw_start: u32,
     slot: usize,
     source: u32,
@@ -25,6 +29,15 @@ pub(super) struct ParagraphSeed {
 struct TextSegment {
     text: String,
     attrs: Attrs,
+}
+
+impl ParagraphSeed {
+    pub(super) fn start(&mut self, safe: bool) {
+        *self = Self {
+            tainted: !safe,
+            ..Self::default()
+        };
+    }
 }
 
 #[derive(Debug)]
@@ -73,8 +86,63 @@ impl LocalLowering {
     pub(crate) fn new(enabled: bool) -> Self {
         Self {
             blocked: !enabled,
+            preview_blocked: !enabled,
+            enabled,
             ..Default::default()
         }
+    }
+
+    pub(super) fn block(&mut self, blocked: bool) {
+        self.blocked |= blocked;
+        self.preview_blocked |= blocked;
+    }
+
+    pub(crate) fn refresh_seeds(&mut self, blocks: &[Rc<LayoutBlock>], map: &LoweringMap) {
+        self.edit = None;
+        if self.seeds.is_empty() {
+            return;
+        }
+        let sources: BTreeMap<_, _> = map
+            .paragraphs
+            .iter()
+            .enumerate()
+            .filter(|(_, (story, _))| *story == 0)
+            .map(|(source, (_, id))| (id.as_str(), source as u32))
+            .collect();
+        let positions: BTreeMap<_, _> = map
+            .paragraph_blocks
+            .iter()
+            .map(|&(pm, source)| (source, pm))
+            .collect();
+        let slots: BTreeMap<_, _> = blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, block)| block.pm_start().map(|pm| (pm as u64, slot)))
+            .collect();
+        self.seeds.retain(|id, seed| {
+            let Some((&source, &pm)) = sources
+                .get(id.as_str())
+                .and_then(|source| Some((source, positions.get(source)?)))
+            else {
+                return false;
+            };
+            let Some(&slot) = slots.get(&pm) else {
+                return false;
+            };
+            let LayoutBlock::Paragraph(paragraph) = blocks[slot].as_ref() else {
+                return false;
+            };
+            if paragraph.id != BlockId::Str(id.clone())
+                || !shiftable(&blocks[slot])
+                || page_break_changes_marker(paragraph, blocks.get(slot + 1).map(Rc::as_ref))
+            {
+                return false;
+            }
+            seed.source = source;
+            seed.pm_start = pm;
+            seed.slot = slot;
+            true
+        });
     }
 
     pub(super) fn observe<T: ReadTxn>(
@@ -88,10 +156,12 @@ impl LocalLowering {
             return;
         }
         let attrs = diff.attributes.as_deref();
-        self.blocked |= attrs
+        let unsafe_attrs = attrs
             .into_iter()
             .flatten()
             .any(|(key, value)| unsafe_value(key, value));
+        self.preview_blocked |= unsafe_attrs;
+        paragraph.tainted |= unsafe_attrs;
         match &diff.insert {
             Out::Any(Any::String(_)) if story != "body" => {}
             Out::Any(Any::String(text)) => {
@@ -109,11 +179,24 @@ impl LocalLowering {
             Out::YMap(mark) if is_pilcrow(mark, txn) => {}
             Out::YMap(mark) => {
                 let values = pilcrow_values(mark, txn);
-                self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value))
+                for key in ["fieldCodeMarks", "fieldResultBlocks"] {
+                    self.dependent.extend(any_strings(values.get(key)));
+                }
+                if let Some(target) = value_string(values.get("fieldCodeTarget")) {
+                    self.dependent.insert(target);
+                }
+                self.preview_blocked |= values.iter().any(|(key, value)| unsafe_value(key, value))
                     || value_string(values.get("_kind")).as_deref() != Some("table");
-                *paragraph = ParagraphSeed::default();
+                if value_string(values.get("_kind")).as_deref() == Some("table") {
+                    *paragraph = ParagraphSeed::default();
+                } else {
+                    paragraph.tainted = true;
+                }
             }
-            _ => self.blocked = true,
+            _ => {
+                self.preview_blocked = true;
+                paragraph.tainted = true;
+            }
         }
     }
 
@@ -127,14 +210,17 @@ impl LocalLowering {
         story: &str,
         (start, pm_start, slot, source): (u32, u64, usize, u32),
         last: bool,
+        safe: bool,
     ) {
         if self.blocked {
             return;
         }
-        self.blocked |= values.iter().any(|(key, value)| unsafe_value(key, value));
+        let unsafe_values = values.iter().any(|(key, value)| unsafe_value(key, value));
         let sectioned = values.contains_key("sectPr") || values.contains_key("sectionBreakType");
-        self.blocked |= sectioned && (story != "body" || !last);
-        if story == "body" && !sectioned && !self.blocked {
+        self.preview_blocked |= unsafe_values || sectioned && (story != "body" || !last);
+        self.block(sectioned && story != "body");
+        paragraph.tainted |= unsafe_values || !safe;
+        if story == "body" && !sectioned && !paragraph.tainted && !self.blocked {
             paragraph.raw_start = start;
             paragraph.pm_start = pm_start;
             paragraph.slot = slot;
@@ -154,17 +240,23 @@ impl LocalLowering {
             return;
         }
         let mut identities = BTreeSet::new();
-        self.blocked |= map.paragraphs.iter().any(|(_, id)| !identities.insert(id));
-        self.blocked |= !blocks.iter().all(shiftable);
-        if self.blocked {
-            self.seeds.clear();
-            return;
-        }
-        self.seeds.retain(|_, seed| {
+        let duplicates: BTreeSet<_> = map
+            .paragraphs
+            .iter()
+            .filter_map(|(_, id)| (!identities.insert(id.clone())).then_some(id.clone()))
+            .collect();
+        self.preview_blocked |= !duplicates.is_empty() || !blocks.iter().all(shiftable);
+        self.seeds.retain(|id, seed| {
+            if duplicates.contains(id) || self.dependent.contains(id) {
+                return false;
+            }
             let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
                 return false;
             };
-            paragraph.pm_start == Some(seed.pm_start as f64) && paragraph.attrs.is_some()
+            paragraph.pm_start == Some(seed.pm_start as f64)
+                && paragraph.attrs.is_some()
+                && shiftable(&blocks[seed.slot])
+                && !page_break_changes_marker(paragraph, blocks.get(seed.slot + 1))
         });
     }
 
@@ -175,10 +267,16 @@ impl LocalLowering {
     }
 
     pub(crate) fn offset(&self, paragraph: &str, raw: u32) -> Option<u32> {
+        if self.blocked {
+            return None;
+        }
         raw.checked_sub(self.seeds.get(paragraph)?.raw_start)
     }
 
     pub(crate) fn edit_slot(&self, edit: &TextEdit) -> Option<usize> {
+        if self.blocked {
+            return None;
+        }
         Some(self.seeds.get(&edit.paragraph)?.slot)
     }
 
@@ -186,10 +284,18 @@ impl LocalLowering {
         &mut self,
         blocks: &mut [Rc<LayoutBlock>],
         map: &mut LoweringMap,
+        revealable: &mut [LayoutBlock],
         txn: &T,
         env: &RenderEnv,
         edit: &TextEdit,
     ) -> Option<()> {
+        if self.blocked
+            || edit.attributes.as_ref().is_some_and(|attrs| {
+                attrs.iter().any(|(key, value)| unsafe_value(key, value))
+            })
+        {
+            return None;
+        }
         let seed = self.seeds.get_mut(&edit.paragraph)?;
         let pilcrow = seed.pilcrow.as_ref()?;
         let (raw, slot, source) = (seed.raw_start, seed.slot, seed.source);
@@ -244,6 +350,11 @@ impl LocalLowering {
         blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
         for block in &mut blocks[slot + 1..] {
             shift_block(Rc::make_mut(block), delta);
+        }
+        for block in revealable {
+            if block.pm_start().is_some_and(|start| start >= old_end as f64) {
+                shift_block(block, delta);
+            }
         }
         for pm in map
             .paragraph_blocks
@@ -358,6 +469,12 @@ fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {
     }
 }
 
+fn page_break_changes_marker(paragraph: &ParagraphBlock, next: Option<&LayoutBlock>) -> bool {
+    paragraph.attrs.as_ref().is_some_and(|attrs| attrs.list_marker.is_some())
+        && matches!(next, Some(LayoutBlock::PageBreak(page_break))
+            if page_break.pm_start == paragraph.pm_end)
+}
+
 fn shiftable(block: &LayoutBlock) -> bool {
     match block {
         LayoutBlock::Paragraph(paragraph) => {
@@ -377,25 +494,22 @@ fn shiftable(block: &LayoutBlock) -> bool {
             .flat_map(|cell| &cell.blocks)
             .all(shiftable),
         LayoutBlock::SectionBreak(_) => true,
-        _ => false,
+        LayoutBlock::Image(_)
+        | LayoutBlock::Shape(_)
+        | LayoutBlock::Chart(_)
+        | LayoutBlock::TextBox(_)
+        | LayoutBlock::PageBreak(_)
+        | LayoutBlock::ColumnBreak(_)
+        | LayoutBlock::Unsupported => false,
     }
 }
 
 fn shift_block(block: &mut LayoutBlock, delta: i64) {
     match block {
-        LayoutBlock::Paragraph(paragraph) => {
-            shift_pair(&mut paragraph.pm_start, &mut paragraph.pm_end, delta);
-            for run in &mut paragraph.runs {
-                match run {
-                    Run::Text(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
-                    Run::Tab(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
-                    Run::LineBreak(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
-                    _ => unreachable!("certified plain text"),
-                }
-            }
-        }
+        LayoutBlock::Paragraph(paragraph) => shift_paragraph(paragraph, delta),
         LayoutBlock::Table(table) => {
             shift_pair(&mut table.pm_start, &mut table.pm_end, delta);
+            shift_groups(&mut table.sdt_groups, delta);
             for row in &mut table.rows {
                 for cell in &mut row.cells {
                     for block in &mut cell.blocks {
@@ -404,7 +518,115 @@ fn shift_block(block: &mut LayoutBlock, delta: i64) {
                 }
             }
         }
-        LayoutBlock::SectionBreak(_) => {}
-        _ => unreachable!("certified body blocks"),
+        LayoutBlock::Image(image) => {
+            shift_pair(&mut image.pm_start, &mut image.pm_end, delta);
+            shift_groups(&mut image.sdt_groups, delta);
+        }
+        LayoutBlock::Shape(shape) => shift_shape(shape, delta),
+        LayoutBlock::Chart(chart) => {
+            shift_pair(&mut chart.pm_start, &mut chart.pm_end, delta);
+            shift_pair(&mut chart.doc_start, &mut chart.doc_end, delta);
+            shift_drawing_id(&mut chart.id, delta);
+            shift_groups(&mut chart.sdt_groups, delta);
+        }
+        LayoutBlock::TextBox(text_box) => {
+            shift_pair(&mut text_box.pm_start, &mut text_box.pm_end, delta);
+            shift_groups(&mut text_box.sdt_groups, delta);
+            for paragraph in &mut text_box.content {
+                shift_paragraph(paragraph, delta);
+            }
+        }
+        LayoutBlock::SectionBreak(section) => shift_groups(&mut section.sdt_groups, delta),
+        LayoutBlock::PageBreak(page_break) => {
+            shift_pair(&mut page_break.pm_start, &mut page_break.pm_end, delta);
+            shift_groups(&mut page_break.sdt_groups, delta);
+        }
+        LayoutBlock::ColumnBreak(column_break) => {
+            shift_pair(&mut column_break.pm_start, &mut column_break.pm_end, delta);
+            shift_groups(&mut column_break.sdt_groups, delta);
+        }
+        LayoutBlock::Unsupported => {}
+    }
+}
+
+fn shift_paragraph(paragraph: &mut ParagraphBlock, delta: i64) {
+    if paragraph.pm_start.is_none() {
+        shift_drawing_id(&mut paragraph.id, delta);
+    }
+    shift_pair(&mut paragraph.pm_start, &mut paragraph.pm_end, delta);
+    shift_groups(&mut paragraph.sdt_groups, delta);
+    if let Some(attrs) = &mut paragraph.attrs {
+        for rule in &mut attrs.horizontal_rules {
+            rule.pm_start += delta as f64;
+            rule.pm_end += delta as f64;
+        }
+    }
+    for run in &mut paragraph.runs {
+        match run {
+            Run::Text(run) => {
+                shift_pair(&mut run.pm_start, &mut run.pm_end, delta);
+                if let Some(widget) = run.inline_sdt_widget.as_mut().and_then(Value::as_object_mut) {
+                    if let Some(pos) = widget.get_mut("pos")
+                        && let Some(value) = pos.as_i64()
+                    {
+                        *pos = Value::from(value + delta);
+                    }
+                    if let Some(Value::String(id)) = widget.get_mut("groupId") {
+                        shift_group_id(id, delta);
+                    }
+                }
+            }
+            Run::Tab(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
+            Run::LineBreak(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
+            Run::Image(run) => {
+                shift_pair(&mut run.pm_start, &mut run.pm_end, delta);
+                if let Some(shape) = &mut run.inline_shape {
+                    shift_shape(shape, delta);
+                }
+            }
+            Run::Field(run) => shift_pair(&mut run.pm_start, &mut run.pm_end, delta),
+            Run::Unsupported => {}
+        }
+    }
+}
+
+fn shift_shape(shape: &mut ShapeBlock, delta: i64) {
+    shift_pair(&mut shape.pm_start, &mut shape.pm_end, delta);
+    shift_pair(&mut shape.doc_start, &mut shape.doc_end, delta);
+    shift_drawing_id(&mut shape.id, delta);
+    shift_groups(&mut shape.sdt_groups, delta);
+    for paragraph in shape.inner_text.iter_mut().flatten() {
+        shift_paragraph(paragraph, delta);
+    }
+    for child in &mut shape.children {
+        shift_shape(child, delta);
+    }
+}
+
+fn shift_drawing_id(id: &mut BlockId, delta: i64) {
+    let BlockId::Str(value) = id else {
+        return;
+    };
+    let Some((kind @ ("shape" | "chart"), rest)) = value.split_once(':') else {
+        return;
+    };
+    let end = rest.find(':').unwrap_or(rest.len());
+    if let Ok(position) = rest[..end].parse::<i64>() {
+        *value = format!("{kind}:{}{}", position + delta, &rest[end..]);
+    }
+}
+
+fn shift_group_id(id: &mut String, delta: i64) {
+    if let Some(position) = id.strip_prefix("sdt@").and_then(|value| value.parse::<i64>().ok()) {
+        *id = format!("sdt@{}", position + delta);
+    }
+}
+
+fn shift_groups(groups: &mut Option<Vec<SdtGroup>>, delta: i64) {
+    for group in groups.iter_mut().flatten() {
+        shift_group_id(&mut group.id, delta);
+        if let Some(pos) = &mut group.pos {
+            *pos += delta;
+        }
     }
 }

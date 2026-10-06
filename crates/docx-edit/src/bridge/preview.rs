@@ -732,7 +732,7 @@ pub(crate) fn lower_refreshed(
         .as_ref()
         .is_some_and(|units| units.refresh.as_ref().is_some_and(|refresh| !refresh.valid))
     {
-        *local = local::LocalLowering::new(!local.blocked);
+        *local = local::LocalLowering::new(local.enabled);
         return lower_recorded(doc, story, env, local, true);
     }
     if let Some(units) = preview.as_mut() {

@@ -3854,13 +3854,7 @@ impl EngineSession {
             || epoch != lowered.doc_epoch.wrapping_add(1)
             || lowered.env != *env
             || lowered.media != self.doc.media_sources()
-            || !lowered.revealable_blocks.is_empty()
             || !lowered.local.matches_source(&self.doc)
-            || self.regions.borrow().as_ref().is_some_and(|state| {
-                state.fast_path.as_ref().is_none_or(|fast| {
-                    !fast.notes_clear || fast.regions.sections.is_empty() || fast.render_env != *env
-                })
-            })
         {
             return None;
         }
@@ -3871,6 +3865,7 @@ impl EngineSession {
         }
         let blocks = Rc::get_mut(&mut lowered.blocks)?;
         let map = Rc::get_mut(&mut lowered.map)?;
+        let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
         if self.relayout_trigger.get().uses_region_path() {
             let slot = lowered.local.edit_slot(&edit)?;
             for certificate in self
@@ -3886,7 +3881,7 @@ impl EngineSession {
         let txn = self.doc.yrs_doc().transact();
         lowered
             .local
-            .patch(blocks.shared_mut(), map, &txn, env, &edit)?;
+            .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
         lowered.preview = None;
@@ -3917,7 +3912,7 @@ impl EngineSession {
             .cloned()
             .collect();
         let patched = (|| {
-            if !lowered.local.blocked {
+            if !lowered.local.preview_blocked {
                 return None;
             }
             let units = lowered.preview.as_ref()?;
@@ -3939,6 +3934,7 @@ impl EngineSession {
                 );
                 lowered.preview = Some(Rc::new(units));
                 lowered.serialized_blocks = None;
+                lowered.local.refresh_seeds(lowered.blocks.shared(), &lowered.map);
             }
             lowered.env = env.clone();
             Some(())
@@ -13567,6 +13563,7 @@ mod tests {
                 serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
                 pagination.block_fingerprints.clone(),
                 serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+                serde_json::to_string(lowered.revealable_blocks.as_ref()).unwrap(),
             )
         };
         let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
@@ -13738,7 +13735,7 @@ mod tests {
                 step(&engine, &request, "body", (11, 11, Some("😀")), true);
                 step(&engine, &request, "body:t0:r0c1", (2, 2, Some("x")), false);
             } else if name == "contextual" {
-                step(&engine, &request, "body", (8, 8, Some("x")), false);
+                step(&engine, &request, "body", (8, 8, Some("x")), true);
             }
         }
         let bold = Package::new(&para(
@@ -13931,6 +13928,7 @@ mod tests {
                 );
             }
         }
+        resident_paragraph_blockers_patch_matches_cold_full_in(enabled);
         for (bytes, patched) in [
             (
                 include_bytes!(
@@ -13945,7 +13943,7 @@ mod tests {
             ),
             (
                 include_bytes!("../tests/fixtures/page-fragments/pages.docx").as_slice(),
-                false,
+                true,
             ),
             (
                 include_bytes!("../tests/fixtures/footnote-anchor.docx").as_slice(),
@@ -13954,6 +13952,204 @@ mod tests {
         ] {
             let (engine, request) = laid_out(bytes, 9603);
             step(&engine, &request, "body", (0, 0, Some("x")), patched);
+        }
+    }
+
+    fn local_patch_paragraph_edits(
+        engine: &EngineSession,
+        request: &str,
+        paragraph: usize,
+        patched: bool,
+    ) {
+        let bounds = || {
+            let txn = engine.doc().yrs_doc().transact();
+            let story = crate::story_ref(&txn, "body").unwrap();
+            crate::op::para_bounds(&story, &txn).remove(paragraph)
+        };
+        for inserted in ["x", "😀"] {
+            let paragraph = bounds();
+            let at = paragraph.start + paragraph.len().min(1);
+            local_patch_step(engine, request, "body", (at, at, Some(inserted)), patched);
+            local_patch_step(
+                engine,
+                request,
+                "body",
+                (at, at + inserted.encode_utf16().count() as u32, None),
+                patched,
+            );
+        }
+        let paragraph = bounds();
+        if paragraph.len() != 0 {
+            local_patch_step(
+                engine,
+                request,
+                "body",
+                (paragraph.start, paragraph.start + 1, None),
+                patched,
+            );
+        }
+    }
+
+    fn resident_paragraph_blockers_patch_matches_cold_full_in(enabled: bool) {
+        use super::lowering_fixture::{Package, image, para, run};
+        use yrs::{Map, ReadTxn};
+
+        let shape = r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="2" name="shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+        let simple = r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
+        let complex = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Example </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+        let contents = [
+            ("hyperlink", r#"<w:hyperlink w:anchor="target"><w:r><w:t>Link</w:t></w:r></w:hyperlink>"#.to_owned()),
+            ("bookmark", r#"<w:bookmarkStart w:id="0" w:name="mark"/><w:r><w:t>Book</w:t></w:r><w:bookmarkEnd w:id="0"/>"#.to_owned()),
+            ("insert", r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Added</w:t></w:r></w:ins>"#.to_owned()),
+            ("delete", r#"<w:del w:id="1" w:author="A"><w:r><w:delText>Removed</w:delText></w:r></w:del>"#.to_owned()),
+            ("rPrChange", r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="1" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>Changed</w:t></w:r>"#.to_owned()),
+            ("hidden run", r#"<w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t></w:r>"#.to_owned()),
+            ("hidden mark", r#"<w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>"#.to_owned()),
+            ("contextual", r#"<w:pPr><w:contextualSpacing/><w:spacing w:before="240" w:after="240"/></w:pPr>"#.to_owned()),
+            ("image", image("rIdImage", "inline")),
+            ("float", shape.to_owned()),
+            ("simple SEQ", simple.to_owned()),
+            ("complex SEQ", complex.to_owned()),
+            ("section", r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/><w:pgMar w:left="1800"/></w:sectPr></w:pPr>"#.to_owned()),
+            ("duplicate", String::new()),
+            ("sequence metadata", simple.to_owned()),
+            ("comments", r#"<w:commentRangeStart w:id="0"/><w:r><w:t>Comment</w:t></w:r><w:commentRangeEnd w:id="0"/>"#.to_owned()),
+            ("checkbox", r#"<w:sdt><w:sdtPr><w:id w:val="4"/><w14:checkbox><w14:checked w14:val="0"/></w14:checkbox></w:sdtPr><w:sdtContent><w:r><w:t>Box</w:t></w:r></w:sdtContent></w:sdt>"#.to_owned()),
+            ("note", r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#.to_owned()),
+        ];
+        for (name, content) in contents {
+            let blocker = if content.starts_with("<w:pPr>") {
+                format!("{content}{}", run("Block"))
+            } else {
+                format!("{}{content}", run("Block"))
+            };
+            let body = format!(
+                "{}{}{}{}{}",
+                para("10000001", &run("Before")),
+                para("10000002", &blocker),
+                para("10000003", &run("Middle")),
+                para("10000004", &blocker),
+                para("10000005", &run("After")),
+            );
+            let mut package = Package::new(&body).rel("rIdImage", "image", "media/image1.png");
+            if name == "comments" {
+                package = package.part(
+                    "comments.xml", "rIdComments", "comments", "comments",
+                    &format!(r#"<w:comments {}><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:comment></w:comments>"#, lowering_fixture::NS),
+                );
+            } else if name == "note" {
+                package = package.part(
+                    "footnotes.xml", "rIdNotes", "footnotes", "footnotes",
+                    &format!(r#"<w:footnotes {}><w:footnote w:id="1"><w:p><w:r><w:t>Note</w:t></w:r></w:p></w:footnote></w:footnotes>"#, lowering_fixture::NS),
+                );
+            }
+            for paragraph in 0..5 {
+                let (engine, request) = local_patch_laid_out(&package.bytes(), 9613, enabled);
+                if name == "duplicate" {
+                    lowering_fixture::share_key(engine.doc(), "body", "10000004", "10000002");
+                } else if name == "sequence metadata" {
+                    let mut txn = engine.doc().yrs_doc().transact_mut();
+                    txn.get_map(crate::identity::SESSION).unwrap().insert(
+                        &mut txn,
+                        crate::seed::OPAQUE_SEQUENCES,
+                        Any::Array(vec![Any::String("example".into())].into()),
+                    );
+                }
+                if matches!(name, "duplicate" | "sequence metadata") {
+                    engine.render.replace(Default::default());
+                    engine.pagination.replace(Default::default());
+                    engine.regions.replace(Default::default());
+                    engine.display.replace(Default::default());
+                    engine.layout_document_with_regions_retained_json(&request).unwrap();
+                    engine.build_display_list_frame("{}", 0).unwrap();
+                }
+                assert_eq!(
+                    engine.render.borrow().stories["body"].local.blocked,
+                    !enabled || matches!(name, "rPrChange" | "comments"),
+                    "{name}",
+                );
+                let patched = paragraph % 2 == 0 && !matches!(name, "rPrChange" | "comments");
+                local_patch_paragraph_edits(&engine, &request, paragraph, patched);
+            }
+        }
+        let toc = format!(
+            "{}{}{}{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", &format!(r#"{}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r>"#, run("Owner"))),
+            para("10000003", r#"<w:r><w:instrText> \o "1-3" </w:instrText></w:r>"#),
+            para("10000004", r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>First entry</w:t></w:r>"#),
+            para("10000005", r#"<w:r><w:t>Last entry</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
+            para("10000006", &run("After")),
+        );
+        for paragraph in 0..6 {
+            let (engine, request) = local_patch_laid_out(&Package::new(&toc).bytes(), 9614, enabled);
+            local_patch_paragraph_edits(&engine, &request, paragraph, matches!(paragraph, 0 | 5));
+        }
+        let hidden = format!(
+            "{}{}{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> 123 </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#),
+            para("10000003", &run("Cached result")),
+            para("10000004", r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
+            para("10000005", &run("After")),
+        );
+        for paragraph in 0..5 {
+            let (engine, request) = local_patch_laid_out(&Package::new(&hidden).bytes(), 9617, enabled);
+            local_patch_paragraph_edits(&engine, &request, paragraph, matches!(paragraph, 0 | 4));
+        }
+        let body = para("10000001", &run("Plain"));
+        let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9615, enabled);
+        {
+            let mut txn = engine.doc().yrs_doc().transact_mut();
+            txn.get_map(crate::identity::SESSION).unwrap().insert(
+                &mut txn,
+                crate::seed::OPAQUE_SEQUENCES,
+                Any::Array(Vec::new().into()),
+            );
+        }
+        engine.render.replace(Default::default());
+        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        assert!(engine.render.borrow().stories["body"].local.preview_blocked);
+        assert_eq!(engine.render.borrow().stories["body"].local.blocked, !enabled);
+        local_patch_paragraph_edits(&engine, &request, 0, true);
+        let body = format!(
+            "{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Change</w:t></w:r></w:ins>"#),
+            para("10000003", &run("After")),
+        );
+        let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9616, enabled);
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        request["renderEnv"] = serde_json::to_value(
+            RenderEnv::default().with_revision_preview("1", RevisionPreview::Rejected),
+        )
+        .unwrap();
+        let request = request.to_string();
+        let before = engine.stats();
+        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + 1,
+        );
+        engine.build_display_list_frame("{}", 0).unwrap();
+        for paragraph in [0, 2] {
+            local_patch_paragraph_edits(&engine, &request, paragraph, true);
+        }
+        let body = format!(
+            "{}{}",
+            local_patch_list_paragraph(
+                "10000001", 1, 0, "",
+                &format!(r#"{}<w:r><w:br w:type="page"/></w:r>"#, run("x")),
+            ),
+            para("10000002", &run("After")),
+        );
+        let bytes = Package::new(&body)
+            .numbering(&local_patch_numbering("decimal", "%1."))
+            .bytes();
+        for paragraph in 0..2 {
+            let (engine, request) = local_patch_laid_out(&bytes, 9618, enabled);
+            local_patch_paragraph_edits(&engine, &request, paragraph, paragraph == 1);
         }
     }
 
@@ -22098,7 +22294,8 @@ mod tests {
                     .clone()
             };
             preview_mapped_oracle(&engine, &RenderEnv::default());
-            assert!(engine.render.borrow().stories["body"].local.blocked);
+            assert!(engine.render.borrow().stories["body"].local.preview_blocked);
+            assert!(!engine.render.borrow().stories["body"].local.blocked);
             let before = engine.stats();
             preview_mapped_oracle(
                 &engine,

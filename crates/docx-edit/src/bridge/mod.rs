@@ -384,16 +384,17 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     };
     let source = doc.source_metadata();
     local.source = source.as_ref().map(Arc::downgrade).unwrap_or_default();
-    local.blocked |= source.as_ref().is_some_and(|source| {
+    local.block(source.as_ref().is_some_and(|source| {
         source
             .run_revision_stories()
             .any(|story| story == "body" || story.starts_with("body:"))
-    });
+    }));
     let mut list_state = ListState::new(source.map(|source| source.numbering()));
     let txn = doc.yrs_doc().transact();
-    local.blocked |= txn
-        .get_map(COMMENTS)
-        .is_some_and(|comments| comments.len(&txn) != 0);
+    local.block(
+        txn.get_map(COMMENTS)
+            .is_some_and(|comments| comments.len(&txn) != 0),
+    );
     let mut active_stories = BTreeSet::new();
     let mut map = preview::LoweringOutput::default();
     let session = txn.get_map(crate::identity::SESSION);
@@ -407,7 +408,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
                 .collect()
         })
         .unwrap_or_default();
-    local.blocked |= has_sequence_metadata;
+    local.preview_blocked |= has_sequence_metadata;
     let mut recording = if story_id == "body" {
         preview_units.take().map(preview::UnitRecorder::new)
     } else {
@@ -595,6 +596,15 @@ fn walk_story_chunks<T: ReadTxn>(
     }
     let mut plain = local::ParagraphSeed::default();
     for (chunk_index, diff) in chunks.iter().enumerate() {
+        let local_safe = pending_hidden_field_blocks.is_empty()
+            && pending_code_join.is_none()
+            && field_join.is_none()
+            && story_id == "body"
+            && active_stories.len() == 1
+            && active_stories.contains("body");
+        if at_block_boundary && paragraph_start == story_index {
+            plain.start(local_safe && paragraph_runs.is_empty() && paragraph_drawings.is_empty());
+        }
         if let Some(recording) = recording.as_deref_mut()
             && recording.wants_chunk(story_index)
         {
@@ -645,6 +655,9 @@ fn walk_story_chunks<T: ReadTxn>(
                         map.paragraph_count(),
                     ),
                     story_index + 1 == story.len(txn),
+                    local_safe
+                        && !value_string(values.get("paraId"))
+                            .is_some_and(|id| hidden_field_blocks.contains(&id)),
                 );
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
                 let code_join = pending_code_join.take();
@@ -1695,7 +1708,7 @@ fn lower_table<T: ReadTxn>(
         })
         .filter_map(any_map)
         .find_map(|cell| map_string(cell, "story"));
-    local.blocked |= table_identity.is_none();
+    local.block(table_identity.is_none());
     let table_identity = table_identity.unwrap_or_else(|| story_index.to_string());
     let table_id = format!("{parent_story}:table:{table_identity}");
 
