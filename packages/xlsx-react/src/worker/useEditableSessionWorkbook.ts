@@ -81,6 +81,7 @@ export class EditableWorkbookSession implements WorkerEditorSessionAccess {
 
   whenHydrated(): Promise<void> {
     if (!this.current) return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
+    this.releaseHold();
     if (this.recovering && this.peer && this.editPeer) return Promise.resolve();
     if (this.failure) return Promise.reject(this.failure);
     return this.hydrated;

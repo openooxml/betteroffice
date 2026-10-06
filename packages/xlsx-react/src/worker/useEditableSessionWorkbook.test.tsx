@@ -109,6 +109,33 @@ describe('editable session workbook', () => {
     expect(release).toHaveBeenCalledTimes(1);
   });
 
+  test('releases the hold on whenHydrated before any paint', async () => {
+    const { value } = session();
+    const { hydrate, peer } = resources();
+    const pending = deferred<WorkbookHandle>();
+    hydrate.mockReturnValue(pending.promise);
+    const release = mock(() => {});
+    const hold = spyOn(editableWorkbookSessionBackend, 'hold').mockReturnValue(release);
+    restorers.push(() => hold.mockRestore());
+    const ready = mock(() => {});
+    const run = owner(value, { onReady: ready });
+    expect(release).not.toHaveBeenCalled();
+    const hydrated = mock(() => {});
+    const waiting = run.whenHydrated().then(hydrated);
+    void run.whenHydrated();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(ready).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(hydrated).not.toHaveBeenCalled();
+    pending.resolve(peer);
+    await waiting;
+    expect(hydrated).toHaveBeenCalledTimes(1);
+    expect(run.ready).toBe(true);
+    expect(hydrate).toHaveBeenCalledTimes(1);
+    run.dispose();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
   for (const reason of ['input', 'flush', 'save', 'recovery', 'command']) {
     test(`releases the hold on ${reason} hydration before any paint`, async () => {
       const { value } = session();
