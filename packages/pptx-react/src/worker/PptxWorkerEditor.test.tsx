@@ -27,6 +27,8 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+const settle = () => act(() => new Promise<void>((done) => { setTimeout(done); }));
+
 function session(ready = true, slideCount = 1) {
   let text = 'x';
   let epoch = 0;
@@ -127,7 +129,13 @@ beforeEach(() => {
   restorers.push(() => Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', context),
     () => paint.mockRestore(), () => { globalThis.ResizeObserver = observer; });
 });
-afterEach(() => { cleanup(); for (const restore of restorers.reverse()) restore(); restorers.length = 0; });
+afterEach(async () => {
+  await settle();
+  cleanup();
+  await settle();
+  for (const restore of restorers.reverse()) restore();
+  restorers.length = 0;
+});
 afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
 
 test('dispatches_only_flagged_editable_props', async () => {
@@ -286,7 +294,7 @@ test('commands_plugins_notes_and_keyboard_share_replay', async () => {
   await act(async () => { await context.run(async (fresh) => { await fresh.edits!.applyEdits({ expectVersion: value.owner.state.version!, steps: [] }); }); });
   fireEvent.change(view.getByTestId('pptx-notes-textarea'), { target: { value: 'notes' } });
   await act(async () => { api.selectText({ slide: 1, shapeId: 'shape', storyId: 'story', start: 1, end: 1 }); });
-  fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
+  await act(async () => { fireEvent.keyDown(view.getByRole('application'), { key: 'a' }); });
   expect(value.methods.filter((method) => method !== 'addUndoBoundary')).toEqual(['formatText', 'applyEdits', 'setSlideNotes', 'insertText']);
 });
 
@@ -306,7 +314,7 @@ test('paint_and_interaction_frames_are_separate', async () => {
   expect(painted.length).toBeGreaterThan(0);
   expect(painted).not.toContain(value.peerFrame);
   expect(painted.every((list) => value.frames.some((frame) => frame.displayList === list))).toBe(true);
-  const access = await api.handleAsync();
+  const access = await act(() => api.handleAsync());
   await act(async () => {
     access.setSlideNotes('s', 'new');
     expect(run.overlays).toBe(false);
@@ -324,7 +332,6 @@ test('thumbnail_retains_evicted_images_until_paint_settles', async () => {
   const ids = Array.from({ length: 26 }, (_, index) => `image-${index}`);
   const bitmaps = ids.map(() => ({ width: 1, height: 1, close: mock(() => {}) }));
   const decodes = ids.map(() => deferred<ImageBitmap>());
-  const requested = deferred<void>();
   const firstDecoded = deferred<void>();
   const released = deferred<void>();
   const release = mock(() => {});
@@ -341,12 +348,7 @@ test('thumbnail_retains_evicted_images_until_paint_settles', async () => {
     }
     return result;
   };
-  let decoding = 0;
-  const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation((bytes) => {
-    decoding += 1;
-    if (decoding === ids.length) requested.resolve();
-    return decodes[bytes[0]].promise;
-  });
+  const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation((bytes) => decodes[bytes[0]].promise);
   const thumbnailImages = EditablePresentation.prototype.thumbnailImages;
   const resolvers = spyOn(EditablePresentation.prototype, 'thumbnailImages').mockImplementation(function (
     this: EditablePresentation, list
@@ -374,7 +376,7 @@ test('thumbnail_retains_evicted_images_until_paint_settles', async () => {
   restorers.push(() => decode.mockRestore(), () => resolvers.mockRestore(),
     () => paint.mockRestore());
   render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen />);
-  await requested.promise;
+  await waitFor(() => expect(decode).toHaveBeenCalledTimes(ids.length));
   expect(resolverCount).toBe(1);
   expect(decode).toHaveBeenCalledTimes(26);
   expect(draw).not.toHaveBeenCalled();
@@ -419,14 +421,14 @@ test('replacement_preserves_old_recovery', async () => {
   const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={(ready) => { api = ready; }} />);
   await waitFor(() => expect(api).toBeDefined());
   const retired = api;
-  const access = await api.handleAsync();
+  const access = await act(() => api.handleAsync());
   await act(async () => { access.insertText('story', 1, 'old'); });
   view.rerender(<PptxEditor fonts={[]} file={new Uint8Array([2])} experimentalWorkerOpen onReady={(ready) => { api = ready; }} />);
   await waitFor(() => expect(api).not.toBe(retired));
-  expect(await retired.recoverySave()).toEqual({ bytes: new TextEncoder().encode('xold'), recovery: true });
-  await expect(retired.saveAsync()).rejects.toBeInstanceOf(pptx.PptxWorkerEditorDisposedError);
+  expect(await act(() => retired.recoverySave())).toEqual({ bytes: new TextEncoder().encode('xold'), recovery: true });
+  await act(() => expect(retired.saveAsync()).rejects.toBeInstanceOf(pptx.PptxWorkerEditorDisposedError));
   view.unmount();
-  expect((await retired.recoverySave()).bytes).toEqual(new TextEncoder().encode('xold'));
+  expect((await act(() => retired.recoverySave())).bytes).toEqual(new TextEncoder().encode('xold'));
 });
 
 test('strictmode_disposes_partial_hydration', async () => {
