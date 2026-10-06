@@ -209,7 +209,7 @@ test('readOnly_toggles_keep_edits_and_live_api_guards_in_the_same_session', asyn
   const view = render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onReady={ready} />);
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
   const retained = api;
-  const access = await api.handleAsync();
+  const access = await act(() => api.handleAsync());
   const insert = access.insertText;
   await act(async () => {
     insert('story', 1, 'first');
@@ -222,7 +222,7 @@ test('readOnly_toggles_keep_edits_and_live_api_guards_in_the_same_session', asyn
   expect(value.owner.dispose).not.toHaveBeenCalled();
   expect(api).toBe(retained);
   expect(ready).toHaveBeenCalledTimes(1);
-  expect(await api.handleAsync()).toBe(access);
+  expect(await act(() => api.handleAsync())).toBe(access);
   expect(new TextDecoder().decode(await api.saveAsync())).toBe('xfirst');
   expect(await api.readContent()).toMatchObject({ stories: [{ text: 'xfirst' }] });
   const before = value.methods.slice();
