@@ -12,7 +12,7 @@ import {
   type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
-import { createProposalRegistry } from '@betteroffice/docx/yrs/proposals';
+import { createProposalRegistry, type DocxProposalSession } from '@betteroffice/docx/yrs/proposals';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
 import {
   beginWorkerProposalHandover,
@@ -1065,7 +1065,7 @@ function editorRoundHarness(laidOut = async () => {}) {
       return registry;
     },
     storiesChangedSince: () => ({ revision: 0, stories: [] }),
-  } as unknown as YrsSession;
+  } as unknown as YrsSession & DocxProposalSession;
   const events: string[] = [];
   const worker = {
     proposal: mock(async (op: Parameters<WorkerOpenedDocument['proposal']>[0]): Promise<ResidentProposalReply> => {

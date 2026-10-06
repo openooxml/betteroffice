@@ -35,6 +35,7 @@ import {
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
+  failWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
   hasEditorWorkerProposalRounds,
   workerProposalAuthority,
@@ -394,6 +395,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       markLayoutQueued(owner, false);
     }
     if (viewer && failure instanceof SupersededPreviewError) return failure;
+    if (!viewer && hasEditorWorkerProposalRounds(owner)) failWorkerProposalAuthority(owner, failure);
     onErrorRef.current?.(failure, owner);
     return failure;
   }, [isViewerSession]);
@@ -692,7 +694,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
             }
           } catch (error) {
             console.error('[PagedEditor] Layout pipeline error:', error);
-            onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
+            if (hasEditorWorkerProposalRounds(session)) reportLayoutError(session, error);
+            else onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)), session);
           }
         };
 

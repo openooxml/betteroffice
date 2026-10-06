@@ -771,9 +771,9 @@ export function useDocxEditorRefApi({
     };
     const authority = roundAuthority();
     if (authority) return execute(authority);
-    if (modeRef.current !== 'viewing' && hostProposalsAllowed() && experimentalWorkerOpen && session &&
+    if (hostProposalsAllowed() && experimentalWorkerOpen && session && !workerOpenDocumentHeld(session) &&
       editorWorkerProposalActivationAvailable(session)) {
-      return activateEditorWorkerProposalRounds(session, () => modeRef.current !== 'viewing' && hostProposalsAllowed()).then((activated) => {
+      return activateEditorWorkerProposalRounds(session, () => !workerOpenDocumentHeld(session) && hostProposalsAllowed()).then((activated) => {
         if (pagedEditorRef.current?.getYrsSession() !== session) throw new Error('The document changed while applying proposals');
         return execute(activated);
       });
