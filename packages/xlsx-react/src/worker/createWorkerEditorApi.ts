@@ -43,6 +43,7 @@ export interface WorkerEditorSessionAccess {
 export interface WorkerEditorApiBridge {
   coordinator(): WorkerInputCoordinator | null;
   readOnly(): boolean;
+  readOnlyGeneration?(): number;
   clearSelection(): void;
   focus(): void;
   refreshProposals(): void;
@@ -148,6 +149,11 @@ export function createWorkerEditorApi(
     ok: false as const, version: requirePeer().peer.version(),
     failure: { code: 'read-only' as const, message: 'The editor is read-only' },
   });
+  const admitEdit = () => {
+    const readOnly = bridge().readOnly();
+    const generation = bridge().readOnlyGeneration?.();
+    return () => !readOnly && !bridge().readOnly() && generation === bridge().readOnlyGeneration?.();
+  };
   const editCell = (
     sheet: number, row: number, col: number, input: string, markApplied: WorkerInputLease
   ) => {
@@ -255,10 +261,11 @@ export function createWorkerEditorApi(
       return ordered('validate-edits', () => bridge().readOnly() ? refusal() : requirePeer().peer.validateEdits(input));
     },
     applyEdits: (request) => {
+      const editable = admitEdit();
       const input = structuredClone(request);
       const op: WorkbookReplayOp = { method: 'applyEdits', args: [input] };
       return ordered('apply-edits', (markApplied) => {
-        if (bridge().readOnly()) return refusal();
+        if (!editable()) return refusal();
         let result: XlsxEditResult;
         try {
           result = session.recovering || !bridge().previewEdits ? requirePeer().edits.applyEdits(input) :
@@ -284,9 +291,10 @@ export function createWorkerEditorApi(
       return synchronous((markApplied) => editCell(sheet, row, col, input, markApplied));
     },
     editCellAsync: (sheet, row, col, input) => {
+      const editable = admitEdit();
       const op: WorkbookReplayOp = { method: 'editCell', args: [sheet, row, col, input] };
       return ordered('edit-cell', (markApplied) => {
-        if (bridge().readOnly()) return { error: new Error('The editor is read-only') };
+        if (!editable()) return { error: new Error('The editor is read-only') };
         if (!bridge().previewEdits || session.recovering) return { result: editCell(sheet, row, col, input, markApplied) };
         markApplied.check();
         const result = workbookEditPeerOperations(requirePeer().edits).applyQueuedOp(op) as EditResult;
