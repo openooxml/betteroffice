@@ -13745,13 +13745,7 @@ mod tests {
                     );
                     let before = engine.stats();
                     let end = at + text.map_or(inserted.encode_utf16().count() as u32, |_| 0);
-                    local_patch_step(
-                        &engine,
-                        &request.to_string(),
-                        "body",
-                        (at, end, text),
-                        true,
-                    );
+                    local_patch_step(&engine, &request.to_string(), "body", (at, end, text), true);
                     assert_eq!(
                         engine.stats().lower_cache_misses,
                         before.lower_cache_misses + u64::from(!enabled),
@@ -14809,10 +14803,7 @@ mod tests {
             engine.stats().lower_preview_fallbacks,
             before.lower_preview_fallbacks,
         );
-        assert_eq!(
-            engine.stats().lower_cache_misses,
-            before.lower_cache_misses,
-        );
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses,);
         assert_local_patch_matches_cold(&engine, &request, "preview after resident text edits");
         let body = format!(
             "{}{}",
