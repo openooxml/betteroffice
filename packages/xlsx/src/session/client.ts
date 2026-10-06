@@ -151,6 +151,10 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
     check();
     await initWasm(source.wasm ?? source.module!);
     check();
+    while (source.holds > 0) {
+      await waitForPeerInput(source);
+      check();
+    }
     if (!source.bytes) throw new Error('Workbook peer source bytes are missing');
     const opener = createWorkbookPeerOpener(source.bytes, source.options);
     source.opener = opener;
@@ -180,7 +184,11 @@ async function openPeerFromSource(source: WorkbookPeerSource): Promise<WorkbookH
       });
       check();
       ready = state === 2;
-      if (state === 1 && source.hydration.length === 0) await waitForPeerInput(source);
+      if (state === 1 && source.hydration.length === 0) {
+        if (source.deliveryComplete) throw new WorkbookPeerHydrationError('missing-hydration',
+          'Workbook worker hydration ended before the peer was ready');
+        await waitForPeerInput(source);
+      }
     }
     check();
     peer = opener.finish();
@@ -269,7 +277,7 @@ export async function createWorkbookSession(
         },
         module: input.wasm instanceof WebAssembly.Module ? input.wasm : undefined,
         wasm: input.wasm instanceof ArrayBuffer ? input.wasm.slice(0) : undefined,
-        hydration: [], receivedHydration: false, holds: 0, disposed: false,
+        hydration: [], receivedHydration: false, deliveryComplete: false, holds: 0, disposed: false,
       };
     }
     client = createSessionClient<Methods, Events>(transport, {
@@ -335,6 +343,11 @@ export async function createWorkbookSession(
     state = await Promise.race([
       client.callWithTransfer('open', [document, input], transfer), hydrationFailure,
     ]);
+    if (peerSource) {
+      peerSource.deliveryComplete = true;
+      peerSource.wake?.();
+      peerSource.wake = undefined;
+    }
     if (signal?.aborted) throw new SessionFailure('disposed', 'Session was disposed');
     if (peerSource && !peerSource.module && !peerSource.wasm && !peerSource.opener) {
       throw new WorkbookPeerHydrationError('missing-module',

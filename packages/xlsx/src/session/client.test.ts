@@ -62,6 +62,102 @@ function peerScheduler() {
 }
 
 describe('workbook peer hydration', () => {
+
+  test('rejects a partial hydration stream when the open reply completes delivery', async () => {
+    const scheduler = peerScheduler();
+    let delivered = false;
+    const dispose = mock(() => {});
+    const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
+      pushHydration() {}, advance() { return 1; },
+      finish() { throw new Error('Unexpected opener finish'); }, dispose,
+    }));
+    let session;
+    try {
+      session = await createTestWorkbookSession(fixture, (transport) => ({
+        ...transport,
+        post(message, transfer) {
+          if (isHostMessage(message) && message.kind === 'wasm-module' && message.hydration !== undefined) {
+            if (delivered) return;
+            delivered = true;
+          }
+          transport.post(message, transfer);
+        },
+      }), { calculation, wasm: wasmBytes.buffer, retainPeerHydration: true });
+      const pending = hydratePeer(session);
+      expect(delivered).toBe(true);
+      expect(scheduler.tasks).toHaveLength(1);
+      scheduler.tasks.shift()!();
+      await expect(pending).rejects.toMatchObject({
+        name: 'WorkbookPeerHydrationError', code: 'missing-hydration',
+      });
+      expect(dispose).toHaveBeenCalledTimes(1);
+      expect(scheduler.tasks).toHaveLength(0);
+    } finally {
+      await session?.dispose();
+      for (const task of scheduler.tasks.splice(0)) task();
+      peerOpen.mockRestore();
+      scheduler.restore();
+    }
+  });
+
+  test('defers opener allocation after wasm init while held and rejects disposal', async () => {
+    for (const disposed of [false, true]) {
+      const scheduler = peerScheduler();
+      let resume = () => {};
+      let version = '';
+      const initializing = spyOn(workbookWasm, 'initWasm').mockImplementation(() =>
+        new Promise<void>((resolve) => { resume = resolve; }));
+      const peer = { version: () => version, dispose() {} } as unknown as WorkbookHandle;
+      const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
+        pushHydration() {}, advance() { return 2; }, finish: () => peer, dispose() {},
+      }));
+      let session;
+      try {
+        const pair = createInProcessPair();
+        const module = new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+        createWorkbookSessionHost(pair.host, { initWasm: async () => {}, wasmModule: () => module });
+        session = await createWorkbookSession(fixture, {
+          calculation, wasm: wasmBytes.buffer, retainPeerHydration: true,
+        }, pair.client);
+        const release = holdPeerOpen(session);
+        const secondRelease = holdPeerOpen(session);
+        const pending = hydratePeer(session);
+        expect(peerOpen).not.toHaveBeenCalled();
+        resume();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(peerOpen).not.toHaveBeenCalled();
+        expect(scheduler.tasks).toHaveLength(0);
+        release();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(peerOpen).not.toHaveBeenCalled();
+        if (disposed) {
+          await session.dispose();
+          await expect(pending).rejects.toBeInstanceOf(SessionFailure);
+          await expect(pending).rejects.toMatchObject({ code: 'disposed' });
+          expect(peerOpen).not.toHaveBeenCalled();
+          secondRelease();
+        } else {
+          version = await session.call.version();
+          secondRelease();
+          await Promise.resolve();
+          await Promise.resolve();
+          expect(peerOpen).toHaveBeenCalledTimes(1);
+          scheduler.tasks.shift()!();
+          expect(await pending).toBe(peer);
+        }
+      } finally {
+        resume();
+        await session?.dispose();
+        for (const task of scheduler.tasks.splice(0)) task();
+        initializing.mockRestore();
+        peerOpen.mockRestore();
+        scheduler.restore();
+      }
+    }
+  });
+
   test('holds queued source slices and hydration until all holds are released', async () => {
     const scheduler = peerScheduler();
     let version = '';

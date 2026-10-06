@@ -9,6 +9,7 @@ export interface WorkbookPeerSource {
   wasm?: ArrayBuffer | WebAssembly.Module;
   hydration: string[];
   receivedHydration: boolean;
+  deliveryComplete: boolean;
   opener?: ReturnType<typeof createWorkbookPeerOpener>;
   wake?: () => void;
   holds: number;
