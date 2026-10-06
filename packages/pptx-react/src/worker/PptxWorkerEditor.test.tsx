@@ -333,14 +333,14 @@ test('thumbnail_retains_evicted_images_until_paint_settles', async () => {
   let thumbnail!: SlideDisplayList;
   let resolverCount = 0;
   const frame = value.owner.frame;
-  const frames = spyOn(value.owner, 'frame').mockImplementation(async (slideId) => {
+  value.owner.frame = async (slideId) => {
     const result = await frame(slideId);
     if (slideId === 's2') {
       thumbnail = result.displayList;
       result.media = new Map(ids.map((id, index) => [id, new Uint8Array([index])]));
     }
     return result;
-  });
+  };
   let decoding = 0;
   const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation((bytes) => {
     decoding += 1;
@@ -371,7 +371,7 @@ test('thumbnail_retains_evicted_images_until_paint_settles', async () => {
     ctx.drawImage = draw;
     ctx.drawImage(images[0]!, 0, 0);
   });
-  restorers.push(() => frames.mockRestore(), () => decode.mockRestore(), () => resolvers.mockRestore(),
+  restorers.push(() => decode.mockRestore(), () => resolvers.mockRestore(),
     () => paint.mockRestore());
   render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen />);
   await requested.promise;
