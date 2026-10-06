@@ -68,6 +68,7 @@ export interface WorkerInputCoordinatorHooks
   /** Waits passively for the edit peer. */
   whenReady(): Promise<void>;
   resolveDraft?(draft: InputDraft): Promise<InputDraft>;
+  sameDraft?(a: InputDraft, b: InputDraft): boolean;
   /** Resolves after the pending text has crossed a browser paint boundary. */
   preview(draft: InputDraft): Promise<void>;
   requestHydration(reason: string): void | Promise<void>;
@@ -571,7 +572,7 @@ export function createWorkerInputCoordinator(
       }
       if (!ended) throw new XlsxCommandAdmissionError('input-failed');
       let composedDraft = saved.draft;
-      if (saved.draft && draft && sameCell(saved.draft, draft)) {
+      if (saved.draft && draft && sameCell(saved.draft, draft) && (hooks.sameDraft?.(saved.draft, draft) ?? true)) {
         hooks.sync();
         composedDraft = draft ? snapshot(draft) : null;
       } else {
@@ -581,7 +582,8 @@ export function createWorkerInputCoordinator(
             entry.intent.kind === 'commit' &&
             saved.draft !== null &&
             entry.intent.draft !== null &&
-            sameCell(saved.draft, entry.intent.draft)
+            sameCell(saved.draft, entry.intent.draft) &&
+            (hooks.sameDraft?.(saved.draft, entry.intent.draft) ?? true)
         );
         composedDraft = committed[committed.length - 1]?.intent.draft ?? saved.draft;
       }

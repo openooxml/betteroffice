@@ -268,6 +268,11 @@ export type XlsxWorkerEditorProps = Omit<XlsxEditorProps, 'onReady' | 'readOnly'
   onReady?: (api: XlsxWorkerEditorApi) => void | (() => void);
 };
 
+type WorkerSessionProps = Omit<XlsxWorkerEditorProps, 'readOnly' | 'onReady'> & {
+  readOnly: boolean;
+  onReady?: (api: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => void | (() => void);
+};
+
 /** the open in-cell editor: which cell it targets and its current draft text. */
 interface EditState {
   row: number;
@@ -569,13 +574,22 @@ function useSyncedState<T>(initial: T) {
  */
 export function XlsxEditor(props: XlsxWorkerViewerProps): React.JSX.Element;
 export function XlsxEditor(props: XlsxWorkerEditorProps): React.JSX.Element;
+export function XlsxEditor(props: WorkerSessionProps): React.JSX.Element;
 export function XlsxEditor(props: XlsxEditorProps): React.JSX.Element;
-export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxWorkerEditorProps | XlsxEditorProps): React.JSX.Element {
+export function XlsxEditor(props: XlsxWorkerViewerProps | XlsxWorkerEditorProps | WorkerSessionProps | XlsxEditorProps): React.JSX.Element {
+  const worker = 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen;
+  const collaboration = (props as XlsxEditorProps).collaboration;
+  const [session, setSession] = useState(() => ({ file: props.file, collaboration, worker, editor: !props.readOnly }));
+  const replaced = session.file !== props.file || session.collaboration !== collaboration || session.worker !== worker;
+  const editor = replaced ? !props.readOnly : session.editor || !props.readOnly;
+  if (replaced || editor !== session.editor) {
+    setSession({ file: props.file, collaboration, worker, editor });
+  }
   return (
     <LocaleProvider i18n={props.i18n}>
-      {'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && props.readOnly ? (
+      {worker && !editor ? (
         <XlsxSessionViewer {...props as XlsxWorkerViewerProps} />
-      ) : 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen && !props.readOnly ? (
+      ) : worker ? (
         <XlsxWorkerEditor {...props as XlsxWorkerEditorProps} />
       ) : (
         <XlsxEditorContent {...props as XlsxEditorProps} />

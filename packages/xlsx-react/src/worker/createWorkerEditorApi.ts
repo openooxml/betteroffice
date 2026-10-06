@@ -1,9 +1,9 @@
 import type {
-  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
+  CellEdit, CellInputEdit, EditResult, Selection, WorkbookHandle, WorkbookEditPeer, WorkbookReplayOp, XlsxEditResult, XlsxReadRequest, XlsxReadResult,
 } from '@betteroffice/xlsx';
-import { WorkbookEditPeerFailedError, WorkbookPeerHydrationError } from '@betteroffice/xlsx';
-import { WorkbookRecoveryRefusal, workbookEditPeerOperations } from '../../../xlsx/src/session/editPeerInternals';
-import type { WorkbookReplayOp } from '../../../xlsx/src/session/replay';
+import {
+  WorkbookEditPeerFailedError, WorkbookPeerHydrationError, WorkbookRecoveryRefusal, workbookEditPeerOperations,
+} from '@betteroffice/xlsx';
 import type { XlsxWorkerViewerApi } from '../XlsxEditor';
 import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
@@ -123,7 +123,8 @@ export function createWorkerEditorApi(
           ('ok' in value && value.ok === false || 'error' in value && value.error)) {
           await discardPreview?.();
           markApplied.check();
-          markApplied.refuse(new WorkerInputRefusal('Cell operation was refused'), mutation);
+          const failure = value as { failure?: { message: string }; error?: Error };
+          markApplied.refuse(new WorkerInputRefusal(failure.failure?.message ?? failure.error?.message ?? 'Cell operation was refused'), mutation);
         }
         return session.current ? value : null;
       }, { kind: 'host', recover: mutation, barrier: reason === 'save', prepare: prepare ? async () => {
@@ -255,10 +256,11 @@ export function createWorkerEditorApi(
       return ordered('validate-edits', () => bridge().readOnly() ? refusal() : requirePeer().peer.validateEdits(input));
     },
     applyEdits: (request) => {
+      const editable = !bridge().readOnly();
       const input = structuredClone(request);
       const op: WorkbookReplayOp = { method: 'applyEdits', args: [input] };
       return ordered('apply-edits', (markApplied) => {
-        if (bridge().readOnly() && !session.retiring) return refusal();
+        if (!editable) return refusal();
         let result: XlsxEditResult;
         try {
           result = session.recovering || !bridge().previewEdits ? requirePeer().edits.applyEdits(input) :
@@ -271,7 +273,7 @@ export function createWorkerEditorApi(
         if (result.ok) markApplied();
         if (!session.retiring) bridge().apply(result, op);
         return result;
-      }, true, () => previewRequest(input, op));
+      }, true, () => editable ? previewRequest(input, op) : undefined);
     },
     cell: (sheet, row, col) => readable() ? session.peer!.cell(sheet, row, col) : null,
     cellAsync: (sheet, row, col) => ordered('cell', () => requirePeer().peer.cell(sheet, row, col)),
@@ -284,16 +286,17 @@ export function createWorkerEditorApi(
       return synchronous((markApplied) => editCell(sheet, row, col, input, markApplied));
     },
     editCellAsync: (sheet, row, col, input) => {
+      const editable = !bridge().readOnly();
       const op: WorkbookReplayOp = { method: 'editCell', args: [sheet, row, col, input] };
       return ordered('edit-cell', (markApplied) => {
-        if (bridge().readOnly() && !session.retiring) return { error: new Error('The editor is read-only') };
+        if (!editable) return { error: new Error('The editor is read-only') };
         if (!bridge().previewEdits || session.recovering) return { result: editCell(sheet, row, col, input, markApplied) };
         markApplied.check();
         const result = workbookEditPeerOperations(requirePeer().edits).applyQueuedOp(op) as EditResult;
         markApplied();
         if (!session.retiring) bridge().apply(result, op);
         return { result };
-      }, true, () => bridge().previewEdits?.(sheet, [{ row, col, input }], op)).then((outcome) => {
+      }, true, () => editable ? bridge().previewEdits?.(sheet, [{ row, col, input }], op) : undefined).then((outcome) => {
         if (outcome?.error) throw outcome.error;
         return outcome?.result ?? null;
       });

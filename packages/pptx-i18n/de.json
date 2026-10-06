@@ -1,5 +1,13 @@
 {
   "_lang": "de",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Editor wird vorbereitet. Die Bearbeitung ist in Kürze verfügbar.",
+    "failed": "Die Bearbeitung ist nicht verfügbar. Laden Sie die wiederhergestellte Präsentation herunter.",
+    "disabled": "Diese Funktion ist in diesem Bearbeitungsmodus nicht verfügbar.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Speichern",

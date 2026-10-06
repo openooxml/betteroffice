@@ -32,6 +32,15 @@ export async function sessionWasmFactory<Client>(clientPath: string, workerPath:
           }));
           build.onLoad({ filter: /\/wasm\/loader\.ts$/ }, () => ({
             contents: `
+              export class PresentationPeerError extends Error {
+                constructor(code, message) { super(message); this.name = 'PresentationPeerError'; this.code = code; }
+              }
+              export const openPresentationReplayBaseline = () => { throw new Error('openPresentationReplayBaseline is not stubbed'); };
+              export const presentationPeerHydration = () => { throw new Error('presentationPeerHydration is not stubbed'); };
+              export const presentationPeerMetadata = () => { throw new Error('presentationPeerMetadata is not stubbed'); };
+              export const presentationPeerDisplayListJson = () => { throw new Error('presentationPeerDisplayListJson is not stubbed'); };
+              export const registerPresentationPeerFonts = () => { throw new Error('registerPresentationPeerFonts is not stubbed'); };
+              export const replayPresentation = () => { throw new Error('replayPresentation is not stubbed'); };
               export const initWasm = (source) => testHarness.initialize(source);
               export const openPresentation = (bytes) => testHarness.open(bytes);
               export const openWorkbook = (bytes) => testHarness.open(bytes);
