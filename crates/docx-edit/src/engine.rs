@@ -2650,10 +2650,7 @@ fn normalize_retained_block(
 }
 
 fn retain_shape_measurements(next: &mut LayoutBlock, previous: &LayoutBlock) {
-    fn shape(
-        next: &mut docx_layout::types::ShapeBlock,
-        previous: &docx_layout::types::ShapeBlock,
-    ) {
+    fn shape(next: &mut docx_layout::types::ShapeBlock, previous: &docx_layout::types::ShapeBlock) {
         next.inner_measures.clone_from(&previous.inner_measures);
         for (next, previous) in next.children.iter_mut().zip(&previous.children) {
             shape(next, previous);
@@ -7374,7 +7371,10 @@ impl EngineSession {
                         && patch.epochs.1 == self.doc_epoch()
                         && patch.block_count_before == previous.measured.len()
                         && patch.block_count_after == blocks.len()
-                }) => None,
+                }) =>
+                {
+                    None
+                }
                 _ => return Ok(None),
             },
             None => None,
@@ -7599,9 +7599,9 @@ impl EngineSession {
             .enumerate()
             .map(|(index, entry)| {
                 if reused[index]
-                    && measurement_patch.as_ref().is_some_and(|patch| {
-                        index >= patch.replaced.end && patch.shift.delta != 0
-                    })
+                    && measurement_patch
+                        .as_ref()
+                        .is_some_and(|patch| index >= patch.replaced.end && patch.shift.delta != 0)
                 {
                     measured_parts_fingerprint(
                         &entry.as_ref().expect("normalized retained block").block,
@@ -7697,7 +7697,10 @@ impl EngineSession {
                         && patch.epochs.1 == self.doc_epoch()
                         && patch.block_count_before == previous.measured.len()
                         && patch.block_count_after == blocks.len()
-                }) => None,
+                }) =>
+                {
+                    None
+                }
                 _ => return Ok(None),
             },
             None => None,
@@ -7878,9 +7881,10 @@ impl EngineSession {
                     BODY_MEASUREMENT_WORK.with(|work| work.borrow_mut().0.push(index));
                 }
             }
-            if measurement_patch.as_ref().is_some_and(|patch| {
-                index >= patch.replaced.end && patch.shift.delta != 0
-            }) {
+            if measurement_patch
+                .as_ref()
+                .is_some_and(|patch| index >= patch.replaced.end && patch.shift.delta != 0)
+            {
                 block_fingerprints[index] = match measured_fingerprint(&measured[index]) {
                     Ok(fingerprint) => fingerprint,
                     Err(error) => {
@@ -14329,7 +14333,12 @@ mod tests {
                 &"wrapping words ".repeat(80),
             );
             let expected = certified_float_dirty_segment(&engine);
-            let replaced = engine.measurement_patch().as_ref().unwrap().replaced.clone();
+            let replaced = engine
+                .measurement_patch()
+                .as_ref()
+                .unwrap()
+                .replaced
+                .clone();
             assert_eq!(
                 certified_float_layout(&engine, &request, trigger),
                 (expected, 0),
