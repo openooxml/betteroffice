@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'bun:test';
 import type { ComponentProps } from 'react';
 import { PptxPeerNotReadyError, PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError } from '@betteroffice/pptx';
-import type { PptxWorkerEditorAccess, PptxWorkerEditorSession, PptxWorkerEditorState } from '@betteroffice/pptx';
+import type { PptxEditRequest, PptxWorkerEditorAccess, PptxWorkerEditorSession, PptxWorkerEditorState } from '@betteroffice/pptx';
 import { PptxEditor } from '../PptxEditor';
 import type { PptxEditorApi, PptxEditorProps, PptxWorkerViewerApi } from '../PptxEditor';
 import { createWorkerEditorApi, type PptxWorkerEditorApi } from './createWorkerEditorApi';
@@ -29,6 +29,7 @@ function setup(gestureActive: () => boolean = () => false) {
   } as unknown as PptxWorkerEditorSession;
   const ui = {
     commands: { execute: mock(async () => ({ ok: true, status: 'executed' })) },
+    applyEdits: mock(async (request: PptxEditRequest) => peer.applyEdits(request)),
     flushPendingInput: mock(async () => {}), refresh: mock(() => {}), refreshProposals: mock(() => {}),
     clearSelection: mock(() => {}), focus: mock(() => {}), goToSlide: mock(() => true),
     getPositionAtPoint: mock(() => null), selectText: mock(() => true),
@@ -77,12 +78,13 @@ test('async_access_never_exposes_raw_peer', async () => {
 });
 
 test('applyEdits_before_hydration_is_not_queued', async () => {
-  const { api, peer, stage } = setup();
+  const { api, peer, ui, stage } = setup();
   stage('hydrating');
   await expect(api.applyEdits({ expectVersion: 'v1', steps: [] })).rejects.toBeInstanceOf(PptxPeerNotReadyError);
   stage('ready');
   expect(peer.applyEdits).not.toHaveBeenCalled();
   const pending = api.applyEdits({ expectVersion: 'v1', steps: [] });
+  expect(ui.applyEdits).toHaveBeenCalledTimes(1);
   expect(peer.applyEdits).toHaveBeenCalledTimes(1);
   await pending;
 });

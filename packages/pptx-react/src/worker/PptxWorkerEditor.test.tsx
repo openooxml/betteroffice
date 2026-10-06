@@ -27,7 +27,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function session(ready = true) {
+function session(ready = true, slideCount = 1) {
   let text = 'x';
   let epoch = 0;
   const listeners = new Set<() => void>();
@@ -42,11 +42,13 @@ function session(ready = true) {
       flipH: false, flipV: false, geometry: 'rect', adjustValues: {}, placeholder: null, fill: null,
       resolvedFillColor: null, outline: null, resolvedOutlineColor: null, mediaPartPath: null,
       graphic: null, textStories: [story()], children: [] }] }] };
+  for (let index = 1; index < slideCount; index += 1)
+    snapshot.slides.push({ ...snapshot.slides[0], id: `s${index + 1}`, shapes: [] });
   const peerFrame: SlideDisplayList = { contractVersion: 1, width: 960, height: 540, primitives: [] };
   const state: PptxWorkerEditorState = { stage: ready ? 'ready' : 'hydrating', sequence: 0,
     acknowledgedSequence: 0, version: 'v0', projection: { format: 'pptx', stage: 'ready', version: 0,
       dirty: false, size: { width: snapshot.widthEmu, height: snapshot.heightEmu },
-      slides: [{ id: 's', index: 0, name: null, layoutPartPath: null }] } };
+      slides: snapshot.slides.map((slide, index) => ({ id: slide.id, index, name: null, layoutPartPath: null })) } };
   let current = state;
   const publish = () => { for (const listener of listeners) listener(); };
   const access = {
@@ -70,16 +72,25 @@ function session(ready = true) {
       methods.push(op.method);
       if (op.method === 'insertText') text = text.slice(0, op.args[1]) + op.args[2] + text.slice(op.args[1]);
       if (op.method === 'setSlideNotes') snapshot.slides[0].notes = op.args[1];
-      const sequence = current.sequence + 1;
-      current = { ...current, sequence, acknowledgedSequence: sequence, version: `v${sequence}` };
+      const batch = op.method === 'applyEdits' ? op.args[0] : undefined;
+      const refused = !!batch && batch.expectVersion !== current.version;
+      const applied = !refused && (!batch || batch.steps.length > 0);
+      if (batch && applied) for (const step of batch.steps) {
+        if (step.op === 'setSlideNotes') snapshot.slides[0].notes = step.text;
+      }
+      const sequence = current.sequence + (refused ? 0 : 1);
+      current = { ...current, sequence, acknowledgedSequence: sequence, version: applied ? `v${sequence}` : current.version };
       publish();
-      return { sequence, consumed: true, revision: sequence, version: current.version!, engineVersion: current.version!,
-        outcome: { result: op.method === 'applyEdits' ? { ok: true, version: current.version, applied: 1 } : true,
-          applied: true, changedTargets: [], canUndo: true, canRedo: false } };
+      return { sequence, consumed: !refused, revision: sequence, version: current.version!, engineVersion: current.version!,
+        outcome: { result: batch ? refused
+          ? { ok: false, version: current.version, failure: { code: 'stale-version', message: 'Version changed' } }
+          : { ok: true, version: current.version, applied } : true,
+          applied, changedTargets: [], canUndo: true, canRedo: false } };
     }),
     flush: mock(async () => {}), saveAsync: mock(async () => new TextEncoder().encode(text)),
-    frame: mock(async () => {
-      const frame = { slideId: 's', slideIndex: 0, sequence: current.sequence, version: current.version!,
+    frame: mock(async (slideId: string) => {
+      const frame = { slideId, slideIndex: snapshot.slides.findIndex((slide) => slide.id === slideId),
+        sequence: current.sequence, version: current.version!,
         epoch: ++epoch, media: new Map(), displayList: { ...peerFrame, primitives: [] } };
       frames.push(frame);
       return frame;
@@ -171,9 +182,80 @@ test('preparing_state_disables_every_edit_entry', async () => {
   fireEvent.keyDown(view.getByRole('application'), { key: 'a' });
   expect(value.methods).toEqual([]);
   expect(ready).not.toHaveBeenCalled();
-  expect(view.getByTestId('pptx-worker-status').textContent).toContain('Preparing editor');
+  expect(view.getByTestId('pptx-worker-status').textContent).toBe('Preparing editor. Editing will be available shortly.');
   await act(async () => { value.hydrate(); });
   await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+});
+
+test('hydration_keeps_navigation_and_the_painted_worker_slide', async () => {
+  const value = session(false, 2);
+  open(value);
+  const ready = mock(() => {});
+  let run!: EditablePresentation;
+  let adopted!: PptxWorkerEditorFrame;
+  const didPaint = EditablePresentation.prototype.didPaint;
+  const spy = spyOn(EditablePresentation.prototype, 'didPaint').mockImplementation(function (
+    this: EditablePresentation, frame, navigation
+  ) {
+    if (this.currentPaint(frame, navigation)) { run = this; adopted = frame; }
+    didPaint.call(this, frame, navigation);
+  });
+  restorers.push(() => spy.mockRestore());
+  const view = render(<PptxEditor fonts={[]} file={file} initialSlide={1} experimentalWorkerOpen onReady={ready} />);
+  await waitFor(() => expect(view.container.querySelectorAll('aside button')).toHaveLength(2));
+  const second = view.container.querySelectorAll('aside button')[1];
+  fireEvent.click(second);
+  await waitFor(() => expect(second.getAttribute('aria-current')).toBe('page'));
+  await waitFor(() => expect(adopted?.slideId).toBe('s2'));
+  expect(ready).not.toHaveBeenCalled();
+  await act(async () => { value.hydrate(); });
+  await waitFor(() => expect(ready).toHaveBeenCalledTimes(1));
+  expect(second.getAttribute('aria-current')).toBe('page');
+  expect(run.active).toBe(1);
+  expect(adopted.slideId).toBe('s2');
+  expect(adopted.slideIndex).toBe(1);
+  expect(adopted).toBe(run.frame(1)!);
+  expect(painted).toContain(adopted.displayList);
+  expect(painted).not.toContain(value.peerFrame);
+});
+
+test('applyEdits_publishes_only_applied_batches_and_waits_for_replay', async () => {
+  const value = session();
+  open(value);
+  let api!: PptxWorkerEditorApi;
+  const changes = mock((_snapshot: DeckSnapshot) => {});
+  render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen onChange={changes}
+    onReady={(ready) => { api = ready; }} />);
+  await waitFor(() => expect(api).toBeDefined());
+  const held = deferred<void>();
+  const flush = spyOn(value.owner, 'flush').mockImplementationOnce(() => held.promise);
+  restorers.push(() => flush.mockRestore());
+  let settled = false;
+  let pending!: ReturnType<PptxWorkerEditorApi['applyEdits']>;
+  await act(async () => {
+    pending = api.applyEdits({ expectVersion: value.owner.state.version!,
+      steps: [{ op: 'setSlideNotes', target: { slideId: 's' }, text: 'Batch notes' }] });
+    void pending.then(() => { settled = true; });
+  });
+  await waitFor(() => expect(flush).toHaveBeenCalledTimes(1));
+  expect(changes).toHaveBeenCalledTimes(1);
+  expect(changes.mock.calls[0][0].slides[0].notes).toBe('Batch notes');
+  expect(settled).toBe(false);
+  await act(async () => { held.resolve(); expect(await pending).toMatchObject({ ok: true, applied: true }); });
+  expect(settled).toBe(true);
+  expect(changes).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    expect(await api.applyEdits({ expectVersion: value.owner.state.version!, steps: [] }))
+      .toMatchObject({ ok: true, applied: false });
+  });
+  expect(changes).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    expect(await api.applyEdits({ expectVersion: 'stale', steps: [] }))
+      .toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  });
+  expect(changes).toHaveBeenCalledTimes(1);
+  expect(value.methods).toEqual(['applyEdits', 'applyEdits', 'applyEdits']);
+  expect(flush).toHaveBeenCalledTimes(3);
 });
 
 test('commands_plugins_notes_and_keyboard_share_replay', async () => {
@@ -283,7 +365,7 @@ test('proposal_visuals_and_slideshow_refuse_with_reason', async () => {
   for (const id of ['exportPng', 'slideshow', 'proposalDiff', 'proposalSelect'] as const) {
     const state = api.commands.getState(id);
     expect(state.enabled).toBe(false);
-    if (!state.enabled) expect(state.disabledReason.message).toContain('worker editor');
+    if (!state.enabled) expect(state.disabledReason.message).toBe('This feature is unavailable in this editing mode.');
   }
   expect(view.queryByTestId('pptx-canvas-review-toolbar')).toBeNull();
   expect(value.access).not.toHaveProperty('exportMarkdown');

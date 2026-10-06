@@ -74,9 +74,8 @@ export function createWorkerEditorApi(
     findText: (request) => read((value) => value.findText(request)),
     validateEdits: (request) => read((value) => value.validateEdits(request)),
     applyEdits: async (request) => {
-      const value = admit();
-      const result = value.applyEdits(request);
-      ui.refresh();
+      admit();
+      const result = await ui.applyEdits(request);
       await ui.flushPendingInput();
       current();
       return result;

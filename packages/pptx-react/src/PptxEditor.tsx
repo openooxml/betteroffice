@@ -1131,7 +1131,7 @@ export function PptxEditorContent({
           });
           const requestedSlide = initialSlideRef.current;
           refreshAt(
-            typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
+            worker ? worker.active : typeof requestedSlide === 'number' && Number.isInteger(requestedSlide)
               ? requestedSlide - 1
               : 0,
             false,

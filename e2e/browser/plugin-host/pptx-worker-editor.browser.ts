@@ -43,7 +43,7 @@ for (const dpr of [1, 2]) {
       await page.goto('/pptx-worker-editor.html');
       await page.waitForFunction(() => '__pptxWorkerEditor' in window);
       await page.evaluate(() => window.__pptxWorkerEditor.mounted);
-      await expect(page.getByTestId('pptx-worker-status')).toHaveText(/Preparing editor/);
+      await expect(page.getByTestId('pptx-worker-status')).toHaveText('Preparing editor. Editing will be available shortly.');
       expect(await page.evaluate(() => window.__pptxWorkerEditor.state()))
         .toEqual({ hydrated: false, sequence: 0, acknowledged: 0, held: 1 });
       const stage = page.getByRole('application');
@@ -102,14 +102,14 @@ for (const dpr of [1, 2]) {
       for (const id of ['pptx-export-png', 'pptx-present']) {
         const control = page.getByTestId(id);
         await expect(control).toHaveAttribute('aria-disabled', 'true');
-        await expect(control).toHaveAttribute('title', /worker editor/);
+        await expect(control).toHaveAttribute('title', 'This feature is unavailable in this editing mode.');
       }
       await page.evaluate(() => window.__pptxWorkerEditor.proposal());
       await page.getByTestId('pptx-proposals-button').click();
       const preview = page.getByTestId('pptx-proposal-preview');
       await expect(preview).toBeDisabled();
-      await expect(preview).toHaveAttribute('title', /worker editor/);
-      await expect(page.getByTestId('pptx-proposals-panel').getByText(/worker editor/)).toBeVisible();
+      await expect(preview).toHaveAttribute('title', 'This feature is unavailable in this editing mode.');
+      await expect(page.getByTestId('pptx-proposals-panel').getByText('This feature is unavailable in this editing mode.', { exact: true })).toBeVisible();
       await preview.click({ force: true });
       await expect(page.getByTestId('pptx-proposal-preview-dialog')).toHaveCount(0);
       await page.getByTestId('pptx-proposals-panel').getByRole('button', { name: 'Close', exact: true }).click();

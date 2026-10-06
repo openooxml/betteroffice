@@ -2,9 +2,9 @@
   "_lang": "en",
   "worker": {
     "previousRecovery": "Download previous presentation recovery",
-    "preparing": "Preparing editor. Editing is unavailable until hydration completes.",
-    "failed": "Worker stopped. Download the recovered presentation.",
-    "disabled": "Unavailable in the worker editor: this feature requires in-thread painting or export.",
+    "preparing": "Preparing editor. Editing will be available shortly.",
+    "failed": "Editing is unavailable. Download the recovered presentation.",
+    "disabled": "This feature is unavailable in this editing mode.",
     "recovery": "Download recovered presentation",
     "image": "Preparing image"
   },
