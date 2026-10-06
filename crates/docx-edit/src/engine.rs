@@ -54,6 +54,7 @@ use crate::structured::{
 
 #[derive(Debug)]
 struct LoweredStory {
+    generation: u64,
     doc_epoch: u64,
     env: RenderEnv,
     /// The document's media sources the lowering read.
@@ -93,6 +94,7 @@ impl LoweredStory {
 
 #[derive(Debug, Default)]
 struct RenderState {
+    generation: u64,
     stories: HashMap<String, LoweredStory>,
     cache_hits: u64,
     cache_misses: u64,
@@ -297,6 +299,7 @@ struct PreparedRegionLayout {
     main_body: bool,
     block_fingerprints: Option<Vec<Fingerprint>>,
     lowered_from: Option<Rc<SharedBlocks>>,
+    lowered_generation: Option<u64>,
     retain_matches: Vec<Option<BlockCertificate>>,
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     has_floats: bool,
@@ -387,6 +390,7 @@ impl Drop for MovedArenaGuard<'_> {
         if !pagination.moved_blocks.is_empty() {
             pagination.input = None;
             pagination.measured_with = None;
+            pagination.measurement_patch = None;
             pagination.set_font_dependencies(Vec::new(), None);
             pagination.retain_matches.clear();
             pagination.moved_blocks.clear();
@@ -1194,6 +1198,49 @@ fn extend_input_for_header_footer(
     }
 }
 
+#[derive(Debug)]
+struct MeasurementPatch {
+    base_generation: u64,
+    current_generation: u64,
+    epochs: (u64, u64),
+    block_count_before: usize,
+    block_count_after: usize,
+    replaced: std::ops::Range<usize>,
+    old_blocks: Vec<Rc<LayoutBlock>>,
+    shift: crate::bridge::preview::ParagraphEdit,
+}
+
+impl MeasurementPatch {
+    fn advance(
+        mut self,
+        generations: (u64, u64),
+        epochs: (u64, u64),
+        block_count: usize,
+        replaced: &std::ops::Range<usize>,
+        shift: &crate::bridge::preview::ParagraphEdit,
+    ) -> Option<Self> {
+        if self.base_generation == self.current_generation
+            || self.current_generation != generations.0
+            || self.epochs.1 != epochs.0
+            || self.block_count_before != self.block_count_after
+            || self.block_count_after != block_count
+            || self.replaced != *replaced
+            || self.old_blocks.len() != replaced.len()
+            || self.shift.raw.start != shift.raw.start
+            || self.shift.pm.start != shift.pm.start
+            || i64::from(self.shift.raw.end).checked_add(self.shift.delta)
+                != Some(i64::from(shift.raw.end))
+            || self.shift.pm.end.checked_add_signed(self.shift.delta) != Some(shift.pm.end)
+        {
+            return None;
+        }
+        self.shift.delta = self.shift.delta.checked_add(shift.delta)?;
+        self.current_generation = generations.1;
+        self.epochs.1 = epochs.1;
+        Some(self)
+    }
+}
+
 #[derive(Debug, Default)]
 struct PaginationState {
     input: Option<LayoutInput>,
@@ -1201,6 +1248,8 @@ struct PaginationState {
     measured_with: Option<u64>,
     /// The body lowering a float document's `input` arena was measured from.
     lowered_from: Option<Rc<SharedBlocks>>,
+    lowered_generation: Option<u64>,
+    measurement_patch: Option<MeasurementPatch>,
     /// The doc epoch and lowering map a resident edit path built `input` from.
     input_lowering: Option<(u64, Rc<LoweringMap>)>,
     retain_matches: Vec<Option<BlockCertificate>>,
@@ -1435,7 +1484,7 @@ pub struct EngineSession {
     #[cfg(test)]
     font_dependency_work: RefCell<FontDependencyWork>,
     regions: RefCell<Option<ResidentRegionState>>,
-    pagination: RefCell<PaginationState>,
+    pagination: Rc<RefCell<PaginationState>>,
     display: RefCell<DisplayState>,
     /// The resident caret head and the body or nested body story it lies in.
     resident_caret_head: RefCell<Option<(String, StickyIndex)>>,
@@ -3527,15 +3576,18 @@ impl EngineSession {
         let relayout_trigger = Rc::new(Cell::new(RelayoutTrigger::Open));
         let interactive_pending = Rc::new(Cell::new(false));
         let region_retention_valid = Rc::new(Cell::new(false));
+        let pagination = Rc::new(RefCell::new(PaginationState::default()));
         let observer_epoch = Rc::clone(&doc_epoch);
         let observer_trigger = Rc::clone(&relayout_trigger);
         let observer_interactive = Rc::clone(&interactive_pending);
         let observer_retention = Rc::clone(&region_retention_valid);
+        let observer_pagination = Rc::clone(&pagination);
         let host_edit_depth = Arc::clone(&doc.host_edit_depth);
         let observer = doc
             .yrs_doc()
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observer_pagination.borrow_mut().measurement_patch = None;
                     observer_epoch.set(observer_epoch.get().wrapping_add(1));
                     let bulk = host_edit_depth.load(std::sync::atomic::Ordering::Relaxed) != 0
                         || txn.origin() == Some(&yrs::Origin::from(crate::batch::HOST_ORIGIN));
@@ -3566,7 +3618,7 @@ impl EngineSession {
             #[cfg(test)]
             font_dependency_work: RefCell::new(FontDependencyWork::default()),
             regions: RefCell::new(None),
-            pagination: RefCell::new(PaginationState::default()),
+            pagination,
             display: RefCell::new(DisplayState::default()),
             resident_caret_head: RefCell::new(None),
             capture: RefCell::new(None),
@@ -3668,6 +3720,7 @@ impl EngineSession {
     fn clear_region_retention(&self) {
         self.region_retention_valid.set(false);
         let mut pagination = self.pagination.borrow_mut();
+        pagination.measurement_patch = None;
         if !pagination.moved_blocks.is_empty() {
             pagination.input = None;
             pagination.measured_with = None;
@@ -3697,6 +3750,8 @@ impl EngineSession {
         pagination.input = None;
         pagination.measured_with = None;
         pagination.lowered_from = None;
+        pagination.lowered_generation = None;
+        pagination.measurement_patch = None;
         pagination.input_lowering = None;
         pagination.retain_matches = Vec::new();
         pagination.moved_blocks = BTreeSet::new();
@@ -3774,6 +3829,7 @@ impl EngineSession {
             None
         };
         let mut attrs = None;
+        let measurement_patch = self.pagination.borrow_mut().measurement_patch.take();
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
             Some(text) => self.doc.insert_text_observed(
@@ -3859,12 +3915,26 @@ impl EngineSession {
                         epochs: (before, self.doc_epoch()),
                     })
                 });
+            if measurement_patch.is_some()
+                && range.story == "body"
+                && lowered.local.edit.is_some()
+                && lowered.preview_edit.is_some()
+                && lowered.media == self.doc.media_sources()
+                && lowered.local.matches_source(&self.doc)
+            {
+                self.pagination.borrow_mut().measurement_patch =
+                    measurement_patch.filter(|patch| {
+                        patch.current_generation == lowered.generation && patch.epochs.1 == before
+                    });
+            }
         }
         Ok(receipt)
     }
 
     fn patch_lowered_body(&self, epoch: u64, env: &RenderEnv) -> Option<()> {
+        let previous_patch = self.pagination.borrow_mut().measurement_patch.take();
         let mut render = self.render.borrow_mut();
+        let generation = render.generation.wrapping_add(1);
         let lowered = render.stories.get_mut("body")?;
         let edit = lowered.local.edit.take()?;
         let float_reuse = {
@@ -3880,16 +3950,39 @@ impl EngineSession {
         {
             return None;
         }
-        {
+        let slot = lowered.local.edit_slot(&edit)?;
+        let replaced = slot..slot.checked_add(1)?;
+        let block_count = lowered.blocks.len();
+        let old_blocks = vec![Rc::clone(lowered.blocks.shared().get(slot)?)];
+        let (origin_matches, previous_patch) = {
             let mut pagination = self.pagination.borrow_mut();
+            let measured_matches = pagination.measured_with.is_some()
+                && pagination
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| input.measured.len() == block_count);
+            let origin_matches = measured_matches
+                && pagination.doc_epoch == lowered.doc_epoch
+                && pagination.lowered_generation == Some(lowered.generation)
+                && pagination
+                    .lowered_from
+                    .as_ref()
+                    .is_some_and(|blocks| Rc::ptr_eq(blocks, &lowered.blocks));
+            let previous_patch = previous_patch.filter(|patch| {
+                measured_matches
+                    && pagination.doc_epoch == patch.epochs.0
+                    && pagination.lowered_from.is_none()
+                    && pagination.lowered_generation.is_none()
+            });
             pagination.input_lowering = None;
             pagination.lowered_from = None;
-        }
+            pagination.lowered_generation = None;
+            (origin_matches, previous_patch)
+        };
         let blocks = Rc::get_mut(&mut lowered.blocks)?;
         let map = Rc::get_mut(&mut lowered.map)?;
         let revealable = Rc::get_mut(&mut lowered.revealable_blocks)?;
         if self.relayout_trigger.get().uses_region_path() {
-            let slot = lowered.local.edit_slot(&edit)?;
             for certificate in self
                 .pagination
                 .borrow_mut()
@@ -3904,6 +3997,33 @@ impl EngineSession {
         let shift = lowered
             .local
             .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
+        let measurement_patch = if origin_matches {
+            Some(MeasurementPatch {
+                base_generation: lowered.generation,
+                current_generation: generation,
+                epochs: edit.epochs,
+                block_count_before: block_count,
+                block_count_after: blocks.len(),
+                replaced,
+                old_blocks,
+                shift: crate::bridge::preview::ParagraphEdit {
+                    raw: shift.raw.clone(),
+                    pm: shift.pm.clone(),
+                    delta: shift.delta,
+                },
+            })
+        } else {
+            previous_patch.and_then(|patch| {
+                patch.advance(
+                    (lowered.generation, generation),
+                    edit.epochs,
+                    blocks.len(),
+                    &replaced,
+                    &shift,
+                )
+            })
+        };
+        lowered.generation = generation;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
         lowered.preview_edit = None;
@@ -3917,6 +4037,8 @@ impl EngineSession {
                 lowered.preview_paragraph_edits.push(shift);
             }
         }
+        render.generation = generation;
+        self.pagination.borrow_mut().measurement_patch = measurement_patch;
         Some(())
     }
 
@@ -3930,6 +4052,7 @@ impl EngineSession {
         {
             return None;
         }
+        self.pagination.borrow_mut().measurement_patch = None;
         let mut previous = lowered.env.clone();
         previous.revision_preview = env.revision_preview.clone();
         let changed = lowered
@@ -3972,6 +4095,13 @@ impl EngineSession {
             Some(())
         })();
         if patched.is_some() {
+            let generation = render.generation.wrapping_add(1);
+            render
+                .stories
+                .get_mut("body")
+                .expect("resident body exists after preview patch")
+                .generation = generation;
+            render.generation = generation;
             render.preview_patches = render.preview_patches.wrapping_add(1);
         } else {
             render.preview_fallbacks = render.preview_fallbacks.wrapping_add(1);
@@ -4026,6 +4156,9 @@ impl EngineSession {
         epoch: u64,
         env: &RenderEnv,
     ) -> Result<(), BridgeError> {
+        if story == "body" {
+            self.pagination.borrow_mut().measurement_patch = None;
+        }
         let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
@@ -4051,10 +4184,13 @@ impl EngineSession {
             crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
         };
         let mut render = self.render.borrow_mut();
+        render.generation = render.generation.wrapping_add(1);
+        let generation = render.generation;
         render.cache_misses = render.cache_misses.wrapping_add(1);
         render.stories.insert(
             story.to_owned(),
             LoweredStory {
+                generation,
                 doc_epoch: epoch,
                 env: env.clone(),
                 media: self.doc.media_sources(),
@@ -4912,10 +5048,25 @@ impl EngineSession {
         ))
         .map(|bytes| hash_bytes(&bytes))
         .map_err(|error| format!("fingerprint measurement config: {error}"))?;
+        {
+            let mut pagination = self.pagination.borrow_mut();
+            if pagination.measurement_patch.is_some()
+                && (pagination.measured_with != Some(measurement_fingerprint)
+                    || pagination.measured_font_chains.as_ref() != Some(&measurement.font_chains)
+                    || self
+                        .regions
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|state| state.fonts != fonts))
+            {
+                pagination.measurement_patch = None;
+            }
+        }
         let resident_body = body_story.is_some();
         let main_body = body_story.as_deref() == Some("body");
         let mut block_fingerprints: Option<Vec<Fingerprint>> = None;
         let mut lowered_from = None;
+        let mut lowered_generation = None;
         let mut retain_matches = Vec::new();
         let mut input_lowering = None;
         let mut has_floats = false;
@@ -4974,13 +5125,11 @@ impl EngineSession {
                     },
                 )
                 .map_err(|error| error.to_string())??;
-            if trigger.uses_region_path() || has_floats {
-                lowered_from = self
-                    .render
-                    .borrow()
-                    .stories
-                    .get(story)
-                    .map(|lowered| Rc::clone(&lowered.blocks));
+            if (trigger.uses_region_path() || has_floats)
+                && let Some(lowered) = self.render.borrow().stories.get(story)
+            {
+                lowered_from = Some(Rc::clone(&lowered.blocks));
+                lowered_generation = Some(lowered.generation);
             }
             match arena {
                 Arena::Reused(measured, fingerprints) => {
@@ -5084,6 +5233,7 @@ impl EngineSession {
             main_body,
             block_fingerprints,
             lowered_from,
+            lowered_generation,
             retain_matches,
             input_lowering,
             has_floats,
@@ -5154,6 +5304,7 @@ impl EngineSession {
             main_body,
             mut block_fingerprints,
             lowered_from,
+            lowered_generation,
             input_lowering,
             has_floats,
             measured_widths,
@@ -5444,6 +5595,8 @@ impl EngineSession {
         pagination.measured_with =
             (resident_body && !provisional).then_some(measurement_fingerprint);
         pagination.lowered_from = lowered_from;
+        pagination.lowered_generation = lowered_generation;
+        pagination.measurement_patch = None;
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
         pagination.measured_table_wrap_frames = measured_table_wrap_frames;
@@ -5494,6 +5647,7 @@ impl EngineSession {
             main_body,
             mut block_fingerprints,
             lowered_from,
+            lowered_generation,
             retain_matches,
             input_lowering,
             has_floats,
@@ -5953,6 +6107,8 @@ impl EngineSession {
         pagination.measured_with =
             (resident_body && !provisional).then_some(measurement_fingerprint);
         pagination.lowered_from = lowered_from;
+        pagination.lowered_generation = lowered_generation;
+        pagination.measurement_patch = None;
         pagination.retain_matches = retain_matches;
         pagination.input_lowering = input_lowering;
         pagination.measured_widths = measured_widths;
@@ -6768,6 +6924,8 @@ impl EngineSession {
         pagination.measured_with = None;
         pagination.set_font_dependencies(Vec::new(), None);
         pagination.lowered_from = None;
+        pagination.lowered_generation = None;
+        pagination.measurement_patch = None;
         pagination.input_lowering = None;
         if trigger.uses_region_path() {
             pagination.region_placements.clear();
@@ -7906,6 +8064,7 @@ impl EngineSession {
                 let mut pagination = self.pagination.borrow_mut();
                 pagination.block_fingerprints.clear();
                 pagination.measured_with = None;
+                pagination.measurement_patch = None;
                 pagination.set_font_dependencies(Vec::new(), None);
             }
             return Err(error);
@@ -13735,6 +13894,469 @@ mod tests {
     #[test]
     fn resident_local_lowering_without_floats_reuses_unchanged_measurements() {
         local_lowering_measurement_reuse(false);
+    }
+
+    fn measurement_patch_engine(font: u32) -> (EngineSession, String) {
+        let engine = paragraphs_engine(9632, 3);
+        engine.set_local_lowering(true);
+        let request = small_page_request(font);
+        engine
+            .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
+            .unwrap();
+        let render = engine.render.borrow();
+        let lowered = &render.stories["body"];
+        let pagination = engine.pagination.borrow();
+        assert!(!pagination.measured_with_floats);
+        assert_eq!(pagination.lowered_generation, Some(lowered.generation));
+        assert!(Rc::ptr_eq(
+            pagination.lowered_from.as_ref().unwrap(),
+            &lowered.blocks,
+        ));
+        drop(pagination);
+        drop(render);
+        (engine, request)
+    }
+
+    fn measurement_patch_offset(engine: &EngineSession, paragraph: usize) -> u32 {
+        let paragraph = engine.doc().paragraphs("body").unwrap().remove(paragraph);
+        engine
+            .doc()
+            .paragraph_index("body")
+            .unwrap()
+            .para_span(&paragraph.para_id)
+            .unwrap()
+            .0
+            + 1
+    }
+
+    fn measurement_patch_type(engine: &EngineSession, offset: u32, text: &str) {
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset),
+                Some(text),
+                true,
+            )
+            .unwrap();
+        let env = engine.render.borrow().stories["body"].env.clone();
+        assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_some());
+    }
+
+    #[test]
+    fn resident_local_lowering_records_measurement_patch() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, _) = measurement_patch_engine(font);
+        let offset = measurement_patch_offset(&engine, 1);
+        let before_epoch = engine.doc_epoch();
+        let (before_generation, old_block, suffix_start, block_count) = {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            (
+                lowered.generation,
+                Rc::clone(&lowered.blocks.shared()[1]),
+                lowered.blocks.get(2).unwrap().pm_start().unwrap(),
+                lowered.blocks.len(),
+            )
+        };
+        measurement_patch_type(&engine, offset, "x");
+        let render = engine.render.borrow();
+        let lowered = &render.stories["body"];
+        let pagination = engine.pagination.borrow();
+        let patch = pagination.measurement_patch.as_ref().unwrap();
+        assert_eq!(lowered.generation, before_generation + 1);
+        assert_eq!(patch.base_generation, before_generation);
+        assert_eq!(patch.current_generation, lowered.generation);
+        assert_eq!(patch.epochs, (before_epoch, engine.doc_epoch()));
+        assert_eq!(patch.block_count_before, block_count);
+        assert_eq!(patch.block_count_after, block_count);
+        assert_eq!(patch.replaced, 1..2);
+        assert_eq!(patch.shift.delta, 1);
+        assert_eq!(patch.shift.raw.start, offset - 1);
+        assert_eq!(patch.shift.pm.start as f64, old_block.pm_start().unwrap());
+        let LayoutBlock::Paragraph(old_paragraph) = old_block.as_ref() else {
+            panic!("edited slot is a paragraph");
+        };
+        assert_eq!(patch.shift.pm.end as f64, old_paragraph.pm_end.unwrap());
+        assert_eq!(patch.old_blocks.len(), 1);
+        assert!(Rc::ptr_eq(&patch.old_blocks[0], &old_block));
+        assert_eq!(patch.old_blocks[0], old_block);
+        assert!(!Rc::ptr_eq(&patch.old_blocks[0], &lowered.blocks.shared()[1]));
+        assert_eq!(
+            lowered.blocks.get(2).unwrap().pm_start(),
+            Some(suffix_start + 1.0),
+        );
+        assert!(pagination.lowered_from.is_none());
+        assert!(pagination.lowered_generation.is_none());
+    }
+
+    #[test]
+    fn resident_local_lowering_composes_measurement_patches() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, _) = measurement_patch_engine(font);
+        let offset = measurement_patch_offset(&engine, 1);
+        let before_epoch = engine.doc_epoch();
+        let before_generation = engine.render.borrow().stories["body"].generation;
+        let old_block = Rc::clone(&engine.render.borrow().stories["body"].blocks.shared()[1]);
+        let block_count = engine.render.borrow().stories["body"].blocks.len();
+        let suffix_start = engine.render.borrow().stories["body"]
+            .blocks
+            .get(2)
+            .unwrap()
+            .pm_start();
+        for (step, (text, delta)) in [("x", 1), ("😀", 3), ("y", 4)].into_iter().enumerate() {
+            measurement_patch_type(&engine, offset, text);
+            let pagination = engine.pagination.borrow();
+            let patch = pagination.measurement_patch.as_ref().unwrap();
+            assert_eq!(patch.base_generation, before_generation);
+            assert_eq!(patch.current_generation, before_generation + step as u64 + 1);
+            assert_eq!(patch.epochs, (before_epoch, engine.doc_epoch()));
+            assert_eq!(patch.block_count_before, block_count);
+            assert_eq!(patch.block_count_after, block_count);
+            assert_eq!(patch.replaced, 1..2);
+            assert_eq!(patch.shift.delta, delta);
+            assert_eq!(patch.old_blocks.len(), 1);
+            assert!(Rc::ptr_eq(&patch.old_blocks[0], &old_block));
+        }
+        engine
+            .edit_resident_text(crate::StoryRange::new("body", offset, offset + 1), None, true)
+            .unwrap();
+        let env = engine.render.borrow().stories["body"].env.clone();
+        assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_some());
+        let pagination = engine.pagination.borrow();
+        let patch = pagination.measurement_patch.as_ref().unwrap();
+        assert_eq!(patch.base_generation, before_generation);
+        assert_eq!(patch.current_generation, before_generation + 4);
+        assert_eq!(patch.epochs, (before_epoch, engine.doc_epoch()));
+        assert_eq!(patch.shift.delta, 3);
+        assert!(Rc::ptr_eq(&patch.old_blocks[0], &old_block));
+        assert_eq!(
+            engine.render.borrow().stories["body"]
+                .blocks
+                .get(2)
+                .unwrap()
+                .pm_start(),
+            suffix_start.map(|start| start + 3.0),
+        );
+    }
+
+    #[test]
+    fn resident_local_lowering_clears_incompatible_measurement_patches() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for case in [
+            "slot",
+            "generation",
+            "epochs",
+            "count",
+            "raw range",
+            "pm range",
+            "delta",
+        ] {
+            let (engine, _) = measurement_patch_engine(font);
+            let offset = measurement_patch_offset(&engine, 1);
+            measurement_patch_type(&engine, offset, "x");
+            {
+                let mut pagination = engine.pagination.borrow_mut();
+                let patch = pagination.measurement_patch.as_mut().unwrap();
+                match case {
+                    "slot" => {}
+                    "generation" => patch.current_generation += 1,
+                    "epochs" => patch.epochs.1 += 1,
+                    "count" => patch.block_count_after += 1,
+                    "raw range" => patch.shift.raw.end += 1,
+                    "pm range" => patch.shift.pm.end += 1,
+                    "delta" => patch.shift.delta = i64::MAX,
+                    _ => unreachable!(),
+                }
+            }
+            let offset = if case == "slot" {
+                measurement_patch_offset(&engine, 2)
+            } else {
+                offset
+            };
+            measurement_patch_type(&engine, offset, "y");
+            assert!(
+                engine.pagination.borrow().measurement_patch.is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn resident_local_lowering_requires_matching_measurement_origin() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for case in ["generation", "blocks", "epoch"] {
+            let (engine, _) = measurement_patch_engine(font);
+            {
+                let mut pagination = engine.pagination.borrow_mut();
+                match case {
+                    "generation" => *pagination.lowered_generation.as_mut().unwrap() += 1,
+                    "blocks" => {
+                        pagination.lowered_from = Some(Rc::new(SharedBlocks::default()));
+                    }
+                    "epoch" => pagination.doc_epoch += 1,
+                    _ => unreachable!(),
+                }
+            }
+            let offset = measurement_patch_offset(&engine, 1);
+            measurement_patch_type(&engine, offset, "x");
+            assert!(
+                engine.pagination.borrow().measurement_patch.is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn resident_measurement_patch_invalidations_clear_certificate() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for case in [
+            "full lowering",
+            "environment",
+            "media",
+            "undo",
+            "redo",
+            "paragraph split",
+            "retention",
+            "retention reset",
+            "measurement config",
+            "placement",
+        ] {
+            let (engine, request) = measurement_patch_engine(font);
+            let undo = crate::UndoSession::new();
+            undo.track(engine.doc());
+            let offset = measurement_patch_offset(&engine, 1);
+            measurement_patch_type(&engine, offset, "x");
+            undo.add_undo_barrier();
+            assert!(
+                engine.pagination.borrow().measurement_patch.is_some(),
+                "{case}"
+            );
+            let generation = engine.render.borrow().stories["body"].generation;
+            let env = engine.render.borrow().stories["body"].env.clone();
+            match case {
+                "full lowering" => {
+                    engine
+                        .lower_story_into_cache("body", engine.doc_epoch(), &env)
+                        .unwrap();
+                    assert_eq!(
+                        engine.render.borrow().stories["body"].generation,
+                        generation + 1,
+                    );
+                }
+                "environment" => {
+                    let mut env = env.clone();
+                    env.show_hidden_text = !env.show_hidden_text;
+                    engine.lower_story_json("body", &env).unwrap();
+                    assert_eq!(
+                        engine.render.borrow().stories["body"].generation,
+                        generation + 1,
+                    );
+                }
+                "media" => {
+                    engine.doc().set_media_sources(
+                        crate::media::MediaSources::from_json(
+                            r#"{"key":["1","2"],"parts":[["3",0]]}"#,
+                        )
+                        .unwrap(),
+                    );
+                    engine.lower_story_json("body", &env).unwrap();
+                    assert_eq!(
+                        engine.render.borrow().stories["body"].generation,
+                        generation + 1,
+                    );
+                }
+                "undo" => assert!(undo.undo()),
+                "redo" => {
+                    let patch = engine
+                        .pagination
+                        .borrow_mut()
+                        .measurement_patch
+                        .take()
+                        .unwrap();
+                    assert!(undo.undo());
+                    assert!(engine.pagination.borrow().measurement_patch.is_none());
+                    engine.pagination.borrow_mut().measurement_patch = Some(patch);
+                    assert!(undo.redo());
+                }
+                "paragraph split" => {
+                    engine
+                        .doc()
+                        .split_paragraph(
+                            &crate::EditCtx::local("", ""),
+                            crate::Position::new("body", offset),
+                            None,
+                        )
+                        .unwrap();
+                }
+                "retention" => engine.clear_region_retention(),
+                "retention reset" => {
+                    engine.region_retention_valid.set(false);
+                    engine.ensure_region_retention();
+                    assert!(engine.pagination.borrow().lowered_generation.is_none());
+                }
+                "measurement config" => {
+                    let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                    request["measurement"]["defaults"]["fontSize"] = json!(12);
+                    engine.region_retention_valid.set(true);
+                    engine
+                        .prepare_region_layout(&request.to_string(), None, RelayoutTrigger::Bulk)
+                        .unwrap();
+                    assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+                }
+                "placement" => {
+                    let input = engine.pagination.borrow().input.as_ref().unwrap().clone();
+                    engine.relayout_trigger.set(RelayoutTrigger::Bulk);
+                    engine.layout_document_value(input).unwrap();
+                    assert!(engine.pagination.borrow().lowered_from.is_none());
+                    assert!(engine.pagination.borrow().lowered_generation.is_none());
+                    assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                engine.pagination.borrow().measurement_patch.is_none(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn resident_measurement_patch_region_layout_captures_new_generation() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) = measurement_patch_engine(font);
+        let offset = measurement_patch_offset(&engine, 1);
+        measurement_patch_type(&engine, offset, "x");
+        assert!(engine.pagination.borrow().measurement_patch.is_some());
+        engine.region_retention_valid.set(true);
+        engine
+            .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
+            .unwrap();
+        let pagination = engine.pagination.borrow();
+        assert_eq!(
+            pagination.lowered_generation,
+            Some(engine.render.borrow().stories["body"].generation),
+        );
+        assert!(pagination.measurement_patch.is_none());
+    }
+
+    #[test]
+    fn resident_local_lowering_shared_blocks_leave_no_measurement_patch() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for shared in ["blocks", "map", "revealable"] {
+            let (engine, _) = measurement_patch_engine(font);
+            let offset = measurement_patch_offset(&engine, 1);
+            measurement_patch_type(&engine, offset, "x");
+            assert!(engine.pagination.borrow().measurement_patch.is_some());
+            let generation = engine.render.borrow().stories["body"].generation;
+            let blocks = (shared == "blocks")
+                .then(|| Rc::clone(&engine.render.borrow().stories["body"].blocks));
+            let map = (shared == "map")
+                .then(|| Rc::clone(&engine.render.borrow().stories["body"].map));
+            let revealable = (shared == "revealable")
+                .then(|| Rc::clone(&engine.render.borrow().stories["body"].revealable_blocks));
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset),
+                    Some("y"),
+                    true,
+                )
+                .unwrap();
+            let env = engine.render.borrow().stories["body"].env.clone();
+            assert!(
+                engine.patch_lowered_body(engine.doc_epoch(), &env).is_none(),
+                "{shared}"
+            );
+            assert!(engine.pagination.borrow().measurement_patch.is_none());
+            assert!(engine.pagination.borrow().lowered_generation.is_none());
+            assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+            drop((blocks, map, revealable));
+        }
+    }
+
+    #[test]
+    fn resident_preview_splice_clears_measurement_patch() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let engine = EngineSession::new(9633);
+        crate::seed_from_docx(engine.doc(), &preview_fixture::plain()).unwrap();
+        engine.set_local_lowering(true);
+        let request = small_page_request(font);
+        engine
+            .layout_regions_for_trigger(&request, None, RelayoutTrigger::Bulk)
+            .unwrap();
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
+        measurement_patch_type(&engine, 1, "x");
+        assert!(engine.pagination.borrow().measurement_patch.is_some());
+        let generation = engine.render.borrow().stories["body"].generation;
+        let epoch = engine.doc_epoch();
+        let before = engine
+            .lower_story_json("body", &RenderEnv::default())
+            .unwrap();
+        let id = preview_fixture::ids(&engine).remove(0);
+        let env = RenderEnv::default().with_revision_preview(&id, RevisionPreview::Rejected);
+        assert!(engine.patch_preview_body(epoch, &env).is_some());
+        assert!(engine.pagination.borrow().measurement_patch.is_none());
+        assert_eq!(engine.doc_epoch(), epoch);
+        assert_eq!(
+            engine.render.borrow().stories["body"].generation,
+            generation + 1,
+        );
+        assert_ne!(engine.lower_story_json("body", &env).unwrap(), before);
+    }
+
+    #[test]
+    fn resident_float_local_lowering_refusal_leaves_no_measurement_patch() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let shape =
+            INSIDE_SHAPE.replace("<wp:align>inside</wp:align>", "<wp:align>left</wp:align>");
+        let bytes = preview_fixture::document(&format!(
+            "{}{}{}",
+            preview_fixture::paragraph(1, &preview_fixture::run("Before")),
+            preview_fixture::paragraph(2, &format!("{}{shape}", preview_fixture::run("Float"))),
+            preview_fixture::paragraph(3, &preview_fixture::run("After")),
+        ));
+        for trigger in [RelayoutTrigger::Bulk, RelayoutTrigger::Interactive] {
+            let engine = EngineSession::new(9634);
+            crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+            engine.set_local_lowering(true);
+            engine
+                .layout_regions_for_trigger(&small_page_request(font), None, trigger)
+                .unwrap();
+            assert!(engine.pagination.borrow().measured_with_floats);
+            let generation = engine.render.borrow().stories["body"].generation;
+            assert_eq!(engine.pagination.borrow().lowered_generation, Some(generation));
+            engine
+                .edit_resident_text(crate::StoryRange::new("body", 1, 1), Some("x"), true)
+                .unwrap();
+            let env = engine.render.borrow().stories["body"].env.clone();
+            assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_none());
+            assert!(engine.pagination.borrow().measurement_patch.is_none());
+            assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+            assert_eq!(
+                engine.pagination.borrow().lowered_generation,
+                Some(generation),
+            );
+            assert!(Rc::ptr_eq(
+                engine.pagination.borrow().lowered_from.as_ref().unwrap(),
+                &engine.render.borrow().stories["body"].blocks,
+            ));
+        }
     }
 
     fn local_lowering_measurement_reuse(floats: bool) {
