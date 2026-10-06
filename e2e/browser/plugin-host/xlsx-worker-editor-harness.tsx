@@ -53,12 +53,13 @@ async function workbook() {
 </styleSheet>`);
   zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:B2"/>
+  <dimension ref="${variant === 'merged-grid' ? 'A1:D4' : 'A1:B2'}"/>
   <sheetViews><sheetView workbookViewId="0"/></sheetViews>
   <sheetFormatPr defaultRowHeight="24"/>
   <cols><col min="1" max="2" width="24" customWidth="1"/></cols>
   <sheetData><row r="1"><c r="A1" s="${variant === 'formatted' ? 2 : variant === 'styled' ? 1 : 0}" t="inlineStr"><is><t>initial</t></is></c>${variant === 'merged' || variant === 'overflow' ? '' : '<c r="B1"><v>1</v></c>'}</row></sheetData>
 ${variant === 'merged' ? '<mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells>' : ''}
+${variant === 'merged-grid' ? '<mergeCells count="1"><mergeCell ref="B2:C3"/></mergeCells>' : ''}
 <drawing r:id="rId1"/>
 </worksheet>`);
   zip.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>other</t></is></c></row></sheetData></worksheet>');
@@ -209,6 +210,25 @@ window.__xlsxWorkerEditor = {
     const bounds = canvas.getBoundingClientRect();
     const zoom = canvas.clientWidth / latestFrame!.viewport.width;
     return { x: bounds.x + rect.x * zoom, y: bounds.y + rect.y * zoom, width: rect.w * zoom, height: rect.h * zoom };
+  },
+  mergedGridPoints() {
+    const grid = latestFrame?.displayList.grid;
+    const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+    if (!grid || !canvas) throw new Error('Worker grid geometry unavailable');
+    const merge = rangeRect(grid, { top: 1, left: 1, bottom: 2, right: 2 });
+    const first = cellRect(grid, 1, 1);
+    const last = cellRect(grid, 2, 2);
+    const below = cellRect(grid, 3, 2);
+    if (!merge || !first || !last || !below) throw new Error('Merged grid is not visible');
+    const zoom = canvas.clientWidth / latestFrame!.viewport.width;
+    const point = (x: number, y: number) => ({ x: x * zoom, y: y * zoom });
+    return {
+      background: point(first.x + first.w / 2, first.y + first.h / 2),
+      interiors: [point(last.x, first.y + first.h / 2), point(first.x + first.w / 2, last.y)],
+      edges: [point(merge.x, first.y + first.h / 2), point(merge.x + merge.w, first.y + first.h / 2),
+        point(first.x + first.w / 2, merge.y), point(first.x + first.w / 2, merge.y + merge.h)],
+      neighbour: point(last.x, below.y + below.h / 2),
+    };
   },
   chartClip() {
     const chart = latestFrame?.displayList.charts?.[0];

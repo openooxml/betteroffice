@@ -7,6 +7,12 @@ export interface WorkerEditorProbe {
   flush(): Promise<void>;
   zoom(scale: number): Promise<void>;
   cellClip(): { x: number; y: number; width: number; height: number };
+  mergedGridPoints(): {
+    background: { x: number; y: number };
+    interiors: { x: number; y: number }[];
+    edges: { x: number; y: number }[];
+    neighbour: { x: number; y: number };
+  };
   chartClip(): { x: number; y: number; width: number; height: number };
   queueNavigation(): void;
   adoptedSequence(): number;

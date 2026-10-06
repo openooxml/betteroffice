@@ -74,6 +74,58 @@ test('xlsx worker editor undo restores the original cell and canvas value', asyn
 });
 
 
+test('merged worker canvas has background pixels inside and grid pixels around the merge', async ({ browser, baseURL }) => {
+  for (const dpr of [1, 2]) {
+    const context = await browser.newContext({ baseURL, deviceScaleFactor: dpr });
+    const page = await context.newPage();
+    try {
+      await page.goto('/xlsx-worker-editor.html?variant=merged-grid');
+      await page.waitForFunction(() => '__xlsxWorkerEditor' in window);
+      await page.evaluate(() => window.__xlsxWorkerEditor.ready);
+      await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('initial');
+      for (const zoom of [1, 1.25]) {
+        await page.evaluate((scale) => window.__xlsxWorkerEditor.zoom(scale), zoom);
+        await expect(page.locator('[data-paint-source="worker"]')).toHaveAttribute('data-worker-zoom', String(zoom));
+        const samples = await page.evaluate(() => {
+          const canvas = document.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]')!;
+          const ctx = canvas.getContext('2d')!;
+          const points = window.__xlsxWorkerEditor.mergedGridPoints();
+          const scaleX = canvas.width / canvas.clientWidth;
+          const scaleY = canvas.height / canvas.clientHeight;
+          const band = ({ x, y }: { x: number; y: number }) => {
+            const left = Math.floor((x - 2) * scaleX);
+            const top = Math.floor((y - 2) * scaleY);
+            const width = Math.ceil(4 * scaleX) + 1;
+            const height = Math.ceil(4 * scaleY) + 1;
+            return ctx.getImageData(left, top, width, height).data;
+          };
+          const background = Array.from(ctx.getImageData(
+            Math.floor(points.background.x * scaleX), Math.floor(points.background.y * scaleY), 1, 1,
+          ).data);
+          const difference = (point: { x: number; y: number }) => {
+            const pixels = band(point);
+            let max = 0;
+            for (let i = 0; i < pixels.length; i += 4) {
+              for (let channel = 0; channel < 3; channel++) {
+                max = Math.max(max, Math.abs(pixels[i + channel] - background[channel]));
+              }
+            }
+            return max;
+          };
+          return { background, interiors: points.interiors.map(difference),
+            edges: [...points.edges, points.neighbour].map(difference) };
+        });
+        expect(samples.background).toEqual([255, 255, 255, 255]);
+        for (const difference of samples.interiors) expect(difference).toBeLessThanOrEqual(3);
+        for (const difference of samples.edges) {
+          expect(difference).toBeGreaterThan(8);
+          expect(difference).toBeLessThanOrEqual(46);
+        }
+      }
+    } finally { await context.close(); }
+  }
+});
+
 for (const dpr of [1, 2]) {
   for (const zoom of [1, 1.25]) {
     for (const variant of ['plain', 'styled', 'formatted', 'merged', 'overflow']) {

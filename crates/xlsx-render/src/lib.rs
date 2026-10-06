@@ -1762,6 +1762,9 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
 }
 
 #[cfg(test)]
+mod merged_grid_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use xlsx_model::Hyperlink;
