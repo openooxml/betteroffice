@@ -366,16 +366,18 @@ fn unshown_layouts_crossing_display_paths_match_cold() {
         }
         assert_eq!(engine.stats().display_builds, before.display_builds);
         assert!(engine.pagination.borrow().display_full_rebuild);
+        assert_eq!(engine.pagination.borrow().last_incremental, region_first);
         assert_region_state_matches_cold(&engine, &request, "unshown layouts across paths");
         assert!(!engine.pagination.borrow().has_display_damage());
         assert_eq!(engine.stats().display_builds, before.display_builds + 2);
         assert_eq!(
             engine.stats().incremental_display_builds,
-            before.incremental_display_builds + 1
+            before.incremental_display_builds + u64::from(region_first)
         );
+        let pages = engine.with_display_list(|list| list.pages.len()).unwrap() as u64;
         assert_eq!(
             engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
-            engine.with_display_list(|list| list.pages.len()).unwrap() as u64
+            if region_first { pages } else { 2 * pages }
         );
     }
 }
