@@ -38,6 +38,40 @@ pub(crate) fn next_event(
     Ok(ev.into_owned())
 }
 
+pub(crate) async fn next_event_sliced(
+    reader: &mut Reader<&[u8]>,
+    buf: &mut Vec<u8>,
+    depth: &mut usize,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Event<'static>, ParseError> {
+    work.step().await;
+    next_event(reader, buf, depth)
+}
+
+pub(crate) async fn collect_text_sliced(
+    reader: &mut Reader<&[u8]>,
+    buf: &mut Vec<u8>,
+    depth: &mut usize,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<String, ParseError> {
+    let target = *depth;
+    let mut out = String::new();
+    loop {
+        match next_event_sliced(reader, buf, depth, work).await? {
+            Event::Text(text) => out.push_str(&text.decode().map_err(xml_err)?),
+            Event::CData(text) => out.push_str(&text.decode().map_err(xml_err)?),
+            Event::GeneralRef(reference) => {
+                let name = reference.decode().map_err(xml_err)?;
+                out.push_str(&resolve_entity(&name)?);
+            }
+            Event::End(_) if *depth < target => break,
+            Event::Eof => return Err(ParseError::Malformed("unexpected eof in text".into())),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// collect all descendant text of the element whose start was just read,
 /// flattening nested markup. `depth` must already reflect that start element.
 pub(crate) fn collect_text(

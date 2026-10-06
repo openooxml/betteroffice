@@ -2,9 +2,13 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
+use serde::Serialize;
+
+mod peer_open;
+use peer_open::{fingerprint_styles_json, hash_bytes_sliced, json_list};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
@@ -29,9 +33,6 @@ use yrs::{
     StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod snapshot;
-pub(crate) mod snapshot_validation;
 
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
@@ -202,6 +203,56 @@ impl WorkbookBase {
         })
     }
 
+    async fn from_model_with_legacy_dimensions_sliced(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<Self, String> {
+        let mut builder = FingerprintBuilder::new_sliced(model, legacy_dimensions, work).await;
+        let styles = FingerprintStyles::new(&model.styles);
+        let (fingerprint, bootstrap_client_id) =
+            builder.fingerprint_sliced(styles, SCHEMA_VERSION, true, true, false, work).await?;
+        let fingerprints = builder.accepted_fingerprints_sliced(styles, legacy_styles, work).await?;
+        let mut col_styles = Vec::new();
+        let mut hyperlinks = Vec::new();
+        let mut charts = Vec::new();
+        let mut hidden_dimensions = Vec::new();
+        let mut freeze_panes = Vec::new();
+        let mut formats = Vec::new();
+        for (index, sheet) in model.sheets.iter().enumerate() {
+            work.step().await;
+            col_styles.push(work.clone_slice(&sheet.col_styles).await);
+            hyperlinks.push(work.clone_slice(&sheet.hyperlinks).await);
+            charts.push(xlsx_parse::sliced::clone_charts(&sheet.charts, work).await);
+            freeze_panes.push(sheet.freeze_pane);
+            formats.push(sheet.format);
+            let mut hidden = HiddenDimensions::default();
+            if let Some(legacy) = legacy_dimensions.get(index) {
+                for (&at, &value) in &sheet.col_widths {
+                    work.step().await;
+                    if !legacy.col_widths.contains_key(&at) { hidden.col_widths.insert(at, value); }
+                }
+                for (&at, &value) in &sheet.row_heights {
+                    work.step().await;
+                    if !legacy.row_heights.contains_key(&at) { hidden.row_heights.insert(at, value); }
+                }
+            }
+            hidden_dimensions.push(hidden);
+        }
+        Ok(Self {
+            bootstrap_client_id,
+            date_system: model.date_system,
+            defined_names: work.clone_slice(&model.defined_names).await,
+            fingerprint,
+            fingerprints,
+            freeze_panes, formats, col_styles, hyperlinks, charts, hidden_dimensions,
+            shared_strings: work.clone_slice(&model.shared_strings).await,
+            styles: xlsx_parse::sliced::clone_stylesheet(&model.styles, work).await,
+            tables: xlsx_parse::sliced::clone_tables(&model.tables, work).await,
+        })
+    }
+
     #[cfg(test)]
     fn from_model_with_legacy_dimensions_oracle(
         model: &WorkbookModel,
@@ -328,6 +379,17 @@ impl WorkbookBase {
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
             tables: self.tables.clone(),
+        }
+    }
+
+    async fn workbook_sliced(&self, work: &ooxml_opc::WorkBudget) -> WorkbookModel {
+        WorkbookModel {
+            sheets: Vec::new(),
+            date_system: self.date_system,
+            defined_names: work.clone_slice(&self.defined_names).await,
+            shared_strings: work.clone_slice(&self.shared_strings).await,
+            styles: Stylesheet::default(),
+            tables: xlsx_parse::sliced::clone_tables(&self.tables, work).await,
         }
     }
 }
@@ -500,15 +562,9 @@ enum HistoryAction {
     Redo(SheetOrderEntry),
 }
 
-#[cfg(test)]
-thread_local! {
-    pub(crate) static SNAPSHOT_VECTOR_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
     projection_valid: Arc<AtomicBool>,
-    snapshot_revision: Arc<AtomicU64>,
     base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
@@ -528,12 +584,10 @@ struct SetCellSync {
 
 impl WorkbookAuthority {
     fn hydrated(doc: Doc, base: Arc<WorkbookBase>, next_sheet_id: u64) -> Self {
-        let snapshot_revision = Arc::new(AtomicU64::new(0));
-        let projection_valid = observe_projection(&doc, snapshot_revision.clone());
+        let projection_valid = observe_projection(&doc);
         Self {
             doc,
             projection_valid,
-            snapshot_revision,
             base,
             history: SheetOrderHistory::default(),
             next_sheet_id,
@@ -611,67 +665,49 @@ impl WorkbookAuthority {
         Ok((authority, model, structure))
     }
 
+    pub(crate) async fn from_source_with_projection_sliced(
+        model: &WorkbookModel,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<(Self, WorkbookModel, WorkbookStructure), AuthorityError> {
+        let base = WorkbookBase::from_model_with_legacy_dimensions_sliced(
+            model,
+            legacy_dimensions,
+            legacy_styles,
+            work,
+        ).await
+        .map_err(AuthorityError::InvalidState)?;
+        if client_id == Some(base.bootstrap_client_id) {
+            return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
+        }
+
+        let bootstrap = Doc::with_client_id(base.bootstrap_client_id);
+        let keys = (0..model.sheets.len())
+            .map(|index| format!("sheet:{index}"))
+            .collect::<Vec<_>>();
+        let doc = match client_id {
+            Some(client_id) => Doc::with_client_id(client_id),
+            None => loop {
+                let candidate = Doc::new();
+                if candidate.client_id().get() != base.bootstrap_client_id {
+                    break candidate;
+                }
+            },
+        };
+        peer_open::seed_sliced(&bootstrap, &doc, &base, model, &keys, work)
+            .await.map_err(AuthorityError::InvalidState)?;
+        drop(bootstrap);
+        let authority = Self::hydrated(doc, Arc::new(base), 0);
+        let (model, structure) = authority
+            .materialize_bootstrap_sliced(true, work).await
+            .map_err(AuthorityError::InvalidState)?;
+        Ok((authority, model, structure))
+    }
+
     pub(crate) fn client_id(&self) -> u64 {
         self.doc.client_id().get()
-    }
-
-    pub(crate) fn snapshot_revision(&self) -> u64 {
-        self.snapshot_revision.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn snapshot_projection_valid(&self) -> crate::snapshot::SnapshotResult<bool> {
-        let _transaction = self.doc.try_transact().map_err(|_| {
-            crate::snapshot::SnapshotError::new("snapshot authority has an active transaction")
-        })?;
-        if !self.history.undo.is_empty()
-            || !self.history.redo.is_empty()
-            || !self.undo_stack.is_empty()
-            || !self.redo_stack.is_empty()
-            || self.next_sheet_id != 0
-            || has_pending(&self.doc)
-        {
-            return Err(crate::snapshot::SnapshotError::new(
-                "snapshot authority is not at the initial boundary",
-            ));
-        }
-        self.base.styles.snapshot_field_counts();
-        Ok(self.projection_valid.load(Ordering::Relaxed))
-    }
-
-    pub(crate) fn set_snapshot_projection_valid(&mut self, valid: bool) {
-        self.projection_valid.store(valid, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot_transaction_for_test(&self) -> TransactionMut<'_> {
-        self.doc.transact_mut()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn snapshot_skip_gc_for_test(&mut self) {
-        let mut options = Options::with_guid_and_client_id(self.doc.guid(), self.doc.client_id());
-        options.skip_gc = true;
-        let doc = Doc::with_options(options);
-        hydrate_local_doc(&doc, &self.encode_state_as_update_v1()).unwrap();
-        self.doc = doc;
-        self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
-        self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
-    }
-
-    #[cfg(test)]
-    #[doc(hidden)]
-    pub(crate) fn snapshot_checkpoint_for_test(&mut self) {
-        let mut undo = build_undo_manager(
-            &self.doc,
-            std::mem::take(&mut self.undo_stack),
-            std::mem::take(&mut self.redo_stack),
-        )
-        .unwrap();
-        undo.clear_all();
-        drop(undo);
-        self.doc.transact_mut_with(HYDRATE_ORIGIN).gc(None);
-        self.clear_history();
-        assert_eq!(self.next_sheet_id, 0);
     }
 
     pub(crate) fn state_vector_entries(&self) -> usize {
@@ -833,8 +869,6 @@ impl WorkbookAuthority {
     }
 
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
-        #[cfg(test)]
-        SNAPSHOT_VECTOR_ENCODINGS.set(SNAPSHOT_VECTOR_ENCODINGS.get() + 1);
         let state_vector = self.doc.transact().state_vector();
         let mut entries = state_vector
             .iter()
@@ -1311,8 +1345,7 @@ impl WorkbookAuthority {
         ));
         hydrate_local_doc(&doc, restore).map_err(AuthorityError::InvalidState)?;
         self.doc = doc;
-        self.snapshot_revision.fetch_add(1, Ordering::Relaxed);
-        self.projection_valid = observe_projection(&self.doc, self.snapshot_revision.clone());
+        self.projection_valid = observe_projection(&self.doc);
         self.undo_stack = undo_stack;
         self.redo_stack = redo_stack;
         Ok(())
@@ -1592,6 +1625,178 @@ impl WorkbookAuthority {
             shared_types,
         };
         self.projection_valid.store(true, Ordering::Relaxed);
+        Ok((model, structure))
+    }
+
+    async fn materialize_bootstrap_sliced(
+        &self,
+        strict: bool,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<(WorkbookModel, WorkbookStructure), String> {
+        let txn = self.doc.transact();
+        if strict {
+            require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS])?;
+        }
+        let meta = txn
+            .get_map(META)
+            .ok_or_else(|| "missing workbook metadata".to_string())?;
+        if strict {
+            require_map_keys(
+                &meta,
+                &txn,
+                &[BASE_FINGERPRINT, "schemaVersion", STRUCTURE_GENERATION],
+                "workbook metadata",
+            )?;
+        }
+        let version = meta
+            .get(&txn, "schemaVersion")
+            .and_then(|value| value.cast::<i64>().ok())
+            .ok_or_else(|| "missing schema version".to_string())?;
+        validate_schema_version(version)?;
+        let fingerprint = meta
+            .get(&txn, BASE_FINGERPRINT)
+            .and_then(|value| value.cast::<String>().ok())
+            .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
+        if !self.base.accepts_fingerprint(version, &fingerprint) {
+            return Err("workbook base fingerprint does not match shared state".to_string());
+        }
+        let generation = structure_generation(&meta, &txn)?;
+        let cell_formats = txn
+            .get_map(CELL_FORMATS)
+            .ok_or_else(|| "missing cell format catalog".to_string())?;
+        let (styles, mut style_indices) =
+            materialize_cell_formats_sliced(&cell_formats, &txn, &self.base.styles, work).await?;
+
+        let order = txn
+            .get_array(SHEET_ORDER)
+            .ok_or_else(|| "missing sheet order".to_string())?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| "missing sheet map".to_string())?;
+        let keys = sheet_keys(&order, &txn)?;
+        let mut seen = HashSet::with_capacity(keys.len());
+        let mut model = self.base.workbook_sliced(work).await;
+        model.styles = styles;
+        let expected_sheet_keys = sheet_schema_keys(version);
+        let optional_sheet_keys = sheet_schema_optional_keys(version);
+        for key in keys.iter() {
+            work.step().await;
+            if !seen.insert(key.clone()) {
+                return Err(format!("duplicate sheet key {key}"));
+            }
+            let sheet_map = sheets
+                .get(&txn, key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("missing sheet {key}"))?;
+            if strict {
+                require_map_keys_with_optional(
+                    &sheet_map,
+                    &txn,
+                    expected_sheet_keys,
+                    optional_sheet_keys,
+                    &format!("sheet {key}"),
+                )?;
+            }
+            let base_sheet = base_sheet_index(key);
+            let freeze_pane = base_sheet
+                .and_then(|base| self.base.freeze_panes.get(base))
+                .copied()
+                .flatten();
+            let format = base_sheet
+                .and_then(|base| self.base.formats.get(base))
+                .copied()
+                .unwrap_or_default();
+            let col_styles = base_sheet
+                .and_then(|base| self.base.col_styles.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let hyperlinks = base_sheet
+                .and_then(|base| self.base.hyperlinks.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let charts = base_sheet
+                .and_then(|base| self.base.charts.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let hidden_dimensions = base_sheet
+                .and_then(|base| self.base.hidden_dimensions.get(base))
+                .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
+            model.sheets.push(materialize_bootstrap_sheet_sliced(
+                &sheet_map,
+                &txn,
+                &style_indices,
+                version,
+                SheetFallbacks {
+                    freeze_pane,
+                    format,
+                    col_styles,
+                    hyperlinks,
+                    charts,
+                    hidden_dimensions,
+                },
+                work,
+            ).await?);
+        }
+        project_shared_frame_anchors_sliced(&mut model.sheets, work).await;
+        let active = keys.iter().cloned().collect::<BTreeSet<_>>();
+        let all_keys = sheets
+            .keys(&txn)
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        let mut shared_types = BTreeMap::new();
+        for key in all_keys {
+            work.step().await;
+            let sheet_map = sheets
+                .get(&txn, &key)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .ok_or_else(|| format!("sheet {key} is not a map"))?;
+            if strict && !active.contains(&key) {
+                require_map_keys_with_optional(
+                    &sheet_map,
+                    &txn,
+                    expected_sheet_keys,
+                    optional_sheet_keys,
+                    &format!("inactive sheet {key}"),
+                )?;
+                materialize_bootstrap_sheet_sliced(
+                    &sheet_map,
+                    &txn,
+                    &style_indices,
+                    version,
+                    SheetFallbacks::default(),
+                    work,
+                ).await?;
+            }
+            shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
+        }
+        let mut sheet_names = Vec::new();
+        let mut freeze_panes = Vec::new();
+        let mut hyperlinks = Vec::new();
+        let mut charts = Vec::new();
+        let mut merges = Vec::new();
+        for sheet in &model.sheets {
+            work.step().await;
+            sheet_names.push(sheet.name.clone());
+            freeze_panes.push(sheet.freeze_pane);
+            hyperlinks.push(work.clone_slice(&sheet.hyperlinks).await);
+            merges.push(work.clone_slice(&sheet.merges).await);
+            let mut identities = Vec::with_capacity(sheet.charts.len());
+            for chart in &sheet.charts {
+                work.step().await;
+                identities.push(ChartIdentity {
+                    part: chart.part.clone(), drawing: chart.drawing.clone(),
+                    anchor_index: chart.anchor_index, anchor: AnchorShape::of(&chart.anchor),
+                    refs: work.clone_slice(&chart.refs).await,
+                });
+            }
+            charts.push(identities);
+        }
+        let structure = WorkbookStructure {
+            generation, sheet_keys: keys, sheet_names, freeze_panes,
+            hyperlinks, charts, merges, shared_types,
+        };
+        self.projection_valid.store(true, Ordering::Relaxed);
+        while !style_indices.is_empty() { work.step().await; style_indices.pop_first(); }
         Ok((model, structure))
     }
 
@@ -1911,14 +2116,11 @@ impl WorkbookAuthority {
     }
 }
 
-fn observe_projection(doc: &Doc, revision: Arc<AtomicU64>) -> Arc<AtomicBool> {
+fn observe_projection(doc: &Doc) -> Arc<AtomicBool> {
     let valid = Arc::new(AtomicBool::new(false));
     let observed = valid.clone();
-    doc.observe_after_transaction_with("projection", move |transaction| {
+    doc.observe_after_transaction_with("projection", move |_transaction| {
         observed.store(false, Ordering::Relaxed);
-        if !transaction.insert_set().is_empty() || !transaction.delete_set().is_empty() {
-            revision.fetch_add(1, Ordering::Relaxed);
-        }
     })
     .expect("authority document has no active transaction");
     valid
@@ -1988,11 +2190,6 @@ fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)
         .map_err(|error| error.to_string())
-}
-
-#[cfg(test)]
-pub(crate) fn hydrate_snapshot_part(doc: &Doc, update: &[u8]) -> Result<(), String> {
-    hydrate_local_doc(doc, update)
 }
 
 fn has_pending(doc: &Doc) -> bool {
@@ -3096,6 +3293,57 @@ fn materialize_cell_formats<T: ReadTxn>(
     Ok((styles, indices))
 }
 
+async fn materialize_cell_formats_sliced<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    base: &Stylesheet,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(Stylesheet, BTreeMap<String, Option<u32>>), String> {
+    let mut catalog = BTreeMap::new();
+    for (key, value) in map.iter(txn) {
+        work.step().await;
+        let Out::Any(Any::String(payload)) = value else {
+            return Err(format!("cell format {key} is not a string"));
+        };
+        if payload.len() > MAX_CELL_FORMAT_BYTES {
+            return Err(format!("cell format {key} exceeds its size limit"));
+        }
+        let format = serde_json::from_str::<CellFormat>(&payload)
+            .map_err(|error| format!("invalid cell format {key}: {error}"))?;
+        let (expected, canonical) = cell_format_entry(&format)?;
+        if key != expected || *payload != canonical {
+            return Err(format!("cell format {key} is not canonical"));
+        }
+        catalog.insert(key.to_string(), format);
+    }
+
+    let mut styles = xlsx_parse::sliced::clone_stylesheet(base, work).await;
+    let mut known = BTreeMap::new();
+    for index in 0..base.cell_xfs.len() {
+        work.step().await;
+        let index =
+            u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
+        known.entry(style_key(base, index)?).or_insert(Some(index));
+    }
+    let mut indices = BTreeMap::new();
+    for (key, format) in catalog {
+        work.step().await;
+        let index = match known.get(&key) {
+            Some(index) => *index,
+            None => {
+                let index = styles
+                    .intern_cell_format(&format)
+                    .map_err(|_| "number format table is full".to_string())?;
+                known.insert(key.clone(), index);
+                index
+            }
+        };
+        indices.insert(key, index);
+    }
+    while !known.is_empty() { work.step().await; known.pop_first(); }
+    Ok((styles, indices))
+}
+
 /// Rewrites the style indices `ops` carry from `source`'s table to the indices of the same
 /// formats in `target`, adding formats `target` lacks. Two tables built from one base agree on
 /// its indices but intern later formats in their own order.
@@ -3366,6 +3614,120 @@ fn materialize_sheet<T: ReadTxn>(
     Ok(sheet)
 }
 
+async fn materialize_bootstrap_sheet_sliced<T: ReadTxn>(
+    sheet_map: &MapRef,
+    txn: &T,
+    style_indices: &BTreeMap<String, Option<u32>>,
+    version: i64,
+    fallbacks: SheetFallbacks<'_>,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<Sheet, String> {
+    let name = sheet_map
+        .get(txn, NAME)
+        .and_then(|value| value.cast::<String>().ok())
+        .ok_or_else(|| "sheet is missing its name".to_string())?;
+    let mut sheet = Sheet::new(name);
+    let mut cells = BTreeMap::<(u32, u32), Cell>::new();
+    let contents = nested_map(sheet_map, txn, CONTENTS)?;
+    for (key, value) in contents.iter(txn) {
+        work.step().await;
+        let at = parse_cell_key(key)?;
+        let Out::Any(value) = value else {
+            return Err(format!("cell content {key} is not an atomic value"));
+        };
+        cells.insert((at.row, at.col), content_from_any(&value)?);
+    }
+    let styles = nested_map(sheet_map, txn, STYLES)?;
+    for (key, value) in styles.iter(txn) {
+        work.step().await;
+        let at = parse_cell_key(key)?;
+        let style_key = value
+            .cast::<String>()
+            .map_err(|_| format!("cell style {key} is not a string"))?;
+        let style = style_indices
+            .get(&style_key)
+            .ok_or_else(|| format!("cell style {key} references an unknown format"))?;
+        cells.entry((at.row, at.col)).or_default().style = *style;
+    }
+    for ((row, col), cell) in cells {
+        work.step().await;
+        sheet.set_cell(CellRef::new(row, col), cell);
+    }
+    sheet.col_widths = materialize_numbers_sliced(
+        &nested_map(sheet_map, txn, COL_WIDTHS)?,
+        txn,
+        MAX_COLS,
+        "column width",
+        work,
+    ).await?;
+    sheet.row_heights = materialize_numbers_sliced(
+        &nested_map(sheet_map, txn, ROW_HEIGHTS)?,
+        txn,
+        MAX_ROWS,
+        "row height",
+        work,
+    ).await?;
+    if version < SCHEMA_VERSION {
+        for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
+            work.step().await;
+            sheet.col_widths.entry(at).or_insert(size);
+        }
+        for (&at, &size) in &fallbacks.hidden_dimensions.row_heights {
+            work.step().await;
+            sheet.row_heights.entry(at).or_insert(size);
+        }
+    }
+    sheet.format = fallbacks.format;
+    sheet.col_styles = work.clone_slice(fallbacks.col_styles).await;
+    sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
+        (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
+        (FREEZE_PANE_SCHEMA_VERSION.., _) => {
+            return Err("sheet is missing freeze pane".to_string());
+        }
+        _ => fallbacks.freeze_pane,
+    };
+    sheet.hyperlinks = match (version, sheet_map.get(txn, HYPERLINKS)) {
+        (HYPERLINK_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => {
+            if json.len() > crate::sheet_json::MAX_HYPERLINK_STATE_BYTES {
+                return Err("sheet hyperlink state exceeds its size limit".into());
+            }
+            work.clone_slice(fallbacks.hyperlinks).await
+        }
+        (HYPERLINK_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet hyperlinks are not a string".to_string());
+        }
+        (HYPERLINK_SCHEMA_VERSION.., None) => {
+            return Err("sheet is missing hyperlinks".to_string());
+        }
+        _ => work.clone_slice(fallbacks.hyperlinks).await,
+    };
+    sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
+        (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => {
+            if json.len() > crate::sheet_json::MAX_CHART_STATE_BYTES {
+                return Err("sheet chart state exceeds its size limit".into());
+            }
+            xlsx_parse::sliced::clone_charts(fallbacks.charts, work).await
+        },
+        (CHARTS_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet charts are not a string".to_string());
+        }
+        _ => xlsx_parse::sliced::clone_charts(fallbacks.charts, work).await,
+    };
+    sheet.merges = match sheet_map.get(txn, MERGES) {
+        Some(Out::Any(Any::Array(merges))) => {
+            let mut ranges = Vec::with_capacity(merges.len());
+            for merge in merges.iter() {
+                work.step().await;
+                ranges.extend(merges_from_any(&any_array(vec![merge.clone()]))?);
+            }
+            ranges
+        },
+        Some(Out::Any(_)) => return Err("sheet merges are not an array".into()),
+        _ => return Err("sheet is missing merges".to_string()),
+    };
+    Ok(sheet)
+}
+
 /// One drawing anchor is one element however many sheets point at it, but each
 /// sheet's chart state is assigned on its own. Two replicas can each write a
 /// legal value for a different sheet and only disagree once the two are merged,
@@ -3387,6 +3749,24 @@ fn project_shared_frame_anchors(sheets: &mut [Sheet]) {
     }
     for sheet in sheets.iter_mut() {
         for chart in &mut sheet.charts {
+            if let Some(anchor) = chosen.get(&chart.frame_id()) {
+                chart.anchor = *anchor;
+            }
+        }
+    }
+}
+
+async fn project_shared_frame_anchors_sliced(sheets: &mut [Sheet], work: &ooxml_opc::WorkBudget) {
+    let mut chosen = BTreeMap::new();
+    for sheet in sheets.iter() {
+        for chart in &sheet.charts {
+            work.step().await;
+            chosen.entry(chart.frame_id()).or_insert(chart.anchor);
+        }
+    }
+    for sheet in sheets.iter_mut() {
+        for chart in &mut sheet.charts {
+            work.step().await;
             if let Some(anchor) = chosen.get(&chart.frame_id()) {
                 chart.anchor = *anchor;
             }
@@ -3419,6 +3799,36 @@ fn materialize_numbers<T: ReadTxn>(
 ) -> Result<BTreeMap<u32, f64>, String> {
     let mut values = BTreeMap::new();
     for (key, value) in map.iter(txn) {
+        let index = key
+            .parse::<u32>()
+            .map_err(|_| format!("invalid numeric key {key}"))?;
+        if key != index.to_string() {
+            return Err(format!("noncanonical numeric key {key}"));
+        }
+        if index >= limit {
+            return Err(format!("{label} key {key} is out of bounds"));
+        }
+        let value = value
+            .cast::<f64>()
+            .map_err(|_| format!("invalid numeric value at {key}"))?;
+        if !value.is_finite() {
+            return Err(format!("nonfinite {label} at {key}"));
+        }
+        values.insert(index, value);
+    }
+    Ok(values)
+}
+
+async fn materialize_numbers_sliced<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    limit: u32,
+    label: &str,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<BTreeMap<u32, f64>, String> {
+    let mut values = BTreeMap::new();
+    for (key, value) in map.iter(txn) {
+        work.step().await;
         let index = key
             .parse::<u32>()
             .map_err(|_| format!("invalid numeric key {key}"))?;
@@ -4021,6 +4431,36 @@ impl<'a> FingerprintBuilder<'a> {
         }
     }
 
+    async fn new_sliced(
+        model: &'a WorkbookModel,
+        legacy_dimensions: &'a [xlsx_parse::LegacySheetDimensions],
+        work: &ooxml_opc::WorkBudget,
+    ) -> Self {
+        let mut differs = false;
+        let mut has_col_styles = false;
+        for (index, sheet) in model.sheets.iter().enumerate() {
+            work.step().await;
+            has_col_styles |= !sheet.col_styles.is_empty();
+            if let Some(legacy) = legacy_dimensions.get(index) {
+                for (current, legacy) in [
+                    (&sheet.col_widths, &legacy.col_widths),
+                    (&sheet.row_heights, &legacy.row_heights),
+                ] {
+                    if current.len() != legacy.len() { differs = true; continue; }
+                    for (left, right) in current.iter().zip(legacy) {
+                        work.step().await;
+                        differs |= left != right;
+                    }
+                }
+            }
+        }
+        Self {
+            model, legacy_dimensions: if differs { legacy_dimensions } else { &[] },
+            has_col_styles, styles: Vec::new(), style_bytes: Vec::new(), hashes: BTreeMap::new(),
+        }
+    }
+
+
     fn fingerprint(
         &mut self,
         styles: FingerprintStyles<'a>,
@@ -4077,6 +4517,67 @@ impl<'a> FingerprintBuilder<'a> {
         Ok(hash)
     }
 
+    async fn fingerprint_sliced(
+        &mut self,
+        styles: FingerprintStyles<'a>,
+        version: i64,
+        include_defined_names: bool,
+        include_col_styles: bool,
+        legacy_dimensions: bool,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<(String, u64), String> {
+        let style_index = match self.styles.iter().find(|(known, _)| {
+            std::ptr::eq(known.styles, styles.styles)
+                && std::ptr::eq(known.indexed_colors, styles.indexed_colors)
+        }) {
+            Some((_, index)) => *index,
+            None => {
+                let bytes = fingerprint_styles_json(styles, work).await?;
+                let mut found = None;
+                for (index, known) in self.style_bytes.iter().enumerate() {
+                    if work.equal_bytes(known, &bytes).await { found = Some(index); break; }
+                }
+                let index = match found {
+                    Some(index) => index,
+                    None => {
+                        self.style_bytes.push(bytes);
+                        self.style_bytes.len() - 1
+                    }
+                };
+                self.styles.push((styles, index));
+                index
+            }
+        };
+        let include_col_styles =
+            include_col_styles && version >= CHARTS_SCHEMA_VERSION && self.has_col_styles;
+        let legacy_dimensions = legacy_dimensions && !self.legacy_dimensions.is_empty();
+        let key = (
+            style_index,
+            version,
+            include_defined_names,
+            include_col_styles,
+            legacy_dimensions,
+        );
+        if let Some(hash) = self.hashes.get(&key) {
+            return Ok(hash.clone());
+        }
+        let hash = fingerprint_model_with_overrides_sliced(
+            self.model,
+            version,
+            include_defined_names,
+            include_col_styles,
+            if legacy_dimensions {
+                self.legacy_dimensions
+            } else {
+                &[]
+            },
+            styles,
+            work,
+        ).await?;
+        self.hashes.insert(key, hash.clone());
+        Ok(hash)
+    }
+
     fn accepted_fingerprints(
         &mut self,
         styles: FingerprintStyles<'a>,
@@ -4112,6 +4613,60 @@ impl<'a> FingerprintBuilder<'a> {
             .filter(|legacy| *legacy != styles)
         {
             let legacy_fingerprints = self.accepted_fingerprints(legacy, None)?;
+            for (version, accepted) in legacy_fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+        }
+        if !styles.indexed_colors.is_empty() {
+            let legacy_fingerprints =
+                self.accepted_fingerprints(styles.without_indexed_colors(), legacy_styles)?;
+            for (version, accepted) in legacy_fingerprints {
+                for fingerprint in accepted {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+        }
+        Ok(fingerprints)
+    }
+
+    async fn accepted_fingerprints_sliced(
+        &mut self,
+        styles: FingerprintStyles<'a>,
+        legacy_styles: Option<&'a Stylesheet>,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<BTreeMap<i64, Vec<String>>, String> {
+        let mut fingerprints = BTreeMap::new();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (fingerprint, _) = self.fingerprint_sliced(styles, version, version >= 4, true, false, work).await?;
+            fingerprints.insert(version, vec![fingerprint]);
+        }
+        let (defined_names_v3, _) = self.fingerprint_sliced(styles, 3, true, true, false, work).await?;
+        append_fingerprint(&mut fingerprints, 3, defined_names_v3);
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (without_col_styles, _) =
+                self.fingerprint_sliced(styles, version, version >= 4, false, false, work).await?;
+            append_fingerprint(&mut fingerprints, version, without_col_styles);
+        }
+        if !self.legacy_dimensions.is_empty() {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+                let (legacy_fingerprint, _) =
+                    self.fingerprint_sliced(styles, version, version >= 4, true, true, work).await?;
+                let (without_col_styles, _) =
+                    self.fingerprint_sliced(styles, version, version >= 4, false, true, work).await?;
+                for fingerprint in [legacy_fingerprint, without_col_styles] {
+                    append_fingerprint(&mut fingerprints, version, fingerprint);
+                }
+            }
+            let (defined_names_v3, _) = self.fingerprint_sliced(styles, 3, true, true, true, work).await?;
+            append_fingerprint(&mut fingerprints, 3, defined_names_v3);
+        }
+        if let Some(legacy) = legacy_styles
+            .map(FingerprintStyles::new)
+            .filter(|legacy| *legacy != styles)
+        {
+            let legacy_fingerprints = Box::pin(self.accepted_fingerprints_sliced(legacy, None, work)).await?;
             for (version, accepted) in legacy_fingerprints {
                 for fingerprint in accepted {
                     append_fingerprint(&mut fingerprints, version, fingerprint);
@@ -4240,6 +4795,128 @@ fn fingerprint_model_with_overrides(
             let col_styles = serde_json::to_vec(&sheet.col_styles)
                 .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
             hash_bytes(&mut hasher, &col_styles);
+        }
+    }
+    let digest = hasher.finalize();
+    let fingerprint = format!("{digest:x}");
+    let mut client_bytes = [0_u8; 8];
+    client_bytes.copy_from_slice(&digest[..8]);
+    let mut bootstrap_client_id = u64::from_be_bytes(client_bytes) & MAX_SAFE_CLIENT_ID;
+    if bootstrap_client_id == 0 {
+        bootstrap_client_id = 1;
+    }
+    Ok((fingerprint, bootstrap_client_id))
+}
+
+async fn fingerprint_model_with_overrides_sliced(
+    model: &WorkbookModel,
+    schema_version: i64,
+    include_defined_names: bool,
+    include_col_styles: bool,
+    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    styles: FingerprintStyles<'_>,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(String, u64), String> {
+    validate_schema_version(schema_version)?;
+    let mut hasher = Sha256::new();
+    let domain = match schema_version {
+        3 => b"betteroffice-xlsx-yrs-v3".as_slice(),
+        4 => b"betteroffice-xlsx-yrs-v4".as_slice(),
+        5 => b"betteroffice-xlsx-yrs-v5".as_slice(),
+        _ => b"betteroffice-xlsx-yrs-v6".as_slice(),
+    };
+    hasher.update(domain);
+    let mut base = vec![serde_json::to_vec(&model.date_system).map_err(|error| error.to_string())?];
+    if include_defined_names { base.push(json_list(&model.defined_names, work).await?); }
+    base.push(json_list(&model.shared_strings, work).await?);
+    base.push(fingerprint_styles_json(styles, work).await?);
+    hash_u64(&mut hasher, (base.iter().map(Vec::len).sum::<usize>() + base.len() + 1) as u64);
+    hasher.update([b'[']);
+    for (index, bytes) in base.iter().enumerate() {
+        if index != 0 { hasher.update([b',']); }
+        peer_open::hash_payload_sliced(&mut hasher, bytes, work).await;
+    }
+    hasher.update([b']']);
+    hash_u64(&mut hasher, model.sheets.len() as u64);
+    let hash_col_styles = include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.col_styles.is_empty());
+    for (index, sheet) in model.sheets.iter().enumerate() {
+        work.step().await;
+        let (col_widths, row_heights) = match legacy_dimensions.get(index) {
+            Some(legacy) => (&legacy.col_widths, &legacy.row_heights),
+            None => (&sheet.col_widths, &sheet.row_heights),
+        };
+        hash_bytes_sliced(&mut hasher, sheet.name.as_bytes(), work).await;
+        let mut count = 0;
+        for _ in sheet.iter_cells() {
+            work.step().await;
+            count += 1;
+        }
+        hash_u64(&mut hasher, count);
+        for (at, cell) in sheet.iter_cells() {
+            work.step().await;
+            hash_u32(&mut hasher, at.row);
+            hash_u32(&mut hasher, at.col);
+            peer_open::hash_cell_value_sliced(&mut hasher, &cell.value, work).await;
+            match &cell.formula {
+                Some(formula) => {
+                    hasher.update([1]);
+                    hash_bytes_sliced(&mut hasher, formula.as_bytes(), work).await;
+                }
+                None => hasher.update([0]),
+            }
+            match cell.style {
+                Some(style) => {
+                    hasher.update([1]);
+                    hash_u32(&mut hasher, style);
+                }
+                None => hasher.update([0]),
+            }
+        }
+        hash_u64(&mut hasher, sheet.merges.len() as u64);
+        for range in &sheet.merges {
+            work.step().await;
+            hash_cell_ref(&mut hasher, range.start);
+            hash_cell_ref(&mut hasher, range.end);
+        }
+        hash_u64(&mut hasher, col_widths.len() as u64);
+        for (&column, &width) in col_widths {
+            work.step().await;
+            hash_u32(&mut hasher, column);
+            hash_u64(&mut hasher, width.to_bits());
+        }
+        hash_u64(&mut hasher, row_heights.len() as u64);
+        for (&row, &height) in row_heights {
+            work.step().await;
+            hash_u32(&mut hasher, row);
+            hash_u64(&mut hasher, height.to_bits());
+        }
+        if schema_version >= FREEZE_PANE_SCHEMA_VERSION {
+            match sheet.freeze_pane {
+                Some(pane) => {
+                    hasher.update([1]);
+                    hash_u32(&mut hasher, pane.rows);
+                    hash_u32(&mut hasher, pane.cols);
+                    hash_cell_ref(&mut hasher, pane.top_left);
+                }
+                None => hasher.update([0]),
+            }
+        }
+        if schema_version >= HYPERLINK_SCHEMA_VERSION {
+            let hyperlinks = json_list(&sheet.hyperlinks, work).await?;
+            hash_bytes_sliced(&mut hasher, &hyperlinks, work).await;
+        }
+        if schema_version >= CHARTS_SCHEMA_VERSION {
+            let charts = json_list(&sheet.charts, work).await?;
+            hash_bytes_sliced(&mut hasher, &charts, work).await;
+        }
+        if hash_col_styles {
+            let col_styles = json_list(&sheet.col_styles, work).await?;
+            hash_bytes_sliced(&mut hasher, &col_styles, work).await;
         }
     }
     let digest = hasher.finalize();

@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use betteroffice_xlsx::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, SnapshotBudget, UpdateEvent,
-    UpdateOrigin, UpdateSubscription, WorkbookSnapshotBuilder,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, UpdateEvent,
+    UpdateOrigin, UpdateSubscription,
 };
 use wasm_bindgen::prelude::*;
 
@@ -52,74 +52,78 @@ struct PendingUpdateEvents {
 }
 
 #[wasm_bindgen]
-pub struct XlsxSnapshotBuilder {
-    builder: WorkbookSnapshotBuilder,
+pub struct XlsxPeerOpener {
+    opener: Option<core::PeerOpener>,
+    source: Option<PeerSource>,
+    client_id: Option<u64>,
+    hydration: VecDeque<String>,
+    state: u8,
+}
+
+struct PeerSource {
+    bytes: js_sys::Uint8Array,
+    copied: Vec<u8>,
 }
 
 #[wasm_bindgen]
-impl XlsxSnapshotBuilder {
+impl XlsxPeerOpener {
     #[wasm_bindgen(constructor)]
-    pub fn new() -> XlsxSnapshotBuilder {
-        Self {
-            builder: WorkbookSnapshotBuilder::new(),
+    pub fn new(bytes: js_sys::Uint8Array, client_id: Option<f64>) -> Result<XlsxPeerOpener, JsValue> {
+        let client_id = client_id.map(parse_client_id).transpose()?;
+        let copied = Vec::with_capacity(bytes.length() as usize);
+        Ok(Self {
+            opener: None, source: Some(PeerSource { bytes, copied }),
+            client_id, hydration: VecDeque::new(), state: 0,
+        })
+    }
+
+    pub fn advance(&mut self, units: usize) -> Result<u8, JsValue> {
+        if units == 0 { return Ok(self.state); }
+        if let Some(source) = &mut self.source {
+            let offset = source.copied.len();
+            let length = source.bytes.length() as usize;
+            let count = units.min(256).saturating_mul(64).min(length - offset);
+            source.copied.resize(offset + count, 0);
+            source.bytes.subarray(offset as u32, (offset + count) as u32)
+                .copy_to(&mut source.copied[offset..]);
+            if source.copied.len() == length {
+                let source = self.source.take().ok_or_else(|| js_sys::Error::new("Peer source is missing"))?;
+                self.opener = Some(core::PeerOpener::new(source.copied, self.client_id));
+            }
+            return Ok(0);
         }
+        let opener = self.opener.as_mut().ok_or_else(|| js_sys::Error::new("Peer opener is missing"))?;
+        if let Some(chunk) = self.hydration.pop_front() {
+            opener.push_hydration(&chunk).map_err(|error| js_sys::Error::new(&error))?;
+            return Ok(0);
+        }
+        self.state = match opener.advance(units).map_err(|error| js_sys::Error::new(&error))? {
+            betteroffice_xlsx::OpenerState::Parsing => 0,
+            betteroffice_xlsx::OpenerState::NeedsHydration => 1,
+            betteroffice_xlsx::OpenerState::Ready => 2,
+        };
+        Ok(self.state)
     }
 
-    pub fn push(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
-        self.builder
-            .push(chunk)
-            .map(|_| ())
-            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
-    }
-
-    pub fn advance(&mut self, records: usize, bytes: usize) -> Result<bool, JsValue> {
-        let budget = SnapshotBudget::new(records, bytes)
-            .map_err(|error| JsValue::from(js_sys::Error::new(&error.to_string())))?;
-        self.builder
-            .advance(budget)
-            .map(|progress| progress.is_ready())
-            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
+    #[wasm_bindgen(js_name = pushHydration)]
+    pub fn push_hydration(&mut self, json: &str) -> Result<(), JsValue> {
+        self.hydration.push_back(json.to_owned());
+        self.state = 0;
+        Ok(())
     }
 
     pub fn finish(self) -> Result<XlsxDocument, JsValue> {
-        self.builder
-            .finish()
-            .map(|hydrated| XlsxDocument {
-                session: Session::from_hydrated_workbook(hydrated),
-                update_observer: None,
-            })
-            .map_err(|error| js_sys::Error::new(&error.to_string()).into())
-    }
-}
-
-impl Default for XlsxSnapshotBuilder {
-    fn default() -> Self {
-        Self::new()
+        if self.source.is_some() || !self.hydration.is_empty() {
+            return Err(js_sys::Error::new("Peer opener is not ready").into());
+        }
+        self.opener.ok_or_else(|| js_sys::Error::new("Peer opener is missing"))?
+            .finish().map(|session| XlsxDocument { session, update_observer: None })
+            .map_err(|error| js_sys::Error::new(&error).into())
     }
 }
 
 #[wasm_bindgen]
 impl XlsxDocument {
-    #[wasm_bindgen(js_name = beginPeerSnapshot)]
-    pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), JsValue> {
-        self.session
-            .begin_peer_snapshot(records, bytes)
-            .map_err(|error| js_sys::Error::new(&error).into())
-    }
-
-    #[wasm_bindgen(js_name = nextPeerSnapshotChunk)]
-    pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<js_sys::Uint8Array>, JsValue> {
-        self.session
-            .next_peer_snapshot_chunk()
-            .map(|chunk| chunk.map(|bytes| js_sys::Uint8Array::from(bytes.as_slice())))
-            .map_err(|error| js_sys::Error::new(&error).into())
-    }
-
-    #[wasm_bindgen(js_name = endPeerSnapshot)]
-    pub fn end_peer_snapshot(&mut self) {
-        self.session.end_peer_snapshot();
-    }
-
     #[doc(hidden)]
     #[wasm_bindgen(js_name = adoptPeerVersion)]
     pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), JsValue> {
@@ -129,25 +133,11 @@ impl XlsxDocument {
     }
 
     #[doc(hidden)]
-    #[wasm_bindgen(js_name = peerHydrationJson)]
-    pub fn peer_hydration_json(&self) -> Result<String, JsValue> {
-        self.session
-            .peer_hydration_json()
-            .map_err(|error| JsValue::from_str(&error))
-    }
-
-    #[doc(hidden)]
-    #[wasm_bindgen(js_name = openWithPeerHydrationJson)]
-    pub fn open_with_peer_hydration_json(
-        bytes: &[u8],
-        hydration: &str,
-    ) -> Result<XlsxDocument, JsValue> {
-        Session::open_with_peer_hydration_json(bytes, hydration)
-            .map(|session| XlsxDocument {
-                session,
-                update_observer: None,
-            })
-            .map_err(|error| JsValue::from_str(&error))
+    #[wasm_bindgen(js_name = peerHydrationChunksJson)]
+    pub fn peer_hydration_chunks_json(&self) -> Result<js_sys::Array, JsValue> {
+        self.session.peer_hydration_chunks_json()
+            .map(|chunks| chunks.into_iter().map(JsValue::from).collect())
+            .map_err(|error| js_sys::Error::new(&error).into())
     }
 
     /// open a workbook from raw `.xlsx` bytes.

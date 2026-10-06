@@ -437,6 +437,7 @@ name = "betteroffice-xlsx-parse"
 version = "0.4.3"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-opc",
  "betteroffice-xlsx-model",
  "quick-xml",
 ]

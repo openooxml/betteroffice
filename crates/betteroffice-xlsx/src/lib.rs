@@ -3,17 +3,11 @@
 mod authority;
 mod error;
 mod sheet_json;
-#[cfg_attr(not(test), allow(dead_code))]
-mod snapshot;
 mod structured;
 mod types;
 mod workbook;
 
 pub use error::Error;
-pub use snapshot::{
-    HydratedWorkbook, SnapshotBudget, SnapshotError, SnapshotProgress, SnapshotResult,
-    WorkbookSnapshotBuilder, WorkbookSnapshotEncoder,
-};
 pub use structured::{
     DEFAULT_EXPORT_MAX_BYTES, DEFAULT_EXPORT_MAX_CELLS, DEFAULT_MARKDOWN_MAX_CELLS,
     DEFAULT_MARKDOWN_MAX_COLUMNS, DEFAULT_MARKDOWN_MAX_ROWS, MAX_EXPORT_BYTES, MAX_EXPORT_CELLS,
@@ -51,7 +45,8 @@ pub use workbook::target::{
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS,
-    UpdateSubscription, Workbook,
+    OpenerState, PeerHydrationChunk, PeerHydrationHeader, UpdateSubscription, Workbook,
+    WorkbookPeerOpener,
 };
 
 pub use xlsx_model::addr::AddrError;

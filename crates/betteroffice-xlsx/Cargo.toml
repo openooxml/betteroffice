@@ -30,6 +30,7 @@ sha2 = "0.10"
 yrs = "0.27.3"
 
 [dev-dependencies]
+xlsx-calc = { workspace = true, features = ["test-oracle"] }
 xlsx-parse = { workspace = true, features = ["test-counters", "test-oracle"] }
 xlsx-render = { workspace = true, features = ["test-counters"] }
 png = "0.18"

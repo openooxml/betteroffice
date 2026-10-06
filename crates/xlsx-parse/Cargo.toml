@@ -19,6 +19,7 @@ test-counters = []
 test-oracle = []
 
 [dependencies]
+ooxml-opc.workspace = true
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 quick-xml = "0.41"
 xlsx-model.workspace = true

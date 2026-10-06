@@ -2,28 +2,51 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, EditProfile, Error, HydratedWorkbook, MutationResult, NumberFormatMutation, Op,
-    PeerHydration as WorkbookPeerHydration, PrintMetrics, Proposal,
-    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, SnapshotBudget,
-    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookSnapshotEncoder,
+    CellRef, EditProfile, Error, MutationResult, NumberFormatMutation, Op,
+    OpenerState, PeerHydrationChunk, PrintMetrics, Proposal,
+    ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId,
+    StylePatch, UpdateEvent, UpdateSubscription, Viewport, Workbook, WorkbookPeerOpener,
 };
 use serde::{Deserialize, Serialize};
 
 pub struct Session {
     workbook: Workbook,
     calculation_context: Option<CalculationOptions>,
-    snapshot: Option<PeerSnapshot>,
-}
-
-struct PeerSnapshot {
-    encoder: WorkbookSnapshotEncoder,
-    version: String,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PeerHydration {
-    workbook: WorkbookPeerHydration,
+    workbook: PeerHydrationChunk,
     calculation_context: Option<CalculationOptions>,
+}
+
+pub struct PeerOpener {
+    opener: WorkbookPeerOpener,
+    calculation_context: Option<CalculationOptions>,
+}
+
+impl PeerOpener {
+    pub fn new(bytes: Vec<u8>, client_id: Option<u64>) -> Self {
+        Self { opener: WorkbookPeerOpener::new(bytes, client_id), calculation_context: None }
+    }
+
+    pub fn advance(&mut self, units: usize) -> Result<OpenerState, String> {
+        self.opener.advance(units).map_err(|error| error.to_string())
+    }
+
+    pub fn push_hydration(&mut self, json: &str) -> Result<(), String> {
+        let hydration: PeerHydration = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        if matches!(&hydration.workbook, PeerHydrationChunk::Header { .. }) {
+            self.calculation_context = hydration.calculation_context;
+        }
+        self.opener.push_hydration(hydration.workbook).map_err(|error| error.to_string())
+    }
+
+    pub fn finish(self) -> Result<Session, String> {
+        self.opener.finish().map(|workbook| Session {
+            workbook, calculation_context: self.calculation_context,
+        }).map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Deserialize)]
@@ -298,54 +321,6 @@ struct AcceptResult {
 }
 
 impl Session {
-    pub fn begin_peer_snapshot(&mut self, records: usize, bytes: usize) -> Result<(), String> {
-        self.snapshot = None;
-        let budget = SnapshotBudget::new(records, bytes).map_err(|error| error.to_string())?;
-        let encoder =
-            WorkbookSnapshotEncoder::new(&self.workbook, self.calculation_context, budget)
-                .map_err(|error| error.to_string())?;
-        if let Some(reason) = encoder.split_fallback_reason() {
-            return Err(reason.to_owned());
-        }
-        self.snapshot = Some(PeerSnapshot {
-            encoder,
-            version: self.document_version(),
-        });
-        Ok(())
-    }
-
-    pub fn next_peer_snapshot_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
-        let mut snapshot = self
-            .snapshot
-            .take()
-            .ok_or_else(|| "workbook peer snapshot is not active".to_owned())?;
-        if snapshot.version != self.document_version() {
-            return Err("workbook changed during peer snapshot".to_owned());
-        }
-        let chunk = snapshot
-            .encoder
-            .next(&self.workbook)
-            .map_err(|error| error.to_string())?;
-        if let Some(reason) = snapshot.encoder.split_fallback_reason() {
-            return Err(reason.to_owned());
-        }
-        self.snapshot = Some(snapshot);
-        Ok(chunk)
-    }
-
-    pub fn end_peer_snapshot(&mut self) {
-        self.snapshot = None;
-    }
-
-    pub fn from_hydrated_workbook(hydrated: HydratedWorkbook) -> Self {
-        let (workbook, calculation_context) = hydrated.into_parts();
-        Self {
-            workbook,
-            calculation_context,
-            snapshot: None,
-        }
-    }
-
     #[doc(hidden)]
     pub fn adopt_peer_version(&mut self, version: &str) -> Result<(), String> {
         self.workbook
@@ -354,29 +329,13 @@ impl Session {
     }
 
     #[doc(hidden)]
-    pub fn peer_hydration_json(&self) -> Result<String, String> {
-        let workbook = self
-            .workbook
-            .peer_hydration()
-            .map_err(|error| error.to_string())?;
-        serde_json::to_string(&PeerHydration {
-            workbook,
-            calculation_context: self.calculation_context,
-        })
-        .map_err(|error| error.to_string())
-    }
-
-    #[doc(hidden)]
-    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self, String> {
-        let hydration: PeerHydration = serde_json::from_str(hydration)
-            .map_err(|error| format!("bad peer hydration: {error}"))?;
-        let workbook = Workbook::open_with_peer_hydration(bytes, hydration.workbook)
-            .map_err(|error| error.to_string())?;
-        Ok(Self {
-            workbook,
-            calculation_context: hydration.calculation_context,
-            snapshot: None,
-        })
+    pub fn peer_hydration_chunks_json(&self) -> Result<Vec<String>, String> {
+        self.workbook.peer_hydration().map_err(|error| error.to_string())?
+            .into_chunks().into_iter().map(|workbook| {
+                serde_json::to_string(&PeerHydration {
+                    workbook, calculation_context: self.calculation_context,
+                }).map_err(|error| error.to_string())
+            }).collect()
     }
 
     pub fn open(bytes: &[u8], now_serial: Option<f64>) -> Result<Self, String> {
@@ -384,7 +343,6 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
-                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -398,7 +356,6 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: Some(options),
-                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -434,7 +391,6 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
-                snapshot: None,
             })
             .map_err(|error| error.to_string())
     }
@@ -1242,12 +1198,15 @@ mod tests {
         let mut worker =
             Session::open_with_calculation_json(&bytes, r#"{"nowSerial":45000.75,"randSeed":42}"#)
                 .unwrap();
-        let hydration = worker.peer_hydration_json().unwrap();
-        let transferred: serde_json::Value = serde_json::from_str(&hydration).unwrap();
+        let hydration = worker.peer_hydration_chunks_json().unwrap();
+        let transferred: serde_json::Value = serde_json::from_str(&hydration[0]).unwrap();
         assert!(transferred["workbook"].is_object());
-        assert_eq!(transferred["workbook"]["delta"], true);
-        assert_eq!(transferred["workbook"]["rand_seed"], 42);
-        let mut peer = Session::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        assert_eq!(transferred["workbook"]["header"]["delta"], true);
+        assert_eq!(transferred["workbook"]["header"]["rand_seed"], 42);
+        let mut opener = PeerOpener::new(bytes.clone(), None);
+        for chunk in hydration { opener.push_hydration(&chunk).unwrap(); }
+        while opener.advance(1).unwrap() != OpenerState::Ready {}
+        let mut peer = opener.finish().unwrap();
         assert_eq!(peer.workbook.version(), worker.workbook.version());
         assert_eq!(peer.workbook.rand_seed(), worker.workbook.rand_seed());
         assert_eq!(peer.calculation_context, worker.calculation_context);

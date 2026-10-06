@@ -33,6 +33,35 @@ pub(crate) fn parse_stylesheet(
     Ok((sheet, legacy))
 }
 
+pub(crate) async fn parse_stylesheet_sliced(
+    styles: Option<&[u8]>,
+    theme: Option<&[u8]>,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(Stylesheet, Option<Stylesheet>), ParseError> {
+    let theme = match theme {
+        Some(bytes) => parse_theme_sliced(bytes, work).await?,
+        None => Theme::default(),
+    };
+    let (mut sheet, legacy_xfs) = match styles {
+        Some(bytes) => parse_styles_sliced(bytes, work).await?,
+        None => (Stylesheet::default(), Vec::new()),
+    };
+    sheet.theme = theme;
+    let mut differs = legacy_xfs.len() != sheet.cell_xfs.len();
+    if !differs {
+        for (legacy, current) in legacy_xfs.iter().zip(&sheet.cell_xfs) {
+            work.step().await;
+            if legacy != current { differs = true; break; }
+        }
+    }
+    let legacy = if differs {
+        let mut legacy = crate::sliced::clone_stylesheet(&sheet, work).await;
+        legacy.cell_xfs = legacy_xfs;
+        Some(legacy)
+    } else { None };
+    Ok((sheet, legacy))
+}
+
 /// which top-level pool the cursor is inside; disambiguates elements that recur
 /// across sections (`<xf>` in cellStyleXfs vs cellXfs, `<color>` everywhere).
 #[derive(PartialEq)]
@@ -66,6 +95,157 @@ fn parse_styles(data: &[u8]) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) => match local_name(&e).as_slice() {
+                b"colors" if depth == 2 => colors_depth = Some(depth),
+                b"indexedColors" if colors_depth == Some(depth - 1) => {
+                    indexed_colors_depth = Some(depth);
+                }
+                b"rgbColor" if indexed_colors_depth == Some(depth - 1) => {
+                    cap(ss.indexed_colors.len())?;
+                    let rgb = match attr(&e, b"rgb")? {
+                        Some(value) => normalize_rgb(&value).ok_or_else(|| {
+                            ParseError::Xml("invalid indexed palette color".into())
+                        })?,
+                        None => String::new(),
+                    };
+                    ss.indexed_colors.push(rgb);
+                }
+                b"numFmts" => section = Section::None,
+                b"fonts" => section = Section::Fonts,
+                b"fills" => section = Section::Fills,
+                b"borders" => section = Section::Borders,
+                b"cellStyleXfs" => section = Section::CellStyleXfs,
+                b"cellXfs" => section = Section::CellXfs,
+                b"numFmt" => {
+                    if let (Some(id), Some(code)) = (
+                        attr(&e, b"numFmtId")?.and_then(|v| v.parse::<u16>().ok()),
+                        attr(&e, b"formatCode")?,
+                    ) {
+                        cap(ss.num_fmts.len())?;
+                        ss.num_fmts.push((id, code));
+                    }
+                }
+                b"font" if section == Section::Fonts => font = Some(Font::default()),
+                b"fill" if section == Section::Fills => fill = Some(Fill::None),
+                b"border" if section == Section::Borders => border = Some(Border::default()),
+                b"b" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.bold)?,
+                b"i" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.italic)?,
+                b"u" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.underline)?,
+                b"strike" if font.is_some() => set_bool(&e, &mut font, |f| &mut f.strike)?,
+                b"sz" if font.is_some() => {
+                    if let Some(v) = attr(&e, b"val")?.and_then(|v| v.parse::<f64>().ok()) {
+                        font.as_mut().unwrap().size_pt = Some(v);
+                    }
+                }
+                b"name" if font.is_some() => {
+                    if let Some(v) = attr(&e, b"val")? {
+                        font.as_mut().unwrap().name = Some(v);
+                    }
+                }
+                b"color" if font.is_some() => {
+                    font.as_mut().unwrap().color = parse_color(&e)?;
+                }
+                b"patternFill" if fill.is_some() => {
+                    if attr(&e, b"patternType")?.as_deref() != Some("none") {
+                        // any non-none pattern collapses to solid auto until fgColor is seen
+                        *fill.as_mut().unwrap() = Fill::Solid(Color::Auto);
+                    }
+                }
+                b"fgColor" if fill.is_some() => {
+                    if let Some(c) = parse_color(&e)? {
+                        *fill.as_mut().unwrap() = Fill::Solid(c);
+                    }
+                }
+                b"left" | b"start" if border.is_some() => edge = begin_edge(&e, 0)?,
+                b"right" | b"end" if border.is_some() => edge = begin_edge(&e, 1)?,
+                b"top" if border.is_some() => edge = begin_edge(&e, 2)?,
+                b"bottom" if border.is_some() => edge = begin_edge(&e, 3)?,
+                b"color" if edge.is_some() => {
+                    if let Some((_, ed)) = edge.as_mut() {
+                        ed.color = parse_color(&e)?;
+                    }
+                }
+                b"xf" if section == Section::CellXfs => {
+                    let (parsed, flags) = parse_xf(&e)?;
+                    xf = Some(parsed);
+                    explicit = flags;
+                }
+                b"alignment" if xf.is_some() && section == Section::CellXfs => {
+                    let a = parse_alignment(&e)?;
+                    if !a.is_empty() {
+                        xf.as_mut().unwrap().alignment = Some(a);
+                    }
+                }
+                _ => {}
+            },
+            Event::End(e) => match e.name().local_name().as_ref() {
+                b"colors" if colors_depth == Some(depth + 1) => colors_depth = None,
+                b"indexedColors" if indexed_colors_depth == Some(depth + 1) => {
+                    indexed_colors_depth = None;
+                }
+                b"font" => {
+                    if let Some(f) = font.take() {
+                        cap(ss.fonts.len())?;
+                        ss.fonts.push(f);
+                    }
+                }
+                b"fill" => {
+                    if let Some(f) = fill.take() {
+                        cap(ss.fills.len())?;
+                        ss.fills.push(f);
+                    }
+                }
+                b"border" => {
+                    if let Some(b) = border.take() {
+                        cap(ss.borders.len())?;
+                        ss.borders.push(b);
+                    }
+                }
+                b"left" | b"start" | b"right" | b"end" | b"top" | b"bottom" => {
+                    if let (Some((kind, ed)), Some(bd)) = (edge.take(), border.as_mut()) {
+                        match kind {
+                            0 => bd.left = Some(ed),
+                            1 => bd.right = Some(ed),
+                            2 => bd.top = Some(ed),
+                            _ => bd.bottom = Some(ed),
+                        }
+                    }
+                }
+                b"xf" if section == Section::CellXfs => {
+                    if let Some(x) = xf.take() {
+                        cap(ss.cell_xfs.len())?;
+                        legacy_cell_xfs.push(held_back(&x, explicit));
+                        ss.cell_xfs.push(x);
+                    }
+                }
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok((ss, legacy_cell_xfs))
+}
+
+async fn parse_styles_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<(Stylesheet, Vec<Xf>), ParseError> {
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+
+    let mut ss = Stylesheet::default();
+    let mut section = Section::None;
+    let mut font: Option<Font> = None;
+    let mut fill: Option<Fill> = None;
+    let mut border: Option<Border> = None;
+    let mut edge: Option<(u8, BorderEdge)> = None;
+    let mut xf: Option<Xf> = None;
+    let mut explicit = [false; 4];
+    let mut legacy_cell_xfs: Vec<Xf> = Vec::new();
+    let mut colors_depth = None;
+    let mut indexed_colors_depth = None;
+
+    loop {
+        match crate::xml::next_event_sliced(&mut reader, &mut buf, &mut depth, work).await? {
             Event::Start(e) => match local_name(&e).as_slice() {
                 b"colors" if depth == 2 => colors_depth = Some(depth),
                 b"indexedColors" if colors_depth == Some(depth - 1) => {
@@ -353,6 +533,48 @@ fn parse_theme(data: &[u8]) -> Result<Theme, ParseError> {
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) => match local_name(&e).as_slice() {
+                b"clrScheme" => in_scheme = true,
+                name if in_scheme && slot.is_none() => {
+                    slot = slot_index(name);
+                }
+                b"srgbClr" => {
+                    if let (Some(i), Some(val)) = (slot, attr(&e, b"val")?)
+                        && let Some(c) = normalize_rgb(&val)
+                    {
+                        theme.colors[i] = c;
+                    }
+                }
+                b"sysClr" => {
+                    if let Some(i) = slot {
+                        theme.colors[i] = sys_color(&e)?;
+                    }
+                }
+                _ => {}
+            },
+            Event::End(e) => match e.name().local_name().as_ref() {
+                b"clrScheme" => in_scheme = false,
+                name if slot_index(name).is_some() => slot = None,
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(theme)
+}
+
+async fn parse_theme_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Theme, ParseError> {
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+
+    let mut theme = Theme::default();
+    let mut slot: Option<usize> = None;
+    let mut in_scheme = false;
+
+    loop {
+        match crate::xml::next_event_sliced(&mut reader, &mut buf, &mut depth, work).await? {
             Event::Start(e) => match local_name(&e).as_slice() {
                 b"clrScheme" => in_scheme = true,
                 name if in_scheme && slot.is_none() => {

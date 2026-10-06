@@ -18,6 +18,10 @@ use wasm_bindgen::prelude::*;
 mod retained;
 mod sanitize;
 mod source_bytes;
+mod work;
+
+#[doc(hidden)]
+pub use work::WorkBudget;
 
 pub use retained::{PackageBytes, RetainedPackage};
 pub use source_bytes::SourceContainerBuilder;
@@ -73,6 +77,55 @@ fn normalized_security_path(name: &str) -> Option<String> {
 /// remaining byte budget so a lying size header cannot force unbounded output.
 pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
     unzip_parts_with_limits(data, MAX_TOTAL_UNCOMPRESSED_BYTES)
+}
+
+#[doc(hidden)]
+pub async fn unzip_parts_sliced(
+    data: &[u8],
+    work: &WorkBudget,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    work.step().await;
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(data)).map_err(|error| format!("bad zip: {error}"))?;
+    if archive.len() > MAX_ENTRY_COUNT {
+        return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
+    }
+    let mut parts = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 16 * 1024];
+    for index in 0..archive.len() {
+        work.step().await;
+        let mut entry = archive.by_index(index).map_err(|error| format!("bad zip entry: {error}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_owned();
+        let Some(path) = normalized_security_path(&name) else {
+            return Err(format!("unsafe zip entry path: {name}"));
+        };
+        if !seen_paths.insert(path) {
+            return Err(format!("duplicate normalized zip entry path: {name}"));
+        }
+        let mut bytes = Vec::new();
+        loop {
+            let count = work.take(buffer.len() / 64).await * 64;
+            let remaining = MAX_TOTAL_UNCOMPRESSED_BYTES - total;
+            let limit = count.min((remaining + 1) as usize);
+            let read = entry.read(&mut buffer[..limit])
+                .map_err(|error| format!("read failed for {name}: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > MAX_TOTAL_UNCOMPRESSED_BYTES {
+                return Err(format!("inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"));
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        parts.push((name, bytes));
+    }
+    Ok(parts)
 }
 
 /// As [`unzip_parts`], with a caller-supplied expanded-data budget. The budget only

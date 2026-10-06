@@ -106,6 +106,35 @@ impl SharedFormulas {
         }
         Ok(())
     }
+
+    pub(crate) async fn resolve_sliced(mut self, sheet: &mut Sheet, work: &ooxml_opc::WorkBudget) -> Result<(), ParseError> {
+        for ((row, col), index) in self.members {
+            work.step().await;
+            let at = CellRef::new(row, col);
+            let master = self
+                .masters
+                .get(&index)
+                .ok_or_else(|| malformed("shared formula group has no master"))?;
+            if !master.range.contains(at) {
+                return Err(malformed("shared formula is outside its master's range"));
+            }
+            if (row, col) == (master.origin.row, master.origin.col) {
+                continue;
+            }
+            let formula = translate(
+                &master.source,
+                i64::from(row) - i64::from(master.origin.row),
+                i64::from(col) - i64::from(master.origin.col),
+                self.remaining.min(MAX_FORMULA_BYTES),
+            )?;
+            self.remaining -= formula.len();
+            let cell = sheet
+                .cell_mut(at)
+                .ok_or_else(|| malformed("shared formula cell is missing"))?;
+            cell.formula = Some(formula);
+        }
+        Ok(())
+    }
 }
 
 fn malformed(message: &str) -> ParseError {

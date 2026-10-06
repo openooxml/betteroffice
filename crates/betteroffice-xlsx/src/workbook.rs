@@ -1,10 +1,13 @@
+mod peer_open;
+pub use peer_open::{OpenerState, PeerHydrationChunk, PeerHydrationHeader, WorkbookPeerOpener};
+
 pub(crate) mod batch;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
+mod peer_open_tests;
+#[cfg(test)]
 mod save_oracle_tests;
-#[path = "snapshot/assembly.rs"]
-pub(crate) mod snapshot_assembly;
 mod staging;
 pub(crate) mod target;
 
@@ -51,7 +54,6 @@ use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
-use crate::snapshot::package::PackageSlot;
 use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
@@ -334,8 +336,7 @@ pub struct Workbook {
     mode: WorkbookMode,
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
-    source_package: Option<PackageSlot>,
-    snapshot_package_lineage: Option<snapshot_assembly::Lineage>,
+    source_package: Option<xlsx_parse::PreservedPackage>,
     /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
@@ -407,12 +408,6 @@ pub struct PeerHydration {
 
 impl Workbook {
     #[doc(hidden)]
-    pub fn peer_hydration_json(&self) -> Result<String> {
-        serde_json::to_string(&self.peer_hydration()?)
-            .map_err(|error| Error::InvalidRequest(error.to_string()))
-    }
-
-    #[doc(hidden)]
     pub fn peer_hydration(&self) -> Result<PeerHydration> {
         if self.edited_since_open || !self.proposals.list().is_empty() {
             return Err(Error::InvalidOperation(
@@ -463,14 +458,18 @@ impl Workbook {
     }
 
     #[doc(hidden)]
-    pub fn open_with_peer_hydration_json(bytes: &[u8], hydration: &str) -> Result<Self> {
-        let hydration: PeerHydration = serde_json::from_str(hydration)
-            .map_err(|error| Error::InvalidRequest(error.to_string()))?;
-        Self::open_with_peer_hydration(bytes, hydration)
+    pub fn open_with_peer_hydration(bytes: &[u8], hydration: PeerHydration) -> Result<Self> {
+        if hydration.cells.len() != hydration.arrays.len() || hydration.cells.len() != hydration.deleted_cells.len() {
+            return Err(Error::InvalidRequest("Peer hydration sheet count differs".into()));
+        }
+        let mut opener = WorkbookPeerOpener::new(bytes.to_vec(), hydration.client_id);
+        for chunk in hydration.into_chunks() { opener.push_hydration(chunk)?; }
+        while opener.advance(usize::MAX)? != OpenerState::Ready {}
+        opener.finish()
     }
 
-    #[doc(hidden)]
-    pub fn open_with_peer_hydration(bytes: &[u8], hydration: PeerHydration) -> Result<Self> {
+    #[cfg(test)]
+    fn open_with_peer_hydration_oracle(bytes: &[u8], hydration: PeerHydration) -> Result<Self> {
         let mut workbook = Self::open_internal(bytes, false, hydration.client_id)?;
         if hydration.cells.len() != workbook.model.sheets.len()
             || hydration.arrays.len() != workbook.model.sheets.len()
@@ -587,9 +586,6 @@ impl Workbook {
     }
 
     pub fn set_rand_seed(&mut self, seed: Option<u32>) {
-        if self.rand_seed != seed {
-            self.snapshot_package_lineage = None;
-        }
         self.rand_seed = seed;
     }
 
@@ -705,8 +701,7 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package: source_package.map(PackageSlot::Present),
-            snapshot_package_lineage: None,
+            source_package,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -733,14 +728,115 @@ impl Workbook {
         })
     }
 
-    fn require_snapshot_standalone(&self) -> crate::snapshot::SnapshotResult<()> {
-        if matches!(self.mode, WorkbookMode::Standalone) {
-            Ok(())
+    async fn from_source_sliced(
+        model: WorkbookModel,
+        source_package: Option<xlsx_parse::PreservedPackage>,
+        active_sheet: SheetId,
+        build_graph: bool,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<Self> {
+        validate_model_sheets_sliced(&model, work).await?;
+        validate_chart_source(&model, source_package.is_some())?;
+        let active_sheet = if (active_sheet.0 as usize) < model.sheets.len() {
+            active_sheet
         } else {
-            Err(crate::snapshot::SnapshotError::new(
-                "collaborative workbooks cannot be snapshotted",
-            ))
+            SheetId(0)
+        };
+        if let Some(client_id) = client_id {
+            validate_collaboration_client_id(client_id)?;
         }
+        let (authority, mut projected, structure) = WorkbookAuthority::from_source_with_projection_sliced(
+            &model,
+            client_id,
+            legacy_dimensions,
+            legacy_styles,
+            work,
+        ).await
+        .map_err(authority_error)?;
+        if client_id.is_some() {
+            validate_collaboration_size(&authority.encode_state_as_update_v1())?;
+            validate_collaboration_state_entries(authority.state_vector_entries())?;
+        }
+        for (source, target) in model.sheets.iter().zip(&mut projected.sheets) {
+            for (at, range) in source.array_formulas() {
+                work.step().await;
+                let formula = target.cell(at).and_then(|cell| cell.formula.as_deref());
+                if formula.is_some() && formula == source.cell(at).and_then(|cell| cell.formula.as_deref()) {
+                    target.set_array_formula(at, range);
+                }
+            }
+        }
+        xlsx_parse::sliced::retire_workbook(model, work).await;
+        let model = projected;
+        validate_model_sheets_sliced(&model, work).await?;
+        let mut opened_anchors = BTreeMap::new();
+        for sheet in &model.sheets {
+            for chart in &sheet.charts {
+                work.step().await;
+                opened_anchors.insert(chart.frame_id(), chart.anchor);
+            }
+        }
+        let graph = build_graph.then(|| DepGraph::build(&model));
+        let mode = match client_id {
+            Some(_) => WorkbookMode::Collaborative { structure },
+            None => WorkbookMode::Standalone,
+        };
+        let preserved = match &source_package {
+            Some(package) => PreservedSheetState {
+                origins: (0..model.sheets.len())
+                    .map(|index| (index < package.source_sheet_count()).then_some(index))
+                    .collect(),
+                shared_string_cells: {
+                    let mut cells = Vec::with_capacity(model.sheets.len());
+                    for index in 0..model.sheets.len() {
+                        cells.push(package.source_shared_string_cells_sliced(index, work).await);
+                    }
+                    Arc::new(cells)
+                },
+                axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
+                created: vec![false; model.sheets.len()],
+            },
+            None => PreservedSheetState {
+                origins: vec![None; model.sheets.len()],
+                shared_string_cells: Arc::new(vec![Default::default(); model.sheets.len()]),
+                axes: vec![None; model.sheets.len()],
+                created: vec![false; model.sheets.len()],
+            },
+        };
+        let version_nonce = batch::mint_nonce();
+        Ok(Self {
+            authority,
+            mode,
+            pending_remote_updates: Vec::new(),
+            model,
+            source_package,
+            source_container: None,
+            preserved,
+            preserved_undo: Vec::new(),
+            preserved_redo: Vec::new(),
+            edited_since_open: false,
+            recalculated_since_open: false,
+            calculations_since_open: 0,
+            moved_references_since_open: false,
+            active_sheet,
+            undo: UndoStack::new(),
+            graph,
+            rand_seed: None,
+            proposals: ProposalSet::new(),
+            last_calculation: CalculationResult::default(),
+            update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
+            opened_anchors,
+            sheet_info_cache: Mutex::new(None),
+            model_epoch: 0,
+            geometry_cache: Mutex::new(HashMap::new()),
+            version_nonce,
+            committed_changes: 0,
+            chart_cache: Mutex::new(ChartCache::default()),
+            source_part_hashes: Mutex::new(BTreeMap::new()),
+        })
     }
 
     pub fn client_id(&self) -> u64 {
@@ -921,7 +1017,7 @@ impl Workbook {
             model,
             self.source_package
                 .as_ref()
-                .is_some_and(|package| package.facts().source_present()),
+                .is_some_and(|package| xlsx_parse::PackageFactsView::from_package(package).source_present()),
         )?;
         self.validate_incoming_anchors(model)
     }
@@ -1110,7 +1206,6 @@ impl Workbook {
         validate_chart_source(&self.model, self.source_package.is_some())?;
         match &self.source_package {
             Some(package) => {
-                let package = package.materialize()?;
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -1147,7 +1242,7 @@ impl Workbook {
     fn has_uncached_source_formulas(&self) -> bool {
         self.source_package
             .as_ref()
-            .is_some_and(|package| package.facts().has_uncached_source_formulas())
+            .is_some_and(|package| xlsx_parse::PackageFactsView::from_package(package).has_uncached_source_formulas())
     }
 
     /// The committed state a structured export reads.
@@ -1156,9 +1251,7 @@ impl Workbook {
             model: &self.model,
             package: self
                 .source_package
-                .as_ref()
-                .map(PackageSlot::materialize)
-                .transpose()?,
+                .as_ref(),
             origins: &self.preserved.origins,
             shared_string_cells: &self.preserved.shared_string_cells,
             axes: &self.preserved.axes,
@@ -1179,29 +1272,6 @@ impl Workbook {
         self.model
     }
 
-    #[cfg(test)]
-    pub(crate) fn defer_source_package_for_test(&mut self) -> Result<()> {
-        let source = self
-            .source_container
-            .as_ref()
-            .ok_or_else(|| Error::Package("source container is unavailable".to_owned()))?;
-        let package = self
-            .source_package
-            .as_ref()
-            .ok_or_else(|| Error::Package("source package is unavailable".to_owned()))?;
-        let facts = xlsx_parse::PackageFacts::from_package(package.materialize()?);
-        self.source_package = Some(PackageSlot::deferred(source.clone(), facts));
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn source_package_is_unmaterialized_for_test(&self) -> bool {
-        matches!(
-            &self.source_package,
-            Some(PackageSlot::Deferred { rebuilt, .. }) if rebuilt.get().is_none()
-        )
-    }
-
     pub fn sheet(&self, sheet: SheetId) -> Result<&Sheet> {
         self.model.sheet(sheet).ok_or(Error::SheetOutOfRange(sheet))
     }
@@ -1220,9 +1290,6 @@ impl Workbook {
 
     pub fn set_active_sheet(&mut self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
-        if self.active_sheet != sheet {
-            self.snapshot_package_lineage = None;
-        }
         self.active_sheet = sheet;
         self.invalidate_sheet_info();
         Ok(())
@@ -2511,7 +2578,7 @@ impl Workbook {
     /// what the ops before it left behind rather than what the workbook opened
     /// with.
     fn ensure_references_stay_valid(&self, names: &[String], op: &Op) -> Result<()> {
-        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
+        let Some(package) = self.source_package.as_ref().map(xlsx_parse::PackageFactsView::from_package) else {
             return Ok(());
         };
         let at = |sheet: SheetId| {
@@ -2556,7 +2623,7 @@ impl Workbook {
     /// Whether an op moves cells a preserved part names and no save rewrites,
     /// which is what a save has to be told about.
     fn moves_referenced_cells(&self, names: &[String], op: &Op) -> bool {
-        let Some(package) = self.source_package.as_ref().map(PackageSlot::facts) else {
+        let Some(package) = self.source_package.as_ref().map(xlsx_parse::PackageFactsView::from_package) else {
             return false;
         };
         let (sheet, at, by_rows) = match *op {
@@ -2590,7 +2657,7 @@ impl Workbook {
         if origin.is_some_and(|origin| {
             self.source_package
                 .as_ref()
-                .is_some_and(|package| !package.facts().source_sheet_is_worksheet(origin))
+                .is_some_and(|package| !xlsx_parse::PackageFactsView::from_package(package).source_sheet_is_worksheet(origin))
         }) {
             return Err(Error::InvalidOperation(format!(
                 "sheet {} is not an editable worksheet",
@@ -3392,6 +3459,117 @@ fn validate_model_sheets(model: &WorkbookModel) -> Result<()> {
     Ok(())
 }
 
+async fn validate_model_sheets_sliced(model: &WorkbookModel, work: &ooxml_opc::WorkBudget) -> Result<()> {
+    if model.sheets.is_empty() {
+        return Err(Error::NoSheets);
+    }
+    for defined in &model.defined_names {
+        work.step().await;
+        if defined
+            .local_sheet
+            .is_some_and(|sheet| sheet.0 as usize >= model.sheets.len())
+        {
+            return Err(Error::InvalidOperation(format!(
+                "defined name {} has an invalid sheet scope",
+                defined.name
+            )));
+        }
+        if defined.formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES {
+            return Err(Error::InvalidOperation(format!(
+                "defined name {} has a formula above the length limit",
+                defined.name
+            )));
+        }
+    }
+    let mut names = HashSet::with_capacity(model.sheets.len());
+    for sheet in &model.sheets {
+        work.step().await;
+        if let Some(pane) = sheet.freeze_pane
+            && (pane.rows > MAX_ROWS
+                || pane.cols > MAX_COLS
+                || pane.top_left.row >= MAX_ROWS
+                || pane.top_left.col >= MAX_COLS)
+        {
+            return Err(Error::InvalidOperation(format!(
+                "sheet {} has an invalid freeze pane",
+                sheet.name
+            )));
+        }
+        validate_hyperlinks_sliced(&sheet.hyperlinks, work).await?;
+        validate_charts_sliced(&sheet.charts, work).await?;
+        validate_sheet_name(&sheet.name)?;
+        if !names.insert(sheet.name.to_lowercase()) {
+            return Err(Error::InvalidOperation(format!(
+                "duplicate sheet name: {}",
+                sheet.name
+            )));
+        }
+        for (cell, stored) in sheet.iter_cells() {
+            work.step().await;
+            validate_cell_ref(cell)?;
+            if matches!(stored.value, CellValue::Number { value } if !value.is_finite()) {
+                return Err(Error::InvalidOperation(
+                    "workbook contains a non-finite cell number".to_string(),
+                ));
+            }
+            if matches!(&stored.value, CellValue::Text { value } if value.chars().count() > xlsx_calc::eval::MAX_CELL_TEXT_CHARS)
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains cell text above Excel's length limit".to_string(),
+                ));
+            }
+            if stored
+                .formula
+                .as_ref()
+                .is_some_and(|formula| formula.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES)
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains a formula above the length limit".to_string(),
+                ));
+            }
+            if stored
+                .style
+                .is_some_and(|style| style as usize >= model.styles.cell_xfs.len().max(1))
+            {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid cell style index".to_string(),
+                ));
+            }
+        }
+        for (&column, &width) in &sheet.col_widths {
+            work.step().await;
+            if column >= MAX_COLS || !width.is_finite() || !(0.0..=MAX_COL_WIDTH).contains(&width) {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid column width".to_string(),
+                ));
+            }
+        }
+        for (&row, &height) in &sheet.row_heights {
+            work.step().await;
+            if row >= MAX_ROWS || !height.is_finite() || !(0.0..=MAX_ROW_HEIGHT).contains(&height) {
+                return Err(Error::InvalidOperation(
+                    "workbook contains an invalid row height".to_string(),
+                ));
+            }
+        }
+        for (index, range) in sheet.merges.iter().enumerate() {
+            work.step().await;
+            validate_range(*range)?;
+            let mut overlaps = false;
+            for other in &sheet.merges[index + 1..] {
+                work.step().await;
+                if ranges_intersect(*range, *other) { overlaps = true; break; }
+            }
+            if overlaps {
+                return Err(Error::InvalidOperation(
+                    "workbook contains overlapping merged ranges".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One anchor in one drawing is a single element, whatever number of sheets
 /// point at it. A local batch that repins only some of them would build a
 /// workbook that saves nowhere, so it is refused before it is committed.
@@ -3770,6 +3948,63 @@ fn validate_charts(charts: &[SheetChart]) -> Result<()> {
     Ok(())
 }
 
+async fn validate_charts_sliced(charts: &[SheetChart], work: &ooxml_opc::WorkBudget) -> Result<()> {
+    if charts.len() > MAX_CHARTS_PER_SHEET {
+        return Err(Error::InvalidOperation(
+            "sheet contains too many charts".to_string(),
+        ));
+    }
+    let mut identities = HashSet::with_capacity(charts.len());
+    for chart in charts {
+        work.step().await;
+        if chart.part.is_empty() || chart.drawing.is_empty() {
+            return Err(Error::InvalidOperation(
+                "chart must name its part and drawing".to_string(),
+            ));
+        }
+        if chart.part.len() > MAX_CHART_FIELD_BYTES
+            || chart.drawing.len() > MAX_CHART_FIELD_BYTES
+            || chart.refs.len() > MAX_CHART_REFS_PER_CHART
+        {
+            return Err(Error::InvalidOperation(
+                "chart exceeds the supported size".to_string(),
+            ));
+        }
+        for path in [&chart.part, &chart.drawing] {
+            if !is_package_part_path(path) {
+                return Err(Error::InvalidOperation(format!(
+                    "chart names {path}, which is not a package part path"
+                )));
+            }
+        }
+        if chart.anchor_index >= MAX_CHART_ANCHORS_PER_DRAWING {
+            return Err(Error::InvalidOperation(
+                "chart anchor index is out of range".to_string(),
+            ));
+        }
+        if !identities.insert((&chart.drawing, chart.anchor_index)) {
+            return Err(Error::InvalidOperation(
+                "two charts claim the same drawing anchor".to_string(),
+            ));
+        }
+        validate_chart_anchor(chart.anchor)?;
+        for reference in &chart.refs {
+            work.step().await;
+            if reference.formula.len() > MAX_CHART_FIELD_BYTES {
+                return Err(Error::InvalidOperation(
+                    "chart reference exceeds the supported length".to_string(),
+                ));
+            }
+            if !is_writable_xml_text(&reference.formula) {
+                return Err(Error::InvalidOperation(
+                    "chart reference contains a character xml cannot carry".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn chart_frame_not_found(frame: &str) -> Error {
     Error::InvalidOperation(format!("no chart frame on this sheet is named {frame}"))
 }
@@ -3912,6 +4147,47 @@ fn validate_hyperlinks(hyperlinks: &[Hyperlink]) -> Result<()> {
         ));
     }
     for hyperlink in hyperlinks {
+        validate_range(hyperlink.range)?;
+        if hyperlink
+            .external_target
+            .as_deref()
+            .is_none_or(|value| value.is_empty())
+            && hyperlink
+                .location
+                .as_deref()
+                .is_none_or(|value| value.is_empty())
+        {
+            return Err(Error::InvalidOperation(
+                "hyperlink must have a destination".to_string(),
+            ));
+        }
+        for value in [
+            &hyperlink.external_target,
+            &hyperlink.location,
+            &hyperlink.tooltip,
+            &hyperlink.display,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > MAX_HYPERLINK_FIELD_BYTES {
+                return Err(Error::InvalidOperation(
+                    "hyperlink field exceeds its length limit".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn validate_hyperlinks_sliced(hyperlinks: &[Hyperlink], work: &ooxml_opc::WorkBudget) -> Result<()> {
+    if hyperlinks.len() > MAX_HYPERLINKS_PER_SHEET {
+        return Err(Error::InvalidOperation(
+            "sheet contains too many hyperlinks".to_string(),
+        ));
+    }
+    for hyperlink in hyperlinks {
+        work.step().await;
         validate_range(hyperlink.range)?;
         if hyperlink
             .external_target
@@ -4274,10 +4550,10 @@ impl Workbook {
         let package = self
             .source_package
             .as_ref()
+            .map(xlsx_parse::PackageFactsView::from_package)
             .ok_or_else(|| RenderError::ChartSourceUnavailable {
                 part: chart.part.clone(),
-            })?
-            .facts();
+            })?;
         let bytes =
             package
                 .chart_part_bytes(&chart.part)
@@ -4525,8 +4801,7 @@ impl Workbook {
             mode,
             pending_remote_updates: Vec::new(),
             model,
-            source_package: source_package.map(PackageSlot::Present),
-            snapshot_package_lineage: None,
+            source_package,
             source_container: None,
             preserved,
             preserved_undo: Vec::new(),
@@ -4793,8 +5068,8 @@ mod tests {
         let active = SheetId((worker.sheet_count() - 1) as u32);
         assert_ne!(active, worker.active_sheet());
         worker.set_active_sheet(active).unwrap();
-        let hydration = worker.peer_hydration_json().unwrap();
-        let mut peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        let hydration = serde_json::to_string(&worker.peer_hydration().unwrap()).unwrap();
+        let mut peer = Workbook::open_with_peer_hydration(&bytes, serde_json::from_str(&hydration).unwrap()).unwrap();
         assert_eq!(peer.active_sheet(), active);
         assert_eq!(peer.rand_seed(), Some(0x5eed));
         assert_eq!(peer.model, worker.model);
@@ -4838,7 +5113,7 @@ mod tests {
         assert!(!worker.edited_since_open);
         assert_eq!(worker.proposals().len(), 1);
         assert!(matches!(
-            worker.peer_hydration_json(),
+            worker.peer_hydration(),
             Err(Error::InvalidOperation(_))
         ));
     }
@@ -4864,8 +5139,8 @@ mod tests {
         assert_eq!(first.id, "p1");
         assert!(worker.reject_proposal(&first.id));
         assert!(worker.proposals().is_empty());
-        let hydration = worker.peer_hydration_json().unwrap();
-        let mut peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        let hydration = serde_json::to_string(&worker.peer_hydration().unwrap()).unwrap();
+        let mut peer = Workbook::open_with_peer_hydration(&bytes, serde_json::from_str(&hydration).unwrap()).unwrap();
         let original_proposal = worker.propose(request.clone(), options).unwrap();
         let peer_proposal = peer.propose(request, options).unwrap();
         assert_eq!(original_proposal.id, "p2");
@@ -4919,7 +5194,7 @@ mod tests {
             Some(0x5eed),
         )
         .unwrap();
-        let hydration = worker.peer_hydration_json().unwrap();
+        let hydration = serde_json::to_string(&worker.peer_hydration().unwrap()).unwrap();
         let transferred: PeerHydration = serde_json::from_str(&hydration).unwrap();
         assert!(transferred.delta);
         assert_eq!(transferred.calculations_since_open, 1);
@@ -4967,7 +5242,7 @@ mod tests {
             sheet.array_formula(CellRef::new(0, 6)),
             Some(CellRange::parse_a1("G1:G2").unwrap())
         );
-        let peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        let peer = Workbook::open_with_peer_hydration(&bytes, serde_json::from_str(&hydration).unwrap()).unwrap();
         assert_hydrated_opening_equal(&peer, &worker);
     }
 
@@ -4985,7 +5260,7 @@ mod tests {
         worker.recalculate(CalculationOptions {
             now_serial: Some(45_001.5),
         });
-        let hydration = worker.peer_hydration_json().unwrap();
+        let hydration = serde_json::to_string(&worker.peer_hydration().unwrap()).unwrap();
         let transferred: PeerHydration = serde_json::from_str(&hydration).unwrap();
         assert!(!transferred.delta);
         assert_eq!(transferred.calculations_since_open, 2);
@@ -5005,7 +5280,7 @@ mod tests {
                 .iter()
                 .any(|address| address.cell == CellRef::new(0, 1))
         );
-        let peer = Workbook::open_with_peer_hydration_json(&bytes, &hydration).unwrap();
+        let peer = Workbook::open_with_peer_hydration(&bytes, serde_json::from_str(&hydration).unwrap()).unwrap();
         assert_hydrated_opening_equal(&peer, &worker);
     }
 

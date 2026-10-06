@@ -184,6 +184,164 @@ impl PreservedPackage {
         })
     }
 
+    pub(crate) async fn capture_sliced(
+        parts: Vec<(String, Vec<u8>)>,
+        workbook: &Workbook,
+        active_sheet: SheetId,
+        shared_string_cells: &[SharedStringCells],
+        declined_parts: &[String],
+        rich_shared_strings: BTreeSet<usize>,
+        cell_facts: Vec<SourceCellFacts>,
+        work: &ooxml_opc::WorkBudget,
+    ) -> Result<Self, ParseError> {
+        let mut cell_facts = cell_facts.into_iter();
+        let workbook_xml = find_part(&parts, "xl/workbook.xml")
+            .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
+        let workbook_template = XmlTemplate::capture_sliced(workbook_xml, work).await?;
+        let workbook_pr_attributes = workbook_template
+            .child("workbookPr")
+            .map(|child| attributes_from_fragment(&child.bytes))
+            .transpose()?;
+        let workbook_sheets_attributes = workbook_template
+            .child("sheets")
+            .map(|child| attributes_from_fragment(&child.bytes))
+            .transpose()?
+            .unwrap_or_default();
+        let calc_pr_attributes = workbook_template
+            .child("calcPr")
+            .map(|child| attributes_from_fragment(&child.bytes))
+            .transpose()?;
+
+        let workbook_relationships = match find_part(&parts, "xl/_rels/workbook.xml.rels") {
+            Some(bytes) => parse_relationships_sliced(bytes, work).await?,
+            None => Vec::new(),
+        };
+        let relationship_by_id = workbook_relationships
+            .iter()
+            .filter_map(|relationship| relationship.id().map(|id| (id.to_owned(), relationship)))
+            .collect::<HashMap<_, _>>();
+
+        let sheet_entries = parse_sheet_entries_sliced(workbook_xml, work).await?;
+        let mut sheets = Vec::with_capacity(sheet_entries.len());
+        for (index, entry) in sheet_entries.into_iter().enumerate() {
+            work.step().await;
+            let relationship = entry
+                .relationship_id
+                .as_deref()
+                .and_then(|id| relationship_by_id.get(id).copied());
+            let path = relationship
+                .and_then(Relationship::target)
+                .map(|target| resolve_part_path("xl", target))
+                .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
+            let bytes =
+                find_part(&parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
+            let relationship_type = relationship
+                .and_then(|relationship| relationship.attribute("Type"))
+                .map(str::to_owned);
+            sheets.push(PreservedSheet {
+                path,
+                relationship_id: entry.relationship_id,
+                relationship_type,
+                sheet_id: entry.sheet_id.unwrap_or((index + 1) as u32),
+                attributes: entry.attributes,
+                template: XmlTemplate::capture_sliced(bytes, work).await?,
+                shared_string_cells: {
+                    let mut copied = BTreeMap::new();
+                    if let Some(indices) = shared_string_cells.get(index) {
+                        for (&at, &value) in indices {
+                            work.step().await;
+                            copied.insert(at, value);
+                        }
+                    }
+                    copied
+                },
+                cell_facts: cell_facts.next().unwrap_or_default(),
+            });
+        }
+
+        let shared_strings = part_reference(
+            &parts,
+            &workbook_relationships,
+            "sharedStrings",
+            "xl/sharedStrings.xml",
+        );
+        let styles = part_reference(&parts, &workbook_relationships, "styles", "xl/styles.xml");
+        let theme = part_reference(
+            &parts,
+            &workbook_relationships,
+            "theme",
+            "xl/theme/theme1.xml",
+        );
+        let shared_strings_template = match shared_strings
+            .as_ref().and_then(|part| find_part(&parts, &part.path)) {
+            Some(bytes) => Some(XmlTemplate::capture_sliced(bytes, work).await?),
+            None => None,
+        };
+        let mut calc_chains = workbook_relationships
+            .iter()
+            .filter(|relationship| relationship.has_type("calcChain"))
+            .filter_map(|relationship| {
+                relationship.target().map(|target| PartReference {
+                    path: resolve_part_path("xl", target),
+                    relationship_id: relationship.id().map(str::to_owned),
+                })
+            })
+            .collect::<Vec<_>>();
+        if calc_chains.is_empty() && find_part(&parts, "xl/calcChain.xml").is_some() {
+            calc_chains.push(PartReference {
+                path: "xl/calcChain.xml".to_owned(),
+                relationship_id: None,
+            });
+        }
+        let stylesheet_template = match styles
+            .as_ref().and_then(|part| find_part(&parts, &part.path)) {
+            Some(bytes) => Some(XmlTemplate::capture_sliced(bytes, work).await?),
+            None => None,
+        };
+
+        let content_types = match find_part(&parts, "[Content_Types].xml") {
+            Some(bytes) => parse_content_types_sliced(bytes, work).await?,
+            None => Vec::new(),
+        };
+        let unpatchable_references = crate::reference::unpatchable_references(
+            &parts,
+            &part_content_types(&content_types, &parts),
+            workbook,
+            &sheets
+                .iter()
+                .map(|sheet| sheet.path.clone())
+                .collect::<Vec<_>>(),
+            declined_parts,
+        )?;
+
+        let root_relationships = match find_part(&parts, "_rels/.rels") {
+            Some(bytes) => parse_relationships_sliced(bytes, work).await?,
+            None => Vec::new(),
+        };
+
+        Ok(Self {
+            parts,
+            content_types,
+            root_relationships,
+            workbook_relationships,
+            workbook_template,
+            workbook_pr_attributes,
+            workbook_sheets_attributes,
+            calc_pr_attributes,
+            sheets,
+            shared_strings,
+            shared_strings_template,
+            styles,
+            theme,
+            calc_chains,
+            stylesheet_template,
+            original_workbook: crate::sliced::clone_workbook(workbook, work).await,
+            active_sheet,
+            unpatchable_references,
+            rich_shared_strings,
+        })
+    }
+
     /// Returns retained bytes for a package part.
     pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
         find_part(&self.parts, path)
@@ -243,6 +401,20 @@ impl PreservedPackage {
             .get(index)
             .map(|sheet| sheet.shared_string_cells.clone())
             .unwrap_or_default()
+    }
+
+    #[doc(hidden)]
+    pub async fn source_shared_string_cells_sliced(
+        &self, index: usize, work: &ooxml_opc::WorkBudget,
+    ) -> SharedStringCells {
+        let mut cells = SharedStringCells::new();
+        if let Some(sheet) = self.sheets.get(index) {
+            for (&at, &value) in &sheet.shared_string_cells {
+                work.step().await;
+                cells.insert(at, value);
+            }
+        }
+        cells
     }
 
     /// False for chartsheets, dialogsheets and any other non-worksheet sheet.
@@ -583,6 +755,110 @@ impl XmlTemplate {
             children,
             trailing: data[cursor..root_end].to_vec(),
             suffix: data[root_end..].to_vec(),
+            root_name: root_name
+                .ok_or_else(|| ParseError::Malformed("xml part has no root name".into()))?,
+            root_prefix,
+            root_namespace,
+            namespaces,
+        })
+    }
+
+    pub(crate) async fn capture_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Self, ParseError> {
+        let mut reader = NsReader::from_reader(data);
+        let config = reader.config_mut();
+        config.expand_empty_elements = false;
+        config.check_end_names = true;
+
+        let mut depth = 0_usize;
+        let mut root_start = None;
+        let mut root_end = None;
+        let mut root_name = None;
+        let mut root_prefix = None;
+        let mut root_namespace = None;
+        let mut namespaces = Vec::new();
+        let mut active_child: Option<(usize, String, Option<String>)> = None;
+        let mut spans = Vec::new();
+
+        loop {
+            work.step().await;
+            let before = reader.buffer_position() as usize;
+            let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
+            let namespace = resolved_namespace(namespace);
+            let after = reader.buffer_position() as usize;
+            match event {
+                Event::Start(element) => {
+                    if depth == 0 {
+                        root_start = Some(after);
+                        let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                        root_prefix = name.rsplit_once(':').map(|(prefix, _)| prefix.to_owned());
+                        root_name = Some(name);
+                        root_namespace = namespace.clone();
+                        namespaces = namespace_bindings(&element)?;
+                    } else if depth == 1 {
+                        active_child = Some((
+                            before,
+                            String::from_utf8_lossy(element.name().local_name().as_ref())
+                                .into_owned(),
+                            namespace,
+                        ));
+                    }
+                    depth += 1;
+                    if depth > MAX_DEPTH {
+                        return Err(ParseError::DepthExceeded);
+                    }
+                }
+                Event::Empty(element) if depth == 0 => {
+                    return Self::empty_root(data, &element, namespace, before, after);
+                }
+                Event::Empty(element) if depth == 1 => {
+                    spans.push((
+                        before,
+                        after,
+                        String::from_utf8_lossy(element.name().local_name().as_ref()).into_owned(),
+                        namespace,
+                    ));
+                }
+                Event::End(_) if depth == 1 => {
+                    root_end = Some(before);
+                    break;
+                }
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 1
+                        && let Some((start, name, namespace)) = active_child.take()
+                    {
+                        spans.push((start, after, name, namespace));
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+
+        let root_start =
+            root_start.ok_or_else(|| ParseError::Malformed("xml part has no root".into()))?;
+        let root_end =
+            root_end.ok_or_else(|| ParseError::Malformed("xml root is not closed".into()))?;
+        let mut cursor = root_start;
+        let mut children = Vec::with_capacity(spans.len());
+        for (start, end, local_name, namespace) in spans {
+            if start < cursor || end > root_end {
+                return Err(ParseError::Malformed("overlapping xml child spans".into()));
+            }
+            children.push(XmlChild {
+                before: work.copy_bytes(&data[cursor..start]).await,
+                local_name,
+                bytes: work.copy_bytes(&data[start..end]).await,
+                namespace,
+            });
+            cursor = end;
+        }
+
+        Ok(Self {
+            prefix: work.copy_bytes(&data[..root_start]).await,
+            children,
+            trailing: work.copy_bytes(&data[cursor..root_end]).await,
+            suffix: work.copy_bytes(&data[root_end..]).await,
             root_name: root_name
                 .ok_or_else(|| ParseError::Malformed("xml part has no root name".into()))?,
             root_prefix,
@@ -1085,6 +1361,25 @@ pub(crate) fn parse_relationships(data: &[u8]) -> Result<Vec<Relationship>, Pars
     Ok(relationships)
 }
 
+pub(crate) async fn parse_relationships_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Vec<Relationship>, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut relationships = Vec::new();
+    loop {
+        match crate::xml::next_event_sliced(&mut reader, &mut buffer, &mut depth, work).await? {
+            Event::Start(element) if local_name(&element) == b"Relationship" => {
+                relationships.push(Relationship {
+                    attributes: attributes(&element)?,
+                });
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(relationships)
+}
+
 fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError> {
     let mut reader = reader(data);
     let mut buffer = Vec::new();
@@ -1092,6 +1387,29 @@ fn parse_content_types(data: &[u8]) -> Result<Vec<ContentTypeEntry>, ParseError>
     let mut entries = Vec::new();
     loop {
         match next_event(&mut reader, &mut buffer, &mut depth)? {
+            Event::Start(element) => {
+                let name = local_name(&element);
+                if matches!(name.as_slice(), b"Default" | b"Override") {
+                    entries.push(ContentTypeEntry {
+                        element: String::from_utf8_lossy(&name).into_owned(),
+                        attributes: attributes(&element)?,
+                    });
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(entries)
+}
+
+async fn parse_content_types_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Vec<ContentTypeEntry>, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut entries = Vec::new();
+    loop {
+        match crate::xml::next_event_sliced(&mut reader, &mut buffer, &mut depth, work).await? {
             Event::Start(element) => {
                 let name = local_name(&element);
                 if matches!(name.as_slice(), b"Default" | b"Override") {
@@ -1143,6 +1461,40 @@ fn parse_sheet_entries(data: &[u8]) -> Result<Vec<SheetEntry>, ParseError> {
     let mut entries = Vec::new();
     loop {
         match next_event(&mut reader, &mut buffer, &mut depth)? {
+            Event::Start(element) if local_name(&element) == b"sheets" => {
+                sheets_depth = Some(depth);
+            }
+            Event::Start(element)
+                if local_name(&element) == b"sheet"
+                    && sheets_depth.is_some_and(|sheets| depth == sheets + 1) =>
+            {
+                entries.push(SheetEntry {
+                    relationship_id: attr(&element, b"id")?,
+                    sheet_id: attr(&element, b"sheetId")?.and_then(|id| id.parse().ok()),
+                    attributes: attributes(&element)?,
+                });
+            }
+            Event::End(element)
+                if local_name_from_end(&element) == b"sheets"
+                    && sheets_depth.is_some_and(|sheets| depth < sheets) =>
+            {
+                sheets_depth = None;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(entries)
+}
+
+async fn parse_sheet_entries_sliced(data: &[u8], work: &ooxml_opc::WorkBudget) -> Result<Vec<SheetEntry>, ParseError> {
+    let mut reader = reader(data);
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    let mut sheets_depth = None;
+    let mut entries = Vec::new();
+    loop {
+        match crate::xml::next_event_sliced(&mut reader, &mut buffer, &mut depth, work).await? {
             Event::Start(element) if local_name(&element) == b"sheets" => {
                 sheets_depth = Some(depth);
             }

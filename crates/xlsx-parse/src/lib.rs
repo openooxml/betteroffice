@@ -3,7 +3,6 @@
 
 mod axis;
 mod chart;
-mod facts_codec;
 mod formula;
 mod inventory;
 mod package;
@@ -13,6 +12,8 @@ mod read;
 mod reference;
 #[cfg(any(test, feature = "test-oracle"))]
 mod save_oracle;
+#[doc(hidden)]
+pub mod sliced;
 mod styles;
 mod tree;
 mod write;
@@ -22,7 +23,6 @@ pub use axis::SheetAxes;
 pub use chart::{ChartRefresh, ChartRefreshPlan, chart_space, preserved_chart_space};
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, reset_chart_counters};
-pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
@@ -77,6 +77,37 @@ pub fn parse_workbook_with_owned_package(
         parsed.rich_shared_strings,
         parsed.cell_facts,
     )?;
+    Ok(ParsedWorkbook {
+        workbook: parsed.workbook,
+        active_sheet: parsed.active_sheet,
+        package,
+        legacy_dimensions: parsed.legacy_dimensions,
+        legacy_styles: parsed.legacy_styles,
+    })
+}
+
+#[doc(hidden)]
+pub async fn parse_workbook_with_owned_package_sliced(
+    parts: Vec<(String, Vec<u8>)>,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<ParsedWorkbook, ParseError> {
+    let mut parsed = read::parse_workbook_indexed_sliced(&parts, work).await?;
+    let package = PreservedPackage::capture_sliced(
+        parts,
+        &parsed.workbook,
+        parsed.active_sheet,
+        &parsed.shared_string_cells,
+        &parsed.declined_parts,
+        parsed.rich_shared_strings,
+        parsed.cell_facts,
+        work,
+    ).await?;
+    for indices in &mut parsed.shared_string_cells {
+        while !indices.is_empty() {
+            work.step().await;
+            indices.pop_first();
+        }
+    }
     Ok(ParsedWorkbook {
         workbook: parsed.workbook,
         active_sheet: parsed.active_sheet,

@@ -14,5 +14,8 @@ categories = ["parser-implementations", "mathematics"]
 [lib]
 name = "xlsx_calc"
 
+[features]
+test-oracle = []
+
 [dependencies]
 xlsx-model.workspace = true

@@ -445,9 +445,10 @@ impl DepGraph {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-oracle"))]
 impl DepGraph {
-    fn assert_matches(&self, other: &Self) {
+    #[doc(hidden)]
+    pub fn assert_matches(&self, other: &Self) {
         let Self {
             names,
             defined_names,
@@ -498,7 +499,7 @@ impl DepGraph {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-oracle"))]
 fn assert_expr_matches(actual: &Expr, expected: &Expr) {
     let mut pending = vec![(actual, expected)];
     while let Some((actual, expected)) = pending.pop() {
