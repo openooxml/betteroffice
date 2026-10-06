@@ -25,7 +25,10 @@ pub(super) struct ParagraphSeed {
     slot: usize,
     source: u32,
     segments: Vec<TextSegment>,
-    chunks: Option<(Rc<Vec<yrs::types::text::Diff<YChange>>>, std::ops::Range<usize>)>,
+    chunks: Option<(
+        Rc<Vec<yrs::types::text::Diff<YChange>>>,
+        std::ops::Range<usize>,
+    )>,
     pilcrow: Option<MapRef>,
     mark_attrs: Option<Attrs>,
     pm_start: u64,
@@ -514,10 +517,6 @@ impl LocalLowering {
             .map(|segment| utf16_len(&segment.text))
             .sum();
         let old_end = pm_start + u64::from(old_units) + 2;
-        #[cfg(test)]
-        if seed.chunks.is_some() {
-            self.materialized_text_units += old_units;
-        }
         let segments = patch_segments(&old_segments, edit)?;
         drop(old_segments);
         let delta = i64::from(utf16_len(&edit.text)) - i64::from(edit.removed);
@@ -560,6 +559,10 @@ impl LocalLowering {
             paragraph.attrs = old.attrs.clone();
         }
         seed.segments = segments;
+        #[cfg(test)]
+        if seed.chunks.is_some() {
+            self.materialized_text_units += old_units;
+        }
         seed.chunks = None;
         blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
         for block in &mut blocks[slot + 1..] {

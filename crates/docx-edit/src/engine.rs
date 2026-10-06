@@ -14468,7 +14468,15 @@ mod tests {
             assert!(plain.pagination.borrow().measured_shift_safe.is_empty());
         }
         assert!(
-            plain.pagination.borrow().layout.as_ref().unwrap().pages.len() > 1
+            plain
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pages
+                .len()
+                > 1
         );
         SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
         let (engine, request) =
