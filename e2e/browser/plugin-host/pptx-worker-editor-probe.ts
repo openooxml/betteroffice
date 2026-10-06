@@ -70,7 +70,7 @@ export function difference(a: Uint8ClampedArray, b: Uint8ClampedArray) {
 
 export function installPaintProbe() {
   const paints = new WeakMap<HTMLCanvasElement, {
-    depth: number; finished: boolean; frame?: PptxWorkerEditorFrame; scale: number;
+    depth: number; finished: boolean; frame?: PptxWorkerEditorFrame;
     provenance?: { thumbnail: boolean; worker: boolean };
   }>();
   const history: { thumbnail: boolean; worker: boolean }[] = [];
@@ -92,7 +92,7 @@ export function installPaintProbe() {
   CanvasRenderingContext2D.prototype.save = function (this: CanvasRenderingContext2D) {
     nativeSave.call(this);
     if (!this.canvas.closest('[data-editor]')) return;
-    const paint = paints.get(this.canvas) ?? { depth: 0, finished: false, scale: 0 };
+    const paint = paints.get(this.canvas) ?? { depth: 0, finished: false };
     paint.depth += 1;
     paints.set(this.canvas, paint);
   };
@@ -104,7 +104,6 @@ export function installPaintProbe() {
     if (!paint || paint.depth !== 1) return;
     paint.finished = false;
     paint.frame = undefined;
-    paint.scale = this.getTransform().a;
     if (this.canvas.matches('[data-testid="pptx-slide-canvas"], aside canvas')) {
       paint.provenance = { thumbnail: !!this.canvas.closest('aside'), worker: false };
       history.push(paint.provenance);

@@ -203,7 +203,7 @@ const probe: WorkerEditorProbe = {
       const paint = paints.paints.get(canvas)!;
       const frame = paint.frame!;
       const expected = document.createElement('canvas');
-      const scale = paint.scale / devicePixelRatio;
+      const scale = parseFloat(canvas.style.width) / frame.displayList.width;
       sizeCanvasForSlide(expected, frame.displayList, devicePixelRatio, scale);
       if (expected.width !== canvas.width || expected.height !== canvas.height) throw new Error('Backing stores differ');
       await paintSlide(expected.getContext('2d')!, frame.displayList, devicePixelRatio, scale);
@@ -220,7 +220,7 @@ const probe: WorkerEditorProbe = {
     expected.width = canvas.width;
     expected.height = canvas.height;
     const ctx = expected.getContext('2d')!;
-    const scale = canvas.width / access.layoutSlide(0).width;
+    const scale = devicePixelRatio * (parseFloat(canvas.style.width) / access.layoutSlide(0).width);
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     ctx.fillStyle = '#1d4ed8';
     const { line, x } = caret(position);
