@@ -147,6 +147,54 @@ describe('PPTX toolbar overflow', () => {
     expect(screen().queryByTestId('pptx-toolbar-more')).toBeNull();
   });
 
+  test('converges when hidden groups measure narrower', () => {
+    const previousRect = HTMLElement.prototype.getBoundingClientRect;
+    railWidth = 100;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.parentElement?.hasAttribute('data-toolbar-items')) {
+        return rect(this.style.position === 'absolute' ? 20 : 100);
+      }
+      if (this.querySelector(':scope > span > [data-testid="pptx-toolbar-more"]')) return rect(28);
+      return previousRect.call(this);
+    };
+    try {
+      const controller = createPptxCommandController();
+      controller.attach(testBinding().binding);
+      const tree = (
+        <PptxCommandProvider commands={controller.store}>
+          <EditorToolbar mode="commands">
+            <EditorToolbar.Toolbar>
+              <ToolbarGroup label="A">
+                <ToolbarCommandButton id="bold" />
+              </ToolbarGroup>
+              <ToolbarGroup label="B">
+                <ToolbarCommandButton id="italic" />
+              </ToolbarGroup>
+            </EditorToolbar.Toolbar>
+          </EditorToolbar>
+        </PptxCommandProvider>
+      );
+      expect(() => render(tree)).not.toThrow();
+      const groups = document.querySelectorAll('[data-toolbar-items] > [role="group"]');
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual([
+        'true',
+        'true',
+      ]);
+      const trigger = screen().getByRole('button', { name: 'More' });
+      expect(trigger).toBe(more());
+      expect(() => resize(100)).not.toThrow();
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual([
+        'true',
+        'true',
+      ]);
+      expect(screen().getByRole('button', { name: 'More' })).toBe(trigger);
+      expect(items(openMenu()).map((item) => item.dataset.label)).toEqual(['Bold', 'Italic']);
+    } finally {
+      cleanup();
+      HTMLElement.prototype.getBoundingClientRect = previousRect;
+    }
+  });
+
   test('moves trailing units into an accessible More menu, in host order', () => {
     mount();
     resize(200);

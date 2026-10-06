@@ -136,6 +136,57 @@ describe('toolbar overflow', () => {
     expect(screen().queryByTestId('toolbar-more')).toBeNull();
   });
 
+  test('converges when hidden groups measure narrower', () => {
+    const previousRect = HTMLElement.prototype.getBoundingClientRect;
+    railWidth = 100;
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      if (this.parentElement?.hasAttribute('data-toolbar-items')) {
+        return rect(this.style.position === 'absolute' ? 20 : 100);
+      }
+      if (this.querySelector(':scope > span > [data-testid="toolbar-more"]')) return rect(28);
+      return previousRect.call(this);
+    };
+    try {
+      const controller = createDocxCommandController();
+      controller.attach(testBinding().binding);
+      const tree = (
+        <DocxCommandProvider commands={controller.store}>
+          <EditorToolbar>
+            <EditorToolbar.Toolbar>
+              <ToolbarGroup label="A">
+                <ToolbarCommandButton id="bold" />
+              </ToolbarGroup>
+              <ToolbarGroup label="B">
+                <ToolbarCommandButton id="italic" />
+              </ToolbarGroup>
+            </EditorToolbar.Toolbar>
+          </EditorToolbar>
+        </DocxCommandProvider>
+      );
+      expect(() => render(tree)).not.toThrow();
+      const groups = document.querySelectorAll('[data-toolbar-items] > [role="group"]');
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual([
+        'true',
+        'true',
+      ]);
+      const trigger = screen().getByRole('button', { name: 'More actions' });
+      expect(trigger).toBe(more());
+      expect(() => resize(100)).not.toThrow();
+      expect(Array.from(groups, (group) => group.getAttribute('aria-hidden'))).toEqual([
+        'true',
+        'true',
+      ]);
+      expect(screen().getByRole('button', { name: 'More actions' })).toBe(trigger);
+      expect(menuItems(openWithKeyboard()).map((item) => item.dataset.label)).toEqual([
+        'Bold',
+        'Italic',
+      ]);
+    } finally {
+      cleanup();
+      HTMLElement.prototype.getBoundingClientRect = previousRect;
+    }
+  });
+
   test('moves whole trailing groups into More and keeps every action reachable', () => {
     mount();
     resize(120);
@@ -673,4 +724,3 @@ describe('overflow coverage', () => {
     });
   });
 });
-
