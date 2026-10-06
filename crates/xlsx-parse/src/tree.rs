@@ -743,8 +743,7 @@ pub(crate) async fn parse_tree_sliced(
                     "utf-16 part has an odd byte length".into(),
                 ));
             }
-            let units = body.chunks_exact(2).map(|pair| {
-                let pair = [pair[0], pair[1]];
+            let units = body.as_chunks::<2>().0.iter().map(|&pair| {
                 if big_endian {
                     u16::from_be_bytes(pair)
                 } else {
