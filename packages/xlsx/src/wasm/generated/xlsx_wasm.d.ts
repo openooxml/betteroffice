@@ -25,7 +25,6 @@ export class XlsxDocument {
     applyOpsJson(transaction_json: string): string;
     applyOpsProfiledJson(transaction_json: string): string;
     applyUpdateJson(update: Uint8Array): string;
-    beginPeerSnapshot(records: number, bytes: number): void;
     calculationStatusJson(): string;
     captureFormatJson(args: string): string;
     /**
@@ -71,7 +70,6 @@ export class XlsxDocument {
     encodeDiff(remote_state_vector: Uint8Array): Uint8Array;
     encodeStateAsUpdate(): Uint8Array;
     encodeStateVector(): Uint8Array;
-    endPeerSnapshot(): void;
     exportMarkdownJson(options: string, markdown_options: string): string;
     /**
      * Export the committed workbook with the version it was read at; nothing recalculates.
@@ -88,7 +86,6 @@ export class XlsxDocument {
      * slide a chart by a pixel delta as one undo step.
      */
     moveChartJson(args: string): string;
-    nextPeerSnapshotChunk(): Uint8Array | undefined;
     /**
      * open a workbook from raw `.xlsx` bytes.
      */
@@ -98,9 +95,8 @@ export class XlsxDocument {
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     static openWithCalculationJson(bytes: Uint8Array, context: string): XlsxDocument;
-    static openWithPeerHydrationJson(bytes: Uint8Array, hydration: string): XlsxDocument;
     patchRangeStyleJson(args: string): string;
-    peerHydrationJson(): string;
+    peerHydrationChunksJson(): Array<any>;
     printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
@@ -162,13 +158,13 @@ export class XlsxDocument {
     readonly clientId: number;
 }
 
-export class XlsxSnapshotBuilder {
+export class XlsxPeerOpener {
     free(): void;
     [Symbol.dispose](): void;
-    advance(records: number, bytes: number): boolean;
+    advance(units: number): number;
     finish(): XlsxDocument;
-    constructor();
-    push(chunk: Uint8Array): void;
+    constructor(bytes: Uint8Array, client_id?: number | null);
+    pushHydration(json: string): void;
 }
 
 export function exportXlsxMarkdownJson(bytes: Uint8Array, options: string, markdown_options: string): string;
@@ -186,7 +182,7 @@ export interface InitOutput {
     readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbg_xlsxdocument_free: (a: number, b: number) => void;
-    readonly __wbg_xlsxsnapshotbuilder_free: (a: number, b: number) => void;
+    readonly __wbg_xlsxpeeropener_free: (a: number, b: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
@@ -204,7 +200,6 @@ export interface InitOutput {
     readonly xlsxdocument_applyOpsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyOpsProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_beginPeerSnapshot: (a: number, b: number, c: number) => [number, number];
     readonly xlsxdocument_calculationStatusJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -224,7 +219,6 @@ export interface InitOutput {
     readonly xlsxdocument_encodeDiff: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
     readonly xlsxdocument_encodeStateVector: (a: number) => [number, number];
-    readonly xlsxdocument_endPeerSnapshot: (a: number) => void;
     readonly xlsxdocument_exportMarkdownJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly xlsxdocument_exportStructuredJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_findTextJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -232,13 +226,11 @@ export interface InitOutput {
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_nextPeerSnapshotChunk: (a: number) => [number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_openWithCalculationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
-    readonly xlsxdocument_openWithPeerHydrationJson: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
-    readonly xlsxdocument_peerHydrationJson: (a: number) => [number, number, number, number];
+    readonly xlsxdocument_peerHydrationChunksJson: (a: number) => [number, number, number];
     readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -261,10 +253,10 @@ export interface InitOutput {
     readonly xlsxdocument_validateEditsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
     readonly xlsxdocument_visibleMergedRangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly xlsxsnapshotbuilder_advance: (a: number, b: number, c: number) => [number, number, number];
-    readonly xlsxsnapshotbuilder_finish: (a: number) => [number, number, number];
-    readonly xlsxsnapshotbuilder_new: () => number;
-    readonly xlsxsnapshotbuilder_push: (a: number, b: number, c: number) => [number, number];
+    readonly xlsxpeeropener_advance: (a: number, b: number) => [number, number, number];
+    readonly xlsxpeeropener_finish: (a: number) => [number, number, number];
+    readonly xlsxpeeropener_new: (a: any, b: number, c: number) => [number, number, number];
+    readonly xlsxpeeropener_pushHydration: (a: number, b: number, c: number) => [number, number];
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;
