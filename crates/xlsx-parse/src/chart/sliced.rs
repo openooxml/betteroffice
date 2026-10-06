@@ -1,7 +1,7 @@
 use super::*;
 use crate::tree::{
     Unqualified, Vocabulary, charge_bytes, copy_text, names_are_resolvable_sliced,
-    owned_local_name, parse_tree_sliced, text_content_sliced,
+    owned_local_name, parse_tree_sliced, retire_tree, text_content_sliced,
 };
 use crate::xml::find_part_sliced;
 use ooxml_opc::WorkBudget;
@@ -24,7 +24,9 @@ pub(crate) async fn parse_sheet_charts_sliced(
             declined.push(drawing_path);
             continue;
         };
-        let Ok(anchors) = read_anchors_sliced(&drawing_root, work).await else {
+        let anchors = read_anchors_sliced(&drawing_root, work).await;
+        retire_tree(drawing_root, work).await;
+        let Ok(anchors) = anchors else {
             declined.push(drawing_path);
             continue;
         };
@@ -54,10 +56,13 @@ pub(crate) async fn parse_sheet_charts_sliced(
                 continue;
             };
             if !root.is(NS_CHART, "chartSpace") {
+                retire_tree(root, work).await;
                 declined.push(part);
                 continue;
             }
-            let Ok(refs) = chart_refs_sliced(&root, work).await else {
+            let refs = chart_refs_sliced(&root, work).await;
+            retire_tree(root, work).await;
+            let Ok(refs) = refs else {
                 declined.push(part);
                 continue;
             };
@@ -473,10 +478,17 @@ pub(crate) async fn unmodelled_chart_parts_sliced(
         let claimed = owners.is_some();
         if claimed {
             let root = parse_tree_sliced(bytes, work).await?;
-            if names_are_resolvable_sliced(&root, work).await
+            let modelled = if names_are_resolvable_sliced(&root, work).await
                 && !unsupported_reference_form_sliced(&root, 0, work).await
-                && !holds_an_unrebuildable_cache_sliced(&root, work).await?
             {
+                holds_an_unrebuildable_cache_sliced(&root, work)
+                    .await
+                    .map(|holds| !holds)
+            } else {
+                Ok(false)
+            };
+            retire_tree(root, work).await;
+            if modelled? {
                 continue;
             }
         }
@@ -498,31 +510,36 @@ pub(crate) async fn chart_reference_areas_sliced(
     work: &WorkBudget,
 ) -> Result<Option<Vec<(String, CellRef)>>, ParseError> {
     let root = parse_tree_sliced(part, work).await?;
-    if !names_are_resolvable_sliced(&root, work).await
-        || unsupported_reference_form_sliced(&root, 0, work).await
-    {
-        return Ok(None);
-    }
-    let mut areas = Vec::new();
-    for site in ref_sites_sliced(&root, work).await? {
-        work.step().await;
-        charge_bytes(site.formula.len(), work).await;
-        let formula = site.formula.trim();
-        if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
-            continue;
+    let result = async {
+        if !names_are_resolvable_sliced(&root, work).await
+            || unsupported_reference_form_sliced(&root, 0, work).await
+        {
+            return Ok(None);
         }
-        let Some((qualifier, area)) = split_qualifier(formula) else {
-            return Ok(None);
-        };
-        let (Some(sheet), Some((_, end))) = (
-            qualifier.or_else(|| owner.map(str::to_owned)),
-            parse_area(area),
-        ) else {
-            return Ok(None);
-        };
-        areas.push((sheet, end));
+        let mut areas = Vec::new();
+        for site in ref_sites_sliced(&root, work).await? {
+            work.step().await;
+            charge_bytes(site.formula.len(), work).await;
+            let formula = site.formula.trim();
+            if formula.is_empty() || formula == ErrorValue::Ref.as_str() {
+                continue;
+            }
+            let Some((qualifier, area)) = split_qualifier(formula) else {
+                return Ok(None);
+            };
+            let (Some(sheet), Some((_, end))) = (
+                qualifier.or_else(|| owner.map(str::to_owned)),
+                parse_area(area),
+            ) else {
+                return Ok(None);
+            };
+            areas.push((sheet, end));
+        }
+        Ok(Some(areas))
     }
-    Ok(Some(areas))
+    .await;
+    retire_tree(root, work).await;
+    result
 }
 
 async fn holds_an_unrebuildable_cache_sliced(
@@ -687,5 +704,6 @@ pub(crate) async fn parse_relationships_sliced(
             ));
         }
     }
+    retire_tree(root, work).await;
     Ok(rels)
 }

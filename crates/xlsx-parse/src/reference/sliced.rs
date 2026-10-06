@@ -3,7 +3,9 @@ use crate::chart::{
     chart_reference_areas_sliced, drawing_claims_are_unambiguous_sliced,
     parse_relationships_sliced, unmodelled_chart_parts_sliced,
 };
-use crate::tree::{charge_bytes, copy_text, names_are_resolvable_sliced, parse_tree_sliced};
+use crate::tree::{
+    charge_bytes, copy_text, names_are_resolvable_sliced, parse_tree_sliced, retire_tree,
+};
 use crate::xml::find_part_sliced;
 use ooxml_opc::WorkBudget;
 
@@ -75,7 +77,9 @@ async fn package_bears_references_sliced(parts: &[(String, Vec<u8>)], work: &Wor
     let Ok(root) = parse_tree_sliced(bytes, work).await else {
         return false;
     };
-    names_a_reference_bearing_type_sliced(&root, 0, work).await
+    let result = names_a_reference_bearing_type_sliced(&root, 0, work).await;
+    retire_tree(root, work).await;
+    result
 }
 
 async fn names_a_reference_bearing_type_sliced(
@@ -209,6 +213,9 @@ async fn pivot_references_sliced(
                     .or_insert_with(|| Some(part_key(path)));
             }
         }
+        if let Some(root) = root {
+            retire_tree(root, work).await;
+        }
     }
     let mut references = Vec::new();
     for (path, bytes, name) in pivot_parts {
@@ -230,7 +237,12 @@ async fn pivot_references_sliced(
                 clone_areas(areas, work).await
             }
             Some("pivotTableDefinition") => match tree_sliced(bytes, work).await {
-                Some(root) => location_areas_sliced(&root, hosts.get(&part_key(path)), work).await,
+                Some(root) => {
+                    let areas =
+                        location_areas_sliced(&root, hosts.get(&part_key(path)), work).await;
+                    retire_tree(root, work).await;
+                    areas
+                }
                 None => None,
             },
             _ => None,
@@ -299,6 +311,7 @@ async fn root_local_name_sliced(bytes: &[u8], work: &WorkBudget) -> Option<Strin
 async fn tree_sliced(bytes: &[u8], work: &WorkBudget) -> Option<Element> {
     let root = parse_tree_sliced(bytes, work).await.ok()?;
     if carries_alternate_content_sliced(&root, work).await {
+        retire_tree(root, work).await;
         None
     } else {
         Some(root)
@@ -575,9 +588,10 @@ async fn package_metadata_conforms_sliced(
             let Ok(root) = parse_tree_sliced(bytes, work).await else {
                 return false;
             };
-            if !names_are_resolvable_sliced(&root, work).await
-                || !drawing_claims_are_unambiguous_sliced(&root, work).await
-            {
+            let conforms = names_are_resolvable_sliced(&root, work).await
+                && drawing_claims_are_unambiguous_sliced(&root, work).await;
+            retire_tree(root, work).await;
+            if !conforms {
                 return false;
             }
         }
@@ -632,6 +646,12 @@ async fn content_types_conform_sliced(parts: &[(String, Vec<u8>)], work: &WorkBu
     let Ok(root) = parse_tree_sliced(bytes, work).await else {
         return false;
     };
+    let result = content_types_root_conforms_sliced(&root, work).await;
+    retire_tree(root, work).await;
+    result
+}
+
+async fn content_types_root_conforms_sliced(root: &Element, work: &WorkBudget) -> bool {
     if !root.answers_to(&CONTENT_TYPES, "Types") {
         return false;
     }
@@ -689,6 +709,12 @@ async fn relationships_conform_sliced(
     let Ok(root) = parse_tree_sliced(bytes, work).await else {
         return false;
     };
+    let result = relationships_root_conforms_sliced(&root, work).await;
+    retire_tree(root, work).await;
+    result
+}
+
+async fn relationships_root_conforms_sliced(root: &Element, work: &WorkBudget) -> bool {
     if root.namespace() != Some(NS_PACKAGE_RELATIONSHIPS) || root.local_name() != "Relationships" {
         return false;
     }
@@ -746,7 +772,16 @@ async fn sheet_relationships_are_unambiguous_sliced(
     let Ok(root) = parse_tree_sliced(bytes, work).await else {
         return false;
     };
-    let Some(sheets) = sole_child_sliced(&root, "sheets", work).await else {
+    let result = sheet_relationships_root_are_unambiguous_sliced(&root, work).await;
+    retire_tree(root, work).await;
+    result
+}
+
+async fn sheet_relationships_root_are_unambiguous_sliced(
+    root: &Element,
+    work: &WorkBudget,
+) -> bool {
+    let Some(sheets) = sole_child_sliced(root, "sheets", work).await else {
         return false;
     };
     let mut canonical = Vec::new();
@@ -756,7 +791,7 @@ async fn sheet_relationships_are_unambiguous_sliced(
             canonical.push(sheet);
         }
     }
-    if named_sheet_elements_sliced(&root, 0, work).await != canonical.len() {
+    if named_sheet_elements_sliced(root, 0, work).await != canonical.len() {
         return false;
     }
     for sheet in canonical {

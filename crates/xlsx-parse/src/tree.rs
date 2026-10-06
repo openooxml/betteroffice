@@ -579,6 +579,27 @@ pub(crate) async fn text_content_sliced(element: &Element, work: &ooxml_opc::Wor
     text
 }
 
+pub(crate) async fn retire_tree(root: Element, work: &ooxml_opc::WorkBudget) {
+    let mut stack = vec![root];
+    while let Some(element) = stack.last_mut() {
+        if let Some(child) = element.children.pop() {
+            match child {
+                Node::Element(child) => stack.push(child),
+                Node::Text(text) => {
+                    work.step().await;
+                    drop(text);
+                }
+            }
+        } else if !element.attributes.is_empty() {
+            work.step().await;
+            element.attributes.pop();
+        } else {
+            work.step().await;
+            stack.pop();
+        }
+    }
+}
+
 pub(crate) async fn names_are_resolvable_sliced(
     element: &Element,
     work: &ooxml_opc::WorkBudget,
@@ -786,66 +807,90 @@ async fn parse_text_sliced(
     let mut stack: Vec<Element> = Vec::new();
     let mut namespaces = Namespaces::default();
     let mut root: Option<Element> = None;
-    loop {
-        work.step().await;
-        let opened = reader.buffer_position() as usize;
-        let event = reader.read_event().map_err(xml_err)?;
-        let closed = reader.buffer_position() as usize;
-        charge_bytes(closed.saturating_sub(opened), work).await;
-        match event {
-            Event::Start(start) => {
-                if stack.len() >= MAX_DEPTH {
-                    return Err(ParseError::DepthExceeded);
+    let result = async {
+        loop {
+            work.step().await;
+            let opened = reader.buffer_position() as usize;
+            let event = reader.read_event().map_err(xml_err)?;
+            let closed = reader.buffer_position() as usize;
+            charge_bytes(closed.saturating_sub(opened), work).await;
+            match event {
+                Event::Start(start) => {
+                    if stack.len() >= MAX_DEPTH {
+                        return Err(ParseError::DepthExceeded);
+                    }
+                    namespaces.open_sliced(&start, work).await?;
+                    let element =
+                        open_element_sliced(&start, closed, false, &mut budget, &namespaces, work)
+                            .await?;
+                    stack.push(element);
                 }
-                namespaces.open_sliced(&start, work).await?;
-                let element =
-                    open_element_sliced(&start, closed, false, &mut budget, &namespaces, work)
-                        .await?;
-                stack.push(element);
-            }
-            Event::Empty(start) => {
-                if stack.len() >= MAX_DEPTH {
-                    return Err(ParseError::DepthExceeded);
+                Event::Empty(start) => {
+                    if stack.len() >= MAX_DEPTH {
+                        return Err(ParseError::DepthExceeded);
+                    }
+                    namespaces.open_sliced(&start, work).await?;
+                    let element =
+                        open_element_sliced(&start, closed, true, &mut budget, &namespaces, work)
+                            .await;
+                    namespaces.close();
+                    place_sliced(element?, &mut stack, &mut root, work).await?;
                 }
-                namespaces.open_sliced(&start, work).await?;
-                let element =
-                    open_element_sliced(&start, closed, true, &mut budget, &namespaces, work).await;
-                namespaces.close();
-                place(element?, &mut stack, &mut root)?;
+                Event::End(_) => {
+                    let mut done = stack
+                        .pop()
+                        .ok_or_else(|| ParseError::Malformed("unbalanced end tag".into()))?;
+                    namespaces.close();
+                    done.content.end = opened.max(done.content.start);
+                    place_sliced(done, &mut stack, &mut root, work).await?;
+                }
+                Event::Text(text) => {
+                    let decoded = text.decode().map_err(xml_err)?;
+                    push_text_sliced(&decoded, &mut stack, &mut budget, work).await?;
+                }
+                Event::CData(text) => {
+                    let decoded = text.decode().map_err(xml_err)?;
+                    push_text_sliced(&decoded, &mut stack, &mut budget, work).await?;
+                }
+                Event::GeneralRef(entity) => {
+                    let name = entity.decode().map_err(xml_err)?;
+                    let resolved = resolve_entity(&name)?;
+                    push_text_sliced(&resolved, &mut stack, &mut budget, work).await?;
+                }
+                Event::DocType(_) => {
+                    return Err(ParseError::Malformed("doctype is not accepted".into()));
+                }
+                Event::Eof => break,
+                _ => {}
             }
-            Event::End(_) => {
-                let mut done = stack
-                    .pop()
-                    .ok_or_else(|| ParseError::Malformed("unbalanced end tag".into()))?;
-                namespaces.close();
-                done.content.end = opened.max(done.content.start);
-                place(done, &mut stack, &mut root)?;
-            }
-            Event::Text(text) => {
-                let decoded = text.decode().map_err(xml_err)?;
-                push_text_sliced(&decoded, &mut stack, &mut budget, work).await?;
-            }
-            Event::CData(text) => {
-                let decoded = text.decode().map_err(xml_err)?;
-                push_text_sliced(&decoded, &mut stack, &mut budget, work).await?;
-            }
-            Event::GeneralRef(entity) => {
-                let name = entity.decode().map_err(xml_err)?;
-                let resolved = resolve_entity(&name)?;
-                push_text_sliced(&resolved, &mut stack, &mut budget, work).await?;
-            }
-            Event::DocType(_) => {
-                return Err(ParseError::Malformed("doctype is not accepted".into()));
-            }
-            Event::Eof => break,
-            _ => {}
         }
+        if !stack.is_empty() {
+            return Err(ParseError::Malformed("unclosed element".into()));
+        }
+        root.take()
+            .ok_or_else(|| ParseError::Malformed("no root element".into()))
     }
-    if !stack.is_empty() {
-        return Err(ParseError::Malformed("unclosed element".into()));
+    .await;
+    while let Some(element) = stack.pop() {
+        retire_tree(element, work).await;
     }
-    let root = root.ok_or_else(|| ParseError::Malformed("no root element".into()))?;
-    Ok((root, nodes - budget.nodes))
+    if let Some(root) = root {
+        retire_tree(root, work).await;
+    }
+    result.map(|root| (root, nodes - budget.nodes))
+}
+
+async fn place_sliced(
+    element: Element,
+    stack: &mut [Element],
+    root: &mut Option<Element>,
+    work: &ooxml_opc::WorkBudget,
+) -> Result<(), ParseError> {
+    if stack.is_empty() && root.is_some() {
+        retire_tree(element, work).await;
+        return Err(ParseError::Malformed("more than one root element".into()));
+    }
+    place(element, stack, root)
 }
 
 async fn open_element_sliced(
