@@ -83,6 +83,49 @@ fn unsafe_value(key: &str, value: &Any) -> bool {
 }
 
 impl LocalLowering {
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug + use<> {
+        use super::preview::AnySnapshot;
+        use yrs::types::ToJson;
+
+        let txn = doc.yrs_doc().transact();
+        let attrs = |attrs: &Attrs| {
+            attrs
+                .iter()
+                .map(|(key, value)| (key.to_string(), AnySnapshot::from(value)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let seeds = self
+            .seeds
+            .iter()
+            .map(|(id, seed)| {
+                (
+                    id.clone(),
+                    seed.tainted,
+                    seed.raw_start,
+                    seed.slot,
+                    seed.source,
+                    seed.pm_start,
+                    seed.segments
+                        .iter()
+                        .map(|segment| (segment.text.clone(), attrs(&segment.attrs)))
+                        .collect::<Vec<_>>(),
+                    seed.pilcrow
+                        .as_ref()
+                        .map(|mark| (mark.clone(), AnySnapshot::from(&mark.to_json(&txn)))),
+                    seed.mark_attrs.as_ref().map(attrs),
+                )
+            })
+            .collect::<Vec<_>>();
+        (
+            self.blocked,
+            self.preview_blocked,
+            self.enabled,
+            self.dependent.clone(),
+            seeds,
+        )
+    }
+
     pub(crate) fn new(enabled: bool) -> Self {
         Self {
             blocked: !enabled,
@@ -97,11 +140,22 @@ impl LocalLowering {
         self.preview_blocked |= blocked;
     }
 
+    pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
+        self.seeds.retain(|_, seed| !pm.contains(&seed.pm_start));
+        self.seeds.extend(replacement.seeds);
+    }
+
     pub(crate) fn refresh_seeds(&mut self, blocks: &[Rc<LayoutBlock>], map: &LoweringMap) {
         self.edit = None;
         if self.seeds.is_empty() {
             return;
         }
+        let mut identities = BTreeSet::new();
+        let duplicates: BTreeSet<_> = map
+            .paragraphs
+            .iter()
+            .filter_map(|(_, id)| (!identities.insert(id.clone())).then_some(id.clone()))
+            .collect();
         let sources: BTreeMap<_, _> = map
             .paragraphs
             .iter()
@@ -117,9 +171,17 @@ impl LocalLowering {
         let slots: BTreeMap<_, _> = blocks
             .iter()
             .enumerate()
-            .filter_map(|(slot, block)| block.pm_start().map(|pm| (pm as u64, slot)))
+            .filter_map(|(slot, block)| match block.as_ref() {
+                LayoutBlock::Paragraph(paragraph) => {
+                    paragraph.pm_start.map(|pm| (pm as u64, slot))
+                }
+                _ => None,
+            })
             .collect();
         self.seeds.retain(|id, seed| {
+            if self.dependent.contains(id) || duplicates.contains(id) {
+                return false;
+            }
             let Some((&source, &pm)) = sources
                 .get(id.as_str())
                 .and_then(|source| Some((source, positions.get(source)?)))
@@ -133,6 +195,7 @@ impl LocalLowering {
                 return false;
             };
             if paragraph.id != BlockId::Str(id.clone())
+                || paragraph.attrs.is_none()
                 || !shiftable(&blocks[slot])
                 || page_break_changes_marker(paragraph, blocks.get(slot + 1).map(Rc::as_ref))
             {
@@ -290,9 +353,10 @@ impl LocalLowering {
         edit: &TextEdit,
     ) -> Option<()> {
         if self.blocked
-            || edit.attributes.as_ref().is_some_and(|attrs| {
-                attrs.iter().any(|(key, value)| unsafe_value(key, value))
-            })
+            || edit
+                .attributes
+                .as_ref()
+                .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
         {
             return None;
         }
@@ -352,7 +416,10 @@ impl LocalLowering {
             shift_block(Rc::make_mut(block), delta);
         }
         for block in revealable {
-            if block.pm_start().is_some_and(|start| start >= old_end as f64) {
+            if block
+                .pm_start()
+                .is_some_and(|start| start >= old_end as f64)
+            {
                 shift_block(block, delta);
             }
         }
@@ -470,7 +537,10 @@ fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {
 }
 
 fn page_break_changes_marker(paragraph: &ParagraphBlock, next: Option<&LayoutBlock>) -> bool {
-    paragraph.attrs.as_ref().is_some_and(|attrs| attrs.list_marker.is_some())
+    paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.list_marker.is_some())
         && matches!(next, Some(LayoutBlock::PageBreak(page_break))
             if page_break.pm_start == paragraph.pm_end)
 }
@@ -565,7 +635,11 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, delta: i64) {
         match run {
             Run::Text(run) => {
                 shift_pair(&mut run.pm_start, &mut run.pm_end, delta);
-                if let Some(widget) = run.inline_sdt_widget.as_mut().and_then(Value::as_object_mut) {
+                if let Some(widget) = run
+                    .inline_sdt_widget
+                    .as_mut()
+                    .and_then(Value::as_object_mut)
+                {
                     if let Some(pos) = widget.get_mut("pos")
                         && let Some(value) = pos.as_i64()
                     {
@@ -617,7 +691,10 @@ fn shift_drawing_id(id: &mut BlockId, delta: i64) {
 }
 
 fn shift_group_id(id: &mut String, delta: i64) {
-    if let Some(position) = id.strip_prefix("sdt@").and_then(|value| value.parse::<i64>().ok()) {
+    if let Some(position) = id
+        .strip_prefix("sdt@")
+        .and_then(|value| value.parse::<i64>().ok())
+    {
         *id = format!("sdt@{}", position + delta);
     }
 }

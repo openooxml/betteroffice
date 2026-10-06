@@ -3923,6 +3923,7 @@ impl EngineSession {
                     units,
                     &changed,
                     lowered.blocks.shared(),
+                    &lowered.local,
                 )?;
                 let mut units = units.as_ref().clone();
                 crate::bridge::preview::splice(
@@ -3931,10 +3932,10 @@ impl EngineSession {
                     Rc::make_mut(&mut lowered.map),
                     Rc::make_mut(&mut lowered.revealable_blocks),
                     &mut units,
+                    &mut lowered.local,
                 );
                 lowered.preview = Some(Rc::new(units));
                 lowered.serialized_blocks = None;
-                lowered.local.refresh_seeds(lowered.blocks.shared(), &lowered.map);
             }
             lowered.env = env.clone();
             Some(())
@@ -13543,6 +13544,55 @@ mod tests {
         (engine, request)
     }
 
+    fn assert_local_patch_matches_cold(engine: &EngineSession, request: &str, label: &str) {
+        let enabled = engine.local_lowering.get();
+        let snapshot = |engine: &EngineSession| {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            let pagination = engine.pagination.borrow();
+            (
+                (
+                    serde_json::to_string(lowered.blocks.as_ref()).unwrap(),
+                    lowered.map.as_ref().clone(),
+                    serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
+                    pagination.block_fingerprints.clone(),
+                    serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
+                    serde_json::to_string(lowered.revealable_blocks.as_ref()).unwrap(),
+                    engine.with_display_list(Clone::clone).unwrap(),
+                ),
+                lowered.local.snapshot(engine.doc()),
+            )
+        };
+        engine.build_display_list_frame("{}", 0).unwrap();
+        let incremental = snapshot(engine);
+        macro_rules! cold {
+            ($($field:ident)+) => {{
+                let ($($field,)+) = ($(engine.$field.replace(Default::default()),)+);
+                let trigger = engine.relayout_trigger.replace(RelayoutTrigger::Open);
+                let interactive = engine.interactive_pending.replace(false);
+                let retention = engine.region_retention_valid.replace(false);
+                engine.layout_document_with_regions_json(request).unwrap();
+                engine.build_display_list_frame("{}", 0).unwrap();
+                let result = snapshot(engine);
+                $(engine.$field.replace($field);)+
+                engine.relayout_trigger.set(trigger);
+                engine.interactive_pending.set(interactive);
+                engine.region_retention_valid.set(retention);
+                result
+            }};
+        }
+        for cold_enabled in [enabled, !enabled] {
+            engine.set_local_lowering(cold_enabled);
+            let oracle = cold!(render measurement pagination regions display capture resumable
+                note_separators preview_font_requirements preview_locality);
+            assert_eq!(incremental.0, oracle.0, "{label} cold_enabled={cold_enabled}");
+            if cold_enabled == enabled {
+                assert_eq!(incremental.1, oracle.1, "{label} seeds");
+            }
+        }
+        engine.set_local_lowering(enabled);
+    }
+
     fn local_patch_step(
         engine: &EngineSession,
         request: &str,
@@ -13553,19 +13603,6 @@ mod tests {
         use crate::{Position, StoryRange};
 
         let enabled = engine.local_lowering.get();
-        let snapshot = |engine: &EngineSession| {
-            let render = engine.render.borrow();
-            let lowered = &render.stories["body"];
-            let pagination = engine.pagination.borrow();
-            (
-                serde_json::to_string(lowered.blocks.as_ref()).unwrap(),
-                lowered.map.as_ref().clone(),
-                serde_json::to_string(&pagination.input.as_ref().unwrap().measured).unwrap(),
-                pagination.block_fingerprints.clone(),
-                serde_json::to_string(&pagination.layout.as_ref().unwrap().pages).unwrap(),
-                serde_json::to_string(lowered.revealable_blocks.as_ref()).unwrap(),
-            )
-        };
         let before = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
         if text.is_none() && start == end {
             let ctx = crate::EditCtx::local("", "");
@@ -13580,18 +13617,11 @@ mod tests {
             .apply_and_layout(story, epoch)
             .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
         let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
-        let incremental = snapshot(engine);
-        macro_rules! cold {
-            ($($field:ident)+) => {{
-                let ($($field,)+) = ($(engine.$field.replace(Default::default()),)+);
-                engine.layout_document_with_regions_json(request).unwrap();
-                let result = snapshot(engine);
-                $(engine.$field.replace($field);)+
-                result
-            }};
-        }
-        let oracle = cold!(render measurement pagination regions display capture resumable);
-        assert_eq!(incremental, oracle, "{story} [{start}, {end}) {text:?}");
+        assert_local_patch_matches_cold(
+            engine,
+            request,
+            &format!("{story} [{start}, {end}) {text:?}"),
+        );
         assert_eq!(
             before == after,
             patched && enabled,
@@ -13603,6 +13633,77 @@ mod tests {
     fn resident_plain_text_patch_matches_cold_full() {
         for enabled in [false, true] {
             resident_plain_text_patch_matches_cold_full_in(enabled);
+        }
+    }
+
+    #[test]
+    fn resident_edits_before_float_and_after_field_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let shape = local_patch_float();
+        let field =
+            r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
+        let body = format!(
+            "{}{}{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", &format!("{}{shape}", run("Anchor"))),
+            para("10000003", &run("Middle")),
+            para("10000004", &format!("{}{field}", run("Field"))),
+            para("10000005", &run("After")),
+        );
+        let bytes = Package::new(&body).bytes();
+        for enabled in [false, true] {
+            let (engine, request) = local_patch_laid_out(&bytes, 9619, enabled);
+            for (paragraph, text) in [(0, "😀"), (2, "x"), (4, "y")] {
+                let bounds = {
+                    let txn = engine.doc().yrs_doc().transact();
+                    let story = crate::story_ref(&txn, "body").unwrap();
+                    crate::op::para_bounds(&story, &txn).remove(paragraph)
+                };
+                let at = bounds.start + 1;
+                local_patch_step(&engine, &request, "body", (at, at, Some(text)), true);
+            }
+        }
+    }
+
+    #[test]
+    fn resident_float_preview_seeds_match_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}{}",
+            para("10000001", &run("Before")),
+            para(
+                "10000002",
+                &format!(
+                    r#"{}<w:ins w:id="1" w:author="A">{}</w:ins>"#,
+                    run("Anchor"),
+                    local_patch_float(),
+                ),
+            ),
+            para("10000003", &run("After")),
+        );
+        let bytes = Package::new(&body).bytes();
+        for enabled in [false, true] {
+            let (engine, request) = local_patch_laid_out(&bytes, 9620, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            for decision in ["rejected", "accepted", "rejected"] {
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches + 1,
+                );
+                assert_local_patch_matches_cold(
+                    &engine,
+                    &request.to_string(),
+                    &format!("{decision} float preview"),
+                );
+            }
+            local_patch_paragraph_edits(&engine, &request.to_string(), 2, true);
         }
     }
 
@@ -13990,12 +14091,17 @@ mod tests {
         }
     }
 
+    fn local_patch_float() -> &'static str {
+        r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="2" name="shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+    }
+
     fn resident_paragraph_blockers_patch_matches_cold_full_in(enabled: bool) {
         use super::lowering_fixture::{Package, image, para, run};
         use yrs::{Map, ReadTxn};
 
-        let shape = r#"<w:r><w:drawing><wp:anchor simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapNone/><wp:docPr id="2" name="shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
-        let simple = r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
+        let shape = local_patch_float();
+        let simple =
+            r#"<w:fldSimple w:instr=" SEQ Example "><w:r><w:t>7</w:t></w:r></w:fldSimple>"#;
         let complex = r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> SEQ Example </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
         let contents = [
             ("hyperlink", r#"<w:hyperlink w:anchor="target"><w:r><w:t>Link</w:t></w:r></w:hyperlink>"#.to_owned()),
@@ -14060,7 +14166,9 @@ mod tests {
                     engine.pagination.replace(Default::default());
                     engine.regions.replace(Default::default());
                     engine.display.replace(Default::default());
-                    engine.layout_document_with_regions_retained_json(&request).unwrap();
+                    engine
+                        .layout_document_with_regions_retained_json(&request)
+                        .unwrap();
                     engine.build_display_list_frame("{}", 0).unwrap();
                 }
                 assert_eq!(
@@ -14075,26 +14183,46 @@ mod tests {
         let toc = format!(
             "{}{}{}{}{}{}",
             para("10000001", &run("Before")),
-            para("10000002", &format!(r#"{}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r>"#, run("Owner"))),
-            para("10000003", r#"<w:r><w:instrText> \o "1-3" </w:instrText></w:r>"#),
-            para("10000004", r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>First entry</w:t></w:r>"#),
-            para("10000005", r#"<w:r><w:t>Last entry</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
+            para(
+                "10000002",
+                &format!(
+                    r#"{}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r>"#,
+                    run("Owner")
+                )
+            ),
+            para(
+                "10000003",
+                r#"<w:r><w:instrText> \o "1-3" </w:instrText></w:r>"#
+            ),
+            para(
+                "10000004",
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>First entry</w:t></w:r>"#
+            ),
+            para(
+                "10000005",
+                r#"<w:r><w:t>Last entry</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ),
             para("10000006", &run("After")),
         );
         for paragraph in 0..6 {
-            let (engine, request) = local_patch_laid_out(&Package::new(&toc).bytes(), 9614, enabled);
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&toc).bytes(), 9614, enabled);
             local_patch_paragraph_edits(&engine, &request, paragraph, matches!(paragraph, 0 | 5));
         }
         let hidden = format!(
             "{}{}{}{}{}",
             para("10000001", &run("Before")),
-            para("10000002", r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> 123 </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#),
+            para(
+                "10000002",
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> 123 </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#
+            ),
             para("10000003", &run("Cached result")),
             para("10000004", r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#),
             para("10000005", &run("After")),
         );
         for paragraph in 0..5 {
-            let (engine, request) = local_patch_laid_out(&Package::new(&hidden).bytes(), 9617, enabled);
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&hidden).bytes(), 9617, enabled);
             local_patch_paragraph_edits(&engine, &request, paragraph, matches!(paragraph, 0 | 4));
         }
         let body = para("10000001", &run("Plain"));
@@ -14108,18 +14236,27 @@ mod tests {
             );
         }
         engine.render.replace(Default::default());
-        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
         engine.build_display_list_frame("{}", 0).unwrap();
         assert!(engine.render.borrow().stories["body"].local.preview_blocked);
-        assert_eq!(engine.render.borrow().stories["body"].local.blocked, !enabled);
+        assert_eq!(
+            engine.render.borrow().stories["body"].local.blocked,
+            !enabled
+        );
         local_patch_paragraph_edits(&engine, &request, 0, true);
         let body = format!(
             "{}{}{}",
             para("10000001", &run("Before")),
-            para("10000002", r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Change</w:t></w:r></w:ins>"#),
+            para(
+                "10000002",
+                r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Change</w:t></w:r></w:ins>"#
+            ),
             para("10000003", &run("After")),
         );
         let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9616, enabled);
+        assert!(engine.render.borrow().stories["body"].preview.is_some());
         let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
         request["renderEnv"] = serde_json::to_value(
             RenderEnv::default().with_revision_preview("1", RevisionPreview::Rejected),
@@ -14127,19 +14264,44 @@ mod tests {
         .unwrap();
         let request = request.to_string();
         let before = engine.stats();
-        engine.layout_document_with_regions_retained_json(&request).unwrap();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
         assert_eq!(
             engine.stats().lower_preview_patches,
             before.lower_preview_patches + 1,
         );
-        engine.build_display_list_frame("{}", 0).unwrap();
+        assert_local_patch_matches_cold(&engine, &request, "rejected insertion preview");
         for paragraph in [0, 2] {
             local_patch_paragraph_edits(&engine, &request, paragraph, true);
         }
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        request["renderEnv"]["revisionPreview"] = json!({"1": "accepted"});
+        let request = request.to_string();
+        let before = engine.stats();
+        engine
+            .layout_document_with_regions_retained_json(&request)
+            .unwrap();
+        assert_eq!(
+            engine.stats().lower_preview_patches,
+            before.lower_preview_patches + u64::from(!enabled),
+        );
+        assert_eq!(
+            engine.stats().lower_preview_fallbacks,
+            before.lower_preview_fallbacks + u64::from(enabled),
+        );
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + u64::from(enabled),
+        );
+        assert_local_patch_matches_cold(&engine, &request, "preview after resident text edits");
         let body = format!(
             "{}{}",
             local_patch_list_paragraph(
-                "10000001", 1, 0, "",
+                "10000001",
+                1,
+                0,
+                "",
                 &format!(r#"{}<w:r><w:br w:type="page"/></w:r>"#, run("x")),
             ),
             para("10000002", &run("After")),
@@ -20765,17 +20927,27 @@ mod tests {
         let actual = {
             let render = engine.render.borrow();
             let lowered = &render.stories["body"];
-            preview_mapped_snapshot(&lowered.blocks, &lowered.map, &lowered.revealable_blocks)
+            (
+                preview_mapped_snapshot(&lowered.blocks, &lowered.map, &lowered.revealable_blocks),
+                lowered.local.snapshot(engine.doc()),
+            )
         };
+        let mut local = crate::bridge::local::LocalLowering::new(engine.local_lowering.get());
         let (blocks, map, revealable) =
             crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
                 engine.doc(),
                 "body",
                 env,
-                &mut crate::bridge::local::LocalLowering::new(false),
+                &mut local,
             )
             .unwrap();
-        assert_eq!(actual, preview_mapped_snapshot(&blocks, &map, &revealable));
+        assert_eq!(
+            actual,
+            (
+                preview_mapped_snapshot(&blocks, &map, &revealable),
+                local.snapshot(engine.doc()),
+            ),
+        );
     }
 
     fn preview_seeded(bytes: &[u8]) -> EngineSession {

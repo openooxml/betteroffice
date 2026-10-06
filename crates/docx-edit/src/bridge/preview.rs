@@ -200,7 +200,7 @@ pub(crate) struct PreviewUnits {
 
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
-enum AnySnapshot {
+pub(super) enum AnySnapshot {
     Null,
     Undefined,
     Bool(bool),
@@ -679,7 +679,7 @@ pub(crate) fn lower_recorded(
     story: &str,
     env: &RenderEnv,
     local: &mut local::LocalLowering,
-    record: bool,
+    _record: bool,
 ) -> Result<
     (
         Vec<LayoutBlock>,
@@ -689,7 +689,7 @@ pub(crate) fn lower_recorded(
     ),
     BridgeError,
 > {
-    let mut preview = (record && story == "body").then(PreviewUnits::default);
+    let mut preview = (story == "body").then(PreviewUnits::default);
     let mut revealable = Some(Vec::new());
     let (blocks, map) = yrs_doc_to_mapped_layout_blocks_inner(
         doc,
@@ -748,6 +748,7 @@ pub(crate) struct Replay {
     map: LoweringMap,
     revealable: Vec<LayoutBlock>,
     ids: BTreeSet<String>,
+    local: local::LocalLowering,
 }
 
 fn replace_positions<T>(
@@ -774,6 +775,7 @@ pub(crate) fn replay(
     units: &PreviewUnits,
     changed: &BTreeSet<String>,
     current: &[Rc<LayoutBlock>],
+    local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
@@ -798,7 +800,7 @@ pub(crate) fn replay(
         let mut output = LoweringOutput::at(seed.position);
         let mut revealed = Some(Vec::new());
         let mut active_stories = BTreeSet::from(["body".to_owned()]);
-        let mut local = local::LocalLowering::new(false);
+        let mut replay_local = local::LocalLowering::new(local.enabled && !local.blocked);
         let _reads = ReadGuard::new();
         let (replacement, position, hidden_field_blocks) = walk_story_chunks(
             &txn,
@@ -810,7 +812,7 @@ pub(crate) fn replay(
             &mut output,
             &mut opaque_sequences,
             &mut revealed,
-            &mut local,
+            &mut replay_local,
             &story,
             &units.comments,
             &record.chunks,
@@ -854,6 +856,7 @@ pub(crate) fn replay(
             map: output.map,
             revealable: revealed.unwrap_or_default(),
             ids: reads.ids,
+            local: replay_local,
         });
     }
     Some(replays)
@@ -865,6 +868,7 @@ pub(crate) fn splice(
     map: &mut LoweringMap,
     revealable: &mut Vec<LayoutBlock>,
     units: &mut PreviewUnits,
+    local: &mut local::LocalLowering,
 ) {
     let mut block_shift = 0_isize;
     let mut revealable_shift = 0_isize;
@@ -887,6 +891,7 @@ pub(crate) fn splice(
         revealable_shift += replay.revealable.len() as isize - record.revealable.len() as isize;
         let block_end = record.blocks.start + replay.blocks.len();
         let revealable_end = record.revealable.start + replay.revealable.len();
+        local.replace_seeds(&record.pm, replay.local);
         blocks.splice(
             record.blocks.clone(),
             replay.blocks.into_iter().map(Rc::new),
@@ -915,4 +920,5 @@ pub(crate) fn splice(
         record.revealable.end = revealable_end;
         record.ids = Rc::new(replay.ids);
     }
+    local.refresh_seeds(blocks, map);
 }
