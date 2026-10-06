@@ -318,6 +318,82 @@ test('paint_and_interaction_frames_are_separate', async () => {
   await waitFor(() => expect(run.overlays).toBe(true));
 });
 
+test('thumbnail_retains_evicted_images_until_paint_settles', async () => {
+  const value = session(true, 2);
+  open(value);
+  const ids = Array.from({ length: 26 }, (_, index) => `image-${index}`);
+  const bitmaps = ids.map(() => ({ width: 1, height: 1, close: mock(() => {}) }));
+  const decodes = ids.map(() => deferred<ImageBitmap>());
+  const requested = deferred<void>();
+  const firstDecoded = deferred<void>();
+  const released = deferred<void>();
+  const release = mock(() => {});
+  const closedAtDraw: number[] = [];
+  const draw = mock((_image: CanvasImageSource) => { closedAtDraw.push(bitmaps[0].close.mock.calls.length); });
+  let thumbnail!: SlideDisplayList;
+  let resolverCount = 0;
+  const frame = value.owner.frame;
+  const frames = spyOn(value.owner, 'frame').mockImplementation(async (slideId) => {
+    const result = await frame(slideId);
+    if (slideId === 's2') {
+      thumbnail = result.displayList;
+      result.media = new Map(ids.map((id, index) => [id, new Uint8Array([index])]));
+    }
+    return result;
+  });
+  let decoding = 0;
+  const decode = spyOn(pptx, 'decodePresentationImage').mockImplementation((bytes) => {
+    decoding += 1;
+    if (decoding === ids.length) requested.resolve();
+    return decodes[bytes[0]].promise;
+  });
+  const thumbnailImages = EditablePresentation.prototype.thumbnailImages;
+  const resolvers = spyOn(EditablePresentation.prototype, 'thumbnailImages').mockImplementation(function (
+    this: EditablePresentation, list
+  ) {
+    const images = thumbnailImages.call(this, list);
+    if (list === thumbnail && images) {
+      resolverCount += 1;
+      const releaseImages = images.release;
+      images.release = () => { releaseImages(); release(); released.resolve(); };
+    }
+    return images;
+  });
+  const paint = spyOn(pptx, 'paintSlide').mockImplementation(async (ctx, list, _dpr, _scale, options) => {
+    if (list !== thumbnail || !ctx.canvas.closest('aside')) {
+      ctx.fillRect(0, 0, 1, 1);
+      painted.push(list);
+      return;
+    }
+    const pending = ids.map((id) => options!.resolveImage!(id));
+    void Promise.resolve(pending[0]).then(() => firstDecoded.resolve());
+    const images = await Promise.all(pending);
+    ctx.drawImage = draw;
+    ctx.drawImage(images[0]!, 0, 0);
+  });
+  restorers.push(() => frames.mockRestore(), () => decode.mockRestore(), () => resolvers.mockRestore(),
+    () => paint.mockRestore());
+  render(<PptxEditor fonts={[]} file={file} experimentalWorkerOpen />);
+  await requested.promise;
+  expect(resolverCount).toBe(1);
+  expect(decode).toHaveBeenCalledTimes(26);
+  expect(draw).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  await act(async () => { decodes[0].resolve(bitmaps[0] as unknown as ImageBitmap); await firstDecoded.promise; });
+  expect(bitmaps[0].close).not.toHaveBeenCalled();
+  expect(release).not.toHaveBeenCalled();
+  await act(async () => {
+    decodes.slice(1).forEach((decode, index) => decode.resolve(bitmaps[index + 1] as unknown as ImageBitmap));
+    await released.promise;
+  });
+  expect(draw).toHaveBeenCalledTimes(1);
+  expect(draw.mock.calls[0][0]).toBe(bitmaps[0]);
+  expect(closedAtDraw).toEqual([0]);
+  expect(release).toHaveBeenCalledTimes(1);
+  expect(bitmaps[0].close).toHaveBeenCalledTimes(1);
+  expect(bitmaps.slice(1).every((bitmap) => bitmap.close.mock.calls.length === 0)).toBe(true);
+});
+
 test('late_media_cannot_overpaint_new_generation', async () => {
   const old = session();
   const next = session();

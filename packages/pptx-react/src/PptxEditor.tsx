@@ -3335,11 +3335,15 @@ const SlideThumbnail = memo(function SlideThumbnail({
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
     let cancelled = false;
-    void Promise.resolve().then(afterPaint).then(() => {
-      if (!cancelled)
-        return paintSlide(worker ? currentContext(ctx, () => !cancelled && worker.isThumbnailCurrent(frame)) :
+    void Promise.resolve().then(afterPaint).then(async () => {
+      if (cancelled) return;
+      const images = worker ? worker.thumbnailImages(frame) : null;
+      if (worker && !images) return;
+      try {
+        await paintSlide(worker ? currentContext(ctx, () => !cancelled && worker.isThumbnailCurrent(frame)) :
           currentOnly(ctx, () => !cancelled),
-          frame, dpr, scale, { resolveImage: worker ? (id) => worker.thumbnailImage(frame, id) : resolveImage });
+          frame, dpr, scale, { resolveImage: images ?? resolveImage });
+      } finally { images?.release(); }
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [afterPaint, frame, resolveImage, worker]);

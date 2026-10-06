@@ -93,12 +93,11 @@ export class EditablePresentation {
     const resolve = this.images.resolve(frame);
     try { return await resolve(id); } finally { resolve.release(); }
   };
-  thumbnailImage = async (list: SlideDisplayList, id: string) => {
+  thumbnailImages(list: SlideDisplayList) {
     const frame = this.lists.get(list);
     if (!frame || !this.matches(frame)) return null;
-    const resolve = this.images.resolve(frame);
-    try { return await resolve(id); } finally { resolve.release(); }
-  };
+    return this.images.resolve(frame);
+  }
   isThumbnailCurrent(list: SlideDisplayList): boolean {
     const frame = this.lists.get(list);
     return !!frame && this.matches(frame);
