@@ -41,13 +41,15 @@ async function setup() {
     if (isHostMessage(message) && message.kind === 'reply' && message.ok &&
       typeof message.value === 'object' && message.value !== null && 'consumed' in message.value) {
       replayObserved();
+      let reply = message;
       if (controls.mismatch && controls.mismatch !== 'expectedOutcome') {
-        const value = message.value as Record<string, unknown>;
+        const value = reply.value as Record<string, unknown>;
         const field = controls.mismatch;
-        message = { ...message, value: { ...value, [field]: field === 'outcome'
+        reply = { ...reply, value: { ...value, [field]: field === 'outcome'
           ? { ...(value.outcome as object), applied: 'wrong' } : 'wrong' } };
       }
-      if (controls.refusal) message = { ...message, ok: false, error: { name: 'Error', message: 'refused' } };
+      message = controls.refusal
+        ? { ...reply, ok: false, error: { name: 'Error', message: 'refused' } } : reply;
       if (controls.holdReplies) { held.push(() => pair.host.post(message, transfer)); return; }
     }
     pair.host.post(message, transfer);
@@ -266,12 +268,14 @@ test('flush_and_save_wait_for_final_ack', async () => {
   const context = await setup();
   const slide = context.access.snapshot().slides[0].id;
   context.controls.holdReplies = true;
+  let pending: Promise<PromiseSettledResult<unknown>[]> | undefined;
   try {
     context.access.setSlideNotes(slide, 'before fence');
     let flushed = false;
     let saved = false;
     const flush = context.owner.flush().then(() => { flushed = true; });
     const save = context.owner.saveAsync().then((bytes) => { saved = true; return bytes; });
+    pending = Promise.allSettled([flush, save]);
     context.access.setSlideNotes(slide, 'after fence');
     await context.observed;
     expect(flushed).toBe(false);
@@ -285,7 +289,10 @@ test('flush_and_save_wait_for_final_ack', async () => {
     finally { reopened.dispose(); }
     await context.owner.flush();
     expect(context.access.snapshot().slides[0].notes).toBe('after fence');
-  } finally { await context.owner.dispose(); }
+  } finally {
+    await context.owner.dispose();
+    await pending;
+  }
 });
 
 test('normal_save_and_export_use_worker_only', async () => {

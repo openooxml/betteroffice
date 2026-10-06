@@ -131,10 +131,11 @@ test('cold_editor_hydration_reuses_worker_module', async () => {
     import { createInProcessPair } from ${JSON.stringify(resolve(import.meta.dir, '../../../../shared/office-session/testing/inProcessTransport.ts'))};
     import { createPresentationSessionHost, initializePresentationEditorWasm } from ${JSON.stringify(resolve(import.meta.dir, 'host.ts'))};
     import { createPresentationEditorSession } from ${JSON.stringify(resolve(import.meta.dir, 'editorSession.ts'))};
-    import { isWasmAvailable } from ${JSON.stringify(resolve(import.meta.dir, '../wasm/loader.ts'))};
-    assert.equal(isWasmAvailable(), false);
+    import { wasmVersion } from ${JSON.stringify(resolve(import.meta.dir, '../wasm/loader.ts'))};
+    assert.throws(() => wasmVersion(), /wasm is not initialized/);
     const wasm = await Bun.file(${JSON.stringify(resolve(import.meta.dir, '../wasm/generated/pptx_wasm_bg.wasm'))}).arrayBuffer();
     const source = await Bun.file(${JSON.stringify(resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.pptx'))}).arrayBuffer();
+    const font = new Uint8Array(await Bun.file(${JSON.stringify(resolve(import.meta.dir, '../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'))}).arrayBuffer());
     const compile = WebAssembly.compile.bind(WebAssembly);
     let compilations = 0;
     WebAssembly.compile = (bytes) => { compilations++; return compile(bytes); };
@@ -146,7 +147,9 @@ test('cold_editor_hydration_reuses_worker_module', async () => {
       module = await initializePresentationEditorWasm(wasm);
       return module;
     } });
-    const owner = createPresentationEditorSession(source, { clientId: 7101 }, {
+    const owner = createPresentationEditorSession(source, {
+      clientId: 7101, fonts: [{ family: 'Liberation Sans', bytes: font }],
+    }, {
       ...pair.client,
       post(message, transfer) { calls.push(message.method ?? message.kind); pair.client.post(message, transfer); },
       listen(listener) { return pair.client.listen((message) => {
@@ -162,7 +165,9 @@ test('cold_editor_hydration_reuses_worker_module', async () => {
       assert.equal((await owner.handleAsync()).clientId, 7101);
     } finally { await owner.dispose(); }
   `;
-  const child = Bun.spawn([process.execPath, '--eval', script], { stdout: 'ignore', stderr: 'pipe' });
+  const child = Bun.spawn([process.execPath, '--eval', script], {
+    cwd: resolve(import.meta.dir, '../../../..'), stdout: 'ignore', stderr: 'pipe',
+  });
   const error = await new Response(child.stderr).text();
   expect({ exit: await child.exited, error }).toEqual({ exit: 0, error: '' });
 });
@@ -176,7 +181,9 @@ test('ordinary_session_wire_shapes_are_unchanged', async () => {
     lane: 'interactive', reframes: true, key: 'frame', replaceableBy: 'frame',
   });
   const pair = host();
-  const session = await createPresentationSession(source, { wasm: module }, pair.client);
+  const session = await createPresentationSession(source, {
+    wasm: module, fonts: [{ family: 'Liberation Sans', bytes: font }],
+  }, pair.client);
   try {
     expect(Object.keys(session.state).sort()).toEqual(['dirty', 'format', 'size', 'slides', 'stage', 'version']);
     expect(Object.keys(await session.call.frame(0)).sort()).toEqual([
