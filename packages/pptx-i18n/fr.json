@@ -1,5 +1,13 @@
 {
   "_lang": "fr",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": null,
+    "failed": null,
+    "disabled": null,
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Enregistrer",

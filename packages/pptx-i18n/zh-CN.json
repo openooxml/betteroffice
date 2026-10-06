@@ -1,5 +1,13 @@
 {
   "_lang": "zh-CN",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": null,
+    "failed": null,
+    "disabled": null,
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "保存",

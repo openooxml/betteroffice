@@ -141,6 +141,7 @@ export interface PptxCommandController {
    * built-in commands refuse with `unsupported-policy`.
    */
   scoped(scope: PptxCommandScope): PptxCommandStore;
+  guarded(guard: () => void): PptxCommandStore;
   /** Whether `store` is this editor's store or one scoped from it. */
   ownsStore(store: PptxCommandStore): boolean;
 }
@@ -543,6 +544,26 @@ export function createPptxCommandController(): PptxCommandController {
         ownStores.add(scoped);
       }
       return scoped;
+    },
+    guarded(guard) {
+      const guarded = Object.freeze(Object.fromEntries(Object.entries(store).map(([key, method]) =>
+        [key, (...args: unknown[]) => { guard(); return Reflect.apply(method, store, args); }]))) as unknown as PptxCommandStore;
+      controllers.set(guarded, {
+        ...controller,
+        store: guarded,
+        prepare(id) {
+          guard();
+          const pending = controller.prepare(id);
+          return { execute(args) { guard(); return pending.execute(args); } };
+        },
+        defer(id, args) {
+          guard();
+          const pending = controller.defer(id, args);
+          return { complete(write) { guard(); return pending.complete(write); } };
+        },
+      });
+      ownStores.add(guarded);
+      return guarded;
     },
     ownsStore: (candidate) => ownStores.has(candidate),
   };
