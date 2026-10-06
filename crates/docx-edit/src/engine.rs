@@ -16023,11 +16023,16 @@ mod tests {
                 let previous = retained();
                 let env = engine.render.borrow().stories["body"].env.clone();
                 assert!(
-                    engine.patch_lowered_body(engine.doc_epoch(), &env).is_none(),
+                    engine
+                        .patch_lowered_body(engine.doc_epoch(), &env)
+                        .is_none(),
                     "{case}"
                 );
                 assert_eq!(retained(), previous, "{case}");
-                assert_eq!(engine.measurement_patch().is_some(), case == "patched offset");
+                assert_eq!(
+                    engine.measurement_patch().is_some(),
+                    case == "patched offset"
+                );
                 drop(shared);
                 certified_float_layout(&engine, &request, trigger);
                 assert_certified_float_cold(&engine, &request, &mut HashMap::new());
