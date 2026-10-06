@@ -60,6 +60,7 @@ describe('workbook calculation context', () => {
   it.each([
     ['east of UTC', Date.UTC(2026, 0, 1, 23, 30), -120, Date.UTC(2026, 0, 2, 1, 30)],
     ['west of UTC', Date.UTC(2026, 0, 2, 2), 300, Date.UTC(2026, 0, 1, 21)],
+    ['half-hour offset', Date.UTC(2026, 0, 1, 20), -330, Date.UTC(2026, 0, 2, 1, 30)],
   ] as const)('uses local NOW and TODAY for ordinary opens and cleared contexts (%s)', (_, ms, offset, localMs) => {
     const clock = spyOn(Date, 'now').mockReturnValue(ms);
     const timezone = spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(offset);

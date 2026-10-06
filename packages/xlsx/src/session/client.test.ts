@@ -461,6 +461,7 @@ describe('workbook peer hydration', () => {
   test.each([
     ['east of UTC', Date.UTC(2026, 0, 1, 23, 30), -120, Date.UTC(2026, 0, 2, 1, 30)],
     ['west of UTC', Date.UTC(2026, 0, 2, 2), 300, Date.UTC(2026, 0, 1, 21)],
+    ['half-hour offset', Date.UTC(2026, 0, 1, 20), -330, Date.UTC(2026, 0, 2, 1, 30)],
   ] as const)('shares local NOW and TODAY across retained open and edit replay (%s)', async (_, ms, offset, localMs) => {
     const clock = spyOn(Date, 'now').mockReturnValue(ms);
     const timezone = spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(offset);
