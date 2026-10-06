@@ -86,9 +86,18 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
     diff: &yrs::types::text::Diff<YChange>,
     txn: &T,
 ) -> bool {
+    if diff.attributes.as_deref().is_some_and(|attrs| {
+        attrs
+            .iter()
+            .any(|(key, value)| ![INS, DEL].contains(&key.as_ref()) && unsafe_value(key, value))
+    }) {
+        return true;
+    }
     match &diff.insert {
         Out::Any(Any::String(_)) => false,
-        Out::YMap(mark) if is_pilcrow(mark, txn) => false,
+        Out::YMap(mark) if is_pilcrow(mark, txn) => pilcrow_values(mark, txn)
+            .iter()
+            .any(|(key, value)| unsafe_value(key, value)),
         Out::YMap(mark) => {
             let values = pilcrow_values(mark, txn);
             let seed_only = [
@@ -97,6 +106,7 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
                 "columnBreak",
                 "image",
                 "shape",
+                "chart",
                 "noteRef",
                 "math",
                 "horizontalRule",
@@ -394,7 +404,7 @@ impl LocalLowering {
         txn: &T,
         env: &RenderEnv,
         edit: &TextEdit,
-    ) -> Option<()> {
+    ) -> Option<super::preview::ParagraphEdit> {
         if self.blocked
             || edit
                 .attributes
@@ -495,7 +505,11 @@ impl LocalLowering {
                 seed.pm_start = (seed.pm_start as i64 + delta) as u64;
             }
         }
-        Some(())
+        Some(super::preview::ParagraphEdit {
+            raw: raw..raw + old_units + 1,
+            pm: pm_start..old_end,
+            delta,
+        })
     }
 }
 

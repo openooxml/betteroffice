@@ -70,6 +70,25 @@ struct LoweredStory {
     local: crate::bridge::local::LocalLowering,
     preview: Option<Rc<crate::bridge::preview::PreviewUnits>>,
     preview_edit: Option<crate::bridge::preview::TextEdit>,
+    preview_paragraph_edits: Vec<crate::bridge::preview::ParagraphEdit>,
+}
+
+impl LoweredStory {
+    fn shift_preview_positions(&mut self) {
+        if self.preview_paragraph_edits.is_empty() {
+            return;
+        }
+        if self.preview.as_mut().is_some_and(|units| {
+            crate::bridge::preview::shift_paragraph_edits(
+                Rc::make_mut(units),
+                &self.preview_paragraph_edits,
+            )
+            .is_none()
+        }) {
+            self.preview = None;
+        }
+        self.preview_paragraph_edits.clear();
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1277,11 +1296,11 @@ impl PaginationState {
     }
 
     fn clear_display_damage(&mut self) {
+        self.position_deltas.clear();
         if self.display_uses_region_path {
             self.display_rebuilt_pages.clear();
             self.display_layout_pending = false;
             self.display_full_rebuild = false;
-            self.position_deltas.clear();
             self.note_changed_pages.clear();
         }
         self.restamped_pages = Some(BTreeSet::new());
@@ -3879,12 +3898,22 @@ impl EngineSession {
             }
         }
         let txn = self.doc.yrs_doc().transact();
-        lowered
+        let shift = lowered
             .local
             .patch(blocks.shared_mut(), map, revealable, &txn, env, &edit)?;
         lowered.doc_epoch = epoch;
         lowered.serialized_blocks = None;
-        lowered.preview = None;
+        lowered.preview_edit = None;
+        if lowered.preview.is_some() {
+            if let Some(previous) = lowered.preview_paragraph_edits.last_mut()
+                && previous.raw.start == shift.raw.start
+                && previous.pm.start == shift.pm.start
+            {
+                previous.delta += shift.delta;
+            } else {
+                lowered.preview_paragraph_edits.push(shift);
+            }
+        }
         Some(())
     }
 
@@ -3900,9 +3929,6 @@ impl EngineSession {
         }
         let mut previous = lowered.env.clone();
         previous.revision_preview = env.revision_preview.clone();
-        if previous != *env {
-            return None;
-        }
         let changed = lowered
             .env
             .revision_preview
@@ -3912,9 +3938,10 @@ impl EngineSession {
             .cloned()
             .collect();
         let patched = (|| {
-            if !lowered.local.preview_blocked {
+            if previous != *env || !lowered.local.preview_blocked {
                 return None;
             }
+            lowered.shift_preview_positions();
             let units = lowered.preview.as_ref()?;
             if crate::bridge::preview::targets(units, &changed) {
                 let replays = crate::bridge::preview::replay(
@@ -3998,6 +4025,9 @@ impl EngineSession {
         let mut local = crate::bridge::local::LocalLowering::new(self.local_lowering.get());
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
+        if let Some(lowered) = self.render.borrow_mut().stories.get_mut(story) {
+            lowered.shift_preview_positions();
+        }
         let refreshed = self.render.borrow().stories.get(story).and_then(|lowered| {
             #[cfg(test)]
             if !self.preview_refresh.get() {
@@ -4031,6 +4061,7 @@ impl EngineSession {
                 local,
                 preview: preview.map(Rc::new),
                 preview_edit: None,
+                preview_paragraph_edits: Vec::new(),
             },
         );
         Ok(())
@@ -13640,6 +13671,225 @@ mod tests {
     }
 
     #[test]
+    fn resident_section_suffix_positions_shift_once_per_edit() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}",
+            para(
+                "10000001",
+                r#"<w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr><w:r><w:t>First</w:t></w:r>"#,
+            ),
+            para("10000002", &run("Second")),
+        );
+        for enabled in [false, true] {
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&body).bytes(), 9623, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            repeat_final_section(&mut request);
+            let request = request.to_string();
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            for (start, end, text) in [
+                (0, 0, Some("😀")),
+                (0, 2, None),
+                (0, 0, Some("x")),
+                (0, 1, None),
+            ] {
+                local_patch_step(&engine, &request, "body", (start, end, text), false);
+                let before = engine.with_display_list(Clone::clone).unwrap();
+                assert!(before.pages.len() >= 2);
+                assert!(engine.pagination.borrow().position_deltas.is_empty());
+                for _ in 0..2 {
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    engine.build_display_list_frame("{}", epoch).unwrap();
+                    assert_eq!(engine.with_display_list(Clone::clone).unwrap(), before);
+                }
+                assert_local_patch_matches_cold(&engine, &request, "repeated section frames");
+            }
+        }
+    }
+
+    #[test]
+    fn resident_typing_and_preview_decisions_reuse_recorded_units() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}{}",
+            para("10000001", &run("Before")),
+            para(
+                "10000002",
+                r#"<w:ins w:id="1" w:author="A"><w:r><w:t>Change</w:t></w:r></w:ins>"#,
+            ),
+            para("10000003", &run("After")),
+        );
+        for enabled in [false, true] {
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&body).bytes(), 9624, enabled);
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            local_patch_preview_warm_up(&engine, &mut request);
+            for (paragraph, inserted) in [(0, "😀"), (2, "x"), (0, "y"), (2, "😀")] {
+                let at = {
+                    let txn = engine.doc().yrs_doc().transact();
+                    let story = crate::story_ref(&txn, "body").unwrap();
+                    crate::op::para_bounds(&story, &txn)[paragraph].start + 1
+                };
+                for text in [Some(inserted), None] {
+                    let preview = Rc::clone(
+                        engine.render.borrow().stories["body"]
+                            .preview
+                            .as_ref()
+                            .unwrap(),
+                    );
+                    let before = engine.stats();
+                    let end = at + text.map_or(inserted.encode_utf16().count() as u32, |_| 0);
+                    local_patch_step(
+                        &engine,
+                        &request.to_string(),
+                        "body",
+                        (at, end, text),
+                        true,
+                    );
+                    assert_eq!(
+                        engine.stats().lower_cache_misses,
+                        before.lower_cache_misses + u64::from(!enabled),
+                    );
+                    if enabled {
+                        let render = engine.render.borrow();
+                        let lowered = &render.stories["body"];
+                        assert!(Rc::ptr_eq(lowered.preview.as_ref().unwrap(), &preview));
+                        assert_eq!(lowered.preview_paragraph_edits.len(), 1);
+                    }
+                    request["renderEnv"]["revisionPreview"] = json!({
+                        "1": if text.is_some() { "rejected" } else { "accepted" }
+                    });
+                    let before = engine.stats();
+                    engine
+                        .layout_document_with_regions_retained_json(&request.to_string())
+                        .unwrap();
+                    assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+                    assert_eq!(
+                        engine.stats().lower_preview_fallbacks,
+                        before.lower_preview_fallbacks,
+                    );
+                    assert_eq!(
+                        engine.stats().lower_preview_patches,
+                        before.lower_preview_patches + 1,
+                    );
+                    assert!(
+                        engine.render.borrow().stories["body"]
+                            .preview_paragraph_edits
+                            .is_empty()
+                    );
+                    assert_local_patch_matches_cold(
+                        &engine,
+                        &request.to_string(),
+                        "alternating typing and decisions",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resident_chart_preview_matches_cold_full() {
+        resident_chart_preview_matches_cold_full_in(None);
+    }
+
+    #[test]
+    fn resident_dependent_chart_preview_falls_back_and_matches_cold_full() {
+        for dependency in ["fieldCodeMarks", "fieldResultBlocks", "fieldCodeTarget"] {
+            resident_chart_preview_matches_cold_full_in(Some(dependency));
+        }
+    }
+
+    fn resident_chart_preview_matches_cold_full_in(dependency: Option<&str>) {
+        use super::lowering_fixture::{Package, para, run};
+
+        let body = format!(
+            "{}{}{}",
+            para("10000001", &run("Before")),
+            para("10000002", &run("Anchor")),
+            para("10000003", &run("After")),
+        );
+        for enabled in [false, true] {
+            let (engine, request) =
+                local_patch_laid_out(&Package::new(&body).bytes(), 9625, enabled);
+            let mut values = vec![
+                ("chartJson".to_owned(), Any::from("{}")),
+                ("width".to_owned(), Any::Number(8.0)),
+                ("height".to_owned(), Any::Number(8.0)),
+            ];
+            if let Some(key) = dependency {
+                let target = Any::from("10000003");
+                values.push((
+                    key.to_owned(),
+                    if key == "fieldCodeTarget" {
+                        target
+                    } else {
+                        Any::Array(vec![target].into())
+                    },
+                ));
+            }
+            let ctx = crate::EditCtx::local("", "");
+            engine
+                .doc()
+                .insert_embed(&ctx, crate::Position::new("body", 8), "chart", values)
+                .unwrap();
+            let stamp = Any::Map(std::sync::Arc::new(HashMap::from([(
+                "id".to_owned(),
+                Any::from("1"),
+            )])));
+            engine
+                .doc()
+                .apply_raw_ops(
+                    "body",
+                    vec![crate::RawOp::Format {
+                        index: 8,
+                        len: 1,
+                        attrs: [(crate::INS.into(), stamp)].into(),
+                    }],
+                    &ctx,
+                )
+                .unwrap();
+            engine.render.replace(Default::default());
+            engine
+                .layout_document_with_regions_retained_json(&request)
+                .unwrap();
+            engine.build_display_list_frame("{}", 0).unwrap();
+            let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+            local_patch_preview_warm_up(&engine, &mut request);
+            for decision in ["rejected", "accepted", "rejected"] {
+                request["renderEnv"]["revisionPreview"] = json!({"1": decision});
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                let fallback = enabled && dependency.is_some();
+                assert_eq!(
+                    engine.stats().lower_preview_fallbacks,
+                    before.lower_preview_fallbacks + u64::from(fallback),
+                );
+                assert_eq!(
+                    engine.stats().lower_cache_misses,
+                    before.lower_cache_misses + u64::from(fallback),
+                );
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches + u64::from(!fallback),
+                );
+                assert_local_patch_matches_cold(
+                    &engine,
+                    &request.to_string(),
+                    &format!("{decision} chart preview dependency={dependency:?}"),
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resident_edits_before_float_and_after_field_match_cold_full() {
         use super::lowering_fixture::{Package, para, run};
 
@@ -13721,6 +13971,48 @@ mod tests {
     fn resident_preview_hiding_fields_and_controls_matches_cold_full() {
         resident_stateful_preview_matches_cold_full("ins");
         resident_stateful_block_preview_matches_cold_full("ins");
+    }
+
+    #[test]
+    fn resident_unrecorded_state_preview_falls_back_and_matches_cold_full() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let field =
+            r#"<w:fldSimple w:instr=" REF mark "><w:r><w:t>Target</w:t></w:r></w:fldSimple>"#;
+        let control = format!(
+            r#"<w:sdt><w:sdtPr><w:id w:val="4"/></w:sdtPr><w:sdtContent>{field}</w:sdtContent></w:sdt>"#,
+        );
+        for content in [field, control.as_str()] {
+            let body = format!(
+                "{}{}",
+                para("10000001", &format!("{}{content}", run("Owner"))),
+                para("10000002", &run("After")),
+            );
+            for enabled in [false, true] {
+                let (engine, request) =
+                    local_patch_laid_out(&Package::new(&body).bytes(), 9626, enabled);
+                let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                local_patch_preview_warm_up(&engine, &mut request);
+                request["renderEnv"]["revisionPreview"] = json!({"1": "rejected"});
+                let before = engine.stats();
+                engine
+                    .layout_document_with_regions_retained_json(&request.to_string())
+                    .unwrap();
+                assert_eq!(
+                    engine.stats().lower_preview_fallbacks,
+                    before.lower_preview_fallbacks + u64::from(enabled),
+                );
+                assert_eq!(
+                    engine.stats().lower_cache_misses,
+                    before.lower_cache_misses + u64::from(enabled),
+                );
+                assert_eq!(
+                    engine.stats().lower_preview_patches,
+                    before.lower_preview_patches + u64::from(!enabled),
+                );
+                assert_local_patch_matches_cold(&engine, &request.to_string(), "unrecorded state");
+            }
+        }
     }
 
     fn resident_stateful_preview_matches_cold_full(kind: &str) {
@@ -14511,15 +14803,15 @@ mod tests {
             .unwrap();
         assert_eq!(
             engine.stats().lower_preview_patches,
-            before.lower_preview_patches + u64::from(!enabled),
+            before.lower_preview_patches + 1,
         );
         assert_eq!(
             engine.stats().lower_preview_fallbacks,
-            before.lower_preview_fallbacks + u64::from(enabled),
+            before.lower_preview_fallbacks,
         );
         assert_eq!(
             engine.stats().lower_cache_misses,
-            before.lower_cache_misses + u64::from(enabled),
+            before.lower_cache_misses,
         );
         assert_local_patch_matches_cold(&engine, &request, "preview after resident text edits");
         let body = format!(

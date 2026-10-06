@@ -193,6 +193,7 @@ pub(crate) struct PreviewUnits {
     comments: Rc<Vec<CommentInterval>>,
     /// The lowering numbered SEQ fields across the whole body.
     sequences: bool,
+    untracked_state: bool,
     refresh: Option<Refresh>,
     #[cfg(test)]
     pub(crate) work: RecordingWork,
@@ -340,6 +341,47 @@ pub(crate) struct TextEdit {
     pub(crate) epochs: (u64, u64),
 }
 
+#[derive(Debug)]
+pub(crate) struct ParagraphEdit {
+    pub(crate) raw: Range<u32>,
+    pub(crate) pm: Range<u64>,
+    pub(crate) delta: i64,
+}
+
+pub(crate) fn shift_paragraph_edits(
+    units: &mut PreviewUnits,
+    edits: &[ParagraphEdit],
+) -> Option<()> {
+    for edit in edits {
+        for record in &mut units.records {
+            if record.pm.end <= edit.pm.start {
+                continue;
+            }
+            if record.pm.start < edit.pm.end {
+                return None;
+            }
+            let shift_raw = |value: u32| u32::try_from(i64::from(value) + edit.delta).ok();
+            let shift_pm = |value: u64| value.checked_add_signed(edit.delta);
+            let shift_boundary = |boundary: &mut BoundaryState| -> Option<()> {
+                let position = &mut boundary.position;
+                if !position.safe || position.story_index < edit.raw.end {
+                    return None;
+                }
+                position.story_index = shift_raw(position.story_index)?;
+                position.paragraph_start = shift_raw(position.paragraph_start)?;
+                position.paragraph_pm_start = shift_pm(position.paragraph_pm_start)?;
+                position.pm_cursor = shift_pm(position.pm_cursor)?;
+                Some(())
+            };
+            shift_boundary(Rc::make_mut(record.seed.as_mut()?))?;
+            shift_boundary(Rc::make_mut(&mut record.after))?;
+            record.pm = shift_pm(record.pm.start)?..shift_pm(record.pm.end)?;
+            record.capture_raw = Some(shift_raw(record.capture_raw?)?);
+        }
+    }
+    Some(())
+}
+
 #[derive(Clone, Debug)]
 struct Refresh {
     previous: Rc<PreviewUnits>,
@@ -381,6 +423,7 @@ pub(crate) fn refresh(units: &Rc<PreviewUnits>, edit: &TextEdit) -> Option<Previ
             cursor: 0,
             valid: true,
         }),
+        untracked_state: units.untracked_state,
         ..PreviewUnits::default()
     })
 }
@@ -536,6 +579,11 @@ impl UnitRecorder {
         }
         let window = self.window.as_mut().unwrap();
         window.local_stateful |= local::preview_touches_state(diff, txn);
+        for key in [INS, DEL] {
+            if let Some(value) = attribute(diff.attributes.as_deref(), key) {
+                record_decision(value);
+            }
+        }
         if !window.mutated && (pilcrow || standalone) {
             let has_reads = READS.with(|reads| {
                 reads
@@ -597,6 +645,7 @@ impl UnitRecorder {
             .reused
             .map(|index| &self.units.refresh.as_ref().unwrap().previous.records[index]);
         if reads.ids.is_empty() && previous.is_none() {
+            self.units.untracked_state |= window.local_stateful;
             return;
         }
         if !position.safe || reads.hidden_fields {
@@ -770,10 +819,11 @@ fn replace_positions<T>(
 }
 
 pub(crate) fn targets(units: &PreviewUnits, changed: &BTreeSet<String>) -> bool {
-    units
-        .records
-        .iter()
-        .any(|record| !record.ids.is_disjoint(changed))
+    units.untracked_state
+        || units
+            .records
+            .iter()
+            .any(|record| !record.ids.is_disjoint(changed))
 }
 
 pub(crate) fn replay(
@@ -784,6 +834,9 @@ pub(crate) fn replay(
     current: &[Rc<LayoutBlock>],
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
+    if local.enabled && units.untracked_state {
+        return None;
+    }
     let txn = doc.yrs_doc().transact();
     let story = story_ref(&txn, "body").ok()?;
     let with_media;
@@ -801,7 +854,13 @@ pub(crate) fn replay(
         if record.ids.is_disjoint(changed) {
             continue;
         }
-        if local.enabled && record.local_stateful {
+        if local.enabled
+            && (record.local_stateful
+                || record
+                    .chunks
+                    .iter()
+                    .any(|chunk| local::preview_touches_state(chunk, &txn)))
+        {
             return None;
         }
         let seed = record.seed.as_ref()?;
