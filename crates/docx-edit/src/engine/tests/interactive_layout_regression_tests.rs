@@ -140,7 +140,7 @@ fn display_reset_preserves_plain_damage_and_clears_region_damage() {
         assert_eq!(pagination.display_rebuilt_pages.is_empty(), region);
         assert_eq!(pagination.display_layout_pending, !region);
         assert_eq!(pagination.display_full_rebuild, !region);
-        assert_eq!(pagination.position_deltas.is_empty(), region);
+        assert!(pagination.position_deltas.is_empty());
         assert_eq!(pagination.note_changed_pages.is_empty(), region);
         assert_eq!(pagination.restamped_pages, Some(BTreeSet::new()));
     }
@@ -173,13 +173,12 @@ fn repeated_interactive_frames_match_main_with_and_without_notes() {
         engine
             .layout_document_with_regions_retained(&request.to_string())
             .unwrap();
-        let (deltas, note_pages, rebuilt_ranges, display_pending) = {
+        let (note_pages, rebuilt_ranges, display_pending) = {
             let pagination = engine.pagination.borrow();
             assert!(pagination.last_incremental);
             assert!(!pagination.display_uses_region_path);
             assert!(!pagination.position_deltas.is_empty());
             (
-                pagination.position_deltas.clone(),
                 pagination.note_changed_pages.clone(),
                 pagination.rebuilt_page_ranges.clone(),
                 pagination.display_layout_pending,
@@ -200,15 +199,13 @@ fn repeated_interactive_frames_match_main_with_and_without_notes() {
             );
             {
                 let pagination = engine.pagination.borrow();
-                assert_eq!(pagination.position_deltas, deltas);
+                assert!(pagination.position_deltas.is_empty());
                 assert_eq!(pagination.note_changed_pages, note_pages);
                 assert_eq!(pagination.rebuilt_page_ranges, rebuilt_ranges);
                 assert_eq!(pagination.display_layout_pending, display_pending);
                 assert_eq!(pagination.restamped_pages, Some(BTreeSet::new()));
             }
-            if frame == 0 {
-                reference_display = main_frame_baseline(&engine, &extras);
-            }
+            reference_display = main_frame_baseline(&engine, &extras);
         }
     }
 }

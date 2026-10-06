@@ -10640,8 +10640,14 @@ mod tests {
 
     /// The retained region state equals a cold full pass of `request` over the same document.
     fn assert_region_state_matches_cold(engine: &EngineSession, request: &str, label: &str) {
-        let snapshot = |engine: &EngineSession| {
-            engine.build_display_list_frame("{}", 0).unwrap();
+        let extras = engine
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .unwrap_or_else(|| "{}".to_owned());
+        let snapshot = |engine: &EngineSession, epoch| {
+            engine.build_display_list_frame(&extras, epoch).unwrap();
             (
                 engine.retained_layout_json().unwrap(),
                 engine.retained_kernel_inputs_json().unwrap(),
@@ -10649,7 +10655,15 @@ mod tests {
                 engine.with_display_list(Clone::clone).unwrap(),
             )
         };
-        let resident = snapshot(engine);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let resident = snapshot(engine, epoch);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_list_frame(&extras, epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            resident.3,
+            "{label}: repeated display build"
+        );
         let trigger = engine.relayout_trigger.replace(RelayoutTrigger::Open);
         let interactive = engine.interactive_pending.replace(false);
         let retention = engine.region_retention_valid.replace(false);
@@ -10676,7 +10690,7 @@ mod tests {
             engine.preview_font_requirements.replace(None),
         );
         engine.layout_document_with_regions_json(request).unwrap();
-        assert_eq!(resident, snapshot(engine), "{label}");
+        assert_eq!(resident, snapshot(engine, 0), "{label}");
         engine.render.replace(render);
         engine.measurement.replace(measurement);
         engine.pagination.replace(pagination);
@@ -13559,8 +13573,14 @@ mod tests {
         use crate::{Position, StoryRange};
 
         let enabled = engine.local_lowering.get();
-        let snapshot = |engine: &EngineSession| {
-            engine.build_display_list_frame("{}", 0).unwrap();
+        let extras = engine
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .unwrap_or_else(|| "{}".to_owned());
+        let snapshot = |engine: &EngineSession, epoch| {
+            engine.build_display_list_frame(&extras, epoch).unwrap();
             let render = engine.render.borrow();
             let lowered = &render.stories["body"];
             let pagination = engine.pagination.borrow();
@@ -13587,12 +13607,20 @@ mod tests {
             .apply_and_layout(story, epoch)
             .unwrap_or_else(|error| panic!("{story} [{start}, {end}) {text:?}: {error}"));
         let after = Rc::as_ptr(&engine.render.borrow().stories["body"].blocks);
-        let incremental = snapshot(engine);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let incremental = snapshot(engine, epoch);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.build_display_list_frame(&extras, epoch).unwrap();
+        assert_eq!(
+            engine.with_display_list(Clone::clone).unwrap(),
+            incremental.5,
+            "{story} [{start}, {end}) {text:?}: repeated display build"
+        );
         macro_rules! cold {
             ($($field:ident)+) => {{
                 let ($($field,)+) = ($(engine.$field.replace(Default::default()),)+);
                 engine.layout_document_with_regions_json(request).unwrap();
-                let result = snapshot(engine);
+                let result = snapshot(engine, 0);
                 $(engine.$field.replace($field);)+
                 result
             }};
