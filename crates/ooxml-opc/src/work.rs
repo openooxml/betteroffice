@@ -1,8 +1,7 @@
 use std::cell::Cell;
-use std::future::{Future, poll_fn};
-use std::pin::pin;
+use std::future::poll_fn;
 use std::rc::Rc;
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 
 #[derive(Clone, Default)]
 pub struct WorkBudget {
@@ -74,16 +73,5 @@ impl WorkBudget {
             Poll::Ready(count)
         })
         .await
-    }
-
-    pub fn complete<T>(&self, future: impl Future<Output = T>) -> T {
-        let mut future = pin!(future);
-        let mut context = Context::from_waker(Waker::noop());
-        loop {
-            self.reset(usize::MAX);
-            if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
-                return value;
-            }
-        }
     }
 }
