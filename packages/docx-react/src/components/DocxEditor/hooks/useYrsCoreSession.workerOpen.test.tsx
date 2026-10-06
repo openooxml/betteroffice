@@ -4904,13 +4904,13 @@ test('a font preflight OOM after a proposal mirrors retires without failing peer
         proposals: [{
           id: 'after-font-oom', paragraph,
           suggest: { author: 'Host', date: '2026-10-06T00:00:00Z' },
-          op: 'insertText', at: 'start', text: 'Recovered ',
+          op: 'insertText', at: 'end', text: 'Recovered ',
         }],
       })).toMatchObject({ ok: true });
     });
     expect(authority.snapshot()!.proposals.map(({ id }) => id)).toEqual(['before-font-oom', 'after-font-oom']);
     expect(session.getProposals().proposals).toEqual([]);
-    expect(session.paragraphs('body')[0]!.text).toContain('Recovered ');
+    expect(session.paragraphs('body')[0]!.text).toBe('Mirrored Page mapRecovered ');
     expect(posted.filter((request) => request.type === 'proposal')).toHaveLength(workerRounds);
     const saved: ArrayBuffer[] = [];
     const saveErrors: Error[] = [];
