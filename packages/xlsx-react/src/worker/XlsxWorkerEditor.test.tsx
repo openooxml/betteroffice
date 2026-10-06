@@ -1976,7 +1976,9 @@ for (const route of ['cell', 'formula', 'host'] as const) {
       const captured = structuredClone(op);
       expect(op.method).toBe('editCell');
       expect(op.args).toEqual([0, 0, 0, input]);
-      expect(op.calculation.nowSerial).toBe(1_750_000_000_000 / 86400000 + 25569);
+      expect(op.calculation.nowSerial).toBe(
+        (1_750_000_000_000 - new Date(1_750_000_000_000).getTimezoneOffset() * 60_000) / 86_400_000 + 25_569
+      );
       expect(Number.isInteger(seed)).toBe(true);
       expect(seed).toBeGreaterThanOrEqual(0);
       expect(seed).toBeLessThanOrEqual(0xffff_ffff);
@@ -2987,6 +2989,37 @@ for (const [input, normalized] of [['001', '1'], ['true', 'TRUE'], ['false', 'FA
       expect(painted[painted.length - 1].commands.some((cmd) => cmd.op === 'text' && cmd.text === `worker:${normalized}`)).toBe(true);
     });
   }
+}
+
+for (const route of ['draft', 'bulk'] as const) {
+  it(`captures local serials for preview and replay (${route})`, async () => {
+    const host = harness(true);
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const clock = spyOn(Date, 'now').mockReturnValue(Date.UTC(2026, 0, 1, 23, 30));
+    const timezone = spyOn(Date.prototype, 'getTimezoneOffset').mockReturnValue(-120);
+    restorers.push(() => timezone.mockRestore(), () => clock.mockRestore());
+    let api!: XlsxWorkerEditorApi;
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={(value) => { api = value; }} />);
+    await opened();
+    const input = '=NOW()';
+    let pending: Promise<unknown> | undefined;
+    if (route === 'draft') reviewEdit(view, input);
+    else act(() => { pending = api.applyEdits(reviewBatch(input)); });
+    await advance();
+    const op = host.preview.mock.calls[0][2][0];
+    expect(op.method).toBe(route === 'draft' ? 'editCell' : 'applyEdits');
+    expect(op.calculation?.nowSerial).toBe(Date.UTC(2026, 0, 2, 1, 30) / 86_400_000 + 25_569);
+    const calculation = structuredClone(op.calculation);
+    clock.mockReturnValue(Date.UTC(2026, 0, 3));
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    await pending;
+    expect(host.replay).toHaveBeenCalledTimes(1);
+    expect(host.replay.mock.calls[0][0].op).toEqual(op);
+    expect(host.replay.mock.calls[0][0].calculation).toEqual(calculation);
+    expect(host.peerMethods.setCalculationContext).toHaveBeenCalledWith(calculation);
+  });
 }
 
 for (const route of ['cell', 'formula'] as const) {

@@ -302,7 +302,10 @@ test.each(['explicit', 'worker-default'] as const)('successful snapshot releases
         inputs: [['refused']],
       }] })).toMatchObject({ ok: false });
       await edits.flush();
-      expect(setting.mock.calls).toEqual([[calculation], [expected]]);
+      const ms = editOptions.now();
+      const editedCalculation = { ...calculation,
+        nowSerial: (ms - new Date(ms).getTimezoneOffset() * 60_000) / 86_400_000 + 25_569 };
+      expect(setting.mock.calls).toEqual([[editedCalculation], [expected]]);
       expect(edits.sentSequence).toBe(0);
       await equalPeer(peer, session);
       expect(edits.editCell(0, 1, 0, '91').applied).toBe(true);
