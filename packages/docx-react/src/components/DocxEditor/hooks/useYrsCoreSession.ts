@@ -35,6 +35,9 @@ import {
 } from '../internals/workerOpenReplica';
 import { DocxWorkerError } from '../internals/docxWorkerError';
 import {
+  beginWorkerProposalHandover,
+  installEditorWorkerProposalActivation,
+  hasEditorWorkerProposalRounds,
   registerWorkerProposalAuthority,
   registeredWorkerProposalAuthority,
   workerProposalFailure,
@@ -673,7 +676,7 @@ export function useYrsCoreSession(
                     ...(peer ? { stories } : {}),
                   }, peer, (apply) => dirtyStoriesRef.current.adoptWorkerSaveUpdates(apply));
                 });
-                const authority = registeredWorkerProposalAuthority(next);
+                const authority = hasEditorWorkerProposalRounds(next) ? registeredWorkerProposalAuthority(next) : null;
                 return authority ? authority.save(task) : task();
               },
             });
@@ -689,9 +692,8 @@ export function useYrsCoreSession(
                 () => {}
               );
             };
-            const registerProposals = (): void => {
-              if (registeredWorkerProposalAuthority(next)) return;
-              const openedProposalOwner = worker.stateRevision?.()?.owner;
+            const activateEditorProposals = () => {
+              if (stale() || !worker.canSave()) return null;
               let laidOut = renderedFrameRef.current && renderedFrameRef.current !== inheritedFrameRef.current
                 ? Promise.resolve()
                 : new Promise<void>((resolve) => {
@@ -699,7 +701,6 @@ export function useYrsCoreSession(
                   });
               const authority = registerWorkerProposalAuthority(next, worker, {
                 editorPeer: true,
-                passiveEditor: !workerOpenRef.current?.workerProposals,
                 relayout: () => {
                   if (!authority.initialized) {
                     laidOut = new Promise<void>((resolve) => {
@@ -710,12 +711,9 @@ export function useYrsCoreSession(
                   workerOpenRef.current?.refreshWorkerLayout?.();
                 },
                 current: () => !stale(),
-                laidOut: () => {
-                  const owner = worker.stateRevision?.()?.owner;
-                  return owner !== openedProposalOwner && worker.whenBootstrapSent
-                    ? Promise.race([laidOut, worker.whenBootstrapSent()])
-                    : laidOut;
-                },
+                laidOut: () => worker.whenBootstrapSent
+                  ? Promise.race([laidOut, worker.whenBootstrapSent()])
+                  : laidOut,
                 contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
                 projectionChanged: (stories) => {
                   inputPositionMapsRef.current.clear();
@@ -732,6 +730,7 @@ export function useYrsCoreSession(
               authority.subscribe(() => {
                 if (!stale()) setWorkerProposalsReady(authority.initialized);
               });
+              return authority;
             };
             const deferEditorReplica = (): ReturnType<typeof deferWorkerOpenReplica> => {
               type StateRevision = NonNullable<ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>>;
@@ -775,15 +774,19 @@ export function useYrsCoreSession(
               const pending = deferWorkerOpenReplica(
                 next,
                 async () => {
-                  const update = await encodeReplicaState();
+                  const handover = beginWorkerProposalHandover(next);
+                  const handedOver = handover ? await handover : null;
+                  const update = handedOver ?? await encodeReplicaState();
                   let bootstrapped = false;
                   return [
                     () => {
-                      bootstrapped = bootstrapWorkerOpenPeer(next, update, source, workerHost);
+                      if (handedOver) next.openDocx(source, false);
+                      else bootstrapped = bootstrapWorkerOpenPeer(next, update, source, workerHost);
                     },
                     () => { if (!bootstrapped) next.loadState(update.state); },
                     () => {
-                      if (update.version !== undefined) {
+                      if (handedOver) handedOver.complete();
+                      else if ('version' in update && update.version !== undefined) {
                         adoptWorkerOpenHandoverVersion(next, update.version);
                       }
                     },
@@ -795,8 +798,7 @@ export function useYrsCoreSession(
                     throw new Error('The resident worker holds proposals the main thread cannot rebuild');
                   }
                   worker.fallback();
-                  /** Retirement is one-way for this session; the guard above rules out worker state needing catch-up. */
-                  if (registeredWorkerProposalAuthority(next)?.retire('source-fallback')) {
+                  if (hasEditorWorkerProposalRounds(next) && registeredWorkerProposalAuthority(next)?.retire('source-fallback')) {
                     console.warn('[yrs] the source fallback retired worker proposal authority to the peer');
                   }
                   next.openDocx(source, true);
@@ -817,8 +819,6 @@ export function useYrsCoreSession(
                     worker.destroy();
                   },
                   waitForLayout: true,
-                  serializeHydration: (load, complete) =>
-                    registeredWorkerProposalAuthority(next)?.hydratePeer(load, complete) ?? null,
                 }
               );
               pendingReplicaRef.current = pending;
@@ -828,8 +828,7 @@ export function useYrsCoreSession(
                   if (
                     stale() || sessionRef.current !== next ||
                     !pending.pending || pending.started || prefetchedState ||
-                    workerOpenRef.current?.workerProposals ||
-                    registeredWorkerProposalAuthority(next)?.holdsWorkerState()
+                    registeredWorkerProposalAuthority(next)
                   ) return;
                   const revision = worker.stateRevision?.();
                   if (!revision) return;
@@ -866,7 +865,6 @@ export function useYrsCoreSession(
                 }
               });
               revisionQueryRef.current = queryRevisions;
-              registerProposals();
               return pending;
             };
             if (workerOpenRef.current?.viewer) {
@@ -876,8 +874,36 @@ export function useYrsCoreSession(
               setReplicaReady(false);
             } else {
               deferEditorReplica();
+              if (!workerOpenRef.current?.workerProposals) installEditorWorkerProposalActivation(next, activateEditorProposals);
             }
-            if (workerOpenRef.current?.workerProposals) registerProposals();
+            if (workerOpenRef.current?.workerProposals) {
+              let laidOut = new Promise<void>((resolve) => {
+                workerLaidOutRef.current = resolve;
+              });
+              const authority = registerWorkerProposalAuthority(next, worker, {
+                relayout: () => {
+                  if (!authority.initialized) {
+                    laidOut = new Promise<void>((resolve) => {
+                      workerLaidOutRef.current = resolve;
+                    });
+                  }
+                  markLayoutQueued(next, true);
+                  workerOpenRef.current?.refreshWorkerLayout?.();
+                },
+                current: () => !stale(),
+                laidOut: () => laidOut,
+                contentChanged: () => workerOpenRef.current?.onWorkerContentChange?.(),
+                projectionChanged: markProjectionStories,
+                adopted: (version) => {
+                  adoptWorkerOpenMirrorVersion(next, version);
+                  worker.mirrorReady();
+                },
+                handedOver: (version) => adoptWorkerOpenHandoverVersion(next, version),
+              });
+              authority.subscribe(() => {
+                if (!stale()) setWorkerProposalsReady(authority.initialized);
+              });
+            }
           } else {
             if (workerOpenRef.current?.viewer) {
               throw new DocxWorkerError('open', new Error('The document worker is unavailable'));
@@ -986,7 +1012,8 @@ export function useYrsCoreSession(
       !session ||
       session !== sessionRef.current ||
       !hasOwnWorkerFrame ||
-      (!workerOpenDocumentHeld(session) && !startReplicaRef.current) ||
+      (!workerOpenDocumentHeld(session) &&
+        ((!pendingReplicaRef.current?.pending && !hasEditorWorkerProposalRounds(session)) || !startReplicaRef.current)) ||
       previewing ||
       (handoffFrom && options?.shownEngine !== session)
     ) return;
@@ -1083,7 +1110,7 @@ export function useYrsCoreSession(
           if (!controller.signal.aborted && retiringRef.current === null) prefetch?.start();
         }
       ) ?? Promise.resolve();
-      const authority = workerOpenRef.current?.workerProposals === true;
+      const authority = registeredWorkerProposalAuthority(session) !== null;
       if (authority) {
         timer = setTimeout(startPeer, REPLICA_FRAME_WAIT_MS);
         if (typeof requestAnimationFrame === 'function') {

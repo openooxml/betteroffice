@@ -408,9 +408,12 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         })
         .unwrap_or_default();
     local.blocked |= has_sequence_metadata;
-    let mut recording =
-        (story_id == "body" && preview_units.is_some()).then(preview::UnitRecorder::new);
-    let _reads = recording.as_ref().map(|_| preview::ReadGuard::new());
+    let mut recording = if story_id == "body" {
+        preview_units.take().map(preview::UnitRecorder::new)
+    } else {
+        None
+    };
+    let _reads = recording.as_ref().map(preview::UnitRecorder::read_guard);
     let (mut blocks, _) = lower_story_with_preview(
         &txn,
         story_id,
@@ -592,7 +595,9 @@ fn walk_story_chunks<T: ReadTxn>(
     }
     let mut plain = local::ParagraphSeed::default();
     for (chunk_index, diff) in chunks.iter().enumerate() {
-        if let Some(recording) = recording.as_deref_mut() {
+        if let Some(recording) = recording.as_deref_mut()
+            && recording.wants_chunk(story_index)
+        {
             recording.before_chunk(
                 chunk_index,
                 diff,

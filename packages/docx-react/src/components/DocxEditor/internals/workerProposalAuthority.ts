@@ -1,3 +1,4 @@
+import * as baseAuthority from './baseWorkerProposalAuthority';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -13,6 +14,7 @@ import type {
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
+  DocxProposalInput,
   DocxProposalRequest,
   DocxProposalResult,
   DocxProposalSnapshot,
@@ -29,10 +31,10 @@ import type {
   resolveNavigationTarget,
 } from '@betteroffice/docx/yrs';
 import type { WorkerOpenedDocument } from '../hooks/useDisplayList';
+import { stateVectorAhead } from './stateVector';
 import { proposalRevisionPreview, resolveMirroredNavigationTarget } from '@betteroffice/docx/yrs';
 import {
   awaitWorkerOpenReplica,
-  adoptWorkerOpenHandoverVersion,
   workerOpenReplicaPending,
   workerOpenReplicaReady,
   workerOpenReplicaStarted,
@@ -43,6 +45,8 @@ import {
 type SearchRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'searchText'>>>;
 type StickyAnchorsRead = Awaited<ReturnType<typeof ResidentEngineWorkerClient.prototype.documentRead<'stickyAnchors'>>>;
 
+type RoundAdmission = { flush(): Promise<void>; validate(): void };
+
 export interface WorkerProposalAuthority {
   /** The authority has a worker registry snapshot. */
   readonly initialized: boolean;
@@ -52,8 +56,6 @@ export interface WorkerProposalAuthority {
   workerCoversPeer(peerVersion: string): boolean;
   retirementReason(): 'source-fallback' | null;
   retire(reason: 'source-fallback'): boolean;
-  catchUp(complete?: () => void): Promise<void>;
-  hydratePeer(load: () => Promise<void>, complete: () => void): Promise<void>;
   restart(): void;
   save<T>(task: () => Promise<T>): Promise<T>;
   residentOperation<T>(task: () => Promise<T>): Promise<T>;
@@ -67,18 +69,21 @@ export interface WorkerProposalAuthority {
   holdsCommittedWorkerState(): boolean;
   propose(
     request: DocxProposalRequest,
-    main: (request: DocxProposalRequest) => Promise<DocxProposalResult>
+    main: (request: DocxProposalRequest) => Promise<DocxProposalResult>,
+    admission?: RoundAdmission
   ): Promise<DocxProposalResult>;
   setStates(
     request: DocxProposalStateRequest,
-    main: (request: DocxProposalStateRequest) => Promise<DocxProposalResult>
+    main: (request: DocxProposalStateRequest) => Promise<DocxProposalResult>,
+    admission?: RoundAdmission
   ): Promise<DocxProposalResult>;
   withdraw(
     request: DocxProposalWithdrawRequest,
-    main: (request: DocxProposalWithdrawRequest) => Promise<DocxProposalResult>
+    main: (request: DocxProposalWithdrawRequest) => Promise<DocxProposalResult>,
+    admission?: RoundAdmission
   ): Promise<DocxProposalResult>;
   removeComment(id: string, main: () => void | Promise<void>): Promise<void>;
-  getProposals(main: () => Promise<DocxProposalSnapshot>): Promise<DocxProposalSnapshot>;
+  getProposals(main: () => Promise<DocxProposalSnapshot>, admission?: RoundAdmission): Promise<DocxProposalSnapshot>;
   readParagraphs(
     request: DocxReadParagraphsRequest,
     main: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>
@@ -144,6 +149,7 @@ export interface WorkerProposalAuthority {
 type PeerSnapshot = Pick<Awaited<ReturnType<WorkerOpenedDocument['handOver']>>,
   'state' | 'version' | 'metadata' | 'metadataReason'>;
 type RegisteredAuthority = WorkerProposalAuthority & {
+  hasEditorRounds(): boolean;
   readsInWorker(): boolean;
   peerSnapshot(): Promise<PeerSnapshot>;
   fail(error: unknown): void;
@@ -153,7 +159,28 @@ type RegisteredAuthority = WorkerProposalAuthority & {
 class StaleProposalVersionError extends Error {
   constructor(readonly version: string) { super('the document changed since the expected version was read'); }
 }
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value === null || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(Object.keys(record).sort().filter((key) => record[key] !== undefined)
+    .map((key) => [key, canonical(record[key])]));
+}
+
+function retryKey(input: DocxProposalInput): string {
+  const edit = input.op === 'replaceText'
+    ? { op: input.op, search: input.search, replaceWith: input.replaceWith,
+        occurrence: input.occurrence === undefined || input.occurrence === 1 ? 'first' : input.occurrence }
+    : { op: input.op, at: input.at, text: input.text };
+  return JSON.stringify(canonical({ paragraph: input.paragraph, ...edit }));
+}
+
 const authorities = new WeakMap<YrsSession, RegisteredAuthority>();
+
+function sameVector(a: Uint8Array, b: Uint8Array): boolean {
+  return (a.length === b.length && a.every((byte, index) => byte === b[index])) ||
+    (a.length > 0 && b.length > 0 && !stateVectorAhead(a, b) && !stateVectorAhead(b, a));
+}
 
 export function registerWorkerProposalAuthority(
   session: YrsSession,
@@ -161,7 +188,6 @@ export function registerWorkerProposalAuthority(
     Partial<Pick<WorkerOpenedDocument, 'syncUpdate' | 'integrateProposalUpdate' | 'stateRevision'>>,
   hooks: {
     editorPeer?: boolean;
-    passiveEditor?: boolean;
     relayout(): void;
     current(): boolean;
     /** Settles once the worker has laid the document out; proposal requests wait for it. */
@@ -174,8 +200,15 @@ export function registerWorkerProposalAuthority(
     peerUpdated?(stories: readonly string[]): void;
   }
 ): WorkerProposalAuthority {
+  if (!hooks.editorPeer) {
+    const authority = baseAuthority.registerWorkerProposalAuthority(session, worker, {
+      ...hooks, handedOver: hooks.handedOver ?? (() => {}),
+    });
+    return extendBaseAuthority(session, authority);
+  }
   let tail: Promise<unknown> = Promise.resolve();
   let initializing: Promise<void> | null = null;
+  let initializationFailure: { error: unknown } | null = null;
   let failWaiting!: (error: unknown) => void;
   const stopped = new Promise<void>((_resolve, reject) => {
     failWaiting = reject;
@@ -189,7 +222,9 @@ export function registerWorkerProposalAuthority(
   let geometry: ProposalGeometryMirror | null = null;
   let holdsState = false;
   let mutating = 0;
-  let peerHydrated = false;
+  let admittedRounds = 0;
+  const editorRounds = hooks.editorPeer === true;
+  let retiredRegistry: ReturnType<YrsSession['createWorkerProposalRegistry']> | null = null;
   let retirementReason: 'source-fallback' | null = null;
   let releaseRetirement!: () => void;
   const retired = new Promise<void>((resolve) => { releaseRetirement = resolve; });
@@ -197,7 +232,7 @@ export function registerWorkerProposalAuthority(
     worker: string; peer: string; revision?: ReturnType<NonNullable<WorkerOpenedDocument['stateRevision']>>;
   } | null = null;
   const editorPeer = (): boolean => hooks.editorPeer === true && !workerOpenDocumentHeld(session);
-  const peerReady = (): boolean => peerHydrated || (editorPeer() && workerOpenReplicaReady(session));
+  const peerReady = (): boolean => workerOpenReplicaReady(session);
   const listeners = new Set<() => void>();
   const notify = () => { for (const listener of listeners) listener(); };
   const assertCurrent = () => {
@@ -223,11 +258,14 @@ export function registerWorkerProposalAuthority(
     return result;
   };
   const store = (reply: ResidentProposalReply): void => {
-    // Listeners the mirror notifies read the geometry that goes with it.
-    geometry = peerReady() ? { ...reply.geometry, version: session.version() } : reply.geometry;
+    geometry = peerReady()
+      ? sameVector(session.encodeStateVector(), reply.stateVector)
+        ? { ...reply.geometry, version: session.version() }
+        : null
+      : reply.geometry;
     if (correspondence?.worker !== reply.mirror.version) correspondence = null;
     mirror = reply.mirror;
-    if (!peerReady()) session.mirrorWorkerDocument(mirror, !editorPeer());
+    if (!editorPeer() && !peerReady()) session.mirrorWorkerDocument(mirror);
     notify();
   };
   const route = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {
@@ -246,31 +284,45 @@ export function registerWorkerProposalAuthority(
       return call();
     });
     if (initialized) return execute(true);
-    const workerRead = ready.then(() => execute(true));
-    const loaded = workerOpenDocumentHeld(session) ? undefined : awaitWorkerOpenReplica(session);
+    const workerRead = ready.then(async () => {
+      if (!initialized) await awaitWorkerOpenReplica(session);
+      return execute(initialized);
+    });
+    const loaded = workerOpenDocumentHeld(session) ? undefined :
+      Promise.race([awaitWorkerOpenReplica(session) ?? Promise.resolve()])
+        .then(() => awaitWorkerOpenReplica(session));
     return loaded ? Promise.race([workerRead, loaded.then(() => execute(false))]) : workerRead;
   };
-  const round = <T>(call: () => Promise<T>, main: () => T | Promise<T>): Promise<T> => {
-    const ready = authority.initialize();
-    void ready.catch(() => {});
-    const admittedRevision = layoutRevision;
-    const execute = (revision: number): Promise<T> => enqueue<{ value: T } | { readmit: true }>(async () => {
-      if (retirementReason) return { value: await main() };
-      await ready;
+  const round = <T>(
+    call: () => Promise<T>, main: () => T | Promise<T>, admission?: RoundAdmission
+  ): Promise<T> => {
+    admittedRounds += 1;
+    return enqueue(async () => {
+      if (editorPeer()) await awaitWorkerOpenReplica(session);
+      const ready = async () => {
+        while (!initialized && !retirementReason) {
+          const revision = layoutRevision;
+          await Promise.race([hooks.laidOut(), stopped, retired]);
+          assertCurrent();
+          if (retirementReason) break;
+          if (revision !== layoutRevision) continue;
+          await initializeNow();
+        }
+      };
+      await ready();
+      if (retirementReason) {
+        await admission?.flush();
+        admission?.validate();
+        return main();
+      }
+      await admission?.flush();
+      await ready();
       assertCurrent();
-      if (retirementReason) return { value: await main() };
-      if (!initialized && revision !== layoutRevision) return { readmit: true };
-      if (!initialized) await initializeNow();
-      if (retirementReason) return { value: await main() };
-      return { value: await call() };
-    }).then((result) => {
-      if ('value' in result) return result.value;
-      const nextRevision = layoutRevision;
-      return Promise.race([hooks.laidOut(), stopped, retired]).then(() => execute(nextRevision));
-    });
-    return initialized ? execute(admittedRevision) : ready.then(() => execute(admittedRevision));
+      admission?.validate();
+      return retirementReason ? main() : call();
+    }).finally(() => { admittedRounds -= 1; });
   };
-  const workerSnapshot = (): DocxProposalSnapshot | null => retirementReason ? session.getProposals() : mirror ? {
+  const workerSnapshot = (): DocxProposalSnapshot | null => retirementReason ? retiredRegistry!.snapshot() : mirror ? {
     version: peerReady() ? session.version() : mirror.version,
     previewVersion: mirror.proposals.previewVersion,
     proposals: mirror.proposals.entries.map(({ record }) => ({
@@ -278,7 +330,6 @@ export function registerWorkerProposalAuthority(
     })),
   } : null;
   const preview = (): ReturnType<typeof proposalRevisionPreview> => {
-    if (retirementReason) return proposalRevisionPreview(session.getProposals());
     const snapshot = workerSnapshot();
     const workerPreview = snapshot ? proposalRevisionPreview(snapshot) : undefined;
     if (!editorPeer() || !peerReady()) return workerPreview;
@@ -292,12 +343,11 @@ export function registerWorkerProposalAuthority(
     const integrated = worker.integrateProposalUpdate(diff, stories);
     const changed: readonly string[] = Array.isArray(integrated) ? integrated : stories;
     hooks.projectionChanged?.(changed);
-    hooks.peerUpdated?.(changed);
+    if (changed.length > 0) hooks.peerUpdated?.(changed);
   };
   const recordCorrespondence = (workerVersion: string, unchanged: boolean, vector: Uint8Array): void => {
     const peerVector = session.encodeStateVector();
-    correspondence = unchanged && peerVector.length === vector.length &&
-      peerVector.every((byte, index) => byte === vector[index])
+    correspondence = unchanged && sameVector(peerVector, vector)
       ? { worker: workerVersion, peer: session.version(), revision: worker.stateRevision?.() }
       : null;
   };
@@ -308,8 +358,8 @@ export function registerWorkerProposalAuthority(
     const previous = mirror!;
     const previousPreview = JSON.stringify(proposalRevisionPreview(workerSnapshot()!));
     const pending = op.kind === 'propose' || op.kind === 'withdraw' || op.kind === 'removeComment';
-    if (pending && !peerReady()) session.mirrorWorkerDocument(
-      { ...previous, version: previous.version + '~' }, !editorPeer()
+    if (pending && !editorPeer() && !peerReady()) session.mirrorWorkerDocument(
+      { ...previous, version: previous.version + '~' }
     );
     let postedVersion = editorPeer() ? session.version() : undefined;
     let reply: ResidentProposalReply;
@@ -321,23 +371,25 @@ export function registerWorkerProposalAuthority(
         return operation;
       }) : worker.proposal(op));
     } catch (error) {
-      if (hooks.current() && pending && workerOpenReplicaPending(session)) {
-        session.mirrorWorkerDocument(previous, !editorPeer());
+      if (hooks.current() && pending && !editorPeer() && workerOpenReplicaPending(session)) {
+        session.mirrorWorkerDocument(previous);
       }
       throw error;
     } finally {
       mutating -= 1;
     }
     assertCurrent();
+    if (retirementReason) throw new Error('The document worker is unavailable');
     if (
+      (!editorPeer() && op.kind === 'setStates' && reply.result?.ok === true) ||
       reply.changedStories.length > 0 ||
-      JSON.stringify(previous.proposals) !== JSON.stringify(reply.mirror.proposals) ||
-      (op.kind === 'setStates' && reply.result?.ok)
+      JSON.stringify(previous.proposals) !== JSON.stringify(reply.mirror.proposals)
     ) holdsState = true;
     if (peerReady() && reply.peerDiff) {
       const unchanged = session.version() === postedVersion;
       integrate(reply.peerDiff, [...new Set([...reply.changedStories, ...(reply.projectionStories ?? [])])]);
       recordCorrespondence(reply.mirror.version, unchanged, reply.stateVector);
+      holdsState = false;
     } else {
       if (peerReady()) correspondence = null;
       hooks.projectionChanged?.(reply.projectionStories ?? []);
@@ -352,13 +404,17 @@ export function registerWorkerProposalAuthority(
   };
   const mutate = (
     op: Extract<Parameters<WorkerOpenedDocument['proposal']>[0], { request: unknown }>,
-    main: () => Promise<DocxProposalResult>
+    main: () => Promise<DocxProposalResult>, admission?: RoundAdmission
   ): Promise<DocxProposalResult> => round<DocxProposalResult>(async () => {
     const prepare = () => {
+      admission?.validate();
       if (!editorPeer()) return op;
       const version = peerReady() ? session.version() : mirror!.version;
       const token = op.request.expectVersion;
-      if (token !== version && !(correspondence?.peer === version && correspondence.worker === token)) {
+      const retry = op.kind === 'propose' && Array.isArray(op.request.proposals) &&
+        op.request.proposals.every((input) => mirror?.proposals.entries.some((entry) =>
+          entry.record.id === input.id && entry.key === retryKey(input)));
+      if (!retry && token !== version && !(correspondence?.peer === version && correspondence.worker === token)) {
         throw new StaleProposalVersionError(version);
       }
       return { ...op, peerStateVector: session.encodeStateVector() };
@@ -375,56 +431,50 @@ export function registerWorkerProposalAuthority(
     return reply.result.ok
       ? { ...reply.result, snapshot: { ...reply.result.snapshot, version: session.version() } }
       : { ...reply.result, version: session.version() };
-  }, main);
+  }, main, admission);
+  const retiredMutation = (call: () => DocxProposalResult): Promise<DocxProposalResult> => {
+    const before = retiredRegistry!.snapshot();
+    const since = session.storiesChangedSince(Number.MAX_SAFE_INTEGER).revision;
+    const result = call();
+    if (result.ok) {
+      const changed = session.storiesChangedSince(since).stories;
+      const stories = [...new Set([...changed, ...before.proposals, ...result.snapshot.proposals]
+        .flatMap((entry) => typeof entry === 'string' ? [entry] : [entry.paragraph.story]))];
+      hooks.projectionChanged?.(stories);
+      if (stories.length > 0) hooks.peerUpdated?.(stories);
+      if (changed.length > 0) hooks.contentChanged();
+      if (changed.length > 0 || before.previewVersion !== result.snapshot.previewVersion) hooks.relayout();
+    }
+    return Promise.resolve(result);
+  };
   const initializeNow = async (): Promise<void> => {
     if (retirementReason) return;
     assertCurrent();
     if (initialized || retirementReason) return;
+    if (initializationFailure) throw initializationFailure.error;
+    const revision = layoutRevision;
     const reply = await Promise.race([worker.proposal({ kind: 'snapshot' }), retired.then(() => null)]).catch((error: unknown) => {
       if (retirementReason) return null;
+      if (revision === layoutRevision && (editorRounds || mirror === null)) initializationFailure = { error };
       throw error;
     });
     assertCurrent();
-    if (!reply || retirementReason) return;
+    if (!reply || retirementReason || revision !== layoutRevision) return;
     const previousVersion = mirror?.version;
     initialized = true;
+    initializing = Promise.resolve();
     store(reply);
+    if (peerReady()) recordCorrespondence(reply.mirror.version, true, reply.stateVector);
     hooks.adopted(reply.mirror.version);
     if (previousVersion !== undefined && previousVersion !== reply.mirror.version) hooks.relayout();
   };
-  const catchUpNow = async (complete?: () => void): Promise<void> => {
-    if (retirementReason) { complete?.(); return; }
-    if (!worker.syncUpdate) throw new Error('The worker proposal catch-up is unavailable');
-    const version = session.version();
-    const reply = await worker.syncUpdate(new Uint8Array(), session.encodeStateVector());
-    assertCurrent();
-    const unchanged = session.version() === version;
-    if (reply.repair) integrate(reply.repair, []);
-    peerHydrated = true;
-    adoptWorkerOpenHandoverVersion(session, reply.version);
-    session.mirrorWorkerDocument(null, false);
-    recordCorrespondence(reply.version, unchanged, reply.stateVector);
-    if (initialized) {
-      const snapshot = await worker.proposal({ kind: 'snapshot' });
-      assertCurrent();
-      initializing = Promise.resolve();
-      store(snapshot);
-      correspondence = snapshot.mirror.version === reply.version ? correspondence : null;
-    } else {
-      initializing = null;
-      notify();
-    }
-    if (correspondence && mirror?.proposals.entries.length === 0 && mirror.proposals.previewVersion === 0) {
-      holdsState = false;
-    }
-    complete?.();
-  };
   const authority: RegisteredAuthority = {
-    readsInWorker: () => !hooks.passiveEditor || workerOpenDocumentHeld(session) || holdsState || mutating > 0,
+    hasEditorRounds: () => editorRounds,
+    readsInWorker: () => true,
     get initialized() { return initialized; },
     snapshot: workerSnapshot,
     revisionPreview: preview,
-    previewVersion: () => (mirror?.proposals.previewVersion ?? 0) +
+    previewVersion: () => (workerSnapshot()?.previewVersion ?? 0) +
       (retirementReason || (editorPeer() && peerReady()) ? session.getProposals().previewVersion : 0),
     workerCoversPeer: (version) => {
       if (retirementReason || mutating > 0 || correspondence?.peer !== version || session.version() !== version) return false;
@@ -434,7 +484,13 @@ export function registerWorkerProposalAuthority(
     retirementReason: () => retirementReason,
     retire(reason) {
       if (retirementReason) return false;
-      if (holdsState || mutating > 0) throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      if (holdsState) throw new Error('The resident worker holds proposals the main thread cannot rebuild');
+      retiredRegistry = session.createWorkerProposalRegistry(mirror?.proposals ?? { previewVersion: 0, entries: [] });
+      retiredRegistry.subscribe(notify);
+      if (mutating > 0) {
+        const error = new Error('The document worker is unavailable');
+        for (const reject of pendingCalls) reject(error);
+      }
       retirementReason = reason;
       failure = null;
       correspondence = null;
@@ -445,22 +501,17 @@ export function registerWorkerProposalAuthority(
       notify();
       return true;
     },
-    catchUp: (complete) => enqueue(() => catchUpNow(complete)),
-    hydratePeer: (load, complete) => enqueue(async () => {
-      await load();
-      assertCurrent();
-      await catchUpNow(complete);
-    }),
     residentOperation: (task) => enqueue(async () => {
       const result = await task();
       assertCurrent();
       return result;
     }),
     restart() {
-      if (retirementReason || !initialized || holdsState || failure || !hooks.current()) return;
+      if (retirementReason || (!initialized && admittedRounds === 0) || holdsState || failure || !hooks.current()) return;
       initialized = false;
       layoutRevision += 1;
       initializing = null;
+      initializationFailure = null;
       hooks.relayout();
       notify();
     },
@@ -480,11 +531,14 @@ export function registerWorkerProposalAuthority(
       if (failure) return Promise.reject(failure.error);
       if (retirementReason) return Promise.resolve();
       if (initializing) return initializing;
-      initializing = Promise.race([hooks.laidOut(), stopped, retired]).then(() => enqueue(initializeNow));
+      initializing = Promise.resolve(awaitWorkerOpenReplica(session)).then(() =>
+        Promise.race([hooks.laidOut(), stopped, retired])
+      ).then(() => enqueue(initializeNow));
+      void initializing.catch(() => {});
       return initializing;
     },
     geometry: () => geometry,
-    holdsWorkerState: () => holdsState || mutating > 0,
+    holdsWorkerState: () => !retirementReason && (holdsState || mutating > 0),
     holdsCommittedWorkerState: () => holdsState,
     failure: () => failure?.error,
     fail: (error) => {
@@ -493,9 +547,12 @@ export function registerWorkerProposalAuthority(
       failWaiting(error);
       for (const reject of pendingCalls) reject(error);
     },
-    propose: (request, main) => mutate({ kind: 'propose', request }, () => main(request)),
-    setStates: (request, main) => mutate({ kind: 'setStates', request }, () => main(request)),
-    withdraw: (request, main) => mutate({ kind: 'withdraw', request }, () => main(request)),
+    propose: (request, main, admission) => mutate({ kind: 'propose', request },
+      () => retiredRegistry ? retiredMutation(() => retiredRegistry!.propose(request)) : main(request), admission),
+    setStates: (request, main, admission) => mutate({ kind: 'setStates', request },
+      () => retiredRegistry ? retiredMutation(() => retiredRegistry!.setStates(request)) : main(request), admission),
+    withdraw: (request, main, admission) => mutate({ kind: 'withdraw', request },
+      () => retiredRegistry ? retiredMutation(() => retiredRegistry!.withdraw(request)) : main(request), admission),
     removeComment: (id, main) => route(async () => {
       await sendMutation({ kind: 'removeComment', id });
     }, main),
@@ -504,14 +561,20 @@ export function registerWorkerProposalAuthority(
       session.version() === correspondence.peer
         ? { ...request, expectVersion: correspondence.peer }
         : request,
-    getProposals: (main) => round(async () => {
+    getProposals: (main, admission) => round(async () => {
       if (peerReady() && editorPeer()) {
+        const version = session.version();
         const reply = await worker.proposal({ kind: 'snapshot' });
         assertCurrent();
+        if (!initialized) {
+          initialized = true;
+          hooks.adopted(reply.mirror.version);
+        }
         store(reply);
+        recordCorrespondence(reply.mirror.version, session.version() === version, reply.stateVector);
       }
       return workerSnapshot()!;
-    }, main),
+    }, () => retiredRegistry ? Promise.resolve(retiredRegistry.snapshot()) : main(), admission),
     readParagraphs: (request, main) => route(async () => {
       const read = await worker.documentRead({ kind: 'readParagraphs', request });
       assertCurrent();
@@ -590,29 +653,88 @@ export function registerWorkerProposalAuthority(
     }),
   };
   authorities.set(session, authority);
+  const activated = activationListeners.get(session);
+  activationListeners.delete(session);
+  activated?.forEach((listener) => listener());
   return authority;
 }
 
 export function workerProposalAuthority(session: YrsSession, includeHydrating = false): WorkerProposalAuthority | null {
   const authority = authorities.get(session);
+  if (!authority) {
+    const ordinary = baseAuthority.workerProposalAuthority(session);
+    return ordinary ? extendBaseAuthority(session, ordinary) : null;
+  }
   return authority && !authority.retirementReason() && authority.readsInWorker() && workerOpenReplicaPending(session) &&
     (!workerOpenReplicaStarted(session) || authority.holdsWorkerState() || (includeHydrating && authority.initialized))
     ? authority
     : null;
 }
 
-/**
- * Decision A: proposal rounds keep the resident worker authority after editor hydration.
- * Proposal ids are independent across the peer-local and worker registries.
- */
-export function workerProposalRoundAuthority(session: YrsSession): WorkerProposalAuthority | null {
-  return authorities.get(session) ?? null;
+const activators = new WeakMap<YrsSession, () => WorkerProposalAuthority | null>();
+const activationListeners = new WeakMap<YrsSession, Set<() => void>>();
+const extendedBaseAuthorities = new WeakMap<baseAuthority.WorkerProposalAuthority, WorkerProposalAuthority>();
+
+function extendBaseAuthority(session: YrsSession, authority: baseAuthority.WorkerProposalAuthority): WorkerProposalAuthority {
+  let extended = extendedBaseAuthorities.get(authority);
+  if (!extended) {
+    extended = Object.assign(authority, {
+      snapshot: () => authority.initialized ? session.getProposals() : null,
+      revisionPreview: () => proposalRevisionPreview(session.getProposals()),
+      previewVersion: () => session.getProposals().previewVersion,
+      workerCoversPeer: () => false,
+      retirementReason: () => null,
+      retire: () => false,
+    });
+    extendedBaseAuthorities.set(authority, extended);
+  }
+  return extended;
 }
 
-export const registeredWorkerProposalAuthority = workerProposalRoundAuthority;
+export function installEditorWorkerProposalActivation(session: YrsSession, activate: () => WorkerProposalAuthority | null): void {
+  activators.set(session, activate);
+}
+
+export function editorWorkerProposalActivationAvailable(session: YrsSession): boolean {
+  return activators.has(session);
+}
+
+export async function activateEditorWorkerProposalRounds(
+  session: YrsSession, admitted: () => boolean = () => true
+): Promise<WorkerProposalAuthority | null> {
+  await awaitWorkerOpenReplica(session);
+  if (!admitted()) return null;
+  return authorities.get(session) ?? activators.get(session)?.() ?? null;
+}
+
+export function subscribeEditorWorkerProposalAuthority(session: YrsSession, listener: () => void): () => void {
+  let unsubscribe = authorities.get(session)?.subscribe(listener);
+  const activated = () => { unsubscribe = authorities.get(session)?.subscribe(listener); listener(); };
+  let listeners = activationListeners.get(session);
+  if (!listeners) activationListeners.set(session, listeners = new Set());
+  if (!unsubscribe) listeners.add(activated);
+  return () => { listeners.delete(activated); unsubscribe?.(); };
+}
+
+export function workerProposalRoundAuthority(session: YrsSession): WorkerProposalAuthority | null {
+  return authorities.get(session) ?? workerProposalAuthority(session);
+}
+
+export function registeredWorkerProposalAuthority(session: YrsSession): WorkerProposalAuthority | null {
+  const editor = authorities.get(session);
+  if (editor) return editor;
+  const ordinary = baseAuthority.registeredWorkerProposalAuthority(session);
+  return ordinary ? extendBaseAuthority(session, ordinary) : null;
+}
+
+export const beginWorkerProposalHandover = baseAuthority.beginWorkerProposalHandover;
+
+export function hasEditorWorkerProposalRounds(session: YrsSession): boolean {
+  return authorities.get(session)?.hasEditorRounds() === true;
+}
 
 export function workerProposalFailure(session: YrsSession): unknown {
-  return authorities.get(session)?.failure();
+  return authorities.get(session)?.failure() ?? baseAuthority.workerProposalFailure(session);
 }
 
 /**
@@ -623,7 +745,8 @@ export function handedOverRequest<T extends { expectVersion: string }>(
   request: T
 ): T {
   const authority = authorities.get(session);
-  return authority ? authority.handedOverRequest(request) : workerOpenRequest(session, request);
+  return authority ? workerOpenRequest(session, authority.handedOverRequest(request))
+    : baseAuthority.handedOverRequest(session, request);
 }
 
 export function snapshotWorkerProposalPeer(session: YrsSession): Promise<PeerSnapshot> | null {
@@ -632,4 +755,5 @@ export function snapshotWorkerProposalPeer(session: YrsSession): Promise<PeerSna
 
 export function failWorkerProposalAuthority(session: YrsSession, error: unknown): void {
   authorities.get(session)?.fail(error);
+  baseAuthority.failWorkerProposalAuthority(session, error);
 }

@@ -1026,6 +1026,13 @@ export interface YrsSession extends CollaborationReplica {
     goalX: number
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
     rId: string,
@@ -1450,7 +1457,8 @@ export interface YrsSession extends CollaborationReplica {
   /** The proposals in the order they were made. */
   getProposals(): DocxProposalSnapshot;
   /** @internal */
-  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null, mirrorProposals?: boolean): void;
+  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+  createWorkerProposalRegistry(state: DocxProposalRegistryState): import('./proposals').DocxProposalRegistry;
   /** @internal */
   workerDocumentMirrored(): boolean;
   /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */

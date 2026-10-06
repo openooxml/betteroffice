@@ -55,7 +55,7 @@ import type {
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
-import { createProposalRegistry } from './proposals';
+import { createProposalRegistry, type DocxProposalSession } from './proposals';
 import type { DocxContentControlsResult } from './contentControls';
 import type {
   DocxExportFailure,
@@ -380,19 +380,7 @@ export function wrapSession(
   };
 
   let workerDocumentVersion: string | null = null;
-  const proposalListeners = new Set<Parameters<YrsSession['onProposalChange']>[0]>();
-  const notifyProposals = (snapshot = facade.getProposals()): void => {
-    const delivered = JSON.stringify(snapshot);
-    for (const listener of [...proposalListeners]) {
-      try {
-        listener(snapshot);
-      } catch (error) {
-        console.error('[yrs] a proposal listener threw', error);
-      }
-      if (JSON.stringify(facade.getProposals()) !== delivered) break;
-    }
-  };
-  const createRegistry = () => createProposalRegistry({
+  const proposalHooks: DocxProposalSession = {
     version: () => session.version(),
     resolveParagraphAnchor: (anchor) => facade.resolveParagraphAnchor(anchor),
     findText: (request) => facade.findText(request),
@@ -418,10 +406,9 @@ export function wrapSession(
           },
         }
       : {}),
-  });
-  let proposals = createRegistry();
-  proposals.subscribe(notifyProposals);
-  let peerProposals: ReturnType<typeof createRegistry> | null = null;
+  };
+  const proposals = createProposalRegistry(proposalHooks);
+  const detachedProposals = new Set<ReturnType<typeof createProposalRegistry>>();
 
   const facade: YrsSession = {
     clientId,
@@ -645,6 +632,22 @@ export function wrapSession(
     displayVerticalMoveJson: (position, direction, goalX) =>
       session.display_vertical_move_json(position, direction, goalX),
     displayRangeRectsJson: (from, to) => session.display_range_rects_json(from, to),
+    displayRangeRectsOnPagesJson: (from, to, firstPage, lastPage) => {
+      const query = (session as EditSession & {
+        display_range_rects_on_pages_json?: (
+          from: number,
+          to: number,
+          firstPage: number,
+          lastPage: number
+        ) => string;
+      }).display_range_rects_on_pages_json;
+      if (query) return query.call(session, from, to, firstPage, lastPage);
+      return JSON.stringify(
+        (JSON.parse(session.display_range_rects_json(from, to)) as { pageIndex: number }[]).filter(
+          (rect) => rect.pageIndex >= firstPage && rect.pageIndex <= lastPage
+        )
+      );
+    },
     displayRangeRectsRegionJson: (region, rId, from, to) =>
       session.display_range_rects_region_json(region, rId, from, to),
     outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
@@ -1380,41 +1383,31 @@ export function wrapSession(
         if (result.ok && result.applied) markDirty(result.changedStories);
         return result;
       }),
-    /** Editor peer proposals are peer-local, invisible to worker rounds and ref API results. */
     proposeChanges: (request) => mutate(() => proposals.propose(request)),
-    /** Editor peer proposals are peer-local, invisible to worker rounds and ref API results. */
     setProposalStates: (request) => proposals.setStates(request),
-    /** Editor peer proposals are peer-local, invisible to worker rounds and ref API results. */
     withdrawProposals: (request) => mutate(() => proposals.withdraw(request)),
     getProposals: () => proposals.snapshot(),
-    mirrorWorkerDocument: (mirror, mirrorProposals = true) => {
+    createWorkerProposalRegistry: (state) => {
+      if (destroyed) throw new Error('yrs session is destroyed');
+      const registry = createProposalRegistry(proposalHooks);
+      registry.mirror({ version: session.version(), proposals: state });
+      registry.mirror(null);
+      detachedProposals.add(registry);
+      return {
+        ...registry,
+        propose: (request) => mutate(() => registry.propose(request)),
+        withdraw: (request) => mutate(() => registry.withdraw(request)),
+        destroy: () => { registry.destroy(); detachedProposals.delete(registry); },
+      };
+    },
+    mirrorWorkerDocument: (mirror) => {
       workerDocumentVersion = mirror?.version ?? null;
-      if (!mirrorProposals) {
-        if (peerProposals) {
-          proposals.destroy();
-          proposals = peerProposals;
-          peerProposals = null;
-          notifyProposals();
-        }
-        return;
-      }
-      if (mirror && !peerProposals) {
-        peerProposals = proposals;
-        proposals = createRegistry();
-        proposals.subscribe(notifyProposals);
-      }
       proposals.mirror(mirror);
-      if (!mirror && peerProposals) {
-        peerProposals.destroy();
-        peerProposals = null;
-      }
     },
     workerDocumentMirrored: () => workerDocumentVersion !== null,
     onProposalChange: (listener) => {
       if (destroyed) throw new Error('yrs session is destroyed');
-      if (typeof listener !== 'function') throw new TypeError('proposal listener must be a function');
-      proposalListeners.add(listener);
-      return () => { proposalListeners.delete(listener); };
+      return proposals.subscribe(listener);
     },
     formatTextTarget: (target, delta) => {
       ensureUndo(targetStory(target));
@@ -1457,8 +1450,8 @@ export function wrapSession(
       resetMedia();
       listeners.clear();
       proposals.destroy();
-      peerProposals?.destroy();
-      proposalListeners.clear();
+      for (const registry of detachedProposals) registry.destroy();
+      detachedProposals.clear();
       pendingUpdates.length = 0;
       if (observing) session.clear_update_observer();
       session.free();

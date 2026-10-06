@@ -196,7 +196,12 @@ export function RemotePresenceOverlay({
         const selectionRange = clampRemoteSelectionRange(pagePositionRange, from, to);
         const selectionRects = selectionRange
           ? simplifyRemoteSelectionRects(
-              displayListQueries.rangeRects(selectionRange.from, selectionRange.to),
+              displayListQueries.rangeRectsOnPages?.(
+                selectionRange.from,
+                selectionRange.to,
+                pageWindow.start,
+                pageWindow.end
+              ) ?? displayListQueries.rangeRects(selectionRange.from, selectionRange.to),
               pageWindow
             ).flatMap((rect) => {
               const projected = projectPageLocalRect(
