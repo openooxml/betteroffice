@@ -1,4 +1,4 @@
-import type { PptxWorkerEditorFrame } from '@betteroffice/pptx';
+import type { PptxWorkerEditorFrame } from '../../../packages/pptx/src/index';
 
 export interface PixelResult {
   thumbnail: boolean;
