@@ -196,18 +196,21 @@ describe('worker XLSX commands', () => {
     expect(second.edits.patchRangeStyle).not.toHaveBeenCalled();
   });
 
-  test('waits for command preview paint and rechecks live read-only gating', async () => {
-    const { store, state, previewEntered, edits } = harness();
-    const paint = deferred<void>();
-    state.preview = paint.promise;
-    const command = store.execute('bold', null);
-    await previewEntered.promise;
-    expect(edits.patchRangeStyle).not.toHaveBeenCalled();
-    state.readOnly = true;
-    paint.resolve();
-    expect(await command).toMatchObject({ ok: false, failure: { code: 'read-only' } });
-    expect(edits.patchRangeStyle).not.toHaveBeenCalled();
-  });
+  for (const readOnly of [false, true]) {
+    test(`uses submission-time permissions for queued formatting (${readOnly ? 'read-only' : 'editable'})`, async () => {
+      const { store, state, previewEntered, edits } = harness();
+      const paint = deferred<void>();
+      state.preview = paint.promise;
+      state.readOnly = readOnly;
+      const command = store.execute('bold', null);
+      state.readOnly = !readOnly;
+      await previewEntered.promise;
+      expect(edits.patchRangeStyle).not.toHaveBeenCalled();
+      paint.resolve();
+      expect(await command).toMatchObject(readOnly ? { ok: false, failure: { code: 'read-only' } } : { ok: true });
+      expect(edits.patchRangeStyle).toHaveBeenCalledTimes(readOnly ? 0 : 1);
+    });
+  }
 
   test('rechecks scoped grants after readiness and preview paint', async () => {
     const { controller, state, hydrate, previewEntered, edits } = harness(false);

@@ -532,6 +532,32 @@ describe('workbook worker editor', () => {
   }
 
   for (const source of ['cell', 'formula'] as const) {
+    it(`keeps DOM-only ${source} composition and its pending save across an undefined-to-false readOnly rerender`, async () => {
+      const host = harness();
+      host.editMethods.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...host.cells])).buffer);
+      let api!: XlsxWorkerEditorApi;
+      const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen onReady={onReady} />);
+      await opened();
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+      const input = view.getByTestId(source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input') as HTMLInputElement;
+      fireEvent.compositionStart(input);
+      let saved!: Uint8Array | null;
+      act(() => { void api.saveAsync().then((bytes) => { saved = bytes; }); });
+      input.value = 'DOM-only composition';
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly={false} onReady={onReady} />);
+      await advance(3);
+      expect(input.value).toBe('DOM-only composition');
+      expect(saved).toBeUndefined();
+      expect(host.editMethods.editCell).not.toHaveBeenCalled();
+      input.value = 'final composed text';
+      fireEvent.compositionEnd(input);
+      await advance();
+      expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+      expect(host.cells.get('0:0:0')).toBe('final composed text');
+      expect(JSON.parse(new TextDecoder().decode(saved!))).toEqual([['0:0:0', 'final composed text']]);
+    });
+
     it(`commits an open ${source} draft before locking without restoring it on another sheet`, async () => {
       const host = harness();
       host.editMethods.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...host.cells])).buffer);
@@ -560,6 +586,35 @@ describe('workbook worker editor', () => {
       expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
       expect((view.getByTestId('xlsx-formula-input') as HTMLInputElement).value).toBe('');
     });
+  }
+
+  for (const source of ['cell', 'formula'] as const) {
+    for (const newerDraft of [false, true]) {
+      it(`does not restore a failed settled ${source} draft after unlocking (${newerDraft ? 'new draft' : 'no draft'})`, async () => {
+        const host = harness();
+        const hydration = deferred<WorkbookHandle>();
+        host.hydrate.mockReturnValue(hydration.promise);
+        host.editMethods.editCell.mockImplementationOnce(() => { throw new RangeError('Invalid formula'); });
+        const view = render(<XlsxEditor file={file} experimentalWorkerOpen />);
+        await opened();
+        const testId = source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input';
+        if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+        fireEvent.change(view.getByTestId(testId), { target: { value: '=invalid()' } });
+        view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly />);
+        view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly={false} />);
+        if (newerDraft) {
+          if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+          fireEvent.change(view.getByTestId(testId), { target: { value: 'new draft' } });
+        }
+        await act(async () => hydration.resolve(host.peer));
+        await advance();
+        expect(view.getByTestId('xlsx-input-refusal').textContent).toBe('Invalid formula');
+        expect(host.cells.get('0:0:0')).toBe('initial');
+        if (newerDraft || source === 'formula') {
+          expect((view.getByTestId(testId) as HTMLInputElement).value).toBe(newerDraft ? 'new draft' : 'initial');
+        } else expect(view.queryByTestId(testId)).toBeNull();
+      });
+    }
   }
 
   for (const route of ['cell', 'formula', 'batch'] as const) {
@@ -741,7 +796,7 @@ describe('workbook worker editor', () => {
       });
     }
 
-    it(`cancels a pending API ${route} edit on unmount after a readOnly flip`, async () => {
+    it(`rejects a pending API ${route} caller but drains its edit on unmount after a readOnly flip`, async () => {
       const host = harness();
       const hydration = deferred<WorkbookHandle>();
       host.hydrate.mockReturnValue(hydration.promise);
@@ -760,9 +815,12 @@ describe('workbook worker editor', () => {
       await act(async () => hydration.resolve(host.peer));
       await advance();
       expect(outcome).toMatchObject({ code: 'document-replaced' });
-      expect(host.editMethods.editCell).not.toHaveBeenCalled();
-      expect(host.editMethods.applyEdits).not.toHaveBeenCalled();
-      expect(host.cells.get('0:0:0')).toBe('initial');
+      expect(host.editMethods.editCell).toHaveBeenCalledTimes(route === 'cell' ? 1 : 0);
+      expect(host.editMethods.applyEdits).toHaveBeenCalledTimes(route === 'batch' ? 1 : 0);
+      const input = route === 'cell' ? 'host' : 'plugin';
+      expect(host.cells.get('0:0:0')).toBe(input);
+      expect(host.log.indexOf(`edit:0:0:0:${input}`)).toBeLessThan(host.log.indexOf('dispose:facade'));
+      expect(host.session.dispose).toHaveBeenCalledTimes(1);
     });
   }
 

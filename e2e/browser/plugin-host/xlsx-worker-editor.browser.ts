@@ -75,13 +75,21 @@ test('xlsx worker editor undo restores the original cell and canvas value', asyn
 
 test('xlsx worker editor preserves edits and its session across readOnly toggles', async ({ page }) => {
   await open(page);
-  await edit(page, 'first edit');
+  await page.getByTestId('xlsx-scroll').focus();
+  await page.getByTestId('xlsx-scroll').press('F2');
+  const input = page.getByTestId('xlsx-cell-editor');
+  await input.fill('');
+  await input.pressSequentially('first edit');
+  await expect(input).toHaveValue('first edit');
+  await expect(input).toBeFocused();
+  expect(await page.evaluate(() => window.__xlsxWorkerEditor.commitOrder)).toEqual([]);
   const generation = await page.evaluate(() => window.__xlsxWorkerEditor.generation());
   const readyCount = await page.evaluate(() => window.__xlsxWorkerEditor.readyCount());
   await page.evaluate(() => window.__xlsxWorkerEditor.setReadOnly(true));
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.generation())).toBe(generation);
   expect(await page.evaluate(() => window.__xlsxWorkerEditor.readyCount())).toBe(readyCount);
-  expect(await page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('first edit');
+  await expect(input).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.cell())).toBe('first edit');
   await expect.poll(() => page.evaluate(() => window.__xlsxWorkerEditor.paintedTexts())).toContain('first edit');
   await page.getByTestId('xlsx-scroll').focus();
   await page.getByTestId('xlsx-scroll').press('F2');
