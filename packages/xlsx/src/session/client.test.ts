@@ -215,7 +215,7 @@ describe('workbook peer hydration', () => {
     let hydrated = false;
     const clock = spyOn(performance, 'now').mockImplementation(() => ticks += 5);
     const peerOpen = spyOn(workbookWasm, 'createWorkbookPeerOpener').mockImplementation(() => ({
-      pushHydration() {}, advance() { return ++advances >= 20 ? 2 : 0; },
+      pushHydration() {}, advance() { ticks += 8; return ++advances >= 20 ? 2 : 0; },
       finish: () => ({ version: () => version, dispose() {} } as unknown as WorkbookHandle), dispose() {},
     }));
     let session;
@@ -230,6 +230,11 @@ describe('workbook peer hydration', () => {
         tasks.shift()!();
         await Promise.resolve();
         await Promise.resolve();
+        expect(advances).toBe(slice + 1);
+        if (slice < 19) {
+          expect(hydrated).toBe(false);
+          expect(tasks).toHaveLength(1);
+        }
         if (slice < 2) {
           const frame = await session.call.frame({ x: 0, y: slice * 24, width: 800, height: 600 });
           expect(frame.version).toBe(version);
@@ -240,6 +245,7 @@ describe('workbook peer hydration', () => {
       }
       await pending;
       expect(hydrated).toBe(true);
+      expect(tasks).toHaveLength(0);
     } finally {
       await session?.dispose();
       for (const task of tasks.splice(0)) task();
