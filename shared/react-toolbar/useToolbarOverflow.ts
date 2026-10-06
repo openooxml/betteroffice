@@ -138,6 +138,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     const row = items.current;
     const rail = row?.parentElement;
     if (!row || !rail) return;
+    const scrollLeft = row.scrollLeft;
     const trigger = more.current;
     if (trigger) moreWidthRef.current = outerWidth(trigger);
     const units = Array.from(row.children).filter(
@@ -176,6 +177,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     swapStyle(row, SCROLL_STYLE, scrolling, overflows);
     for (const unit of units) setHidden(unit, next.includes(unit));
     for (const unit of hiddenRef.current) if (!units.includes(unit)) setHidden(unit, false);
+    row.scrollLeft = scrollLeft;
     const active = document.activeElement;
     if (active && next.some((unit) => unit.contains(active))) onFocusHidden?.();
     else if (overflows && active && row.contains(active)) reveal(row, active);
