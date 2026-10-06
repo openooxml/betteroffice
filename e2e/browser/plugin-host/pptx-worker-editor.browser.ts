@@ -102,7 +102,8 @@ for (const dpr of [1, 2]) {
       for (const id of ['pptx-export-png', 'pptx-present']) {
         const control = page.getByTestId(id);
         await expect(control).toHaveAttribute('aria-disabled', 'true');
-        await expect(control).toHaveAttribute('title', 'This feature is unavailable in this editing mode.');
+        await expect(control).toHaveAttribute('title',
+          `${await control.getAttribute('aria-label')}: This feature is unavailable in this editing mode.`);
       }
       await page.evaluate(() => window.__pptxWorkerEditor.proposal());
       await page.getByTestId('pptx-proposals-button').click();
