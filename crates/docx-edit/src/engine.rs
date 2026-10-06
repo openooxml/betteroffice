@@ -2998,23 +2998,7 @@ fn incremental_eligible_plain(
     next: &LayoutInput,
     next_options_fingerprint: u64,
 ) -> bool {
-    let Some(previous_input) = previous.input.as_ref() else {
-        return false;
-    };
-    previous.layout.is_some()
-        && !previous.checkpoints.is_empty()
-        && previous.options_fingerprint == next_options_fingerprint
-        && previous_input.measured.len() == next.measured.len()
-        && next
-            .options
-            .columns
-            .as_ref()
-            .is_none_or(|columns| columns.count <= 1.0)
-        && previous_input
-            .measured
-            .iter()
-            .zip(&next.measured)
-            .all(|(previous, next)| resident_fragment_keys_match(&previous.block, &next.block))
+    incremental_eligible(previous, next, next_options_fingerprint)
 }
 
 fn incremental_eligible(
@@ -3879,9 +3863,13 @@ impl EngineSession {
     }
 
     fn clear_region_retention(&self) {
+        self.reset_region_retention(false);
+    }
+
+    fn reset_region_retention(&self, preserve_moved: bool) {
         self.region_retention_valid.set(false);
         let mut pagination = self.pagination.borrow_mut();
-        if !pagination.moved_blocks.is_empty() {
+        if !preserve_moved && !pagination.moved_blocks.is_empty() {
             pagination.measurement_patch = None;
             pagination.input = None;
             pagination.measured_with = None;
@@ -3891,7 +3879,9 @@ impl EngineSession {
         }
         pagination.retain_matches = Vec::new();
         pagination.region_placements = Vec::new();
-        pagination.moved_blocks = BTreeSet::new();
+        if !preserve_moved {
+            pagination.moved_blocks = BTreeSet::new();
+        }
         self.preview_locality.replace(None);
         self.resumable.replace(None);
         if let Some(state) = self.regions.borrow_mut().as_mut() {
@@ -5577,6 +5567,8 @@ impl EngineSession {
         &self,
         prepared: PreparedRegionLayout,
     ) -> Result<RegionPass, String> {
+        let _moved = (!self.pagination.borrow().moved_blocks.is_empty())
+            .then(|| MovedArenaGuard(&self.pagination));
         let PreparedRegionLayout {
             input_json,
             request_fingerprint,
@@ -6945,13 +6937,17 @@ impl EngineSession {
         input_options_fingerprint: u64,
     ) -> Result<(), String> {
         if let Some(previous_input) = previous.input.as_ref() {
-            for ((previous, next), fingerprint) in previous_input
+            for (index, ((retained, next), fingerprint)) in previous_input
                 .measured
                 .iter()
                 .zip(&input.measured)
                 .zip(block_fingerprints.iter_mut())
+                .enumerate()
             {
-                if relative_run_position_fingerprint(&previous.block)
+                if previous.moved_blocks.contains(&index) {
+                    continue;
+                }
+                if relative_run_position_fingerprint(&retained.block)
                     != relative_run_position_fingerprint(&next.block)
                 {
                     *fingerprint = measured_fingerprint(next)?;
@@ -6972,12 +6968,17 @@ impl EngineSession {
             && moved.as_ref().is_none_or(|moved| !moved.is_empty())
         {
             let retained = previous.input.as_ref().expect("eligibility checked input");
-            for (((fingerprint, retained_fingerprint), next), retained) in block_fingerprints
-                .iter_mut()
-                .zip(&previous.block_fingerprints)
-                .zip(&input.measured)
-                .zip(&retained.measured)
+            for (index, (((fingerprint, retained_fingerprint), next), retained)) in
+                block_fingerprints
+                    .iter_mut()
+                    .zip(&previous.block_fingerprints)
+                    .zip(&input.measured)
+                    .zip(&retained.measured)
+                    .enumerate()
             {
+                if previous.moved_blocks.contains(&index) {
+                    continue;
+                }
                 if *fingerprint == *retained_fingerprint
                     && moved
                         .as_ref()
@@ -7077,10 +7078,10 @@ impl EngineSession {
     ) -> Result<(), String> {
         self.consume_relayout_trigger();
         if !trigger.uses_region_path() {
-            self.clear_region_retention();
+            self.reset_region_retention(true);
         }
-        let _moved = trigger
-            .uses_region_path()
+        let _moved = (trigger.uses_region_path()
+            || !self.pagination.borrow().moved_blocks.is_empty())
             .then(|| MovedArenaGuard(&self.pagination));
         if block_fingerprints.len() != input.measured.len() {
             return Err("resident pagination fingerprints do not match measured blocks".to_owned());
@@ -7205,8 +7206,8 @@ impl EngineSession {
         } = run;
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
+        pagination.moved_blocks.clear();
         if trigger.uses_region_path() {
-            pagination.moved_blocks.clear();
             pagination.retain_matches.clear();
         }
         pagination.measured_with = None;
@@ -14661,6 +14662,66 @@ mod tests {
             ((0..blocks).collect(), 1),
         );
         assert_certified_float_cold(&engine, &request, &mut HashMap::new());
+    }
+
+    #[test]
+    fn resident_certified_float_interactive_typing_keeps_incremental_painting() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) = certified_float_engine(
+            font,
+            40,
+            &[0, 2, 4],
+            false,
+            false,
+            RelayoutTrigger::Interactive,
+        );
+        assert!(
+            engine
+                .pagination
+                .borrow()
+                .layout
+                .as_ref()
+                .unwrap()
+                .pages
+                .len()
+                > 1
+        );
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        for (key, text) in ["x", "😀", "y"].into_iter().enumerate() {
+            engine.relayout_trigger.set(RelayoutTrigger::Interactive);
+            measurement_patch_type(&engine, certified_float_offset(&engine, 17), text);
+            assert!(engine.measurement_patch().is_some());
+            let expected = certified_float_dirty_segment(&engine);
+            let before = engine.stats();
+            BODY_MEASUREMENT_WORK.with(|work| *work.borrow_mut() = Default::default());
+            let prepared = engine
+                .prepare_region_layout(&request, None, RelayoutTrigger::Interactive)
+                .unwrap();
+            assert!(!engine.pagination.borrow().moved_blocks.is_empty());
+            engine.finish_region_layout(prepared).unwrap();
+            assert_eq!(
+                BODY_MEASUREMENT_WORK.with(|work| std::mem::take(&mut *work.borrow_mut())),
+                (expected, 0),
+            );
+            assert!(engine.measurement_patch().is_none());
+            if key > 0 {
+                assert!(engine.pagination.borrow().last_incremental);
+                assert_eq!(
+                    engine.stats().incremental_pagination_calls,
+                    before.incremental_pagination_calls + 1,
+                );
+            }
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            if key > 0 {
+                assert_eq!(
+                    engine.stats().incremental_display_builds,
+                    before.incremental_display_builds + 1,
+                );
+            }
+        }
     }
 
     #[test]
