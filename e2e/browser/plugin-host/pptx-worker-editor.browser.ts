@@ -112,7 +112,7 @@ for (const dpr of [1, 2]) {
       await expect(preview).toHaveAttribute('title', 'This feature is unavailable in this editing mode.');
       await expect(page.getByTestId('pptx-proposals-panel').getByText('This feature is unavailable in this editing mode.', { exact: true })).toBeVisible();
       await preview.click({ force: true });
-      await expect(page.getByTestId('pptx-proposal-preview-dialog')).toHaveCount(0);
+      await expect(page.getByTestId('pptx-proposal-preview-dialog')).toHaveJSProperty('open', false);
       await page.getByTestId('pptx-proposals-panel').getByRole('button', { name: 'Close', exact: true }).click();
 
       expect(await page.evaluate(() => window.__pptxWorkerEditor.select(0, 12))).toBe(true);
