@@ -1,5 +1,23 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 /** @experimental */
+export { createPptxWorkerEditorSession } from './session/editorSession';
+/** @experimental */
+export type {
+  PptxWorkerEditorOptions, PptxWorkerEditorRecovery, PptxWorkerEditorSession,
+  PptxWorkerEditorStage, PptxWorkerEditorState,
+} from './session/editorSession';
+/** @experimental */
+export type { PptxWorkerEditorAccess, PptxWorkerEditorInteractionAccess } from './session/editPeer';
+/** @experimental */
+export type {
+  PptxWorkerEditorFrame, PptxWorkerEditorOperation, PptxWorkerEditorReply,
+} from './session/replay';
+/** @experimental */
+export {
+  PptxPeerHydrationError, PptxPeerNotReadyError, PptxWorkerEditorCollaborationError,
+  PptxWorkerEditorDisposedError, PptxWorkerEditorFailedError,
+} from './session/peerHydrationError';
+/** @experimental */
 export { openPresentationSession } from './session/client';
 /** @experimental */
 export type { OpenPresentationSessionOptions, PresentationSession } from './session/client';
