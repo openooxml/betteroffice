@@ -435,6 +435,30 @@ describe('workbook worker editor', () => {
     expect(api).toBe(originalApi);
   });
 
+  it('reports no error or refusal for idle readOnly flips before hydration', async () => {
+    const host = harness();
+    const hydration = deferred<WorkbookHandle>();
+    host.hydrate.mockReturnValue(hydration.promise);
+    const errors = mock(() => {});
+    const view = render(<XlsxEditor file={file} experimentalWorkerOpen showToolbar={false} onError={errors} />);
+    await opened();
+    expect(host.attached).toBeNull();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly showToolbar={false} onError={errors} />);
+    await advance(3);
+    expect(errors).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly={false} showToolbar={false} onError={errors} />);
+    await advance(3);
+    expect(errors).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    await act(async () => hydration.resolve(host.peer));
+    await advance();
+    expect(errors).not.toHaveBeenCalled();
+    expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+    expect(host.editMethods.editCell).not.toHaveBeenCalled();
+    expect(host.editMethods.flush).not.toHaveBeenCalled();
+  });
+
   it('commits a cell draft awaiting hydration across a readOnly flip', async () => {
     const host = harness();
     const hydration = deferred<WorkbookHandle>();
@@ -532,6 +556,39 @@ describe('workbook worker editor', () => {
   }
 
   for (const source of ['cell', 'formula'] as const) {
+    it(`keeps a newer same-cell ${source} draft open when a sealed composition save resumes after unlocking`, async () => {
+      const host = harness();
+      host.editMethods.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...host.cells])).buffer);
+      const toolbar = <EditorToolbar mode="commands"><EditorToolbar.FormulaBar /></EditorToolbar>;
+      let api!: XlsxWorkerEditorApi;
+      const onReady = (value: XlsxWorkerEditorApi | XlsxWorkerViewerApi) => { if ('whenHydrated' in value) api = value; };
+      const view = render(<XlsxEditor file={file} experimentalWorkerOpen toolbar={toolbar} onReady={onReady} />);
+      await opened();
+      const testId = source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input';
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 't' });
+      const input = view.getByTestId(testId) as HTMLInputElement;
+      fireEvent.compositionStart(input);
+      let saving!: ReturnType<XlsxWorkerEditorApi['saveAsync']>;
+      act(() => { saving = api.saveAsync(); });
+      input.value = 'sealed composed text';
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly toolbar={toolbar} onReady={onReady} />);
+      view.rerender(<XlsxEditor file={file} experimentalWorkerOpen readOnly={false} toolbar={toolbar} onReady={onReady} />);
+      if (source === 'cell') fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'n' });
+      const newerInput = view.getByTestId(testId) as HTMLInputElement;
+      fireEvent.change(newerInput, { target: { value: 'new draft' } });
+      await advance();
+      expect(view.queryByTestId('xlsx-input-refusal')).toBeNull();
+      expect(view.getByTestId(testId)).toBe(newerInput);
+      expect(newerInput.value).toBe('new draft');
+      expect(host.editMethods.editCell.mock.calls).toEqual([[0, 0, 0, 'sealed composed text']]);
+      expect(JSON.parse(new TextDecoder().decode((await saving)!))).toEqual([['0:0:0', 'sealed composed text']]);
+      fireEvent.keyDown(newerInput, { key: 'Enter' });
+      await advance();
+      expect(host.editMethods.editCell.mock.calls).toEqual([
+        [0, 0, 0, 'sealed composed text'], [0, 0, 0, 'new draft'],
+      ]);
+    });
+
     it(`keeps DOM-only ${source} composition and its pending save across an undefined-to-false readOnly rerender`, async () => {
       const host = harness();
       host.editMethods.save.mockImplementation(async () => new TextEncoder().encode(JSON.stringify([...host.cells])).buffer);
