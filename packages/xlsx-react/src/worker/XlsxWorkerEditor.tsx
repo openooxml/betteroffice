@@ -109,8 +109,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   const editorRectRef = useRef<ReturnType<typeof cellRect>>(null);
   const runRef = useRef<EditableWorkbookSession | null>(null);
   const propsRef = useRef(props);
-  const readOnlyGeneration = useRef(0);
-  if (props.readOnly && !propsRef.current.readOnly) readOnlyGeneration.current += 1;
   propsRef.current = props;
   const [commands] = useState(createXlsxCommandController);
   const [active, setActive, activeRef] = useSyncedState(0);
@@ -158,15 +156,11 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     setRefusal(error instanceof Error ? error.message : String(error));
   }, []);
   const acceptInput = () => Boolean(runRef.current?.current && !runRef.current.retiring && !runRef.current.failure && !propsRef.current.readOnly);
-  const requireEditable = () => {
-    if (propsRef.current.readOnly) throw new WorkerInputRefusal('The editor is read-only');
-  };
 
   const apiBridgeRef = useRef<WorkerEditorApiBridge | null>(null);
   const [apiBridge] = useState<WorkerEditorApiBridge>(() => ({
     coordinator: () => coordinatorRef.current,
     readOnly: () => propsRef.current.readOnly ?? false,
-    readOnlyGeneration: () => readOnlyGeneration.current,
     clearSelection: () => apiBridgeRef.current?.clearSelection(),
     focus,
     refreshProposals: () => apiBridgeRef.current?.refreshProposals(),
@@ -179,12 +173,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }));
   const { run, error, loading } = useEditableSessionWorkbook(props, commands.store, apiBridge);
   runRef.current = run;
-  const refusedDraft = useMemo(() => ({ current: null as WorkerCellDraft | null }), [run]);
-  const retainDraft = (draft: WorkerCellDraft) => {
-    if (!refusedDraft.current || (draft.revision ?? 0) >= (refusedDraft.current.revision ?? 0)) {
-      refusedDraft.current = draft;
-    }
-  };
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
   const draftOperations = useMemo(() => new WeakMap<InputDraft, WorkbookReplayOp>(), [run]);
@@ -237,13 +225,10 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         const message = error instanceof Error ? error.message : String(error);
         if (owner?.recovering) flushSync(() => setRefusal(message));
         else setRefusal(message);
-        if (draft) {
-          if (propsRef.current.readOnly) retainDraft(draft);
-          else {
-            input.setDraft(draft);
-            if (draft.source === 'cell') setEditing(draft);
-            else setFormulaDraft(draft.value);
-          }
+        if (draft && !propsRef.current.readOnly) {
+          input.setDraft(draft);
+          if (draft.source === 'cell') setEditing(draft);
+          else setFormulaDraft(draft.value);
         }
       },
     });
@@ -634,7 +619,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
 
   apiBridgeRef.current = {
     coordinator: () => coordinator, readOnly: () => propsRef.current.readOnly ?? false, focus,
-    readOnlyGeneration: () => readOnlyGeneration.current,
     clearSelection: () => {
       coordinator.settle(); setEditing(null); setFormulaDraft(null); setSelection(null); setSelectedChart(null);
       setCapturedFormat(null); commands.refresh();
@@ -889,11 +873,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     write(draft, markApplied) {
       const owner = run;
       if (!owner?.ready || !owner.peer || !owner.editPeer) return false;
-      if (propsRef.current.readOnly) {
-        draftDiscards.get(draft)?.();
-        retainDraft(draft);
-        throw new WorkerInputRefusal('The editor is read-only');
-      }
       if (owner.peer.cell(draft.sheet, draft.row, draft.col).input !== draft.value) {
         markApplied.check();
         const op = draftOperations.get(draft);
@@ -1034,7 +1013,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const edits = op.args[1];
       if (edits.length === 0) return;
       markApplied.check();
-      requireEditable();
       const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer!);
       const result = (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied();
@@ -1063,7 +1041,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     let discardPreview: (() => Promise<void>) | undefined;
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
       markApplied.check();
-      requireEditable();
       const operations = workbookEditPeerOperations(run!.recovering ? operationPeer.current! : run!.editPeer!);
       const result = (run!.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied(); apply(result, op);
@@ -1091,7 +1068,6 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const operation = async (_: unknown, markApplied: WorkerInputLease) => {
       await boundary();
       markApplied.check();
-      requireEditable();
       const result = owner.editPeer!.moveChart(sheet, id, dx, dy);
       markApplied(); apply(result); setChartOffset(null);
     };
@@ -1297,13 +1273,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       };
       const op: WorkbookReplayOp = { method: 'applyEdits', args: [structuredClone(request)] };
       const operations = workbookEditPeerOperations(facade);
+      const readOnly = pluginAccessRef.current!.readOnlyRefusal(handle);
       try {
         const value = await coordinator.runAfterPendingInput(async (_, applied) => {
           await boundary();
           applied.check();
           const denied = authorize(owner.recovering);
           if (denied) { applied.refuse(new WorkerInputRefusal('Plugin write permission was refused')); return denied; }
-          const readOnly = pluginAccessRef.current!.readOnlyRefusal(handle);
           if (readOnly) { applied.refuse(new WorkerInputRefusal(readOnly.failure.message)); return readOnly; }
           const write = () => owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op);
           let result: XlsxEditResult;
@@ -1402,38 +1378,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
       await boundary();
       markApplied.check();
-      requireEditable();
       const result = run!.editPeer!.applyFormat(active, a1, format);
       markApplied(); apply(result); focus();
     }, { kind: 'input', target: { sheet: active, target: a1 } }).catch(reportInputError);
   }, [capturedFormat, selection, active, coordinator, boundary, apply, reportInputError, focus]);
 
   useLayoutEffect(() => {
-    if (!props.readOnly) {
-      const draft = refusedDraft.current;
-      if (!draft || coordinator.draft) return;
-      const restore = () => {
-        if (propsRef.current.readOnly || coordinator.draft || refusedDraft.current !== draft) return;
-        refusedDraft.current = null;
-        coordinator.setDraft(draft);
-        setSelection(selectionAt(draft));
-        if (draft.source === 'cell') setEditing(draft);
-        else setFormulaDraft(draft.value);
-      };
-      if (draft.sheet === activeRef.current) restore();
-      else void coordinator.runAfterPendingInput((_, markApplied) => {
-        if (propsRef.current.readOnly || coordinator.draft || refusedDraft.current !== draft) return;
-        markApplied.check();
-        run!.editPeer!.setActiveSheet(draft.sheet);
-        markApplied();
-        if (place(draft.sheet, selectionAt(draft))) restore();
-      }, { kind: 'input', target: { sheet: draft.sheet, target: address(draft) } }).catch(reportInputError);
-      return;
-    }
-    const draft = coordinator.draft;
-    if (draft) retainDraft(draft);
-    if (draft || chartDrag.current || nudge.current) setRefusal('The editor is read-only');
-    coordinator.setDraft(null);
+    if (!props.readOnly) return;
+    const source = coordinator.draft?.source;
     suppressBlur.current = true;
     suppressFormulaBlur.current = true;
     composition.current?.settle(true);
@@ -1442,21 +1394,30 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     setFormulaDraft(null);
     setCapturedFormat(null);
     paintFormatSource.current = null;
+    dragging.current = false;
+    clickStart.current = null;
     chartDrag.current = null;
     nudge.current = null;
     setChartOffset(null);
     if (nudgeTimer.current !== null) clearTimeout(nudgeTimer.current);
     nudgeTimer.current = null;
-    if (draft?.source === 'cell') focus();
+    void coordinator.drain().catch(reportInputError);
+    if (source === 'cell') focus();
     suppressFormulaBlur.current = false;
   }, [props.readOnly, coordinator]);
 
   const startComposition = (source: InputDraft['source']) => {
+    if (!acceptInput()) return;
+    if (source === 'formula' && coordinator.draft?.source !== 'formula' && selectionRef.current) {
+      syncDraft(); coordinator.settle(); suppressBlur.current = true; setEditing(null);
+      coordinator.setDraft(draftFor(source, selectionRef.current.focus, formulaInputRef.current?.value ?? ''));
+    }
     let settle!: (ended: boolean) => void;
     const done = new Promise<boolean>((resolve) => { settle = resolve; });
     composition.current = { source, done, settle };
   };
   const endComposition = () => {
+    if (!composition.current) return;
     syncDraft(); composition.current?.settle(true); composition.current = null;
   };
   const attachCellInput = useCallback((input: HTMLInputElement | null) => {
@@ -1464,14 +1425,14 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     editorInputRef.current = input;
     if (input) suppressBlur.current = false;
     if (!input && composition.current?.source === 'cell') {
-      composition.current.settle(Boolean(propsRef.current.readOnly)); composition.current = null;
+      composition.current.settle(true); composition.current = null;
     }
   }, [inputHooks, props.readOnly]);
   const attachFormulaInput = useCallback((input: HTMLInputElement | null) => {
     if (!input && propsRef.current.readOnly) inputHooks.current?.sync?.();
     formulaInputRef.current = input;
     if (!input && composition.current?.source === 'formula') {
-      composition.current.settle(Boolean(propsRef.current.readOnly)); composition.current = null;
+      composition.current.settle(true); composition.current = null;
     }
   }, [inputHooks, props.readOnly]);
   useLayoutEffect(() => {
