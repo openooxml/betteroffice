@@ -149,6 +149,8 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
         for units in [1, 256, usize::MAX] {
             crate::reference::SYNC_REFERENCE_OPENS.set(0);
             crate::chart::SYNC_CHART_OPENS.set(0);
+            crate::tree::OPENED_ELEMENTS.set(0);
+            crate::tree::RETIRED_ELEMENTS.set(0);
             let work = ooxml_opc::WorkBudget::default();
             let mut opening = Box::pin(crate::parse_workbook_with_owned_package_sliced(
                 parts.clone(),
@@ -167,6 +169,9 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
             };
             assert_eq!(crate::reference::SYNC_REFERENCE_OPENS.get(), 0);
             assert_eq!(crate::chart::SYNC_CHART_OPENS.get(), 0);
+            let opened = crate::tree::OPENED_ELEMENTS.get();
+            assert!(opened > 0);
+            assert_eq!(crate::tree::RETIRED_ELEMENTS.get(), opened);
             match (actual, &expected) {
                 (Ok(actual), Ok(expected)) => {
                     assert_eq!(actual.workbook, expected.workbook);
@@ -182,6 +187,7 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
             }
             if scenario == 0 {
                 assert!(charged > 1024);
+                assert!(opened > 512);
             }
         }
     }
@@ -258,6 +264,8 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
         for units in [1, 256, usize::MAX] {
             crate::reference::SYNC_REFERENCE_OPENS.set(0);
             crate::chart::SYNC_CHART_OPENS.set(0);
+            crate::tree::OPENED_ELEMENTS.set(0);
+            crate::tree::RETIRED_ELEMENTS.set(0);
             let work = ooxml_opc::WorkBudget::default();
             let mut opening = Box::pin(async {
                 let actual = crate::parse_workbook_with_owned_package_sliced(parts.clone(), &work)
@@ -289,6 +297,9 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
             };
             assert_eq!(crate::reference::SYNC_REFERENCE_OPENS.get(), 0);
             assert_eq!(crate::chart::SYNC_CHART_OPENS.get(), 0);
+            let opened = crate::tree::OPENED_ELEMENTS.get();
+            assert!(opened > 0);
+            assert_eq!(crate::tree::RETIRED_ELEMENTS.get(), opened);
             assert_eq!(actual.workbook, expected.workbook);
             assert_eq!(charts, expected_charts);
             assert_eq!(
@@ -304,6 +315,7 @@ fn sliced_pivot_and_chart_discovery_matches_oracle_and_charges_scans() {
                 references
             );
             assert!(charged > 1024);
+            assert!(opened > 512);
         }
     }
 }

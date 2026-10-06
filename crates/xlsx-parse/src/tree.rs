@@ -579,6 +579,12 @@ pub(crate) async fn text_content_sliced(element: &Element, work: &ooxml_opc::Wor
     text
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OPENED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static RETIRED_ELEMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) async fn retire_tree(root: Element, work: &ooxml_opc::WorkBudget) {
     let mut stack = vec![root];
     while let Some(element) = stack.last_mut() {
@@ -595,6 +601,8 @@ pub(crate) async fn retire_tree(root: Element, work: &ooxml_opc::WorkBudget) {
             element.attributes.pop();
         } else {
             work.step().await;
+            #[cfg(test)]
+            RETIRED_ELEMENTS.set(RETIRED_ELEMENTS.get() + 1);
             stack.pop();
         }
     }
@@ -928,6 +936,8 @@ async fn open_element_sliced(
                 .into_owned(),
         });
     }
+    #[cfg(test)]
+    OPENED_ELEMENTS.set(OPENED_ELEMENTS.get() + 1);
     Ok(Element {
         default_cleared: namespaces.default_cleared(),
         name,
