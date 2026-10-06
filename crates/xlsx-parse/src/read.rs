@@ -1064,6 +1064,7 @@ fn parse_worksheet(
     Ok(sheet)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn parse_worksheet_sliced(
     name: &str,
     data: &[u8],

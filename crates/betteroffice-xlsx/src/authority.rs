@@ -4890,14 +4890,14 @@ async fn fingerprint_model_with_overrides_sliced(
         &mut hasher,
         (base.iter().map(Vec::len).sum::<usize>() + base.len() + 1) as u64,
     );
-    hasher.update([b'[']);
+    hasher.update(*b"[");
     for (index, bytes) in base.iter().enumerate() {
         if index != 0 {
-            hasher.update([b',']);
+            hasher.update(*b",");
         }
         peer_open::hash_payload_sliced(&mut hasher, bytes, work).await;
     }
-    hasher.update([b']']);
+    hasher.update(*b"]");
     hash_u64(&mut hasher, model.sheets.len() as u64);
     let hash_col_styles = include_col_styles
         && schema_version >= CHARTS_SCHEMA_VERSION

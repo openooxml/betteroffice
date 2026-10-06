@@ -184,6 +184,7 @@ impl PreservedPackage {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn capture_sliced(
         parts: Vec<(String, Vec<u8>)>,
         workbook: &Workbook,

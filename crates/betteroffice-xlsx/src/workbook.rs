@@ -734,6 +734,7 @@ impl Workbook {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn from_source_sliced(
         model: WorkbookModel,
         source_package: Option<xlsx_parse::PreservedPackage>,
