@@ -48,8 +48,15 @@ test('legacy_contextual_api_types_are_unchanged', () => {
   } });
   const worker: PptxWorkerEditorProps = { fonts: [], experimentalWorkerOpen: true,
     onReady(api) { assertType<Equal<typeof api, PptxWorkerEditorApi>>(); } };
+  const dynamic: PptxWorkerEditorProps = { ...worker, readOnly: Boolean(editor.readOnly) };
+  const dynamicEditor = PptxEditor(dynamic);
+  const toggled = PptxEditor({ fonts: [], experimentalWorkerOpen: true, readOnly: dynamic.readOnly, onReady(api) {
+    assertType<Equal<typeof api, PptxWorkerEditorApi | PptxWorkerViewerApi>>();
+  } });
   expect(editor.fonts).toEqual(worker.fonts);
   expect(viewer).toBeDefined();
+  expect(dynamicEditor).toBeDefined();
+  expect(toggled).toBeDefined();
 });
 
 test('worker_sync_save_and_handle_are_null', async () => {

@@ -26,6 +26,8 @@ export interface WorkerEditorProbe {
   overlay(position: number): Promise<{ differingPixels: number; pixels: number }>;
   provenance(): { total: number; thumbnails: number; unknown: number };
   save(): Promise<{ bytes: number; text: string }>;
+  toggleReadOnly(value: boolean): Promise<{ sessions: number; ready: number }>;
+  edit(text: string): Promise<string>;
   proposal(): Promise<void>;
   fail(): void;
   rejected(index: number): Promise<string[]>;

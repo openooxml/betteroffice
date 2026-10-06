@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
 import JSZip from 'jszip';
 import { PptxEditor, type PptxWorkerEditorApi } from '@betteroffice/pptx-react';
 import {
@@ -132,13 +133,15 @@ async function rejection(operation: () => unknown) {
 const root = createRoot(document.getElementById('worker-editor-root')!);
 let file: Uint8Array;
 let fonts: { family: string; bytes: Uint8Array }[];
+let readOnly = false;
 const render = () => root.render(<div data-editor>
-  <PptxEditor file={file} fonts={fonts} experimentalWorkerOpen clientId={42}
+  <PptxEditor file={file} fonts={fonts} experimentalWorkerOpen clientId={42} readOnly={readOnly}
     onError={(error) => errors.push({ name: error.name,
       code: error instanceof PptxWorkerEditorFailedError || error instanceof PptxPeerNotReadyError ? error.code : '',
       cause: error instanceof PptxWorkerEditorFailedError && error.cause instanceof SessionFailure ? error.cause.code : '',
       typed: error instanceof PptxWorkerEditorFailedError })}
     onReady={(value) => {
+      if (!('handleAsync' in value)) throw new Error('Worker editor session was replaced by a viewer');
       api = value;
       apis.push(value);
       void value.handleAsync().then((peer) => { access = peer; ready.resolve(); });
@@ -233,6 +236,20 @@ const probe: WorkerEditorProbe = {
     thumbnails: paints.history.filter((paint) => paint.thumbnail).length,
     unknown: paints.history.filter((paint) => !paint.worker).length }),
   save: async () => reopen(await api.saveAsync()),
+  toggleReadOnly: async (value) => {
+    readOnly = value;
+    flushSync(render);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    return { sessions: owners.length, ready: apis.length };
+  },
+  edit: async (value) => {
+    const { slideId, shapeId, storyId } = story();
+    const position = text().length;
+    const result = await api.applyEdits({ expectVersion: await api.version(),
+      steps: [{ op: 'insertText', target: { kind: 'range', slideId, shapeId, storyId,
+        start: position, end: position }, at: 'end', text: value }] });
+    return result.ok ? 'accepted' : result.failure.code;
+  },
   proposal: async () => {
     access.propose('browser', 'Review', [{ type: 'replaceText', storyId: story().storyId, start: 0, end: 1, text: '?' }]);
     api.refreshProposals();
