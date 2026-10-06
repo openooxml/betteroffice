@@ -143,6 +143,7 @@ export function useToolbarOverflow(options: ToolbarOverflowOptions): ToolbarOver
     const units = Array.from(row.children).filter(
       (child): child is HTMLElement => child instanceof HTMLElement
     );
+    for (const unit of units) setHidden(unit, false);
     const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
     const available = innerWidth(rail);
     const widths = units.map(outerWidth);
