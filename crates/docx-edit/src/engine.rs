@@ -14914,6 +14914,78 @@ mod tests {
     }
 
     #[test]
+    fn resident_certified_float_rekeyed_shape_display_cache_stays_bounded() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) = certified_float_engine(
+            font,
+            40,
+            &[2],
+            false,
+            false,
+            RelayoutTrigger::Interactive,
+        );
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        let cache_count = || {
+            engine
+                .display
+                .borrow()
+                .resident_input
+                .as_ref()
+                .unwrap()
+                .measured_block_count()
+        };
+        let shape_id = || {
+            engine
+                .pagination
+                .borrow()
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .find_map(|measured| match &measured.block {
+                    LayoutBlock::Shape(shape) => Some(shape.id.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let initial_count = cache_count();
+        let page_count = engine
+            .with_display_list(|list| {
+                assert!(list.pages.iter().all(|page| !page.unbuilt));
+                list.pages.len()
+            })
+            .unwrap();
+        let mut previous_id = shape_id();
+        for (key, text) in ["x", "y", "z", "w"].into_iter().enumerate() {
+            let before = engine.stats();
+            measurement_patch_type(&engine, certified_float_offset(&engine, 17), text);
+            certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+            let next_id = shape_id();
+            assert_ne!(next_id, previous_id);
+            previous_id = next_id;
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            assert_eq!(cache_count(), initial_count, "key {key}");
+            engine
+                .with_display_list(|list| {
+                    assert_eq!(list.pages.len(), page_count);
+                    assert!(list.pages.iter().all(|page| !page.unbuilt));
+                })
+                .unwrap();
+            if key > 0 {
+                assert!(engine.pagination.borrow().last_incremental);
+                assert_eq!(
+                    engine.stats().incremental_display_builds,
+                    before.incremental_display_builds + 1,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn resident_certified_float_segments_match_cold_after_typing() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();

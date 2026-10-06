@@ -523,14 +523,14 @@ fn lower_story_with_preview<T: ReadTxn>(
             BTreeSet::new(),
             recording.as_deref_mut(),
         )?;
-        if story_id == "body" {
-            local.chunks = None;
-        }
         if let Some(recording) = recording {
             recording.save_chunks(&chunks, comments);
         }
         Ok((blocks, after.pm_cursor - pm_base))
     })();
+    if story_id == "body" {
+        local.chunks = None;
+    }
     active_stories.remove(story_id);
     result
 }

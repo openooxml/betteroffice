@@ -1188,6 +1188,11 @@ impl ResidentDisplayInput {
     pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
         &self.input.font_chains
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn measured_block_count(&self) -> usize {
+        self.input.measured.len()
+    }
 }
 
 impl std::fmt::Debug for ResidentDisplayInput {
@@ -11719,6 +11724,7 @@ fn refresh_resident_display_pages_reading(
         }
     }
     let mut pending_blocks = selected_blocks;
+    let mut added_blocks = false;
     for measured in &pagination.measured {
         if pending_blocks.is_empty() {
             break;
@@ -11732,13 +11738,26 @@ fn refresh_resident_display_pages_reading(
         let block = convert_resident_value(measured, "resident display measured block")?;
         match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
-            None => input.measured.push(block),
+            None => {
+                input.measured.push(block);
+                added_blocks = true;
+            }
         }
     }
     if let Some(key) = pending_blocks.into_iter().next() {
         return Err(format!(
             "resident pagination measured block {key:?} is missing"
         ));
+    }
+    if added_blocks {
+        let keys: HashSet<_> = pagination
+            .measured
+            .iter()
+            .filter_map(|measured| resident_block_key(&measured.block))
+            .collect();
+        input.measured.retain(|measured| {
+            measured_block_key(measured).is_none_or(|key| keys.contains(key.as_ref()))
+        });
     }
     Ok(())
 }
