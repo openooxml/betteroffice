@@ -92,6 +92,7 @@ export function createWorkbookSessionHost(
         speculative = opener.finish();
       } finally { opener.dispose(); }
       try {
+        speculative.setLeanEditResults(true);
         for (const envelope of committed) {
           speculative.setCalculationContext(envelope.calculation);
           try { applyWorkbookReplayOp(speculative, envelope.op); }
@@ -139,6 +140,7 @@ export function createWorkbookSessionHost(
         opened.setCalculationContext(envelope.calculation);
         let result: ReturnType<typeof applyWorkbookReplayOp> = undefined;
         try {
+          opened.setLeanEditResults(true);
           result = applyWorkbookReplayOp(opened, !retainedHydration && op.method === 'applyEdits' ? {
             method: 'applyEdits', args: [{ ...op.args[0], expectVersion: before }],
           } : op);
@@ -148,6 +150,8 @@ export function createWorkbookSessionHost(
             JSON.stringify({ cells: error.cells, targets: error.targets }) !== JSON.stringify(envelope.staleProposal)) {
             throw error;
           }
+        } finally {
+          opened.setLeanEditResults(false);
         }
         if (workbookReplayRefused(result)) throw new Error(`Engine refused replay: ${JSON.stringify(result)}`);
         const changed = opened.version() !== before;

@@ -190,6 +190,11 @@ impl XlsxDocument {
             .map_err(|error| js_sys::TypeError::new(&error).into())
     }
 
+    #[wasm_bindgen(js_name = setLeanEditResults)]
+    pub fn set_lean_edit_results(&mut self, enabled: bool) {
+        self.session.set_lean_edit_results(enabled);
+    }
+
     #[wasm_bindgen(js_name = setCalculationContextJson)]
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), JsValue> {
         self.session

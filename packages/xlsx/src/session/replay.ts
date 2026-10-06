@@ -1,5 +1,7 @@
 import type { MethodPolicies } from '../../../../shared/office-session';
-import type { StaleProposalTarget, Viewport, WorkbookCalculationContext, WorkbookHandle } from '../wasm/loader';
+import type {
+  EditResult, LeanEditResult, StaleProposalTarget, Viewport, WorkbookCalculationContext, WorkbookHandle,
+} from '../wasm/loader';
 import type { WorkbookSession } from './client';
 import type { WorkbookFrame, WorkbookWireFrame } from './methods';
 
@@ -33,11 +35,14 @@ export interface WorkbookReplayEnvelope {
   staleProposal?: { cells: string[]; targets: StaleProposalTarget[] };
 }
 
+export type WorkbookReplayResult = ReturnType<WorkbookHandle[WorkbookReplayMethod]>;
+type LeanReplayResult<T> = T extends EditResult ? Omit<T, keyof EditResult> & LeanEditResult : T;
+
 export interface WorkbookReplayReply {
   sequence: number;
   revision: number;
   version: number;
-  result: ReturnType<WorkbookHandle[WorkbookReplayMethod]>;
+  result: LeanReplayResult<WorkbookReplayResult>;
 }
 
 export type WorkbookInternalSessionMethods = {
@@ -255,7 +260,7 @@ export function workbookReplayRefused(result: unknown): boolean {
 
 export function applyWorkbookReplayOp(
   handle: WorkbookHandle, op: WorkbookReplayOp
-): WorkbookReplayReply['result'] {
+): WorkbookReplayResult {
   switch (op.method) {
     case 'editCell': return handle.editCell(...op.args);
     case 'editCells': return handle.editCells(...op.args);

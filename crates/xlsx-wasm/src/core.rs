@@ -16,6 +16,7 @@ const PEER_HYDRATION_CHUNK_BYTES: usize = 64 * 1024;
 pub struct Session {
     workbook: Workbook,
     calculation_context: Option<CalculationOptions>,
+    lean_edit_results: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -77,6 +78,7 @@ impl PeerOpener {
             .map(|workbook| Session {
                 workbook,
                 calculation_context: self.calculation_context,
+                lean_edit_results: false,
             })
             .map_err(|error| error.to_string())
     }
@@ -248,9 +250,31 @@ struct EditResult {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkbookSheetList {
+    sheet_ids: Vec<String>,
+    sheet_names: Vec<String>,
+    active_sheet: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LeanEditResult {
+    applied: bool,
+    sheet_info: WorkbookSheetList,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum EditPayload {
+    Full(EditResult),
+    Lean(LeanEditResult),
+}
+
+#[derive(Serialize)]
 struct ProfiledEditResult {
     #[serde(flatten)]
-    result: EditResult,
+    result: EditPayload,
     profile: EditProfile,
 }
 
@@ -346,10 +370,8 @@ struct StaleTarget {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AcceptResult {
-    applied: bool,
-    sheet_info: SheetInfo,
-    changed: Vec<String>,
-    limited_cells: Vec<String>,
+    #[serde(flatten)]
+    result: EditPayload,
     proposal_id: String,
 }
 
@@ -383,6 +405,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
+                lean_edit_results: false,
             })
             .map_err(|error| error.to_string())
     }
@@ -396,8 +419,13 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: Some(options),
+                lean_edit_results: false,
             })
             .map_err(|error| error.to_string())
+    }
+
+    pub fn set_lean_edit_results(&mut self, enabled: bool) {
+        self.lean_edit_results = enabled;
     }
 
     pub fn set_calculation_context_json(&mut self, context: &str) -> Result<(), String> {
@@ -431,6 +459,7 @@ impl Session {
             .map(|workbook| Self {
                 workbook,
                 calculation_context: None,
+                lean_edit_results: false,
             })
             .map_err(|error| error.to_string())
     }
@@ -982,10 +1011,7 @@ impl Session {
             .accept_proposal(&args.id, args.force, self.calculation_options(now_serial))
             .map_err(|error| self.proposal_error(error))?;
         serde_json::to_string(&AcceptResult {
-            applied: result.mutation.applied,
-            sheet_info: self.sheet_info()?,
-            changed: self.changed_list(&result.mutation.changed),
-            limited_cells: self.changed_list(&result.mutation.limited_cells),
+            result: self.edit_payload(result.mutation)?,
             proposal_id: result.proposal_id,
         })
         .map_err(|error| error.to_string())
@@ -1112,13 +1138,24 @@ impl Session {
         .map_err(|error| error.to_string())
     }
 
-    fn edit_payload(&self, result: MutationResult) -> Result<EditResult, String> {
-        Ok(EditResult {
+    fn edit_payload(&self, result: MutationResult) -> Result<EditPayload, String> {
+        if self.lean_edit_results {
+            let (sheet_ids, sheet_names, active_sheet) = self.workbook.sheet_list();
+            return Ok(EditPayload::Lean(LeanEditResult {
+                applied: result.applied,
+                sheet_info: WorkbookSheetList {
+                    sheet_ids,
+                    sheet_names,
+                    active_sheet: active_sheet.0,
+                },
+            }));
+        }
+        Ok(EditPayload::Full(EditResult {
             applied: result.applied,
             sheet_info: self.sheet_info()?,
             changed: self.changed_list(&result.changed),
             limited_cells: self.changed_list(&result.limited_cells),
-        })
+        }))
     }
 
     fn changed_list(&self, changed: &[CellAddress]) -> Vec<String> {
@@ -1444,6 +1481,86 @@ mod tests {
         model.sheets.push(sheet);
         let parts = xlsx_parse::serialize_workbook(&model).unwrap();
         ooxml_opc::rezip_parts(&parts).unwrap()
+    }
+
+    #[test]
+    fn lean_edit_results_preserve_sheet_lists_and_full_wire_shape() {
+        let bytes = sample_xlsx();
+        let mut full = Session::open(&bytes, None).unwrap();
+        let mut lean = Session::open(&bytes, None).unwrap();
+        full.set_active_sheet(1).unwrap();
+        lean.set_active_sheet(1).unwrap();
+        lean.set_lean_edit_results(true);
+
+        for step in 0..6 {
+            let apply = |session: &mut Session| match step {
+                0 | 1 => {
+                    session.edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"updated"}"#, None)
+                }
+                2 => session.apply_ops_json(
+                    r#"{"ops":[{"type":"addSheet","index":1,"name":"Added"}]}"#,
+                    None,
+                ),
+                3 => session.apply_ops_json(
+                    r#"{"ops":[{"type":"renameSheet","sheet":1,"name":"Renamed"}]}"#,
+                    None,
+                ),
+                _ => session.undo_json(None),
+            };
+            let full_json = apply(&mut full).unwrap();
+            let lean_json = apply(&mut lean).unwrap();
+            let full_value: serde_json::Value = serde_json::from_str(&full_json).unwrap();
+            let lean_value: serde_json::Value = serde_json::from_str(&lean_json).unwrap();
+            assert_eq!(
+                lean_value,
+                serde_json::json!({
+                    "applied": full_value["applied"],
+                    "sheetInfo": {
+                        "sheetIds": full_value["sheetInfo"]["sheetIds"],
+                        "sheetNames": full_value["sheetInfo"]["sheetNames"],
+                        "activeSheet": full_value["sheetInfo"]["activeSheet"],
+                    },
+                })
+            );
+            assert_eq!(
+                full_json,
+                format!(
+                    "{{\"applied\":{},\"sheetInfo\":{},\"changed\":[],\"limitedCells\":[]}}",
+                    step != 1,
+                    full.sheet_info_json().unwrap()
+                )
+            );
+        }
+
+        lean.set_lean_edit_results(false);
+        assert_eq!(full.redo_json(None).unwrap(), lean.redo_json(None).unwrap());
+    }
+
+    #[test]
+    fn lean_profiled_edits_omit_geometry_and_cell_lists() {
+        let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        session.set_lean_edit_results(true);
+        let result: serde_json::Value = serde_json::from_str(
+            &session
+                .edit_cell_profiled_json(
+                    r#"{"sheet":0,"row":0,"col":0,"input":"updated"}"#,
+                    None,
+                    &mut || 0.0,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.as_object().unwrap().len(), 3);
+        assert_eq!(result["applied"], true);
+        assert_eq!(
+            result["sheetInfo"],
+            serde_json::json!({
+                "sheetIds": ["sheet:0", "sheet:1"],
+                "sheetNames": ["Data", "Empty"],
+                "activeSheet": 0,
+            })
+        );
+        assert!(result["profile"].is_object());
     }
 
     #[test]

@@ -73,6 +73,13 @@ export interface SheetInfo {
   initialScrollY: number;
 }
 
+export type WorkbookSheetList = Pick<SheetInfo, 'sheetIds' | 'sheetNames' | 'activeSheet'>;
+
+export interface LeanEditResult {
+  applied: boolean;
+  sheetInfo: WorkbookSheetList;
+}
+
 export interface CellPosition {
   x: number;
   y: number;
@@ -366,6 +373,8 @@ function staleErrorFrom(message: string): StaleProposalError | null {
 export interface WorkbookHandle extends CollaborationReplica {
   readonly clientId: number;
   setCalculationContext(context: WorkbookCalculationContext | null): void;
+  /** @internal */
+  setLeanEditResults(enabled: boolean): void;
   /** Available in both modes; encodes this handle's current Yrs state vector. */
   encodeStateVector(): Uint8Array;
   /** Available in both modes; pass a peer vector to encode only the missing state. */
@@ -794,6 +803,9 @@ function wrapWorkbookDocument(
       }
       wasmCall(() => (doc as CalculationDocument).setCalculationContextJson(JSON.stringify(context)));
       hasCalculationContext = context !== null;
+    },
+    setLeanEditResults(enabled: boolean): void {
+      wasmCall(() => doc.setLeanEditResults(enabled));
     },
     encodeStateVector(): Uint8Array {
       return wasmCall(() => doc.encodeStateVector());

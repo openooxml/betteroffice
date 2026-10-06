@@ -1304,6 +1304,18 @@ impl Workbook {
         Ok(())
     }
 
+    pub fn sheet_list(&self) -> (Vec<String>, Vec<String>, SheetId) {
+        (
+            self.sheet_keys(),
+            self.model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect(),
+            self.active_sheet,
+        )
+    }
+
     pub fn sheet_info(&self) -> Result<SheetInfo> {
         {
             let slot = self

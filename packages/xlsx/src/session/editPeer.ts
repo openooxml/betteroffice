@@ -14,7 +14,7 @@ import {
   type WorkbookReplayEnvelope,
   type WorkbookReplayMethod,
   type WorkbookReplayOp,
-  type WorkbookReplayReply,
+  type WorkbookReplayResult,
 } from './replay';
 
 export interface WorkbookEditPeerOptions {
@@ -82,7 +82,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
   const failed = new Promise<never>((_, reject) => { rejectFailure = reject; });
   void failed.catch(() => {});
   const outcomes = new WeakMap<WorkbookReplayOp,
-    { result: WorkbookReplayReply['result'] } | { error: unknown }
+    { result: WorkbookReplayResult } | { error: unknown }
   >();
   const applying = new WeakSet<WorkbookReplayOp>();
   let activeApplications = 0;
@@ -156,14 +156,14 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     }
   }
 
-  function recoveryResult(result: WorkbookReplayReply['result']): WorkbookReplayReply['result'] {
+  function recoveryResult(result: WorkbookReplayResult): WorkbookReplayResult {
     if (workbookReplayRefused(result)) {
       throw new WorkbookRecoveryRefusal(result);
     }
     return result;
   }
 
-  function apply(op: WorkbookReplayOp, recovery: boolean): WorkbookReplayReply['result'] {
+  function apply(op: WorkbookReplayOp, recovery: boolean): WorkbookReplayResult {
     const outcome = outcomes.get(op);
     if (outcome) {
       if ('error' in outcome) throw outcome.error;
@@ -227,7 +227,7 @@ export function createWorkbookEditPeer(options: WorkbookEditPeerOptions): Workbo
     }
   }
 
-  function applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayReply['result'] {
+  function applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayResult {
     assertReady();
     return apply(op, false);
   }

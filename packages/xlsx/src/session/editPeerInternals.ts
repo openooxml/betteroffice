@@ -1,15 +1,15 @@
 import type { WorkbookEditPeer } from './editPeer';
-import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod, type WorkbookReplayOp, type WorkbookReplayReply } from './replay';
+import { WORKBOOK_REPLAY_MUTATORS, type WorkbookReplayMethod, type WorkbookReplayOp, type WorkbookReplayResult } from './replay';
 
 export interface WorkbookEditPeerOperations {
   fail(error: unknown): void;
   whenAcknowledged(): Promise<void>;
-  applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
-  applyRecoveryOp(op: WorkbookReplayOp): WorkbookReplayReply['result'];
+  applyQueuedOp(op: WorkbookReplayOp): WorkbookReplayResult;
+  applyRecoveryOp(op: WorkbookReplayOp): WorkbookReplayResult;
 }
 
 export class WorkbookRecoveryRefusal extends Error {
-  constructor(readonly result: WorkbookReplayReply['result']) {
+  constructor(readonly result: WorkbookReplayResult) {
     super(`Engine refused workbook recovery: ${JSON.stringify(result)}`);
     this.name = 'WorkbookRecoveryRefusal';
   }

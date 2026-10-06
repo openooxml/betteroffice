@@ -134,6 +134,7 @@ export class XlsxDocument {
      */
     setActiveSheet(index: number): void;
     setCalculationContextJson(context: string): void;
+    setLeanEditResults(enabled: boolean): void;
     setRangeNumberFormatJson(args: string): string;
     sheetCount(): number;
     sheetInfoForJson(sheet: number): string;
@@ -244,6 +245,7 @@ export interface InitOutput {
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
     readonly xlsxdocument_setCalculationContextJson: (a: number, b: number, c: number) => [number, number];
+    readonly xlsxdocument_setLeanEditResults: (a: number, b: number) => void;
     readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_sheetCount: (a: number) => number;
     readonly xlsxdocument_sheetInfoForJson: (a: number, b: number) => [number, number, number, number];

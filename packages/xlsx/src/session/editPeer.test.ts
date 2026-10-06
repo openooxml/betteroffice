@@ -1,7 +1,8 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import JSZip from 'jszip';
 import { isClientMessage, isHostMessage, SessionFailure, type SessionTransport } from '../../../../shared/office-session';
 import type { XlsxEditRequest, XlsxRangeTarget } from '../edits';
+import * as workbookWasm from '../wasm/loader';
 import {
   openWorkbook, workbookPeerHydrationChunks, StaleProposalError, type Viewport, type WorkbookCalculationContext, type WorkbookHandle,
 } from '../wasm/loader';
@@ -87,6 +88,76 @@ function recordReplays(envelopes: WorkbookReplayEnvelope[]): (transport: Session
 }
 
 describe('workbook edit peers', () => {
+  test('updates sheet state from lean replays and restores full worker edit results', async () => {
+    const open = workbookWasm.openWorkbook;
+    const worker: { handle?: WorkbookHandle } = {};
+    let session: WorkbookSession | undefined;
+    const workerOpen = spyOn(workbookWasm, 'openWorkbook').mockImplementation((...args) => {
+      worker.handle = open(...args);
+      return worker.handle;
+    });
+    try {
+      session = await createTestWorkbookSession(fixture, undefined, { calculation });
+      const opened = worker.handle;
+      if (!opened) throw new Error('Missing worker workbook handle');
+      const initial = session.state;
+      const index = initial.sheets.length;
+      const added = await replay(session, {
+        sequence: 1, calculation,
+        op: { method: 'applyOps', args: [[{ type: 'addSheet', index, name: 'Added' }]] },
+      });
+      const summaries = [...initial.sheets, { id: `sheet:${index}`, index, name: 'Added' }];
+      expect(added.result).toEqual({
+        applied: true,
+        sheetInfo: {
+          sheetIds: summaries.map((sheet) => sheet.id),
+          sheetNames: summaries.map((sheet) => sheet.name),
+          activeSheet: initial.activeSheet,
+        },
+      });
+      expect(session.state.sheets).toEqual(summaries);
+      await replay(session, {
+        sequence: 2, calculation, op: { method: 'setActiveSheet', args: [index] },
+      });
+      const renamed = await replay(session, {
+        sequence: 3, calculation,
+        op: { method: 'applyOps', args: [[{ type: 'renameSheet', sheet: index, name: 'Renamed' }]] },
+      });
+      const renamedSheets = summaries.map((sheet) => sheet.index === index ? { ...sheet, name: 'Renamed' } : sheet);
+      expect(renamed.result).toEqual({
+        applied: true,
+        sheetInfo: {
+          sheetIds: renamedSheets.map((sheet) => sheet.id),
+          sheetNames: renamedSheets.map((sheet) => sheet.name),
+          activeSheet: index,
+        },
+      });
+      expect(session.state).toMatchObject({ sheets: renamedSheets, activeSheet: index });
+      await replay(session, { sequence: 4, calculation, op: { method: 'undo', args: [] } });
+      expect(session.state).toMatchObject({ sheets: summaries, activeSheet: index });
+
+      const edited = opened.editCell(index, 0, 0, 'public edit');
+      expect(edited.sheetInfo).toEqual(opened.sheetInfo());
+      expect(edited.sheetInfo.contentWidth).toBeGreaterThan(0);
+      expect(edited.sheetInfo.contentHeight).toBeGreaterThan(0);
+      expect(edited.changed).toBeArray();
+      expect(edited.limitedCells).toBeArray();
+      const applied = await session.call.applyEdits(request(opened, 'B3', 'public batch'));
+      expect(applied).toMatchObject({ ok: true, applied: true });
+      if (!applied.ok) throw new Error(applied.failure.message);
+      expect(applied.calculation.changed).toBeArray();
+      expect(applied.calculation.limitedCells).toBeArray();
+      const { contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY } =
+        opened.sheetInfoFor(index);
+      expect(await session.call.sheetView(index)).toMatchObject({
+        contentWidth, contentHeight, frozenRows, frozenCols, initialScrollX, initialScrollY,
+      });
+    } finally {
+      workerOpen.mockRestore();
+      await session?.dispose();
+    }
+  });
+
   test('keeps replay internal, ordered and never replaceable', () => {
     expect(WORKBOOK_SESSION_METHODS).not.toHaveProperty('replay');
     expect(WORKBOOK_SESSION_POLICIES).not.toHaveProperty('replay');
@@ -331,7 +402,7 @@ describe('workbook edit peers', () => {
     }
   });
 
-  test('replays proposal mutators with identical results, versions and saved digests', async () => {
+  test('replays proposal mutators with matching sheet lists, versions and saved digests', async () => {
     const envelopes: WorkbookReplayEnvelope[] = [];
     const replies: WorkbookReplayReply[] = [];
     const session = await createTestWorkbookSession(fixture, recordReplays(envelopes), {
@@ -352,11 +423,17 @@ describe('workbook edit peers', () => {
     const [peerNonce, initialRevision] = peer.version().split('-');
     expect(peer.version()).toBe(await session.call.version());
     async function check(
-      method: WorkbookReplayMethod, result: WorkbookReplayReply['result'], changed = false
+      method: WorkbookReplayMethod, result: ReturnType<WorkbookHandle[WorkbookReplayMethod]>, changed = false
     ): Promise<void> {
       if (changed) revision += 1;
       await matchingDigest(++batch, method, edits, peer, session);
-      expect(replies[batch - 1]).toEqual({ sequence: batch, revision, version: revision, result });
+      let expected: WorkbookReplayReply['result'] = result;
+      if (result !== null && typeof result === 'object' && 'sheetInfo' in result) {
+        const { changed: _, limitedCells: __, sheetInfo, ...rest } = result;
+        const { sheetIds, sheetNames, activeSheet } = sheetInfo;
+        expected = { ...rest, sheetInfo: { sheetIds, sheetNames, activeSheet } };
+      }
+      expect(replies[batch - 1]).toEqual({ sequence: batch, revision, version: revision, result: expected });
       expect(peer.version()).toBe(`${peerNonce}-${Number(initialRevision) + revision}`);
       expect(peer.version()).toBe(await session.call.version());
       expect(session.state).toMatchObject({ version: revision, stage: 'ready' });

@@ -412,10 +412,10 @@ export async function createWorkbookSession(
     if (envelope.op.method === 'setActiveSheet') {
       state = { ...state, activeSheet: envelope.op.args[0] };
     } else if (reply.result !== null && typeof reply.result === 'object' && 'sheetInfo' in reply.result) {
-      const info = reply.result.sheetInfo;
+      const list = reply.result.sheetInfo;
       state = {
-        ...state, activeSheet: info.activeSheet,
-        sheets: info.sheetIds.map((id, index) => ({ id, index, name: info.sheetNames[index] })),
+        ...state, activeSheet: list.activeSheet,
+        sheets: list.sheetIds.map((id, index) => ({ id, index, name: list.sheetNames[index] })),
       };
     }
     return reply;
