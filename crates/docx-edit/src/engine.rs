@@ -14996,10 +14996,21 @@ mod tests {
         let bytes = Package::new(&body)
             .numbering(&local_patch_numbering("decimal", "%1."))
             .bytes();
-        for paragraph in 0..2 {
-            let (engine, request) = local_patch_laid_out(&bytes, 9618, enabled);
-            local_patch_paragraph_edits(&engine, &request, paragraph, paragraph == 1);
+        let (engine, request) = local_patch_laid_out(&bytes, 9618, enabled);
+        local_patch_paragraph_edits(&engine, &request, 0, false);
+        let (engine, request) = local_patch_laid_out(&bytes, 9618, enabled);
+        for inserted in ["x", "😀"] {
+            local_patch_step(&engine, &request, "body", (3, 3, Some(inserted)), true);
+            local_patch_step(
+                &engine,
+                &request,
+                "body",
+                (3, 3 + inserted.encode_utf16().count() as u32, None),
+                true,
+            );
         }
+        // Paragraph 1 starts with the relocated page break, before "After".
+        local_patch_step(&engine, &request, "body", (2, 3, None), false);
     }
 
     /// Earlier inserts shift mixed and list seeds without forcing full lowering.
