@@ -200,6 +200,79 @@ describe('xlsx toolbar overflow', () => {
     }
   });
 
+  test('preserves scrolling on an unchanged measurement with focus outside the row', () => {
+    railWidth = 10;
+    const controller = createXlsxCommandController();
+    controller.attach(testBinding({ translate: createT(en) }).binding);
+    const tree = () => (
+      <>
+        <button type="button">Outside</button>
+        <XlsxCommandProvider commands={controller.store}>
+          <EditorToolbar mode="commands">
+            <EditorToolbar.Toolbar style={{ padding: 0 }}>
+              <span data-testid="unrepresented" style={{ flexShrink: 0 }}>
+                Plain
+              </span>
+              <ToolbarGroup label="Formatting">
+                <ToolbarCommandButton id="bold" />
+              </ToolbarGroup>
+            </EditorToolbar.Toolbar>
+          </EditorToolbar>
+        </XlsxCommandProvider>
+      </>
+    );
+    const view = render(tree());
+    const row = screen().getByRole('toolbar').querySelector<HTMLElement>('[data-toolbar-items]')!;
+    const units = Array.from(row.children) as HTMLElement[];
+    const trigger = more();
+    const wrapper = trigger.parentElement!.parentElement!;
+    const moreWidth = 28 + (parseFloat(getComputedStyle(wrapper).marginLeft) || 0);
+    const unitWidth = (unit: HTMLElement) => (unit.dataset.testid === 'unrepresented' ? 100 : 20);
+    let scrollLeft = 0;
+    Object.defineProperties(row, {
+      clientWidth: {
+        get: () => railWidth - (wrapper.style.position === 'absolute' ? 0 : moreWidth),
+      },
+      scrollWidth: {
+        get: () =>
+          Math.max(
+            row.clientWidth,
+            units.reduce(
+              (sum, unit) => sum + (unit.style.position === 'absolute' ? 0 : unitWidth(unit)),
+              0
+            )
+          ),
+      },
+      scrollLeft: {
+        get: () => scrollLeft,
+        set: (value: number) => {
+          scrollLeft = Math.max(0, Math.min(value, row.scrollWidth - row.clientWidth));
+        },
+      },
+    });
+    const mockRect = (element: HTMLElement, width: () => number) => {
+      element.getBoundingClientRect = () => {
+        row.scrollLeft = row.scrollLeft;
+        return rect(width());
+      };
+    };
+    mockRect(row, () => row.clientWidth);
+    mockRect(wrapper, () => 28);
+    units.forEach((unit) => mockRect(unit, () => unitWidth(unit)));
+    resize(100);
+    expect(row.style.overflowX).toBe('auto');
+    expect(units[0].getAttribute('aria-hidden')).toBeNull();
+    expect(units[1].getAttribute('aria-hidden')).toBe('true');
+    act(() => screen().getByRole('button', { name: 'Outside' }).focus());
+    expect(row.contains(document.activeElement)).toBe(false);
+    expect(row.scrollWidth - row.clientWidth).toBe(28);
+    row.scrollLeft = 28;
+    expect(row.scrollLeft).toBe(28);
+    view.rerender(tree());
+    expect(more()).toBe(trigger);
+    expect(row.scrollLeft).toBe(28);
+  });
+
   test('moves whole trailing groups into More and keeps every action reachable', () => {
     mount();
     resize(200);
