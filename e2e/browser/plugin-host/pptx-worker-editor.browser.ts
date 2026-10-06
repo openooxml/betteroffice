@@ -99,11 +99,11 @@ for (const dpr of [1, 2]) {
       expect(saved.bytes).toBeGreaterThan(0);
       expect(saved.text).toBe('!worker edit');
 
-      for (const id of ['pptx-export-png', 'pptx-present']) {
+      const reason = 'This feature is unavailable in this editing mode.';
+      for (const [id, title] of [['pptx-export-png', `Export PNG: ${reason}`], ['pptx-present', reason]]) {
         const control = page.getByTestId(id);
         await expect(control).toHaveAttribute('aria-disabled', 'true');
-        await expect(control).toHaveAttribute('title',
-          `${await control.getAttribute('aria-label')}: This feature is unavailable in this editing mode.`);
+        await expect(control).toHaveAttribute('title', title);
       }
       await page.evaluate(() => window.__pptxWorkerEditor.proposal());
       await page.getByTestId('pptx-proposals-button').click();
