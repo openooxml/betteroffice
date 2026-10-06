@@ -156,6 +156,9 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     setRefusal(error instanceof Error ? error.message : String(error));
   }, []);
   const acceptInput = () => Boolean(runRef.current?.current && !runRef.current.retiring && !runRef.current.failure && !propsRef.current.readOnly);
+  const requireEditable = () => {
+    if (propsRef.current.readOnly) throw new WorkerInputRefusal('The editor is read-only');
+  };
 
   const apiBridgeRef = useRef<WorkerEditorApiBridge | null>(null);
   const [apiBridge] = useState<WorkerEditorApiBridge>(() => ({
@@ -173,6 +176,12 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }));
   const { run, error, loading } = useEditableSessionWorkbook(props, commands.store, apiBridge);
   runRef.current = run;
+  const refusedDraft = useMemo(() => ({ current: null as WorkerCellDraft | null }), [run]);
+  const retainDraft = (draft: WorkerCellDraft) => {
+    if (!refusedDraft.current || (draft.revision ?? 0) >= (refusedDraft.current.revision ?? 0)) {
+      refusedDraft.current = draft;
+    }
+  };
   const inputHooks = useMemo(() => ({ current: null as WorkerInputCoordinatorHooks | null }), [run]);
   const acceptedCells = useMemo(() => new Map<string, string>(), [run]);
   const draftOperations = useMemo(() => new WeakMap<InputDraft, WorkbookReplayOp>(), [run]);
@@ -226,9 +235,12 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
         if (owner?.recovering) flushSync(() => setRefusal(message));
         else setRefusal(message);
         if (draft) {
-          input.setDraft(draft);
-          if (draft.source === 'cell') setEditing(draft);
-          else setFormulaDraft(draft.value);
+          if (propsRef.current.readOnly) retainDraft(draft);
+          else {
+            input.setDraft(draft);
+            if (draft.source === 'cell') setEditing(draft);
+            else setFormulaDraft(draft.value);
+          }
         }
       },
     });
@@ -873,9 +885,10 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     write(draft, markApplied) {
       const owner = run;
       if (!owner?.ready || !owner.peer || !owner.editPeer) return false;
-      if (propsRef.current.readOnly && !owner.retiring) {
-        if (owner.recovering) throw new XlsxCommandAdmissionError('input-failed');
-        return true;
+      if (propsRef.current.readOnly) {
+        draftDiscards.get(draft)?.();
+        retainDraft(draft);
+        throw new WorkerInputRefusal('The editor is read-only');
       }
       if (owner.peer.cell(draft.sheet, draft.row, draft.col).input !== draft.value) {
         markApplied.check();
@@ -1017,6 +1030,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       const edits = op.args[1];
       if (edits.length === 0) return;
       markApplied.check();
+      requireEditable();
       const operations = workbookEditPeerOperations(owner.recovering ? operationPeer.current! : owner.editPeer!);
       const result = (owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied();
@@ -1042,13 +1056,18 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
     }
     const op: WorkbookReplayOp = { method: 'editCells', args: [sheet, edits] };
+    let discardPreview: (() => Promise<void>) | undefined;
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
       markApplied.check();
+      requireEditable();
       const operations = workbookEditPeerOperations(run!.recovering ? operationPeer.current! : run!.editPeer!);
       const result = (run!.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op)) as EditResult;
       markApplied(); apply(result, op);
     }, { kind: 'input', target: { sheet, target: JSON.stringify(range) },
-      prepare: async () => { await previewEdits(sheet, edits, op); } }).catch(reportInputError);
+      prepare: async () => { discardPreview = await previewEdits(sheet, edits, op); } }).catch(async (error) => {
+      if (inputRefusal(error)) await discardPreview?.();
+      reportInputError(error);
+    });
   };
 
   const navigate = (sheet: number, next: Selection) => {
@@ -1068,6 +1087,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     const operation = async (_: unknown, markApplied: WorkerInputLease) => {
       await boundary();
       markApplied.check();
+      requireEditable();
       const result = owner.editPeer!.moveChart(sheet, id, dx, dy);
       markApplied(); apply(result); setChartOffset(null);
     };
@@ -1279,6 +1299,8 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
           applied.check();
           const denied = authorize(owner.recovering);
           if (denied) { applied.refuse(new WorkerInputRefusal('Plugin write permission was refused')); return denied; }
+          const readOnly = pluginAccessRef.current!.readOnlyRefusal(handle);
+          if (readOnly) { applied.refuse(new WorkerInputRefusal(readOnly.failure.message)); return readOnly; }
           const write = () => owner.recovering ? operations.applyRecoveryOp(op) : operations.applyQueuedOp(op);
           let result: XlsxEditResult;
           try { result = (owner.recovering ? write() : commit(write)) as XlsxEditResult; }
@@ -1376,10 +1398,44 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     void coordinator.runAfterPendingInput(async (_, markApplied) => {
       await boundary();
       markApplied.check();
+      requireEditable();
       const result = run!.editPeer!.applyFormat(active, a1, format);
       markApplied(); apply(result); focus();
     }, { kind: 'input', target: { sheet: active, target: a1 } }).catch(reportInputError);
   }, [capturedFormat, selection, active, coordinator, boundary, apply, reportInputError, focus]);
+
+  useLayoutEffect(() => {
+    if (!props.readOnly) {
+      const draft = refusedDraft.current;
+      if (!draft || coordinator.draft) return;
+      refusedDraft.current = null;
+      coordinator.setDraft(draft);
+      if (draft.sheet === activeRef.current) setSelection(selectionAt(draft));
+      if (draft.source === 'cell') setEditing(draft);
+      else setFormulaDraft(draft.value);
+      return;
+    }
+    syncDraft();
+    const draft = coordinator.draft;
+    if (draft) retainDraft(draft);
+    if (draft || chartDrag.current || nudge.current) setRefusal('The editor is read-only');
+    coordinator.setDraft(null);
+    suppressBlur.current = true;
+    suppressFormulaBlur.current = true;
+    composition.current?.settle(true);
+    composition.current = null;
+    setEditing(null);
+    setFormulaDraft(null);
+    setCapturedFormat(null);
+    paintFormatSource.current = null;
+    chartDrag.current = null;
+    nudge.current = null;
+    setChartOffset(null);
+    if (nudgeTimer.current !== null) clearTimeout(nudgeTimer.current);
+    nudgeTimer.current = null;
+    if (draft?.source === 'cell') focus();
+    suppressFormulaBlur.current = false;
+  }, [props.readOnly, coordinator]);
 
   const startComposition = (source: InputDraft['source']) => {
     let settle!: (ended: boolean) => void;
@@ -1390,18 +1446,20 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     syncDraft(); composition.current?.settle(true); composition.current = null;
   };
   const attachCellInput = useCallback((input: HTMLInputElement | null) => {
+    if (!input && propsRef.current.readOnly) inputHooks.current?.sync?.();
     editorInputRef.current = input;
     if (input) suppressBlur.current = false;
     if (!input && composition.current?.source === 'cell') {
-      composition.current.settle(false); composition.current = null;
+      composition.current.settle(Boolean(propsRef.current.readOnly)); composition.current = null;
     }
-  }, []);
+  }, [inputHooks]);
   const attachFormulaInput = useCallback((input: HTMLInputElement | null) => {
+    if (!input && propsRef.current.readOnly) inputHooks.current?.sync?.();
     formulaInputRef.current = input;
     if (!input && composition.current?.source === 'formula') {
-      composition.current.settle(false); composition.current = null;
+      composition.current.settle(Boolean(propsRef.current.readOnly)); composition.current = null;
     }
-  }, []);
+  }, [inputHooks]);
   useLayoutEffect(() => {
     if (!editing || run?.failure) return;
     const input = editorInputRef.current;
@@ -1470,7 +1528,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
       {isProposalsAvailable() && <ToolbarCommandButton id="proposalsPanel" />}
     </div>
   </EditorToolbar>;
-  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? defaultToolbar : props.toolbar;
+  const toolbar = props.showToolbar === false ? null : props.toolbar === undefined ? props.readOnly ? null : defaultToolbar : props.toolbar;
   const renderDock = (placement: DockPlacement) => pluginHost.managed ? <PluginDock host={pluginHost.host}
     placement={placement} activations={pluginHost.activations.filter((activation) => activation.plugin.panel?.placement === placement)}
     available={dockArea} /> : null;
@@ -1519,7 +1577,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
                       style={{ ...outline(chartRect, `2px solid ${BRAND}`),
                         transform: `translate(${chartOffset?.x ?? 0}px, ${chartOffset?.y ?? 0}px)`, boxShadow: '0 1px 6px rgba(0, 0, 0, 0.25)' }} />}
                     {editing && editRect && <input ref={attachCellInput} data-testid="xlsx-cell-editor" value={editing.value}
-                      disabled={Boolean(error)}
+                      disabled={Boolean(error) || props.readOnly}
                       onChange={(event) => {
                         if (!acceptInput()) return;
                         const draft: WorkerCellDraft = { ...editing, value: event.target.value, prefill: false, modified: true,

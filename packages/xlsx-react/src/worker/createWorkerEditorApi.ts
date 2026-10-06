@@ -258,7 +258,7 @@ export function createWorkerEditorApi(
       const input = structuredClone(request);
       const op: WorkbookReplayOp = { method: 'applyEdits', args: [input] };
       return ordered('apply-edits', (markApplied) => {
-        if (bridge().readOnly() && !session.retiring) return refusal();
+        if (bridge().readOnly()) return refusal();
         let result: XlsxEditResult;
         try {
           result = session.recovering || !bridge().previewEdits ? requirePeer().edits.applyEdits(input) :
@@ -286,7 +286,7 @@ export function createWorkerEditorApi(
     editCellAsync: (sheet, row, col, input) => {
       const op: WorkbookReplayOp = { method: 'editCell', args: [sheet, row, col, input] };
       return ordered('edit-cell', (markApplied) => {
-        if (bridge().readOnly() && !session.retiring) return { error: new Error('The editor is read-only') };
+        if (bridge().readOnly()) return { error: new Error('The editor is read-only') };
         if (!bridge().previewEdits || session.recovering) return { result: editCell(sheet, row, col, input, markApplied) };
         markApplied.check();
         const result = workbookEditPeerOperations(requirePeer().edits).applyQueuedOp(op) as EditResult;
