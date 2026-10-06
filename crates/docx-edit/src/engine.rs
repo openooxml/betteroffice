@@ -3867,11 +3867,16 @@ impl EngineSession {
         let mut render = self.render.borrow_mut();
         let lowered = render.stories.get_mut("body")?;
         let edit = lowered.local.edit.take()?;
+        let float_reuse = {
+            let pagination = self.pagination.borrow();
+            pagination.measured_with_floats && pagination.lowered_from.is_some()
+        };
         if edit.epochs != (lowered.doc_epoch, epoch)
             || epoch != lowered.doc_epoch.wrapping_add(1)
             || lowered.env != *env
             || lowered.media != self.doc.media_sources()
             || !lowered.local.matches_source(&self.doc)
+            || float_reuse
         {
             return None;
         }
@@ -13719,6 +13724,168 @@ mod tests {
     fn resident_plain_text_patch_matches_cold_full() {
         for enabled in [false, true] {
             resident_plain_text_patch_matches_cold_full_in(enabled);
+        }
+    }
+
+    #[test]
+    fn resident_local_lowering_with_floats_preserves_full_lowering_reuse() {
+        local_lowering_measurement_reuse(true);
+    }
+
+    #[test]
+    fn resident_local_lowering_without_floats_reuses_unchanged_measurements() {
+        local_lowering_measurement_reuse(false);
+    }
+
+    fn local_lowering_measurement_reuse(floats: bool) {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let shape =
+            INSIDE_SHAPE.replace("<wp:align>inside</wp:align>", "<wp:align>left</wp:align>");
+        let section = r#"<w:sectPr><w:type w:val="nextPage"/><w:pgSz w:w="4320" w:h="2880"/><w:pgMar w:top="300" w:right="300" w:bottom="300" w:left="300"/></w:sectPr>"#;
+        let mut body = String::new();
+        for index in 0..30 {
+            let mut content = preview_fixture::run(&format!("Paragraph {index}"));
+            if floats && index == 2 {
+                content.push_str(&shape);
+            }
+            if [9, 19].contains(&index) {
+                content = format!("<w:pPr>{section}</w:pPr>{content}");
+            }
+            body.push_str(&preview_fixture::paragraph(index, &content));
+        }
+        body.push_str(section);
+        let bytes = preview_fixture::document(&body);
+        for trigger in [RelayoutTrigger::Bulk, RelayoutTrigger::Interactive] {
+            let engines = [false, true].map(|enabled| {
+                let engine = EngineSession::new(9630 + u64::from(enabled));
+                crate::seed_from_docx(engine.doc(), &bytes).unwrap();
+                engine.set_local_lowering(enabled);
+                engine
+            });
+            let request = lowering_pages::region_request(&engines[0], &bytes, font).to_string();
+            for engine in &engines {
+                engine.relayout_trigger.set(trigger);
+                engine
+                    .layout_regions_for_trigger(&request, None, trigger)
+                    .unwrap();
+                engine.build_display_list_frame("{}", 0).unwrap();
+                assert_eq!(engine.pagination.borrow().measured_with_floats, floats);
+                assert!(
+                    engine
+                        .regions
+                        .borrow()
+                        .as_ref()
+                        .unwrap()
+                        .fast_path
+                        .is_none()
+                );
+            }
+            for text in ["x", "😀", "y"] {
+                let mut counts = Vec::new();
+                for (index, engine) in engines.iter().enumerate() {
+                    let paragraph = engine.doc().paragraphs("body").unwrap().remove(12);
+                    let (start, _) = engine
+                        .doc()
+                        .paragraph_index("body")
+                        .unwrap()
+                        .para_span(&paragraph.para_id)
+                        .unwrap();
+                    let before = engine.stats();
+                    {
+                        let _host = (trigger == RelayoutTrigger::Bulk).then(|| {
+                            crate::batch::HostEditGuard::new(&engine.doc().host_edit_depth)
+                        });
+                        engine
+                            .edit_resident_text(
+                                crate::StoryRange::new("body", start + 1, start + 1),
+                                Some(text),
+                                true,
+                            )
+                            .unwrap();
+                    }
+                    engine.relayout_trigger.set(trigger);
+                    if floats && index == 1 {
+                        let retained = || {
+                            let pagination = engine.pagination.borrow();
+                            (
+                                pagination.lowered_from.as_ref().map(Rc::as_ptr),
+                                pagination
+                                    .input_lowering
+                                    .as_ref()
+                                    .map(|(epoch, map)| (*epoch, Rc::as_ptr(map))),
+                                pagination.retain_matches.iter().flatten().count(),
+                            )
+                        };
+                        let previous = retained();
+                        assert!(previous.0.is_some());
+                        assert!(previous.1.is_some());
+                        if trigger.uses_region_path() {
+                            assert!(previous.2 > 0);
+                        }
+                        assert!(engine.render.borrow().stories["body"].local.edit.is_some());
+                        let env = engine.render.borrow().stories["body"].env.clone();
+                        assert!(
+                            engine
+                                .patch_lowered_body(engine.doc_epoch(), &env)
+                                .is_none()
+                        );
+                        assert_eq!(retained(), previous);
+                    }
+                    engine
+                        .layout_regions_for_trigger(&request, None, trigger)
+                        .unwrap();
+                    let after = engine.stats();
+                    assert_eq!(
+                        after.lower_cache_misses - before.lower_cache_misses,
+                        u64::from(floats || index == 0),
+                    );
+                    let blocks = engine
+                        .pagination
+                        .borrow()
+                        .input
+                        .as_ref()
+                        .unwrap()
+                        .measured
+                        .len();
+                    let measured = after.resident_measure_calls - before.resident_measure_calls;
+                    let reused = after.resident_reused_blocks - before.resident_reused_blocks;
+                    assert!(reused > 0);
+                    if !floats {
+                        assert_eq!((measured, reused), (1, blocks as u64 - 1));
+                    }
+                    counts.push((measured, reused));
+                    assert_local_patch_matches_cold(
+                        engine,
+                        &request,
+                        "measurement reuse after typing",
+                    );
+                    engine.relayout_trigger.set(trigger);
+                    let before = engine.stats();
+                    engine
+                        .layout_regions_for_trigger(&request, None, trigger)
+                        .unwrap();
+                    let after = engine.stats();
+                    assert_eq!(after.lower_cache_misses, before.lower_cache_misses);
+                    let measured = after.resident_measure_calls - before.resident_measure_calls;
+                    let reused = after.resident_reused_blocks - before.resident_reused_blocks;
+                    if !floats {
+                        assert_eq!((measured, reused), (0, blocks as u64));
+                    }
+                    counts.push((measured, reused));
+                    assert_local_patch_matches_cold(
+                        engine,
+                        &request,
+                        "measurement reuse without edits",
+                    );
+                }
+                assert_eq!(
+                    counts[2..],
+                    counts[..2],
+                    "floats={floats} trigger={trigger:?}"
+                );
+            }
         }
     }
 
