@@ -485,17 +485,19 @@ const initialStyle: EffectiveTextStyle = {
   fontFamily: 'Arial',
 };
 
-export function PptxEditor(props: PptxWorkerEditorProps & { readOnly?: false }): JSX.Element;
-export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
-export function PptxEditor(props: Omit<PptxWorkerEditorProps, 'onReady'> & {
+type WorkerSessionProps = Omit<PptxWorkerEditorProps, 'readOnly' | 'onReady'> & {
+  readOnly: boolean;
   onReady?: (api: PptxWorkerEditorApi | PptxWorkerViewerApi) => void;
-}): JSX.Element;
+};
+
 export function PptxEditor(props: PptxWorkerEditorProps): JSX.Element;
+export function PptxEditor(props: PptxWorkerViewerProps): JSX.Element;
+export function PptxEditor(props: WorkerSessionProps): JSX.Element;
 export function PptxEditor(props: PptxEditorProps): JSX.Element;
 export function PptxEditor({
   i18n,
   ...props
-}: PptxWorkerEditorProps | PptxWorkerViewerProps | PptxEditorProps): JSX.Element {
+}: PptxWorkerEditorProps | PptxWorkerViewerProps | WorkerSessionProps | PptxEditorProps): JSX.Element {
   return (
     <LocaleProvider i18n={i18n}>
       <PptxEditorSession {...props} i18n={i18n} />
@@ -503,7 +505,7 @@ export function PptxEditor({
   );
 }
 
-function PptxEditorSession(props: PptxWorkerEditorProps | PptxWorkerViewerProps | PptxEditorProps) {
+function PptxEditorSession(props: PptxWorkerEditorProps | PptxWorkerViewerProps | WorkerSessionProps | PptxEditorProps) {
   const fonts = useStableFontFaces(props.fonts);
   const workerOpen = 'experimentalWorkerOpen' in props && props.experimentalWorkerOpen;
   const identity = useMemo(() => ({}), [props.file, fonts, props.clientId, props.collaboration, workerOpen]);

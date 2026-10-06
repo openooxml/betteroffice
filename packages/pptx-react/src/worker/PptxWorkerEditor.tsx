@@ -6,7 +6,7 @@ import { useEditableSessionPresentation } from './useEditableSessionPresentation
 /** @experimental */
 export type PptxWorkerEditorProps = Omit<PptxEditorProps, 'onReady' | 'readOnly'> & {
   experimentalWorkerOpen: true;
-  readOnly?: boolean;
+  readOnly?: false;
   onReady?: (api: PptxWorkerEditorApi) => void;
 };
 

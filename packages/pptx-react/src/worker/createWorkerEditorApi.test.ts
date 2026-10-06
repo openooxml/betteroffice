@@ -48,14 +48,22 @@ test('legacy_contextual_api_types_are_unchanged', () => {
   } });
   const worker: PptxWorkerEditorProps = { fonts: [], experimentalWorkerOpen: true,
     onReady(api) { assertType<Equal<typeof api, PptxWorkerEditorApi>>(); } };
-  const dynamic: PptxWorkerEditorProps = { ...worker, readOnly: Boolean(editor.readOnly) };
+  const editable = PptxEditor({ ...worker, readOnly: false, onReady(api) {
+    assertType<Equal<typeof api, PptxWorkerEditorApi>>();
+  } });
+  const dynamic = { fonts: worker.fonts, experimentalWorkerOpen: true as const,
+    readOnly: Boolean(editor.readOnly), onReady(_api: PptxWorkerEditorApi | PptxWorkerViewerApi) {} };
   const dynamicEditor = PptxEditor(dynamic);
+  // @ts-expect-error
+  const editorOnly = PptxEditor({ ...dynamic, onReady: (_api: PptxWorkerEditorApi) => {} });
   const toggled = PptxEditor({ fonts: [], experimentalWorkerOpen: true, readOnly: dynamic.readOnly, onReady(api) {
     assertType<Equal<typeof api, PptxWorkerEditorApi | PptxWorkerViewerApi>>();
   } });
   expect(editor.fonts).toEqual(worker.fonts);
   expect(viewer).toBeDefined();
+  expect(editable).toBeDefined();
   expect(dynamicEditor).toBeDefined();
+  expect(editorOnly).toBeDefined();
   expect(toggled).toBeDefined();
 });
 
