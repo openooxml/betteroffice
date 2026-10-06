@@ -471,7 +471,14 @@ fn separated_interactive_layouts_match_cold_note_anchors_and_frame_bytes() {
         engine.with_display_list(Clone::clone).unwrap(),
         expected_list
     );
-    assert_eq!(expected_list.pages[3].note_areas, initial_notes);
+    let mut shifted_notes = initial_notes;
+    for area in &mut shifted_notes {
+        for note in &mut area.notes {
+            note.anchor_doc_start = note.anchor_doc_start.map(|start| start + 1);
+            note.anchor_doc_end = note.anchor_doc_end.map(|end| end + 1);
+        }
+    }
+    assert_eq!(expected_list.pages[3].note_areas, shifted_notes);
     assert_eq!(
         engine.stats().rebuilt_display_pages - before.rebuilt_display_pages,
         expected_rebuilt as u64
@@ -575,6 +582,116 @@ fn interactive_page_build_before_undo_matches_cold_frame_bytes() {
             .unwrap(),
         expected_bytes
     );
+    assert_eq!(
+        engine.with_display_list(Clone::clone).unwrap(),
+        expected_list
+    );
+}
+
+#[test]
+fn interactive_page_build_before_frame_matches_cold_frame_bytes() {
+    let fonts = docx_layout::MeasureFonts::default();
+    let _scope = fonts.enter();
+    let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+    let (engine, request, extras) = interactive_damage_engine(font, 7, true, Some(0..6));
+    let (resident_input, list) = {
+        let pagination = engine.pagination.borrow();
+        docx_layout::build_resident_display_list_partial_observed(
+            pagination.input.as_ref().unwrap(),
+            pagination.layout.as_ref().unwrap(),
+            &extras,
+            &|index| index < 6,
+            &mut || {},
+        )
+        .unwrap()
+    };
+    let mut reference_display = {
+        let display = engine.display.borrow();
+        assert_eq!(display.list.as_ref().unwrap(), &list);
+        assert!(list.pages[6].unbuilt);
+        DisplayState {
+            list: Some(list),
+            resident_input: Some(resident_input),
+            pages: display.pages.clone(),
+            frame_epoch: display.frame_epoch,
+            binary_frame_epoch: display.binary_frame_epoch,
+            next_page_id: display.next_page_id,
+            ..Default::default()
+        }
+    };
+    engine
+        .doc()
+        .insert_text(
+            &crate::EditCtx::local("", ""),
+            engine.doc().paragraph_mark_position("73000002").unwrap(),
+            "x",
+            crate::FormatPolicy::Inherit,
+        )
+        .unwrap();
+    engine
+        .layout_document_with_regions_retained(&request)
+        .unwrap();
+    {
+        let pagination = engine.pagination.borrow();
+        assert!(pagination.last_incremental);
+        assert!(!pagination.display_uses_region_path);
+        assert!(pagination.has_display_damage());
+        assert!(!pagination.display_full_rebuild);
+        assert_eq!(pagination.position_deltas.get("73000007"), Some(&1));
+        assert!(!pagination.pending_display_pages().any(|index| index == 6));
+    }
+    let built = {
+        let pagination = engine.pagination.borrow();
+        docx_layout::build_resident_display_pages(
+            pagination.input.as_ref().unwrap(),
+            pagination.layout.as_ref().unwrap(),
+            reference_display.resident_input.as_mut().unwrap(),
+            reference_display.list.as_mut().unwrap(),
+            &[6],
+        )
+        .unwrap()
+    };
+    assert_eq!(built, vec![6]);
+    let epoch = reference_display.binary_frame_epoch;
+    let epochs = FrameEpochs {
+        doc_epoch: engine.doc_epoch(),
+        layout_epoch: engine.pagination.borrow().layout_epoch,
+        frame_epoch: reference_display.frame_epoch + 1,
+        base_frame_epoch: epoch,
+    };
+    let expected_page_bytes = encode_frame_delta_changes(
+        reference_display.list.as_ref().unwrap(),
+        &mut reference_display.pages,
+        epochs,
+        DisplayChanges {
+            rebuilt: &built,
+            repositioned: &[],
+            shifts: &[],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        engine.build_display_pages_frame(&[6], epoch).unwrap(),
+        expected_page_bytes
+    );
+    assert!(engine.pagination.borrow().display_full_rebuild);
+    reference_display.frame_epoch = epochs.frame_epoch;
+    reference_display.binary_frame_epoch = epochs.frame_epoch;
+    let (expected_bytes, expected_list, _) =
+        full_display_frame(&engine, &extras, reference_display);
+    assert_eq!(
+        engine
+            .build_display_list_frame(&extras, epochs.frame_epoch)
+            .unwrap(),
+        expected_bytes
+    );
+    assert_eq!(
+        engine.with_display_list(Clone::clone).unwrap(),
+        expected_list
+    );
+    assert!(!engine.pagination.borrow().has_display_damage());
+    let epoch = engine.display.borrow().binary_frame_epoch;
+    engine.build_display_list_frame(&extras, epoch).unwrap();
     assert_eq!(
         engine.with_display_list(Clone::clone).unwrap(),
         expected_list

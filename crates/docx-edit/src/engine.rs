@@ -8133,7 +8133,7 @@ impl EngineSession {
             };
             let font_cache_identity =
                 docx_layout::measure_font_cache_identity(&display.font_chains);
-            let build = if (pagination.last_incremental || !pagination.display_layout_pending)
+            let build = if pagination.last_incremental
                 && !pagination.display_full_rebuild
                 && display.extras_fingerprint == extras_fingerprint
                 && display.font_cache_identity == Some(font_cache_identity)
@@ -8474,6 +8474,12 @@ impl EngineSession {
                 pagination
                     .display_rebuilt_pages
                     .extend(changed_pages.iter().copied());
+                pagination.limit_display_damage();
+            } else if !pagination.display_uses_region_path
+                && pagination.has_display_damage()
+                && !changed_pages.is_empty()
+            {
+                pagination.display_full_rebuild = true;
                 pagination.limit_display_damage();
             }
             pagination.layout_epoch
