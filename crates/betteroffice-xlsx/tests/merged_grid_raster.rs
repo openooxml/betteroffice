@@ -2,7 +2,9 @@
 
 use std::io::Cursor;
 
-use betteroffice_xlsx::{CellRange, GridGeometry, Sheet, SheetId, Viewport, Workbook, WorkbookModel};
+use betteroffice_xlsx::{
+    CellRange, GridGeometry, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+};
 
 fn band_difference(pixels: &[u8], width: usize, x: f32, y: f32) -> u8 {
     let mut difference = 0;
