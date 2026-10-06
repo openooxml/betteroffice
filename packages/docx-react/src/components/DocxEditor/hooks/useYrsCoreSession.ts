@@ -780,8 +780,7 @@ export function useYrsCoreSession(
                   let bootstrapped = false;
                   return [
                     () => {
-                      if (handedOver) next.openDocx(source, false);
-                      else bootstrapped = bootstrapWorkerOpenPeer(next, update, source, workerHost);
+                      bootstrapped = bootstrapWorkerOpenPeer(next, update, source, workerHost);
                     },
                     () => { if (!bootstrapped) next.loadState(update.state); },
                     () => {

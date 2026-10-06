@@ -139,6 +139,14 @@ async function workerOpened(
           return snapshot;
         };
       }
+      if (opened) {
+        const handOver = opened.handOver;
+        opened.handOver = async (...args) => {
+          const snapshot = await handOver(...args);
+          snapshots.push(snapshot);
+          return snapshot;
+        };
+      }
       workerDocument.current = opened;
       return opened;
     }, [renderer.openInWorker]);

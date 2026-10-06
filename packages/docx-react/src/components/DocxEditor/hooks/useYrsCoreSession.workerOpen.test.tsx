@@ -965,16 +965,15 @@ test.each([1, 2])('synchronous ensure finishes the worker peer at hydration yiel
     act(() => {
       ensureWorkerOpenReplica(session);
       expect(session.hasStory('body')).toBe(true);
-      expect(result.current.core.replicaReadyRef?.current).toBe(false);
+      expect(result.current.core.replicaReadyRef?.current).toBe(true);
       expect(load).not.toHaveBeenCalled();
       metadata.check();
     });
-    expect(result.current.core.replicaReady).toBe(false);
+    expect(result.current.core.replicaReady).toBe(true);
     expect(result.current.mainOpens).toEqual([]);
-    expect(replicas).toEqual([]);
+    expect(replicas).toEqual([session]);
     await act(async () => {
       await tasks.run();
-      if (boundary === 1) await tasks.run();
       await pending;
     });
     expect(session.hasStory('body')).toBe(true);
