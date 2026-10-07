@@ -164,6 +164,15 @@ pub(crate) struct TextEdit {
     pub(crate) text: String,
     pub(crate) attributes: Option<Attrs>,
     pub(crate) epochs: (u64, u64),
+    pub(crate) delete_bounds: Option<PatchBounds>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PatchBounds {
+    slot: usize,
+    start: usize,
+    end: usize,
+    left_units: u32,
 }
 
 fn attributes(attrs: Option<&Attrs>) -> Attrs {
@@ -689,7 +698,9 @@ impl LocalLowering {
             && self
                 .seeds
                 .get(&edit.paragraph)
-                .is_some_and(|seed| patch_part_bounds(seed.parts(), edit).is_some())
+                .is_some_and(|seed| {
+                    edit.delete_bounds.is_some() || patch_part_bounds(seed.parts(), edit).is_some()
+                })
     }
 
     pub(crate) fn can_patch_before_insertion(&self, paragraph: &str) -> bool {
@@ -699,12 +710,23 @@ impl LocalLowering {
         pending.paragraph == paragraph && self.can_patch(pending)
     }
 
-    pub(crate) fn can_delete(&self, paragraph: &str, offset: u32, removed: u32) -> bool {
-        removed <= 2
-            && self
-                .seeds
-                .get(paragraph)
-                .is_some_and(|seed| patch_part_range(seed.parts(), offset, removed, true).is_some())
+    pub(crate) fn delete_bounds(
+        &self,
+        paragraph: &str,
+        offset: u32,
+        removed: u32,
+    ) -> Option<PatchBounds> {
+        if removed > 2 {
+            return None;
+        }
+        let range =
+            patch_part_range(self.seeds.get(paragraph)?.parts(), offset, removed, true, true)?;
+        let mut bounds = part_byte_bounds(&range, removed)?;
+        bounds.slot = range.merged_slot;
+        bounds.start += range.merged_bytes;
+        bounds.end += range.merged_bytes;
+        bounds.left_units += range.merged_units;
+        Some(bounds)
     }
 
     pub(crate) fn resume(&mut self) {
@@ -971,7 +993,7 @@ impl LocalLowering {
 fn patch_segment_bounds(
     segments: &[TextSegment],
     edit: &TextEdit,
-) -> Option<(usize, usize, usize)> {
+) -> Option<PatchBounds> {
     patch_part_bounds(
         segments.iter().map(|segment| SegmentPart {
             text: &segment.text,
@@ -1001,12 +1023,32 @@ fn patch_part_range<'a>(
     offset: u32,
     removed: u32,
     empty: bool,
-) -> Option<(usize, SegmentPart<'a>, usize, usize)> {
+    merge: bool,
+) -> Option<PartRange<'a>> {
     let mut before = 0_u32;
-    let mut previous = None;
+    let mut previous: Option<SegmentPart<'a>> = None;
+    let mut merged_slot = 0;
+    let mut merged_bytes = 0;
+    let mut merged_units = 0;
     let mut remaining = parts.enumerate();
     let (slot, segment) = loop {
         let (slot, segment) = remaining.next()?;
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.preflight_chunks += 1;
+            work.set(counts);
+        });
+        if merge && let Some(part) = previous {
+            if same_part_attributes(part.attrs, segment.attrs) {
+                merged_bytes += part.text.len();
+                merged_units += part.units;
+            } else {
+                merged_slot += 1;
+                merged_bytes = 0;
+                merged_units = 0;
+            }
+        }
         let end = before.checked_add(segment.units)?;
         if offset < end || (removed == 0 && offset == end) {
             break (slot, segment);
@@ -1023,6 +1065,14 @@ fn patch_part_range<'a>(
         return None;
     }
     let next = remaining.next().map(|(_, part)| part);
+    #[cfg(test)]
+    if next.is_some() {
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.preflight_chunks += 1;
+            work.set(counts);
+        });
+    }
     if removed != 0
         && start == 0
         && end == segment.units as usize
@@ -1033,18 +1083,52 @@ fn patch_part_range<'a>(
     {
         return None;
     }
-    Some((slot, segment, start, end))
+    Some(PartRange {
+        slot,
+        segment,
+        start,
+        end,
+        merged_slot,
+        merged_bytes,
+        merged_units,
+    })
+}
+
+struct PartRange<'a> {
+    slot: usize,
+    segment: SegmentPart<'a>,
+    start: usize,
+    end: usize,
+    merged_slot: usize,
+    merged_bytes: usize,
+    merged_units: u32,
 }
 
 fn patch_part_bounds<'a>(
     parts: impl Iterator<Item = SegmentPart<'a>> + Clone,
     edit: &TextEdit,
-) -> Option<(usize, usize, usize)> {
-    if parts.clone().next().is_none() {
-        return (edit.offset == 0 && edit.removed == 0).then_some((0, 0, 0));
+) -> Option<PatchBounds> {
+    let mut parts = parts.peekable();
+    if parts.peek().is_none() {
+        return (edit.offset == 0 && edit.removed == 0).then_some(PatchBounds {
+            slot: 0,
+            start: 0,
+            end: 0,
+            left_units: 0,
+        });
     }
-    let (slot, segment, start, end) =
-        patch_part_range(parts, edit.offset, edit.removed, edit.text.is_empty())?;
+    let range = patch_part_range(parts, edit.offset, edit.removed, edit.text.is_empty(), false)?;
+    part_byte_bounds(&range, edit.removed)
+}
+
+fn part_byte_bounds(range: &PartRange<'_>, removed: u32) -> Option<PatchBounds> {
+    let PartRange {
+        slot,
+        segment,
+        start,
+        end,
+        ..
+    } = *range;
     let mut units = 0;
     let mut start_byte = None;
     let mut end_byte = None;
@@ -1071,14 +1155,27 @@ fn patch_part_bounds<'a>(
         end_byte.get_or_insert(segment.text.len());
     }
     let (start, end) = (start_byte?, end_byte?);
-    if edit.removed != 0 && segment.text[start..end].chars().count() != 1 {
+    if removed != 0 && segment.text[start..end].chars().count() != 1 {
         return None;
     }
-    Some((slot, start, end))
+    Some(PatchBounds {
+        slot,
+        start,
+        end,
+        left_units: range.start as u32,
+    })
 }
 
 fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
-    let (slot, start, end) = patch_segment_bounds(segments, edit)?;
+    let PatchBounds {
+        slot,
+        start,
+        end,
+        left_units,
+    } = match edit.delete_bounds {
+        Some(bounds) => bounds,
+        None => patch_segment_bounds(segments, edit)?,
+    };
     if segments.is_empty() {
         return Some(vec![TextSegment {
             text: edit.text.clone(),
@@ -1088,8 +1185,6 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
     }
     let mut result = segments.to_vec();
     let segment = &result[slot];
-    let before: u32 = result[..slot].iter().map(|segment| segment.units).sum();
-    let left_units = edit.offset - before;
     let left = segment.text[..start].to_owned();
     let right = segment.text[end..].to_owned();
     if edit.removed != 0 && left.is_empty() && right.is_empty() && edit.text.is_empty() {
@@ -1133,6 +1228,69 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
         }
     }
     Some(merged)
+}
+
+#[cfg(test)]
+#[test]
+fn cached_delete_bounds_match_coalesced_seed_chunks() {
+    let attrs = Attrs::from([("bold".into(), Any::Bool(true))]);
+    let null = Attrs::from([("italic".into(), Any::Null)]);
+    let chunks = Rc::new(SeedChunks::new(vec![
+        yrs::types::text::Diff::with_change(Out::Any(Any::from("ab")), None, None),
+        yrs::types::text::Diff::with_change(
+            Out::Any(Any::from("α😀")),
+            Some(Box::new(null)),
+            None,
+        ),
+        yrs::types::text::Diff::with_change(
+            Out::Any(Any::from("cd")),
+            Some(Box::new(attrs)),
+            None,
+        ),
+        yrs::types::text::Diff::with_change(Out::Any(Any::from("ef")), None, None),
+    ]));
+    for (diff, units) in chunks.diffs.iter().zip(&chunks.units) {
+        let Out::Any(Any::String(text)) = &diff.insert else {
+            unreachable!();
+        };
+        units.set(utf16_len(text));
+    }
+    let mut local = LocalLowering::new(true);
+    local.seeds.insert(
+        "p".to_owned(),
+        ParagraphSeed {
+            chunks: Some((chunks, 0..4)),
+            ..ParagraphSeed::default()
+        },
+    );
+    for (offset, removed) in [(2, 1), (3, 2), (5, 1), (7, 1)] {
+        let segments = local.seeds["p"].segments();
+        let mut edit = TextEdit {
+            paragraph: "p".to_owned(),
+            offset,
+            removed,
+            text: String::new(),
+            attributes: None,
+            epochs: (0, 1),
+            delete_bounds: None,
+        };
+        let expected = patch_segments(&segments, &edit).unwrap();
+        edit.delete_bounds = Some(local.delete_bounds("p", offset, removed).unwrap());
+        crate::engine::TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        assert!(local.can_patch(&edit));
+        let actual = patch_segments(&segments, &edit).unwrap();
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            assert_eq!(work.get().preflight_chunks, 0);
+            assert_eq!(work.get().preflight_text_units, 0);
+        });
+        let snapshot = |segments: &[TextSegment]| {
+            segments
+                .iter()
+                .map(|segment| (segment.text.clone(), segment.units, segment.attrs.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(snapshot(&actual), snapshot(&expected));
+    }
 }
 
 fn shift_pair(start: &mut Option<f64>, end: &mut Option<f64>, delta: i64) {

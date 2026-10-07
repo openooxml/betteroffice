@@ -282,6 +282,8 @@ pub(crate) struct TypingExtraWork {
     pub(crate) seed_materializations: usize,
     pub(crate) seed_removals: usize,
     pub(crate) preflight_text_units: usize,
+    pub(crate) preflight_chunks: usize,
+    pub(crate) preview_position_steps: usize,
     pub(crate) seed_refreshes: usize,
     certificate_snapshots: usize,
     measurement_attempts: usize,
@@ -298,6 +300,8 @@ thread_local! {
         seed_materializations: 0,
         seed_removals: 0,
         preflight_text_units: 0,
+        preflight_chunks: 0,
+        preview_position_steps: 0,
         seed_refreshes: 0,
         certificate_snapshots: 0,
         measurement_attempts: 0,
@@ -4204,12 +4208,18 @@ impl EngineSession {
                         lowered.local.offset(paragraph, range.start)?
                     };
                     let removed = range.end.checked_sub(range.start)?;
-                    if text.is_none()
-                        && (!single_delete || !lowered.local.can_delete(paragraph, offset, removed))
-                    {
-                        lowered.local.discard_seed(paragraph);
-                        return None;
-                    }
+                    let delete_bounds = if text.is_none() {
+                        let bounds = single_delete
+                            .then(|| lowered.local.delete_bounds(paragraph, offset, removed))
+                            .flatten();
+                        if bounds.is_none() {
+                            lowered.local.discard_seed(paragraph);
+                            return None;
+                        }
+                        bounds
+                    } else {
+                        None
+                    };
                     Some(crate::bridge::local::TextEdit {
                         offset,
                         removed,
@@ -4217,6 +4227,7 @@ impl EngineSession {
                         text: text.unwrap_or_default().to_owned(),
                         attributes: attrs,
                         epochs: (before, self.doc_epoch()),
+                        delete_bounds,
                     })
                 });
             if measurement_patch.is_some()
@@ -4470,9 +4481,13 @@ impl EngineSession {
             if previous != *env || !lowered.local.preview_blocked {
                 return None;
             }
-            lowered.shift_preview_positions();
             let units = lowered.preview.as_ref()?;
             if crate::bridge::preview::targets(units, &changed, &lowered.local) {
+                if !crate::bridge::preview::replayable(units, &lowered.local) {
+                    return None;
+                }
+                lowered.shift_preview_positions();
+                let units = lowered.preview.as_ref()?;
                 let replays = crate::bridge::preview::replay(
                     &self.doc,
                     env,
@@ -4602,9 +4617,6 @@ impl EngineSession {
         };
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
-        if !typing && let Some(lowered) = self.render.borrow_mut().stories.get_mut(story) {
-            lowered.shift_preview_positions();
-        }
         let refreshed = self.render.borrow().stories.get(story).and_then(|lowered| {
             #[cfg(test)]
             if !self.preview_refresh.get() {
@@ -14677,6 +14689,7 @@ mod tests {
             text: "x".to_owned(),
             attributes: None,
             epochs: (0, 0),
+            delete_bounds: None,
         };
         local
             .patch(
@@ -14928,12 +14941,13 @@ mod tests {
         );
     }
 
-    fn assert_refusal_work(seed_removals: usize) {
+    fn assert_refusal_work(seed_removals: usize, preflight_chunks: usize) {
         TYPING_EXTRA_WORK.with(|work| {
             assert_eq!(
                 work.get(),
                 TypingExtraWork {
                     seed_removals,
+                    preflight_chunks,
                     ..Default::default()
                 },
             );
@@ -15085,11 +15099,11 @@ mod tests {
                     true,
                 )
                 .unwrap();
-            assert_refusal_work(1);
+            assert_refusal_work(1, 0);
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
             assert!(engine.measurement_patch().is_none());
-            assert_refusal_work(1);
+            assert_refusal_work(1, 0);
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "first ASCII selection refusal");
         }
@@ -15148,7 +15162,13 @@ mod tests {
         let preview = render.stories["body"].preview.as_ref().unwrap();
         let expected = baseline_render.stories["body"].preview.as_ref().unwrap();
         assert!(expected.work.reused_units > 0);
-        assert_eq!(preview.work, expected.work);
+        assert_eq!(
+            preview.work,
+            crate::bridge::preview::RecordingWork {
+                position_steps: 6,
+                ..expected.work.clone()
+            },
+        );
         assert_eq!(
             preview.snapshot(engine.doc()),
             expected.snapshot(baseline.doc())
@@ -15157,6 +15177,121 @@ mod tests {
         drop(render);
         assert_certified_float_cold(&engine, &request, &mut retained);
         assert_local_patch_matches_cold(&engine, &request, "patch followed by preview refresh");
+    }
+
+    #[test]
+    fn alternating_preview_patches_bound_refusal_refresh_work() {
+        let (engine, request) = alternating_preview_patch_engine();
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        let offset = measurement_patch_offset(&engine, 0);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset + 2),
+                None,
+                true,
+            )
+            .unwrap();
+        assert_refusal_work(1, 0);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        TYPING_EXTRA_WORK.with(|work| {
+            assert_eq!(
+                work.get(),
+                TypingExtraWork {
+                    seed_removals: 1,
+                    preview_position_steps: 1598,
+                    ..Default::default()
+                },
+            );
+        });
+        {
+            let render = engine.render.borrow();
+            let work = &render.stories["body"].preview.as_ref().unwrap().work;
+            assert_eq!(work.refresh_records, 200);
+            assert_eq!(work.position_steps, 1598);
+            assert_eq!(work.reused_units, 200);
+        }
+        assert_local_patch_matches_cold(&engine, &request.to_string(), "alternating patch refusal");
+    }
+
+    #[test]
+    fn alternating_preview_patches_skip_shifts_before_full_recording() {
+        let (engine, request) = alternating_preview_patch_engine();
+        let env = engine.render.borrow().stories["body"].env.clone();
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        engine
+            .lower_story_into_cache("body", engine.doc_epoch(), &env)
+            .unwrap();
+        TYPING_EXTRA_WORK.with(|work| {
+            assert_eq!(work.get().preview_position_steps, 0);
+            assert_eq!(work.get().preview_shifts, 0);
+        });
+        engine
+            .layout_document_with_regions_retained_json(&request.to_string())
+            .unwrap();
+        assert_local_patch_matches_cold(&engine, &request.to_string(), "full preview recording");
+    }
+
+    #[test]
+    fn alternating_preview_patches_skip_unused_shifts_and_bound_replay_work() {
+        let (engine, mut request) = alternating_preview_patch_engine();
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        request["renderEnv"]["revisionPreview"]["unused"] = json!("rejected");
+        engine
+            .layout_document_with_regions_retained_json(&request.to_string())
+            .unwrap();
+        TYPING_EXTRA_WORK.with(|work| {
+            assert_eq!(work.get().preview_position_steps, 0);
+            assert_eq!(work.get().preview_shifts, 0);
+        });
+        assert_eq!(
+            engine.render.borrow().stories["body"].preview_paragraph_edits.len(),
+            200,
+        );
+        assert_local_patch_matches_cold(&engine, &request.to_string(), "unused preview decision");
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        request["renderEnv"]["revisionPreview"]["1"] = json!("rejected");
+        engine
+            .layout_document_with_regions_retained_json(&request.to_string())
+            .unwrap();
+        TYPING_EXTRA_WORK.with(|work| {
+            assert_eq!(work.get().preview_position_steps, 1598);
+            assert_eq!(work.get().preview_shifts, 200);
+        });
+        assert_local_patch_matches_cold(
+            &engine,
+            &request.to_string(),
+            "alternating preview shifts",
+        );
+    }
+
+    fn alternating_preview_patch_engine() -> (EngineSession, serde_json::Value) {
+        use super::lowering_fixture::{Package, para, run};
+
+        let mut body = format!(
+            "{}{}",
+            para("10000001", &run("Typing")),
+            para("10000002", &run("Typing")),
+        );
+        for index in 1..=200 {
+            let content = format!(
+                r#"<w:ins w:id="{index}" w:author="A"><w:r><w:t>Tracked</w:t></w:r></w:ins>"#,
+            );
+            body.push_str(&para(&format!("{:08X}", 0x10000002 + index), &content));
+        }
+        let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9644, true);
+        let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
+        local_patch_preview_warm_up(&engine, &mut request);
+        for index in 0..200 {
+            measurement_patch_type(&engine, measurement_patch_offset(&engine, index % 2), "x");
+        }
+        {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            assert_eq!(lowered.preview.as_ref().unwrap().raw_ranges().len(), 200);
+            assert_eq!(lowered.preview_paragraph_edits.len(), 200);
+        }
+        (engine, request)
     }
 
     #[test]
@@ -15198,7 +15333,7 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
-            assert_refusal_work(usize::from(text == Some("x")));
+            assert_refusal_work(usize::from(text == Some("x")), 0);
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
             assert_certified_float_cold(&engine, &request, &mut retained);
             assert!(
@@ -15346,7 +15481,7 @@ mod tests {
             );
             assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
             assert!(engine.measurement_patch().is_none());
-            assert_refusal_work(usize::from(paragraph == 18));
+            assert_refusal_work(usize::from(paragraph == 18), 0);
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
         }
         let before = engine.stats();
@@ -15357,7 +15492,7 @@ mod tests {
             before.lower_cache_misses + 1
         );
         assert!(engine.measurement_patch().is_none());
-        assert_refusal_work(2);
+        assert_refusal_work(2, 0);
         SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
         assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
         assert_local_patch_matches_cold(&engine, &request, "queued eligible paragraphs");
@@ -15401,7 +15536,7 @@ mod tests {
                 before.lower_cache_misses + 1
             );
             assert!(engine.measurement_patch().is_none());
-            assert_refusal_work(1);
+            assert_refusal_work(1, 0);
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
@@ -15511,10 +15646,62 @@ mod tests {
             engine.stats().lower_cache_misses,
             before.lower_cache_misses + 1
         );
-        assert_refusal_work(1);
+        assert_refusal_work(1, 0);
         assert_local_patch_matches_cold(&engine, &request, "cross-run refusal");
         let offset = measurement_patch_offset(&engine, 1);
         local_patch_step(&engine, &request, "body", (offset, offset, Some("x")), true);
+    }
+
+    #[test]
+    fn styled_single_character_delete_counts_and_reuses_preflight_chunks() {
+        use super::lowering_fixture::{Package, para, run};
+
+        let mut content = String::new();
+        for index in 0..200 {
+            if index % 2 == 0 {
+                content.push_str(r#"<w:r><w:rPr><w:b/></w:rPr><w:t>aa</w:t></w:r>"#);
+            } else {
+                content.push_str(&run("aa"));
+            }
+        }
+        content.push_str(r#"<w:r><w:rPr><w:i/></w:rPr><w:t>x</w:t></w:r>"#);
+        content.push_str(&run("Tail"));
+        let bytes = Package::new(&para("10000001", &content)).bytes();
+        for refused in [true, false] {
+            let (engine, request) = local_patch_laid_out(&bytes, 9645, true);
+            let start = measurement_patch_offset(&engine, 0) - 1;
+            let offset = start + if refused { 400 } else { 398 };
+            TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset + 1),
+                    None,
+                    true,
+                )
+                .unwrap();
+            if refused {
+                assert_refusal_work(1, 202);
+            } else {
+                TYPING_EXTRA_WORK.with(|work| {
+                    assert_eq!(work.get().preflight_chunks, 201);
+                    assert_eq!(work.get().preflight_text_units, 2);
+                });
+                let env = engine.render.borrow().stories["body"].env.clone();
+                assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_some());
+                TYPING_EXTRA_WORK.with(|work| {
+                    assert_eq!(work.get().preflight_chunks, 201);
+                    assert_eq!(work.get().preflight_text_units, 2);
+                });
+            }
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.apply_and_layout("body", epoch).unwrap();
+            if refused {
+                assert_refusal_work(1, 202);
+            } else {
+                TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get().preflight_chunks, 201));
+            }
+            assert_local_patch_matches_cold(&engine, &request, "styled single-character deletion");
+        }
     }
 
     #[test]
@@ -15579,7 +15766,8 @@ mod tests {
                 generation
             );
             assert!(engine.measurement_patch().is_none());
-            assert_refusal_work(1 + usize::from(pending && !same_paragraph));
+            let preflight_chunks = 3 * usize::from(!pending || same_paragraph);
+            assert_refusal_work(1 + usize::from(pending && !same_paragraph), preflight_chunks);
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
             assert_eq!(
@@ -15588,7 +15776,7 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
-            assert_refusal_work(1 + usize::from(pending && !same_paragraph));
+            assert_refusal_work(1 + usize::from(pending && !same_paragraph), preflight_chunks);
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "seeded cross-run refusal");
             measurement_patch_type(&engine, certified_float_offset(&engine, 18), "x");
@@ -15676,7 +15864,7 @@ mod tests {
                 .unwrap();
             let epoch = engine.display.borrow().binary_frame_epoch;
             engine.apply_and_layout("body", epoch).unwrap();
-            assert_refusal_work(1);
+            assert_refusal_work(1, 0);
             assert_local_patch_matches_cold(&engine, &request, "repeated deferred refusal");
         }
         for (pass, text) in ["x", "y"].into_iter().enumerate() {

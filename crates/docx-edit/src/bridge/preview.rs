@@ -332,6 +332,8 @@ pub(crate) struct RecordingWork {
     pub(crate) chunks: usize,
     pub(crate) copied_chunks: usize,
     pub(crate) reused_units: usize,
+    pub(crate) refresh_records: usize,
+    pub(crate) position_steps: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -348,36 +350,221 @@ pub(crate) struct ParagraphEdit {
     pub(crate) delta: i64,
 }
 
+struct PositionNode<const N: usize> {
+    min: [i128; N],
+    max: [i128; N],
+    shift: [i128; N],
+    edited: bool,
+    safe: bool,
+    children: Option<Box<[Self; 2]>>,
+}
+
+enum PositionUpdate<const N: usize> {
+    Shift([i128; N], bool),
+    Split,
+    Refuse,
+}
+
+#[cfg(test)]
+fn position_step() {
+    crate::engine::TYPING_EXTRA_WORK.with(|work| {
+        let mut counts = work.get();
+        counts.preview_position_steps += 1;
+        work.set(counts);
+    });
+}
+
+#[cfg(test)]
+fn position_steps() -> usize {
+    crate::engine::TYPING_EXTRA_WORK.with(|work| work.get().preview_position_steps)
+}
+
+impl<const N: usize> PositionNode<N> {
+    fn new(values: &[([i128; N], bool)]) -> Option<Self> {
+        #[cfg(test)]
+        position_step();
+        let (min, safe) = *values.first()?;
+        let mut node = Self {
+            min,
+            max: min,
+            shift: [0; N],
+            edited: false,
+            safe,
+            children: None,
+        };
+        if values.len() > 1 {
+            let middle = values.len() / 2;
+            node.children = Some(Box::new([
+                Self::new(&values[..middle])?,
+                Self::new(&values[middle..])?,
+            ]));
+            node.pull();
+        }
+        Some(node)
+    }
+
+    fn pull(&mut self) {
+        let [left, right] = self.children.as_deref().unwrap();
+        for (index, value) in self.min.iter_mut().enumerate() {
+            *value = left.min[index].min(right.min[index]);
+            self.max[index] = left.max[index].max(right.max[index]);
+        }
+        self.safe = left.safe && right.safe;
+    }
+
+    fn shift(&mut self, shift: [i128; N], edited: bool) {
+        for (index, delta) in shift.into_iter().enumerate() {
+            self.min[index] += delta;
+            self.max[index] += delta;
+            self.shift[index] += delta;
+        }
+        self.edited |= edited;
+    }
+
+    fn push(&mut self) {
+        if let Some(children) = self.children.as_deref_mut() {
+            for child in children {
+                child.shift(self.shift, self.edited);
+            }
+            self.shift = [0; N];
+            self.edited = false;
+        }
+    }
+
+    fn apply(&mut self, update: &impl Fn(&Self) -> PositionUpdate<N>) -> Option<()> {
+        #[cfg(test)]
+        position_step();
+        match update(self) {
+            PositionUpdate::Shift(shift, edited) => self.shift(shift, edited),
+            PositionUpdate::Split => {
+                self.push();
+                for child in self.children.as_deref_mut()? {
+                    child.apply(update)?;
+                }
+                self.pull();
+            }
+            PositionUpdate::Refuse => return None,
+        }
+        Some(())
+    }
+
+    fn collect(&mut self, values: &mut Vec<([i128; N], bool)>) {
+        #[cfg(test)]
+        position_step();
+        self.push();
+        if let Some(children) = self.children.as_deref_mut() {
+            for child in children {
+                child.collect(values);
+            }
+        } else {
+            values.push((self.min, self.edited));
+        }
+    }
+}
+
+fn shifted_positions<const N: usize>(
+    node: &PositionNode<N>,
+    shift: [i128; N],
+    limits: [i128; N],
+    edited: bool,
+) -> PositionUpdate<N> {
+    for (index, delta) in shift.into_iter().enumerate() {
+        if node.min[index] + delta < 0 || node.max[index] + delta > limits[index] {
+            return PositionUpdate::Refuse;
+        }
+    }
+    PositionUpdate::Shift(shift, edited)
+}
+
 pub(crate) fn shift_paragraph_edits(
     units: &mut PreviewUnits,
     edits: &[ParagraphEdit],
 ) -> Option<()> {
+    if edits.is_empty() || units.records.is_empty() {
+        return Some(());
+    }
+    #[cfg(test)]
+    let steps = position_steps();
+    let values: Vec<_> = units
+        .records
+        .iter()
+        .map(|record| {
+            #[cfg(test)]
+            position_step();
+            let seed = record.seed.as_ref().map(|seed| seed.position);
+            let after = record.after.position;
+            (
+                [
+                    i128::from(record.pm.start),
+                    i128::from(record.pm.end),
+                    i128::from(seed.map_or(0, |seed| seed.story_index)),
+                    i128::from(seed.map_or(0, |seed| seed.paragraph_start)),
+                    i128::from(seed.map_or(0, |seed| seed.paragraph_pm_start)),
+                    i128::from(seed.map_or(0, |seed| seed.pm_cursor)),
+                    i128::from(after.story_index),
+                    i128::from(after.paragraph_start),
+                    i128::from(after.paragraph_pm_start),
+                    i128::from(after.pm_cursor),
+                    i128::from(record.capture_raw.unwrap_or(0)),
+                ],
+                seed.is_some_and(|seed| seed.safe)
+                    && after.safe
+                    && record.capture_raw.is_some(),
+            )
+        })
+        .collect();
+    let mut positions = PositionNode::new(&values)?;
     for edit in edits {
-        for record in &mut units.records {
-            if record.pm.end <= edit.pm.start {
-                continue;
+        #[cfg(test)]
+        position_step();
+        positions.apply(&|node| {
+            if node.max[1] <= i128::from(edit.pm.start) {
+                return PositionUpdate::Shift([0; 11], false);
             }
-            if record.pm.start < edit.pm.end {
-                return None;
+            if node.min[1] <= i128::from(edit.pm.start) {
+                return PositionUpdate::Split;
             }
-            let shift_raw = |value: u32| u32::try_from(i64::from(value) + edit.delta).ok();
-            let shift_pm = |value: u64| value.checked_add_signed(edit.delta);
-            let shift_boundary = |boundary: &mut BoundaryState| -> Option<()> {
-                let position = &mut boundary.position;
-                if !position.safe || position.story_index < edit.raw.end {
-                    return None;
-                }
-                position.story_index = shift_raw(position.story_index)?;
-                position.paragraph_start = shift_raw(position.paragraph_start)?;
-                position.paragraph_pm_start = shift_pm(position.paragraph_pm_start)?;
-                position.pm_cursor = shift_pm(position.pm_cursor)?;
-                Some(())
-            };
-            shift_boundary(Rc::make_mut(record.seed.as_mut()?))?;
-            shift_boundary(Rc::make_mut(&mut record.after))?;
-            record.pm = shift_pm(record.pm.start)?..shift_pm(record.pm.end)?;
-            record.capture_raw = Some(shift_raw(record.capture_raw?)?);
+            if node.min[0] < i128::from(edit.pm.end)
+                || !node.safe
+                || node.min[2] < i128::from(edit.raw.end)
+                || node.min[6] < i128::from(edit.raw.end)
+            {
+                return PositionUpdate::Refuse;
+            }
+            let raw = i128::from(u32::MAX);
+            let pm = i128::from(u64::MAX);
+            shifted_positions(
+                node,
+                [i128::from(edit.delta); 11],
+                [pm, pm, raw, raw, pm, pm, raw, raw, pm, pm, raw],
+                true,
+            )
+        })?;
+    }
+    let mut values = Vec::with_capacity(units.records.len());
+    positions.collect(&mut values);
+    for (record, (value, shifted)) in units.records.iter_mut().zip(values) {
+        #[cfg(test)]
+        position_step();
+        if !shifted {
+            continue;
         }
+        let seed = &mut Rc::make_mut(record.seed.as_mut()?).position;
+        seed.story_index = value[2] as u32;
+        seed.paragraph_start = value[3] as u32;
+        seed.paragraph_pm_start = value[4] as u64;
+        seed.pm_cursor = value[5] as u64;
+        let after = &mut Rc::make_mut(&mut record.after).position;
+        after.story_index = value[6] as u32;
+        after.paragraph_start = value[7] as u32;
+        after.paragraph_pm_start = value[8] as u64;
+        after.pm_cursor = value[9] as u64;
+        record.pm = value[0] as u64..value[1] as u64;
+        record.capture_raw = Some(value[10] as u32);
+    }
+    #[cfg(test)]
+    {
+        units.work.position_steps += position_steps() - steps;
     }
     Some(())
 }
@@ -407,27 +594,62 @@ pub(crate) fn refresh(
     let mut ranges = Vec::new();
     let mut edited = Vec::new();
     let mut captures = Vec::new();
+    #[cfg(test)]
+    let steps = position_steps();
+    let mut values = Vec::with_capacity(units.records.len());
     for record in &units.records {
-        let mut start = record.seed.as_ref()?.position.story_index;
-        let mut end = record.after.position.story_index;
-        let mut capture = record.capture_raw?;
-        let mut changed = false;
-        for paragraph in paragraph_edits {
-            changed |= start < paragraph.raw.end && end > paragraph.raw.start;
-            let shift_paragraph = |value: u32| {
-                if value > paragraph.raw.start {
-                    u32::try_from(i64::from(value) + paragraph.delta).ok()
-                } else {
-                    Some(value)
-                }
-            };
-            start = shift_paragraph(start)?;
-            end = shift_paragraph(end)?;
-            capture = shift_paragraph(capture)?;
+        #[cfg(test)]
+        if !paragraph_edits.is_empty() {
+            position_step();
         }
         if !record.after.position.safe {
             return None;
         }
+        values.push((
+            [
+                i128::from(record.seed.as_ref()?.position.story_index),
+                i128::from(record.after.position.story_index),
+                i128::from(record.capture_raw?),
+            ],
+            false,
+        ));
+    }
+    let mapped = if !paragraph_edits.is_empty() && !values.is_empty() {
+        let mut mapped = Vec::with_capacity(values.len());
+        let mut positions = PositionNode::new(&values)?;
+        for paragraph in paragraph_edits {
+            #[cfg(test)]
+            position_step();
+            positions.apply(&|node| {
+                let start = i128::from(paragraph.raw.start);
+                let end = i128::from(paragraph.raw.end);
+                let changed = node.max[0] < end && node.min[1] > start;
+                let unchanged = node.min[0] >= end || node.max[1] <= start;
+                if !changed && !unchanged {
+                    return PositionUpdate::Split;
+                }
+                let mut shift = [0; 3];
+                for (index, delta) in shift.iter_mut().enumerate() {
+                    if node.min[index] > start {
+                        *delta = i128::from(paragraph.delta);
+                    } else if node.max[index] > start {
+                        return PositionUpdate::Split;
+                    }
+                }
+                shifted_positions(node, shift, [i128::from(u32::MAX); 3], changed)
+            })?;
+        }
+        positions.collect(&mut mapped);
+        mapped
+    } else {
+        values
+    };
+    for (value, changed) in mapped {
+        #[cfg(test)]
+        if !paragraph_edits.is_empty() {
+            position_step();
+        }
+        let [start, end, capture] = value.map(|value| value as u32);
         ranges.push(shift(start)..shift(end));
         edited.push(changed || edit.range.start < end && edit.range.end >= start);
         captures.push(shift(capture));
@@ -443,6 +665,12 @@ pub(crate) fn refresh(
             valid: true,
         }),
         untracked_state: units.untracked_state,
+        #[cfg(test)]
+        work: RecordingWork {
+            refresh_records: units.records.len(),
+            position_steps: position_steps() - steps,
+            ..RecordingWork::default()
+        },
         ..PreviewUnits::default()
     })
 }
@@ -873,6 +1101,10 @@ pub(crate) fn targets(
             .any(|record| !record.ids.is_disjoint(changed))
 }
 
+pub(crate) fn replayable(units: &PreviewUnits, local: &local::LocalLowering) -> bool {
+    !local.enabled || !units.untracked_state && !units.records.is_empty()
+}
+
 pub(crate) fn replay(
     doc: &EditingDoc,
     env: &RenderEnv,
@@ -882,7 +1114,7 @@ pub(crate) fn replay(
     current_map: &LoweringMap,
     local: &local::LocalLowering,
 ) -> Option<Vec<Replay>> {
-    if local.enabled && (units.untracked_state || units.records.is_empty()) {
+    if !replayable(units, local) {
         return None;
     }
     let txn = doc.yrs_doc().transact();
@@ -1112,6 +1344,246 @@ fn local_certification_refresh_matches_fresh_recording() {
                 lower_recorded(&doc, "body", &env, &mut lowering(), true).unwrap();
             let (refreshed, fresh) = (refreshed.unwrap(), fresh.unwrap());
             assert_eq!(refreshed.snapshot(&doc), fresh.snapshot(&doc));
+        }
+    }
+}
+
+#[cfg(test)]
+mod position_tests {
+    use super::*;
+
+    fn boundary(raw: u32, pm: u64) -> Rc<BoundaryState> {
+        let mut position = WalkPosition::new(0, pm, &LoweringOutput::default());
+        position.story_index = raw;
+        position.paragraph_start = raw;
+        position.paragraph_pm_start = pm;
+        Rc::new(BoundaryState::capture(
+            position,
+            &ListState::default(),
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        ))
+    }
+
+    fn units() -> PreviewUnits {
+        PreviewUnits {
+            records: [0, 10, 20, 30]
+                .into_iter()
+                .map(|start| UnitRecord {
+                    ids: Rc::new(BTreeSet::new()),
+                    chunk_range: 0..0,
+                    chunks: Rc::new(Vec::new()),
+                    blocks: 0..0,
+                    revealable: 0..0,
+                    stories: 0..0,
+                    paragraphs: 0..0,
+                    pm: u64::from(start)..u64::from(start + 5),
+                    seed: Some(boundary(start, u64::from(start))),
+                    after: boundary(start + 5, u64::from(start + 5)),
+                    capture_raw: Some(start + 3),
+                    local_stateful: Some(false),
+                })
+                .collect(),
+            ..PreviewUnits::default()
+        }
+    }
+
+    fn edits(first: u32, second: u32, delta: i64) -> Vec<ParagraphEdit> {
+        vec![
+            ParagraphEdit {
+                raw: first..first + 4,
+                pm: u64::from(first)..u64::from(first + 4),
+                delta,
+            },
+            ParagraphEdit {
+                raw: second..second + 4,
+                pm: u64::from(second)..u64::from(second + 4),
+                delta: -delta,
+            },
+        ]
+    }
+
+    type RefreshedPositions = (Vec<Range<u32>>, Vec<bool>, Vec<u32>);
+
+    fn sequential_refresh(
+        units: &PreviewUnits,
+        edit: &TextEdit,
+        paragraphs: &[ParagraphEdit],
+    ) -> Option<RefreshedPositions> {
+        let shift = |raw: u32| {
+            if raw <= edit.range.start {
+                raw
+            } else {
+                raw.saturating_sub(edit.range.end - edit.range.start) + edit.inserted
+            }
+        };
+        let mut ranges = Vec::new();
+        let mut edited = Vec::new();
+        let mut captures = Vec::new();
+        for record in &units.records {
+            let mut start = record.seed.as_ref()?.position.story_index;
+            let mut end = record.after.position.story_index;
+            let mut capture = record.capture_raw?;
+            let mut changed = false;
+            for paragraph in paragraphs {
+                changed |= start < paragraph.raw.end && end > paragraph.raw.start;
+                let shifted = |value: u32| {
+                    if value > paragraph.raw.start {
+                        u32::try_from(i128::from(value) + i128::from(paragraph.delta)).ok()
+                    } else {
+                        Some(value)
+                    }
+                };
+                start = shifted(start)?;
+                end = shifted(end)?;
+                capture = shifted(capture)?;
+            }
+            if !record.after.position.safe {
+                return None;
+            }
+            ranges.push(shift(start)..shift(end));
+            edited.push(changed || edit.range.start < end && edit.range.end >= start);
+            captures.push(shift(capture));
+        }
+        Some((ranges, edited, captures))
+    }
+
+    fn sequential_shift(units: &mut PreviewUnits, edits: &[ParagraphEdit]) -> Option<()> {
+        for edit in edits {
+            for record in &mut units.records {
+                if record.pm.end <= edit.pm.start {
+                    continue;
+                }
+                if record.pm.start < edit.pm.end {
+                    return None;
+                }
+                let raw = |value: u32| {
+                    u32::try_from(i128::from(value) + i128::from(edit.delta)).ok()
+                };
+                let pm = |value: u64| value.checked_add_signed(edit.delta);
+                let boundary = |boundary: &mut BoundaryState| -> Option<()> {
+                    let position = &mut boundary.position;
+                    if !position.safe || position.story_index < edit.raw.end {
+                        return None;
+                    }
+                    position.story_index = raw(position.story_index)?;
+                    position.paragraph_start = raw(position.paragraph_start)?;
+                    position.paragraph_pm_start = pm(position.paragraph_pm_start)?;
+                    position.pm_cursor = pm(position.pm_cursor)?;
+                    Some(())
+                };
+                boundary(Rc::make_mut(record.seed.as_mut()?))?;
+                boundary(Rc::make_mut(&mut record.after))?;
+                record.pm = pm(record.pm.start)?..pm(record.pm.end)?;
+                record.capture_raw = Some(raw(record.capture_raw?)?);
+            }
+        }
+        Some(())
+    }
+
+    #[test]
+    fn paragraph_refresh_matches_sequential_positions_and_flags() {
+        for first in [0, 3, 5, 10, 16, 32] {
+            for second in [0, 3, 5, 10, 16, 32] {
+                for delta in [-12, -1, 0, 1, 12, i64::from(u32::MAX)] {
+                    for unsafe_record in [false, true] {
+                        let mut units = units();
+                        if unsafe_record {
+                            Rc::make_mut(&mut units.records[2].after).position.safe = false;
+                        }
+                        let units = Rc::new(units);
+                        let edits = edits(first, second, delta);
+                        let edit = TextEdit {
+                            range: 12..14,
+                            inserted: 1,
+                            epochs: (0, 1),
+                        };
+                        let expected = sequential_refresh(&units, &edit, &edits);
+                        let actual = refresh(&units, &edit, &edits).map(|units| {
+                            let refresh = units.refresh.unwrap();
+                            (refresh.ranges, refresh.edited, refresh.captures)
+                        });
+                        assert_eq!(actual, expected, "{first}, {second}, {delta}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_shift_matches_sequential_failures_and_boundaries() {
+        for first in [0, 3, 5, 10, 16, 32] {
+            for second in [0, 3, 5, 10, 16, 32] {
+                for delta in [-12, -1, 0, 1, 12, i64::from(u32::MAX)] {
+                    for state in 0..4 {
+                        let mut actual = units();
+                        match state {
+                            1 => actual.records[2].seed = None,
+                            2 => {
+                                let seed = actual.records[2].seed.as_mut().unwrap();
+                                Rc::make_mut(seed).position.safe = false;
+                            }
+                            3 => Rc::make_mut(&mut actual.records[2].after).position.safe = false,
+                            _ => {}
+                        }
+                        let mut expected = actual.clone();
+                        let edits = edits(first, second, delta);
+                        let result = shift_paragraph_edits(&mut actual, &edits);
+                        assert_eq!(result, sequential_shift(&mut expected, &edits));
+                        if result.is_some() {
+                            for (actual, expected) in actual.records.iter().zip(&expected.records) {
+                                assert_eq!(actual.seed, expected.seed);
+                                assert_eq!(actual.after, expected.after);
+                                assert_eq!(actual.pm, expected.pm);
+                                assert_eq!(actual.capture_raw, expected.capture_raw);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn paragraph_positions_preserve_intermediate_overflow_and_underflow_refusals() {
+        for state in 0..5 {
+            let mut actual = units();
+            actual.records = vec![actual.records.pop().unwrap()];
+            let record = &mut actual.records[0];
+            let delta = match state {
+                0 => {
+                    Rc::make_mut(record.seed.as_mut().unwrap()).position.paragraph_start = 0;
+                    -1
+                }
+                1 => {
+                    Rc::make_mut(record.seed.as_mut().unwrap()).position.pm_cursor = 0;
+                    -1
+                }
+                2 => {
+                    Rc::make_mut(&mut record.after).position.paragraph_pm_start = u64::MAX;
+                    1
+                }
+                3 => {
+                    record.capture_raw = Some(u32::MAX);
+                    1
+                }
+                _ => {
+                    Rc::make_mut(&mut record.after).position.story_index = u32::MAX;
+                    1
+                }
+            };
+            let edits = edits(0, 0, delta);
+            let mut expected = actual.clone();
+            assert_eq!(sequential_shift(&mut expected, &edits), None);
+            assert_eq!(shift_paragraph_edits(&mut actual, &edits), None);
+            if state >= 3 {
+                let edit = TextEdit {
+                    range: 0..0,
+                    inserted: 0,
+                    epochs: (0, 1),
+                };
+                assert!(refresh(&Rc::new(actual), &edit, &edits).is_none());
+            }
         }
     }
 }
