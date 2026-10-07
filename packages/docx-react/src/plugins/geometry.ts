@@ -31,10 +31,11 @@ import { workerOpenReplicaReady } from '../components/DocxEditor/internals/worke
 export async function readPluginPositionAtPoint(
   editorRef: React.RefObject<PagedEditorRef | null>,
   clientX: number,
-  clientY: number
+  clientY: number,
+  experimentalWorkerOpen = false
 ): Promise<DocxPointPosition | null> {
   if (isWorkerViewer(editorRef.current)) return editorRef.current?.readPositionAtPoint(clientX, clientY) ?? null;
-  const flushed = await flushEditorInput(editorRef);
+  const flushed = await flushEditorInput(editorRef, experimentalWorkerOpen);
   if (!flushed.ok && flushed.code !== 'editor-unavailable') throw flushed.error;
   return editorRef.current?.getPositionAtPoint(clientX, clientY) ?? null;
 }

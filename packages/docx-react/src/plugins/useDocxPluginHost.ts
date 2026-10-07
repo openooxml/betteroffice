@@ -60,6 +60,7 @@ type RenderedDom = { context: RenderedDomContext; queries: DisplayListQueries };
 
 export interface UseDocxPluginHostOptions extends DocxEditorPluginProps {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  experimentalWorkerOpen?: boolean;
   writeModeRef: React.RefObject<EditorMode>;
   mode: EditorMode;
   /** Host `readOnly` or viewing mode. */
@@ -133,6 +134,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       pagedEditorRef: options.pagedEditorRef,
       writeMode: () => latest.current.writeModeRef.current ?? 'viewing',
       viewer: () => latest.current.viewerDocumentRead !== undefined,
+      workerOpen: () => latest.current.experimentalWorkerOpen === true,
       commands: () => latest.current.commands,
       translate: (key) => translateRef.current(key),
       geometry: () => geometryRef.current,
@@ -382,7 +384,9 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         latest.current.zoom === currentLayout.zoom &&
         dom.context.pagesContainer.isConnected &&
         (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
-      (clientX, clientY) => readPluginPositionAtPoint(latest.current.pagedEditorRef, clientX, clientY)
+      (clientX, clientY) => readPluginPositionAtPoint(
+        latest.current.pagedEditorRef, clientX, clientY, latest.current.experimentalWorkerOpen === true
+      )
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {
