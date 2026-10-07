@@ -16,6 +16,7 @@ export const exportPptxMarkdownJson: (a: number, b: number, c: number, d: number
 export const exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const memory: WebAssembly.Memory;
 export const parsePptxJson: (a: number, b: number) => [number, number, number, number];
+export const parsePptxJsonWithoutMedia: (a: number, b: number) => [number, number, number, number];
 export const pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_addPictureJson: (a: number, b: number, c: number) => [number, number, number, number];

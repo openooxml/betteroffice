@@ -3,6 +3,7 @@ import initWasmModule, {
   exportPptxMarkdownJson,
   exportPptxStructuredJson,
   parsePptxJson,
+  parsePptxJsonWithoutMedia,
   PptxDocument,
   PptxRenderer,
   renderPptxMarkdownJson,
@@ -69,6 +70,10 @@ import type {
 } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
+
+export interface InspectPresentationOptions {
+  includeMedia?: boolean;
+}
 
 export interface OpenPresentationOptions {
   clientId?: number;
@@ -428,9 +433,14 @@ export function wasmVersion(): string {
   return rendererVersion();
 }
 
-export function inspectPresentation(bytes: Uint8Array): unknown {
+export function inspectPresentation(
+  bytes: Uint8Array,
+  options: InspectPresentationOptions = {}
+): unknown {
   requireInitialized();
-  return call(() => parsePptxJson(bytes));
+  return call(() => options.includeMedia === false
+    ? parsePptxJsonWithoutMedia(bytes)
+    : parsePptxJson(bytes));
 }
 
 type ExportOutcome<T> = { ok: true; content: T } | { ok: false; failure: PptxExportFailure };

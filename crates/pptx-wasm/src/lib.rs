@@ -688,6 +688,24 @@ pub fn parse_pptx_json(data: &[u8]) -> Result<String, JsValue> {
     serde_json::to_string(&package).map_err(js_error)
 }
 
+#[wasm_bindgen(js_name = parsePptxJsonWithoutMedia)]
+pub fn parse_pptx_json_without_media(data: &[u8]) -> Result<String, JsValue> {
+    let mut package = pptx_parse::parse_pptx(data).map_err(js_error)?;
+    let media = std::mem::take(&mut package.media)
+        .into_iter()
+        .map(|part| {
+            serde_json::json!({
+                "partPath": part.part_path,
+                "contentType": part.content_type,
+                "byteLength": part.bytes.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut metadata = serde_json::to_value(&package).map_err(js_error)?;
+    metadata["media"] = serde_json::Value::Array(media);
+    serde_json::to_string(&metadata).map_err(js_error)
+}
+
 /// Structured export of PPTX bytes as a snapshot, with the options of
 /// `PptxDocument.exportStructuredJson`: `{"ok":true,"content"}` or `{"ok":false,"failure"}`.
 /// Bytes that are not a readable PPTX throw.

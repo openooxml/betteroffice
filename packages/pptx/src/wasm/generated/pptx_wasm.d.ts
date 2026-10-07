@@ -172,6 +172,8 @@ export function exportPptxStructuredJson(data: Uint8Array, options: string): str
 
 export function parsePptxJson(data: Uint8Array): string;
 
+export function parsePptxJsonWithoutMedia(data: Uint8Array): string;
+
 /**
  * Renders schema-version-1 structured content as Markdown; `options` is `{"maxBytes"?}`.
  */
@@ -198,6 +200,7 @@ export interface InitOutput {
     readonly exportPptxStructuredJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
+    readonly parsePptxJsonWithoutMedia: (a: number, b: number) => [number, number, number, number];
     readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addPictureJson: (a: number, b: number, c: number) => [number, number, number, number];

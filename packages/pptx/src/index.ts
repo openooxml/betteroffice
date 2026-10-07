@@ -105,6 +105,7 @@ export type {
   PptxTextSpan,
 } from './structuredExport';
 export type {
+  InspectPresentationOptions,
   OpenPresentationOptions,
   PresentationHandle,
   UndoCaptureMode,
