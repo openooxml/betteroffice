@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { initWasm, inspectPresentation } from '../index';
-import { parsePptxJson } from './generated/pptx_wasm.js';
+import { parsePptxJson, parsePptxJsonWithoutMedia } from './generated/pptx_wasm.js';
 
 const media = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1"/></svg>');
 let deck: Uint8Array;
@@ -45,4 +45,19 @@ test('inspection includes unchanged media bytes by default', () => {
   expect(JSON.stringify(full)).toBe(legacy);
   expect(JSON.stringify(inspectPresentation(deck, {}))).toBe(legacy);
   expect(JSON.stringify(inspectPresentation(deck, { includeMedia: true }))).toBe(legacy);
+});
+
+test('inspection without media preserves the raw JSON outside the media array', () => {
+  const full = parsePptxJson(deck);
+  const metadata = parsePptxJsonWithoutMedia(deck);
+  const fullMedia = JSON.parse(full).media;
+  const summaries = [{
+    partPath: 'ppt/media/image1.svg', contentType: 'image/svg+xml', byteLength: media.length,
+  }];
+  expect(fullMedia).toHaveLength(1);
+  expect(full).toContain(`"media":${JSON.stringify(fullMedia)}`);
+  expect(metadata).toBe(full.replace(
+    `"media":${JSON.stringify(fullMedia)}`,
+    `"media":${JSON.stringify(summaries)}`,
+  ));
 });
