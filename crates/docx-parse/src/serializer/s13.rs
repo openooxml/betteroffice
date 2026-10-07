@@ -3399,6 +3399,107 @@ mod tests {
     }
 
     #[test]
+    fn removed_new_header_footer_relationships_are_not_registered() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("Body text", None)] },
+            "relationshipEntries": [
+                ["rId_new_header_default", {
+                    "id": "rId_new_header_default",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }],
+                ["rId_new_footer_default", {
+                    "id": "rId_new_footer_default",
+                    "type": relationship_types::FOOTER,
+                    "target": "footer1.xml"
+                }]
+            ],
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let before = part_map(&original);
+        let after = part_map(&write_docx_s13(request, &original).expect("save"));
+
+        for path in ["[Content_Types].xml", "word/_rels/document.xml.rels"] {
+            assert_eq!(after[path], before[path], "{path}");
+        }
+        for path in ["word/header1.xml", "word/footer1.xml"] {
+            assert!(!after.contains_key(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn removed_source_header_footer_relationships_and_parts_are_preserved() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let mut parts = part_map(&original);
+        let rels_path = "word/_rels/document.xml.rels";
+        let mut rels = String::from_utf8(parts[rels_path].clone()).expect("relationships");
+        let mut types = String::from_utf8(parts["[Content_Types].xml"].clone()).expect("types");
+        let mut relationships = Vec::new();
+        for (kind, rel_type, content_type, xml) in [
+            (
+                "header",
+                relationship_types::HEADER,
+                HEADER_CONTENT_TYPE,
+                "<w:hdr/>",
+            ),
+            (
+                "footer",
+                relationship_types::FOOTER,
+                FOOTER_CONTENT_TYPE,
+                "<w:ftr/>",
+            ),
+        ] {
+            let id = format!("rId_{kind}");
+            let target = format!("{kind}1.xml");
+            let path = format!("word/{target}");
+            rels = rels.replace(
+                "</Relationships>",
+                &format!("<Relationship Id=\"{id}\" Type=\"{rel_type}\" Target=\"{target}\"/></Relationships>"),
+            );
+            types = types.replace(
+                "</Types>",
+                &format!("<Override PartName=\"/{path}\" ContentType=\"{content_type}\"/></Types>"),
+            );
+            parts.insert(path, xml.as_bytes().to_vec());
+            relationships.push(json!([id, { "id": id, "type": rel_type, "target": target }]));
+            let new_id = format!("rId_new_{kind}_default");
+            relationships.push(json!([new_id, {
+                "id": new_id, "type": rel_type, "target": format!("{kind}2.xml")
+            }]));
+        }
+        parts[rels_path] = rels.into_bytes();
+        parts["[Content_Types].xml"] = types.into_bytes();
+        let original_parts: Vec<_> = parts
+            .iter()
+            .map(|(path, bytes)| (path.clone(), bytes.clone()))
+            .collect();
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("Body text", None)] },
+            "relationshipEntries": relationships,
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let saved = part_map(&write_docx_s13_parts(request, &original_parts, None).expect("save"));
+
+        for path in [
+            "[Content_Types].xml",
+            rels_path,
+            "word/header1.xml",
+            "word/footer1.xml",
+        ] {
+            assert_eq!(saved[path], parts[path], "{path}");
+        }
+    }
+
+    #[test]
     fn package_ids_and_media_names_are_scoped_across_body_and_headers() {
         let original = base_package(
             "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",

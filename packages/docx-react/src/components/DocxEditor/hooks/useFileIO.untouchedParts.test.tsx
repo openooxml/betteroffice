@@ -818,7 +818,7 @@ test('a host page-setup change is saved even when body text is untouched', async
   expect((await reopened(saved)).package.document.finalSectionProperties?.marginTop).toBe(2880);
 });
 
-test('adding and removing a header across saves keeps relationship and content-type targets', async () => {
+async function mountHeaderFooterEditing() {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
@@ -861,28 +861,51 @@ test('adding and removing a header across saves keeps relationship and content-t
     expect(saved).not.toBeNull();
     return saved!;
   };
+  return { hook, save, document: () => host };
+}
+
+function expectPackageTargetsExist(saved: ArrayBuffer): void {
+  const parts = unzipContainer(new Uint8Array(saved));
+  const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
+  for (const entry of xmlElements(rels, RELS, 'Relationship')) {
+    if (entry.getAttribute('TargetMode') === 'External') continue;
+    const target = entry.getAttribute('Target')!;
+    const name = new URL(target, 'https://package.test/word/document.xml').pathname.slice(1);
+    expect(parts[name]).toBeDefined();
+  }
+  const types = new DOMParser().parseFromString(xmlPart(parts, '[Content_Types].xml'), 'application/xml');
+  for (const entry of xmlElements(types, 'http://schemas.openxmlformats.org/package/2006/content-types', 'Override')) {
+    expect(parts[entry.getAttribute('PartName')!.slice(1)]).toBeDefined();
+  }
+}
+
+test('adding and removing a header across saves keeps relationship and content-type targets', async () => {
+  const { hook, save, document } = await mountHeaderFooterEditing();
   await act(async () => hook.result.current.editing.handleHeaderFooterDoubleClick('header', 1));
-  expect(host.package.headers?.size).toBe(1);
+  expect(document().package.headers?.size).toBe(1);
   const firstSave = await save();
   expect(unzipContainer(new Uint8Array(firstSave))['word/header1.xml']).toBeDefined();
   await act(async () => hook.result.current.editing.handleRemoveHeaderFooter());
-  expect(host.package.headers?.size).toBe(0);
+  expect(document().package.headers?.size).toBe(0);
   const lastSave = await save();
-  for (const saved of [firstSave, lastSave]) {
-    const parts = unzipContainer(new Uint8Array(saved));
-    const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
-    for (const entry of xmlElements(rels, RELS, 'Relationship')) {
-      if (entry.getAttribute('TargetMode') === 'External') continue;
-      const target = entry.getAttribute('Target')!;
-      const name = new URL(target, 'https://package.test/word/document.xml').pathname.slice(1);
-      expect(parts[name]).toBeDefined();
-    }
-    const types = new DOMParser().parseFromString(xmlPart(parts, '[Content_Types].xml'), 'application/xml');
-    for (const entry of xmlElements(types, 'http://schemas.openxmlformats.org/package/2006/content-types', 'Override')) {
-      expect(parts[entry.getAttribute('PartName')!.slice(1)]).toBeDefined();
-    }
-  }
+  for (const saved of [firstSave, lastSave]) expectPackageTargetsExist(saved);
   expect((await reopened(lastSave)).package.document.finalSectionProperties?.headerReferences ?? []).toEqual([]);
+});
+
+test.each(['header', 'footer'] as const)('adding and removing a %s before the first save keeps all package targets present', async (kind) => {
+  const { hook, save, document } = await mountHeaderFooterEditing();
+  const mapKey = kind === 'header' ? 'headers' : 'footers';
+  const refKey = kind === 'header' ? 'headerReferences' : 'footerReferences';
+  await act(async () => hook.result.current.editing.handleHeaderFooterDoubleClick(kind, 1));
+  expect(document().package[mapKey]?.size).toBe(1);
+  await act(async () => hook.result.current.editing.handleRemoveHeaderFooter());
+  expect(document().package[mapKey]?.size).toBe(0);
+  const saved = await save();
+  expectPackageTargetsExist(saved);
+  expect(unzipContainer(new Uint8Array(saved))[`word/${kind}1.xml`]).toBeUndefined();
+  const opened = await reopened(saved);
+  expect(opened.package.document.finalSectionProperties?.[refKey] ?? []).toEqual([]);
+  expect(opened.package[mapKey]?.size ?? 0).toBe(0);
 });
 
 test('an edit in one paragraph keeps the rest of the body byte-for-byte', async () => {
