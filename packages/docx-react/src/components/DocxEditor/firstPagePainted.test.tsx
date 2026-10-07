@@ -8,7 +8,10 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { ResidentEngineWorkerRequest } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import type {
+  ResidentEngineWorkerRequest,
+  ResidentEngineWorkerResponse,
+} from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { pagedDocx } from './__fixtures__/pagedDocx';
 import { setupWorkerEngine } from './__fixtures__/workerEngine';
 
@@ -151,15 +154,29 @@ test('each document reports its first page painted once, however often its pages
 }, 60_000);
 
 describe('DocxEditor first page painted (worker engine)', () => {
-  const workers = setupWorkerEngine();
+  let attachGate: Promise<void>;
+  let attachRequested = false;
+  const workers = setupWorkerEngine((worker) => {
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (request, transfer) => {
+      if (request.type === 'attachCanvases') {
+        attachRequested = true;
+        void attachGate.then(() => post(request, transfer));
+        return;
+      }
+      post(request, transfer);
+    };
+  });
 
   test('a document on the worker engine reports its first page painted once its canvas presents, not at layout', async () => {
-    let releaseReplays = () => {};
-    holdReplays = new Promise((done) => (releaseReplays = done));
+    let releaseAttach = () => {};
+    attachGate = new Promise<void>((done) => (releaseAttach = done));
+    const ref = createRef<Editor>();
     let painted = 0;
     try {
       const view = render(
         <DocxEditor
+          ref={ref}
           experimentalWorkerOpen
           documentBuffer={await pagedDocx(2)}
           onFirstPagePainted={() => (painted += 1)}
@@ -168,37 +185,49 @@ describe('DocxEditor first page painted (worker engine)', () => {
       await waitFor(() => expect(view.container.querySelector('.canvas-page')).not.toBeNull(), {
         timeout: 20_000,
       });
+      await waitFor(() => expect(attachRequested).toBe(true), { timeout: 20_000 });
       expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
+      expect(await ref.current!.whenLayoutComplete({ timeoutMs: 20_000 })).toBe(2);
       await act(async () => {
         await new Promise((done) => setTimeout(done, 200));
       });
       expect(painted).toBe(0);
 
-      await act(async () => releaseReplays());
+      await act(async () => releaseAttach());
       await waitFor(() => expect(painted).toBe(1), { timeout: 20_000 });
+      await act(async () => {
+        await new Promise((done) => setTimeout(done, 200));
+      });
+      expect(painted).toBe(1);
     } finally {
-      releaseReplays();
+      releaseAttach();
     }
   }, 40_000);
 });
 
 describe('DocxEditor first page preview (worker engine)', () => {
-  let painted = 0;
   let fullOpenGate: Promise<void>;
-  let fullOpenError: unknown = null;
+  const posted: ResidentEngineWorkerRequest[] = [];
   const fullOpens: ResidentEngineWorkerRequest[] = [];
+  const fullOpenReplies: ResidentEngineWorkerResponse[] = [];
   const workers = setupWorkerEngine((worker) => {
     const post = worker.postMessage.bind(worker);
+    const fullOpenIds = new Set<number>();
+    let listener: typeof worker.onmessage = null;
+    Object.defineProperty(worker, 'onmessage', {
+      get: () => (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+        if (fullOpenIds.has(event.data.id)) {
+          fullOpenReplies.push(event.data);
+          void fullOpenGate.then(() => listener?.(event));
+        } else listener?.(event);
+      },
+      set: (next: typeof worker.onmessage) => { listener = next; },
+    });
     worker.postMessage = (request, transfer) => {
+      if (request.type !== 'editModule') posted.push(request);
       if (request.type === 'open' && request.previewBlocks === undefined) {
-        try {
-          expect(painted).toBe(1);
-        } catch (error) {
-          fullOpenError = error;
-        }
         fullOpens.push(request);
-        void fullOpenGate.then(() => post(request, transfer));
-        return;
+        fullOpenIds.add(request.id);
       }
       post(request, transfer);
     };
@@ -208,6 +237,7 @@ describe('DocxEditor first page preview (worker engine)', () => {
     let releaseFullOpen = () => {};
     fullOpenGate = new Promise<void>((done) => (releaseFullOpen = done));
     const ref = createRef<Editor>();
+    let painted = 0;
     try {
       render(
         <DocxEditor
@@ -219,7 +249,15 @@ describe('DocxEditor first page preview (worker engine)', () => {
         />
       );
       await waitFor(() => expect(fullOpens).toHaveLength(1), { timeout: 20_000 });
-      if (fullOpenError) throw fullOpenError;
+      const previewOpen = posted.findIndex((request) => request.type === 'open' && request.previewBlocks !== undefined);
+      const previewBootstrap = posted.findIndex((request) => request.type === 'bootstrap' && request.opened === true);
+      expect(previewOpen).toBeGreaterThanOrEqual(0);
+      expect(previewBootstrap).toBeGreaterThan(previewOpen);
+      expect(posted.indexOf(fullOpens[0]!)).toBeGreaterThan(previewBootstrap);
+      await waitFor(() => expect(fullOpenReplies).toHaveLength(1), { timeout: 20_000 });
+      expect(fullOpenReplies[0]!.ok).toBe(true);
+      await waitFor(() => expect(painted).toBe(1), { timeout: 20_000 });
+      expect(ref.current!.getDocument()).toBeNull();
       expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
 
       await act(async () => releaseFullOpen());
