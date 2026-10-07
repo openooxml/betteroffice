@@ -701,9 +701,10 @@ impl LocalLowering {
 
     pub(crate) fn can_delete(&self, paragraph: &str, offset: u32, removed: u32) -> bool {
         removed <= 2
-            && self.seeds.get(paragraph).is_some_and(|seed| {
-                patch_part_range(seed.parts(), offset, removed, true).is_some()
-            })
+            && self
+                .seeds
+                .get(paragraph)
+                .is_some_and(|seed| patch_part_range(seed.parts(), offset, removed, true).is_some())
     }
 
     pub(crate) fn resume(&mut self) {

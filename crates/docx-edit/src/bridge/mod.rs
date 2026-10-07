@@ -508,7 +508,10 @@ fn lower_story_with_preview<T: ReadTxn>(
         let chunks = story.diff(txn, YChange::identity);
         let share_chunks = !local.blocked && !local.legacy;
         let (owned_chunks, shared_chunks) = if story_id == "body" && share_chunks {
-            (Vec::new(), Some(std::rc::Rc::new(local::SeedChunks::new(chunks))))
+            (
+                Vec::new(),
+                Some(std::rc::Rc::new(local::SeedChunks::new(chunks))),
+            )
         } else {
             (chunks, None)
         };

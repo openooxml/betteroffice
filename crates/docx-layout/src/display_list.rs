@@ -1205,7 +1205,10 @@ impl std::fmt::Debug for ResidentDisplayInput {
             .field("measured_blocks", &self.input.measured.len())
             .field("pages", &self.input.layout.pages.len());
         #[cfg(any(test, feature = "test-support"))]
-        debug.field("stale_block_pruning_passes", &self.input.stale_block_pruning_passes);
+        debug.field(
+            "stale_block_pruning_passes",
+            &self.input.stale_block_pruning_passes,
+        );
         debug.finish_non_exhaustive()
     }
 }

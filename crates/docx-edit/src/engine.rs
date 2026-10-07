@@ -14954,8 +14954,10 @@ mod tests {
         let suffix_slot = engine.render.borrow().stories["body"]
             .blocks
             .iter()
-            .position(|block| matches!(block, LayoutBlock::Paragraph(paragraph)
-                if block_key(&paragraph.id) == "00000022"))
+            .position(|block| {
+                matches!(block, LayoutBlock::Paragraph(paragraph)
+                if block_key(&paragraph.id) == "00000022")
+            })
             .unwrap();
         assert_eq!(
             engine.pagination.borrow().measured_shift_safe[suffix_slot],
@@ -15079,7 +15081,11 @@ mod tests {
         }
         certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
         certified_float_layout(&baseline, &baseline_request, RelayoutTrigger::Interactive);
-        assert!(!engine.render.borrow().stories["body"].preview_paragraph_edits.is_empty());
+        assert!(
+            !engine.render.borrow().stories["body"]
+                .preview_paragraph_edits
+                .is_empty()
+        );
         for (current, current_request) in [(&engine, &request), (&baseline, &baseline_request)] {
             let offset = certified_float_offset(current, 17);
             current
@@ -15155,8 +15161,11 @@ mod tests {
                     .has_seed(pending_id)
             );
             assert!(
-                format!("{:?}", engine.display.borrow().resident_input.as_ref().unwrap())
-                    .contains("stale_block_pruning_passes: 0")
+                format!(
+                    "{:?}",
+                    engine.display.borrow().resident_input.as_ref().unwrap()
+                )
+                .contains("stale_block_pruning_passes: 0")
             );
         }
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
@@ -15254,8 +15263,11 @@ mod tests {
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "refused region key");
             assert!(
-                format!("{:?}", engine.display.borrow().resident_input.as_ref().unwrap())
-                    .contains("stale_block_pruning_passes: 0")
+                format!(
+                    "{:?}",
+                    engine.display.borrow().resident_input.as_ref().unwrap()
+                )
+                .contains("stale_block_pruning_passes: 0")
             );
         }
     }
@@ -15491,8 +15503,8 @@ mod tests {
                 (offset + 1, 1)
             };
             if let Some(paragraph) = pending_paragraph {
-                let pending_offset = certified_float_offset(&engine, paragraph)
-                    + if same_paragraph { 3 } else { 0 };
+                let pending_offset =
+                    certified_float_offset(&engine, paragraph) + if same_paragraph { 3 } else { 0 };
                 engine
                     .edit_resident_text(
                         crate::StoryRange::new("body", pending_offset, pending_offset),
@@ -15895,11 +15907,14 @@ mod tests {
         let mut retained = HashMap::new();
         assert_certified_float_cold(&engine, &request, &mut retained);
         let cache_count = || {
-            format!("{:?}", engine.display.borrow().resident_input.as_ref().unwrap())
-                .split(',')
-                .next()
-                .unwrap()
-                .to_owned()
+            format!(
+                "{:?}",
+                engine.display.borrow().resident_input.as_ref().unwrap()
+            )
+            .split(',')
+            .next()
+            .unwrap()
+            .to_owned()
         };
         let shape_id = || {
             engine
