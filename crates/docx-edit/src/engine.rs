@@ -278,6 +278,7 @@ pub(crate) struct TypingExtraWork {
     pub(crate) seeds: usize,
     pub(crate) seed_scans: usize,
     pub(crate) preview_certifications: usize,
+    pub(crate) seed_validations: usize,
     certificate_snapshots: usize,
     measurement_attempts: usize,
     preview_shifts: usize,
@@ -289,6 +290,7 @@ thread_local! {
         seeds: 0,
         seed_scans: 0,
         preview_certifications: 0,
+        seed_validations: 0,
         certificate_snapshots: 0,
         measurement_attempts: 0,
         preview_shifts: 0,
@@ -3945,8 +3947,7 @@ impl EngineSession {
             })
         };
         self.render.borrow_mut().stories.retain(|story, _| {
-            story == "body"
-                && (preserve_patch || self.typing_epoch.get() == Some(self.doc_epoch()))
+            story == "body" && (preserve_patch || self.typing_epoch.get() == Some(self.doc_epoch()))
         });
         self.measurement.borrow_mut().templates = HashMap::new();
         self.note_separators.borrow_mut().take();
@@ -4032,6 +4033,7 @@ impl EngineSession {
         let preview_length = self.doc.story_len(&range.story)?;
         if lower_locally
             && self.local_lowering.get()
+            && seed_epoch_valid
             && range.story == "body"
             && self.pagination.borrow().measured_with_floats
             && (text.is_none() || range.start == range.end)
@@ -4046,7 +4048,18 @@ impl EngineSession {
                     }
                     let index = self.doc.paragraph_index("body").ok()?;
                     let paragraph = index.para_at(range.start)?;
-                    lowered.local.offset(&paragraph.para_id, range.start)?;
+                    let raw = index.para_span(&paragraph.para_id)?.0;
+                    let incoming = crate::bridge::local::TextEdit {
+                        paragraph: paragraph.para_id.clone(),
+                        offset: range.start.checked_sub(raw)?,
+                        removed: range.end.checked_sub(range.start)?,
+                        text: text.unwrap_or_default().to_owned(),
+                        attributes: None,
+                        epochs: (before, before.wrapping_add(1)),
+                    };
+                    if !lowered.local.can_patch_after_pending(&incoming) {
+                        return None;
+                    }
                     Some(lowered.env.clone())
                 })
             };
@@ -4176,13 +4189,11 @@ impl EngineSession {
                             .para_span(paragraph)?
                             .0;
                         if lowered.doc_epoch == before {
-                            lowered.local.refresh_seed(
+                            lowered.local.refresh_coordinates(
                                 paragraph,
                                 raw,
                                 lowered.blocks.shared(),
                                 &lowered.map,
-                                &self.doc.yrs_doc().transact(),
-                                &lowered.env,
                             )?;
                         }
                         range.start.checked_sub(raw)?
@@ -4278,6 +4289,18 @@ impl EngineSession {
             return None;
         }
         let slot = lowered.local.edit_slot(edit)?;
+        if lowered.local.deferred {
+            if !lowered.local.can_patch(edit) {
+                return None;
+            }
+            let paragraph = edit.paragraph.clone();
+            lowered.local.refresh_seed(
+                &paragraph,
+                lowered.blocks.shared(),
+                &self.doc.yrs_doc().transact(),
+                env,
+            )?;
+        }
         let replaced = slot..slot.checked_add(1)?;
         let old_block = Rc::clone(lowered.blocks.shared().get(slot)?);
         let edit = lowered.local.edit.take()?;
@@ -4567,6 +4590,7 @@ impl EngineSession {
         } else {
             crate::bridge::local::LocalLowering::new(self.local_lowering.get())
         };
+        local.retained = retained_local.map(Box::new);
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
         if !typing
@@ -4586,8 +4610,9 @@ impl EngineSession {
             (edit.epochs == (lowered.doc_epoch, epoch)
                 && lowered.env == *env
                 && lowered.media == self.doc.media_sources()
-                && retained_local
-                    .as_ref()
+                && local
+                    .retained
+                    .as_deref()
                     .unwrap_or(&lowered.local)
                     .matches_source(&self.doc))
             .then(|| crate::bridge::preview::refresh(lowered.preview.as_ref()?, edit))
@@ -4598,8 +4623,9 @@ impl EngineSession {
         } else {
             crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
         };
-        if let Some(retained) = retained_local {
-            local = retained;
+        if let Some(mut retained) = local.retained.take() {
+            retained.resume();
+            local = *retained;
         }
         let mut render = self.render.borrow_mut();
         render.generation = render.generation.wrapping_add(1);
@@ -8443,6 +8469,9 @@ impl EngineSession {
                         };
                         measured[start + offset] = entry;
                         dependencies[start + offset] = reads[offset].clone();
+                        if !float_dirty[start + offset] {
+                            reused_blocks -= 1;
+                        }
                         #[cfg(test)]
                         {
                             reused[start + offset] = false;
@@ -14798,7 +14827,16 @@ mod tests {
     ) {
         let epoch = engine.display.borrow().binary_frame_epoch;
         let frame = engine.build_display_list_frame("{}", epoch).unwrap();
-        let warm_frame = crate::frame_delta::apply_placeholder_test_frame(&frame, retained);
+        assert_returned_frame_matches_cold(engine, request, &frame, retained);
+    }
+
+    fn assert_returned_frame_matches_cold(
+        engine: &EngineSession,
+        request: &str,
+        frame: &[u8],
+        retained: &mut HashMap<u64, crate::frame_delta::TestFramePage>,
+    ) {
+        let warm_frame = crate::frame_delta::apply_placeholder_test_frame(frame, retained);
         assert_eq!(retained.len(), engine.display.borrow().pages.len());
         for snapshot in &engine.display.borrow().pages {
             let page = &retained[&snapshot.page_id];
@@ -14814,7 +14852,13 @@ mod tests {
             .unwrap();
         cold.layout_regions_for_trigger(request, None, RelayoutTrigger::Open)
             .unwrap();
-        let frame = cold.build_display_list_frame("{}", 0).unwrap();
+        let extras = engine
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .unwrap_or_else(|| "{}".to_owned());
+        let frame = cold.build_display_list_frame(&extras, 0).unwrap();
         let mut cold_retained = HashMap::new();
         let cold_frame =
             crate::frame_delta::apply_placeholder_test_frame(&frame, &mut cold_retained);
@@ -14924,6 +14968,9 @@ mod tests {
         let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9639, true);
         assert!(!engine.pagination.borrow().measured_with_floats);
         assert!(engine.regions.borrow().as_ref().unwrap().fast_path.is_none());
+        let mut retained = HashMap::new();
+        let frame = engine.build_display_list_frame("{}", 0).unwrap();
+        assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
         for text in [Some("x"), Some("y"), None, None] {
             let offset = measurement_patch_offset(&engine, 1);
             TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
@@ -14942,9 +14989,9 @@ mod tests {
                     f64::from(ticks)
                 })
                 .unwrap();
-            assert!(!frame.is_empty());
             assert_eq!(profile.lower_ms, 0.0);
             TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "refused region key");
             assert_eq!(
                 engine
@@ -14987,6 +15034,97 @@ mod tests {
         assert_local_patch_matches_cold(&engine, &request, "cross-run refusal");
         let offset = measurement_patch_offset(&engine, 1);
         local_patch_step(&engine, &request, "body", (offset, offset, Some("x")), true);
+    }
+
+    #[test]
+    fn resident_pending_float_patch_skips_seeded_cross_run_refusal() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) =
+            certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+        let offset = certified_float_offset(&engine, 1);
+        engine
+            .doc()
+            .format_range(
+                &crate::EditCtx::local("", ""),
+                crate::StoryRange::new("body", offset + 1, offset + 2),
+                &crate::InlineFormatDelta {
+                    bold: crate::Patch::Set(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        certified_float_layout(&engine, &request, RelayoutTrigger::Bulk);
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        let pending_offset = certified_float_offset(&engine, 17);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", pending_offset, pending_offset),
+                Some("pending"),
+                true,
+            )
+            .unwrap();
+        assert!(engine.render.borrow().stories["body"].local.edit.is_some());
+        let before = engine.stats();
+        let generation = engine.render.borrow().stories["body"].generation;
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset + 3),
+                None,
+                true,
+            )
+            .unwrap();
+        assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+        assert!(engine.measurement_patch().is_none());
+        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        let frame = engine.apply_and_layout("body", epoch).unwrap();
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
+        assert_local_patch_matches_cold(&engine, &request, "pending seeded cross-run refusal");
+        measurement_patch_type(&engine, certified_float_offset(&engine, 17), "x");
+        assert!(engine.measurement_patch().is_some());
+        let dirty = certified_float_dirty_segment(&engine);
+        assert_eq!(
+            certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
+            (dirty, 0),
+        );
+        assert_certified_float_cold(&engine, &request, &mut retained);
+    }
+
+    #[test]
+    fn resident_deferred_seed_validates_once_and_skips_refused_deletions() {
+        use super::lowering_fixture::{Package, para};
+
+        let bytes = Package::new(&para("10000001", &local_patch_mixed_runs())).bytes();
+        let (engine, request) = local_patch_laid_out(&bytes, 9641, true);
+        for _ in 0..2 {
+            TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+            let offset = measurement_patch_offset(&engine, 0);
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset + 2),
+                    None,
+                    true,
+                )
+                .unwrap();
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            engine.apply_and_layout("body", epoch).unwrap();
+            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_local_patch_matches_cold(&engine, &request, "repeated deferred refusal");
+        }
+        for (pass, text) in ["x", "y"].into_iter().enumerate() {
+            TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+            let offset = measurement_patch_offset(&engine, 0);
+            local_patch_step(&engine, &request, "body", (offset, offset, Some(text)), true);
+            TYPING_EXTRA_WORK.with(|work| {
+                assert_eq!(work.get().seed_validations, usize::from(pass == 0));
+            });
+        }
     }
 
     fn certified_float_dirty_segment(engine: &EngineSession) -> Vec<usize> {
@@ -18410,6 +18548,8 @@ mod tests {
                         ),
                         true,
                     );
+                } else {
+                    step(&engine, &request, "body", (0, 0, Some("x")), true);
                 }
             }
             for removed in [1, 2] {
@@ -18428,11 +18568,15 @@ mod tests {
                     (offset, offset + removed, None),
                     patched,
                 );
+                if !patched {
+                    step(&engine, &request, "body", (0, 0, Some("x")), true);
+                }
             }
         }
         for (start, end) in [(0, 2), (1, 4), (2, 6), (4, 8)] {
             let (engine, request) = local_patch_laid_out(&bytes, 9612, true);
             step(&engine, &request, "body", (start, end, None), false);
+            step(&engine, &request, "body", (0, 0, Some("x")), true);
         }
     }
 

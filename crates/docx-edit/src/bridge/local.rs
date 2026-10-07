@@ -14,6 +14,9 @@ pub(crate) struct LocalLowering {
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(super) chunks: Option<Rc<Vec<yrs::types::text::Diff<YChange>>>>,
+    pub(crate) retained: Option<Box<LocalLowering>>,
+    invalidated: BTreeSet<String>,
+    validation_epoch: u64,
     dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
     #[cfg(test)]
@@ -34,6 +37,7 @@ pub(super) struct ParagraphSeed {
     pilcrow: Option<MapRef>,
     mark_attrs: Option<Attrs>,
     pm_start: u64,
+    validated: Option<(u64, usize)>,
 }
 
 #[derive(Clone, Debug)]
@@ -573,15 +577,82 @@ impl LocalLowering {
         Some(self.seeds.get(&edit.paragraph)?.slot)
     }
 
+    pub(crate) fn can_patch(&self, edit: &TextEdit) -> bool {
+        !self.blocked
+            && edit.removed <= 2
+            && !edit
+                .attributes
+                .as_ref()
+                .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
+            && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
+                !self.invalidated.contains(&edit.paragraph)
+                    && patch_segment_bounds(&seed.segments(), edit).is_some()
+            })
+    }
+
+    pub(crate) fn can_patch_after_pending(&self, edit: &TextEdit) -> bool {
+        if edit.removed > 2 {
+            return false;
+        }
+        let Some(pending) = self
+            .edit
+            .as_ref()
+            .filter(|pending| pending.paragraph == edit.paragraph)
+        else {
+            return self.can_patch(edit);
+        };
+        self.can_patch(pending)
+            && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
+                patch_segments(&seed.segments(), pending)
+                    .is_some_and(|segments| patch_segment_bounds(&segments, edit).is_some())
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn refresh_seed<T: ReadTxn>(
+    pub(super) fn recover_seed(
+        &mut self,
+        id: &str,
+        mark: &MapRef,
+        attrs: Option<&Attrs>,
+        positions: (u32, u64, usize, u32),
+        chunks: std::ops::Range<usize>,
+        safe: bool,
+    ) {
+        let Some(retained) = self.retained.as_mut() else {
+            return;
+        };
+        if retained.invalidated.is_empty() || !retained.invalidated.remove(id) {
+            return;
+        }
+        if !safe {
+            retained.seeds.remove(id);
+            return;
+        }
+        let Some(seed) = retained.seeds.get_mut(id) else {
+            return;
+        };
+        let (raw, pm, slot, source) = positions;
+        seed.raw_start = raw;
+        seed.pm_start = pm;
+        seed.slot = slot;
+        seed.source = source;
+        seed.pilcrow = Some(mark.clone());
+        seed.mark_attrs = attrs.cloned();
+        seed.segments.clear();
+        seed.chunks = self.chunks.as_ref().map(|shared| (Rc::clone(shared), chunks));
+        seed.validated = None;
+    }
+
+    pub(crate) fn resume(&mut self) {
+        self.validation_epoch = self.validation_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn refresh_coordinates(
         &mut self,
         id: &str,
         raw: u32,
         blocks: &[Rc<LayoutBlock>],
         map: &LoweringMap,
-        txn: &T,
-        env: &RenderEnv,
     ) -> Option<()> {
         let seed = self.seeds.get_mut(id)?;
         let LayoutBlock::Paragraph(current) = blocks.get(seed.slot)?.as_ref() else {
@@ -595,6 +666,34 @@ impl LocalLowering {
         {
             return None;
         }
+        seed.raw_start = raw;
+        seed.pm_start = current.pm_start? as u64;
+        Some(())
+    }
+
+    pub(crate) fn refresh_seed<T: ReadTxn>(
+        &mut self,
+        id: &str,
+        blocks: &[Rc<LayoutBlock>],
+        txn: &T,
+        env: &RenderEnv,
+    ) -> Option<()> {
+        let seed = self.seeds.get_mut(id)?;
+        let block = blocks.get(seed.slot)?;
+        let identity = (self.validation_epoch, Rc::as_ptr(block) as usize);
+        if seed.validated == Some(identity) {
+            return Some(());
+        }
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.seed_validations += 1;
+            work.set(counts);
+        });
+        let LayoutBlock::Paragraph(current) = block.as_ref() else {
+            return None;
+        };
+        let raw = seed.raw_start;
         let pm = current.pm_start? as u64;
         let mut runs = Vec::new();
         let mut units = 0;
@@ -634,29 +733,20 @@ impl LocalLowering {
         if expected != *current {
             return None;
         }
-        seed.raw_start = raw;
-        seed.pm_start = pm;
+        seed.validated = Some(identity);
         Some(())
     }
 
     pub(crate) fn suspend(&mut self) {
         if let Some(edit) = self.edit.take() {
-            let replacement = self.seeds.get(&edit.paragraph).and_then(|seed| {
-                if edit
-                    .attributes
-                    .as_ref()
-                    .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
-                {
-                    return None;
-                }
-                update_seed_segments(&seed.segments(), &edit)
-            });
-            if let Some(segments) = replacement {
-                let seed = self.seeds.get_mut(&edit.paragraph).unwrap();
-                seed.segments = segments;
-                seed.chunks = None;
-            } else {
+            if edit
+                .attributes
+                .as_ref()
+                .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
+            {
                 self.seeds.remove(&edit.paragraph);
+            } else {
+                self.invalidated.insert(edit.paragraph);
             }
         }
         self.deferred = true;
@@ -737,6 +827,7 @@ impl LocalLowering {
         }
         seed.chunks = None;
         blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
+        seed.validated = Some((self.validation_epoch, Rc::as_ptr(&blocks[slot]) as usize));
         for block in &mut blocks[slot + 1..] {
             shift_block(Rc::make_mut(block), delta);
         }
@@ -787,59 +878,15 @@ impl LocalLowering {
     }
 }
 
-fn update_seed_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
-    let end = edit.offset.checked_add(edit.removed)?;
-    let mut updated = Vec::new();
-    let mut position = 0;
-    let mut inserted = false;
-    for segment in segments {
-        let units: Vec<_> = segment.text.encode_utf16().collect();
-        let next = position + units.len() as u32;
-        let prefix = edit.offset.saturating_sub(position).min(units.len() as u32) as usize;
-        let suffix = end.saturating_sub(position).min(units.len() as u32) as usize;
-        let left = String::from_utf16(&units[..prefix]).ok()?;
-        if !left.is_empty() {
-            push_segment(&mut updated, &left, Some(&segment.attrs));
-        }
-        if !inserted && edit.offset <= next {
-            if !edit.text.is_empty() {
-                push_segment(
-                    &mut updated,
-                    &edit.text,
-                    edit.attributes.as_ref().or(Some(&segment.attrs)),
-                );
-            }
-            inserted = true;
-        }
-        let right = String::from_utf16(&units[suffix..]).ok()?;
-        if !right.is_empty() {
-            push_segment(&mut updated, &right, Some(&segment.attrs));
-        }
-        position = next;
-    }
-    if end > position {
-        return None;
-    }
-    if !inserted && edit.offset == position && !edit.text.is_empty() {
-        push_segment(&mut updated, &edit.text, edit.attributes.as_ref());
-    }
-    Some(updated)
-}
-
-fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
-    let mut result = segments.to_vec();
-    if result.is_empty() {
+fn patch_segment_bounds(segments: &[TextSegment], edit: &TextEdit) -> Option<(usize, usize, usize)> {
+    if segments.is_empty() {
         if edit.offset != 0 || edit.removed != 0 {
             return None;
         }
-        result.push(TextSegment {
-            text: edit.text.clone(),
-            attrs: attributes(edit.attributes.as_ref()),
-        });
-        return Some(result);
+        return Some((0, 0, 0));
     }
     let mut before = 0;
-    let slot = result.iter().position(|segment| {
+    let slot = segments.iter().position(|segment| {
         let end = before + utf16_len(&segment.text);
         if edit.offset < end || (edit.removed == 0 && edit.offset == end) {
             true
@@ -848,20 +895,56 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
             false
         }
     })?;
-    let segment = &result[slot];
+    let segment = &segments[slot];
     let start = edit.offset.checked_sub(before)? as usize;
     let end = start.checked_add(edit.removed as usize)?;
-    let units: Vec<_> = segment.text.encode_utf16().collect();
-    let left = String::from_utf16(units.get(..start)?).ok()?;
-    let removed = String::from_utf16(units.get(start..end)?).ok()?;
-    let right = String::from_utf16(units.get(end..)?).ok()?;
-    if !removed.is_empty() && removed.chars().count() != 1 {
+    let mut units = 0;
+    let mut start_byte = None;
+    let mut end_byte = None;
+    for (byte, ch) in segment.text.char_indices() {
+        if units == start {
+            start_byte = Some(byte);
+        }
+        if units == end {
+            end_byte = Some(byte);
+            break;
+        }
+        units += ch.len_utf16();
+    }
+    if units == start {
+        start_byte.get_or_insert(segment.text.len());
+    }
+    if units == end {
+        end_byte.get_or_insert(segment.text.len());
+    }
+    let (start, end) = (start_byte?, end_byte?);
+    if edit.removed != 0 && segment.text[start..end].chars().count() != 1 {
         return None;
     }
+    if edit.removed != 0
+        && start == 0
+        && end == segment.text.len()
+        && edit.text.is_empty()
+        && segments.len() > 1
+    {
+        return None;
+    }
+    Some((slot, start, end))
+}
+
+fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
+    let (slot, start, end) = patch_segment_bounds(segments, edit)?;
+    if segments.is_empty() {
+        return Some(vec![TextSegment {
+            text: edit.text.clone(),
+            attrs: attributes(edit.attributes.as_ref()),
+        }]);
+    }
+    let mut result = segments.to_vec();
+    let segment = &result[slot];
+    let left = segment.text[..start].to_owned();
+    let right = segment.text[end..].to_owned();
     if edit.removed != 0 && left.is_empty() && right.is_empty() && edit.text.is_empty() {
-        if result.len() > 1 {
-            return None;
-        }
         return Some(Vec::new());
     }
     let attrs = edit

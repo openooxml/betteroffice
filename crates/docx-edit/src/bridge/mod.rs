@@ -415,7 +415,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     let mut recording = if story_id == "body" {
         preview_units
             .take()
-            .map(|units| preview::UnitRecorder::new(units, local.enabled && !local.legacy))
+            .map(|units| preview::UnitRecorder::new(units, !local.legacy))
     } else {
         None
     };
@@ -506,12 +506,13 @@ fn lower_story_with_preview<T: ReadTxn>(
         let story = story_ref(txn, story_id)?;
         let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
         let chunks = story.diff(txn, YChange::identity);
-        let (owned_chunks, shared_chunks) =
-            if story_id == "body" && !local.blocked && !local.legacy {
-                (Vec::new(), Some(std::rc::Rc::new(chunks)))
-            } else {
-                (chunks, None)
-            };
+        let (owned_chunks, shared_chunks) = if story_id == "body"
+            && ((!local.blocked && !local.legacy) || local.retained.is_some())
+        {
+            (Vec::new(), Some(std::rc::Rc::new(chunks)))
+        } else {
+            (chunks, None)
+        };
         if story_id == "body" {
             local.chunks.clone_from(&shared_chunks);
         }
@@ -613,7 +614,21 @@ fn walk_story_chunks<T: ReadTxn>(
         };
     }
     let mut plain = local::ParagraphSeed::default();
+    let recovering = local.retained.is_some();
+    let mut paragraph_chunk_start = 0;
+    let mut recovery_safe = false;
     for (chunk_index, diff) in chunks.iter().enumerate() {
+        if recovering && at_block_boundary && paragraph_start == story_index {
+            paragraph_chunk_start = chunk_index;
+            recovery_safe = pending_hidden_field_blocks.is_empty()
+                && pending_code_join.is_none()
+                && field_join.is_none()
+                && paragraph_runs.is_empty()
+                && paragraph_drawings.is_empty()
+                && story_id == "body"
+                && active_stories.len() == 1
+                && active_stories.contains("body");
+        }
         let local_safe = !local.legacy
             && !local.blocked
             && pending_hidden_field_blocks.is_empty()
@@ -680,6 +695,24 @@ fn walk_story_chunks<T: ReadTxn>(
                             .is_some_and(|id| hidden_field_blocks.contains(&id)),
                 );
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                if recovering {
+                    local.recover_seed(
+                        &para_id,
+                        pilcrow,
+                        attributes,
+                        (
+                            paragraph_start,
+                            paragraph_pm_start,
+                            blocks.len(),
+                            map.paragraph_count(),
+                        ),
+                        paragraph_chunk_start..chunk_index,
+                        recovery_safe
+                            && !hidden_field_blocks.contains(&para_id)
+                            && !values.contains_key("sectPr")
+                            && !values.contains_key("sectionBreakType"),
+                    );
+                }
                 let code_join = pending_code_join.take();
                 let sectioned =
                     values.contains_key("sectPr") || values.contains_key("sectionBreakType");
