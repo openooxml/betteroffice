@@ -5,6 +5,7 @@ import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/Rendered
 import type { DocxProposalSnapshot, YrsSession } from '@betteroffice/docx/yrs';
 import { createDocxCommandController } from '../commands/createDocxCommandStore';
 import {
+  clearPresented,
   markPresented,
   stampRevisionPreviewKey,
   stampSourceVersion,
@@ -72,11 +73,15 @@ function setup() {
     hasPendingInput: () => false,
   } as unknown as PagedEditorRef;
   const events: boolean[] = [];
+  const domZooms: (number | null)[] = [];
   const plugin = defineDocxPlugin({
     id: 'test.presented-geometry',
     createState: () => null,
     onEvent(context, event) {
-      if (event.type === 'layout-change' && event.layout) events.push(context.geometry !== null);
+      if (event.type === 'layout-change' && event.layout) {
+        events.push(context.geometry !== null);
+        domZooms.push(context.geometry?.dom.zoom ?? null);
+      }
     },
   });
   const options: UseDocxPluginHostOptions = {
@@ -97,14 +102,21 @@ function setup() {
     i18n: undefined,
     onRenderedDomContextReady: undefined,
   };
-  const { result } = renderHook(() => useDocxPluginHost(options));
+  const { result, rerender } = renderHook(
+    ({ zoom }) => useDocxPluginHost({ ...options, zoom }),
+    { initialProps: { zoom: 1 } }
+  );
   return {
     events,
+    domZooms,
     result,
     present: () => markPresented(pages, displayList),
+    presentWorker: (zoom: number) => markPresented(pages, displayList, { worker: true, zoom }),
+    holdWorker: (zoom: number) => clearPresented(pages, { worker: true, zoom }),
+    setZoom: (zoom: number) => rerender({ zoom }),
     attachLayer: () => result.current.overlayLayerRef(layer),
-    emitDom: () =>
-      result.current.onRenderedDomContext(createRenderedDomContext(pages, 1), queries),
+    emitDom: (zoom = 1) =>
+      result.current.onRenderedDomContext(createRenderedDomContext(pages, zoom), queries),
   };
 }
 
@@ -154,4 +166,59 @@ test('geometry that exists before its layout is presented adds no layout change'
 
   await rebuild();
   expect(view.events).toEqual([false, true]);
+});
+
+test('a worker presentation before its zoom context arrives delivers the new geometry once', async () => {
+  const view = setup();
+  await act(async () => {
+    view.attachLayer();
+    view.emitDom();
+    view.presentWorker(1);
+  });
+  await frames(3);
+  await act(async () => {
+    view.holdWorker(1.5);
+    view.setZoom(1.5);
+  });
+  await frames(3);
+  const before = view.events.length;
+  await act(async () => view.presentWorker(1.5));
+  await frames(3);
+  expect(view.events.length).toBe(before);
+
+  await act(async () => view.emitDom(1.5));
+  await waitFor(() => expect(view.events.length).toBe(before + 1));
+  expect(view.domZooms.at(-1)).toBe(1.5);
+  await act(async () => view.presentWorker(1.5));
+  await rebuild();
+  expect(view.events.length).toBe(before + 1);
+});
+
+test('a worker presentation refreshes current geometry once and ignores an older zoom', async () => {
+  const view = setup();
+  await act(async () => {
+    view.attachLayer();
+    view.emitDom();
+    view.presentWorker(1);
+  });
+  await frames(3);
+  await act(async () => {
+    view.holdWorker(1.5);
+    view.setZoom(1.5);
+  });
+  await act(async () => view.emitDom(1.5));
+  await frames(3);
+  const before = view.events.length;
+  await act(async () => view.presentWorker(1));
+  await frames(3);
+  expect(view.events.length).toBe(before);
+
+  const context = view.result.current.activations[0]!.context;
+  await act(async () => view.presentWorker(1.5));
+  await waitFor(() => expect(view.events.length).toBe(before + 1));
+  expect(view.domZooms.at(-1)).toBe(1.5);
+  expect(view.result.current.activations[0]!.context).not.toBe(context);
+  await act(async () => view.presentWorker(1.5));
+  await frames(3);
+  expect(view.events.length).toBe(before + 1);
 });
