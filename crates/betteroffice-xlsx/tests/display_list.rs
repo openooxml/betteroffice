@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    Cell, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, MAX_COLS, MAX_DISPLAY_CELLS,
-    MAX_ROWS, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+    Cell, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, MAX_COLS,
+    MAX_DISPLAY_CELLS, MAX_ROWS, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 
 fn workbook() -> Workbook {
@@ -170,7 +170,10 @@ fn display_lists_preserve_last_row_strip_with_frozen_pane() {
     assert_eq!(geometry.viewport_range(&viewport).0, MAX_ROWS - 1..MAX_ROWS);
     let frame = workbook.display_list(&viewport).unwrap();
     assert_eq!(frame.grid.start_row, 0);
-    assert_eq!(frame.grid.row_indices.as_deref(), Some(&[0, MAX_ROWS - 1][..]));
+    assert_eq!(
+        frame.grid.row_indices.as_deref(),
+        Some(&[0, MAX_ROWS - 1][..])
+    );
     assert_eq!(frame.grid.row_offsets, vec![0.0, 19.0, 20.0]);
     assert!(frame.commands.iter().any(|command| {
         matches!(
