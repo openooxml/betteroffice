@@ -14942,6 +14942,31 @@ mod tests {
 
     #[test]
     fn remote_checkbox_remeasurement_invalidates_cached_shift_safety() {
+        use docx_layout::display_list::Primitive;
+
+        let checkbox = |engine: &EngineSession| {
+            engine
+                .with_display_list(|list| {
+                    list.pages
+                        .iter()
+                        .flat_map(|page| &page.primitives)
+                        .find_map(|primitive| {
+                            let attrs = match primitive {
+                                Primitive::Text(run) => &run.attrs,
+                                Primitive::GlyphRun(run) => &run.attrs,
+                                _ => return None,
+                            };
+                            let widget = attrs.inline_sdt_widget.as_deref()?;
+                            if widget.kind != "checkbox" || widget.control_id != Some(4) {
+                                return None;
+                            }
+                            assert_eq!(attrs.block_key.as_deref(), Some("00000022"));
+                            Some((widget.clone(), primitive.clone()))
+                        })
+                        .expect("suffix checkbox widget")
+                })
+                .unwrap()
+        };
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -14972,8 +14997,13 @@ mod tests {
             crate::Position::new("body", certified_float_offset(&engine, 33)),
             "sdt",
             vec![
+                ("id".to_owned(), Any::Number(4.0)),
                 ("sdtType".to_owned(), Any::from("checkbox")),
                 ("checked".to_owned(), Any::Bool(false)),
+                (
+                    "content".to_owned(),
+                    Any::from_json(r#"[{"kind":"text","text":"Box","attrs":{}}]"#).unwrap(),
+                ),
             ],
         )
         .unwrap();
@@ -14991,20 +15021,36 @@ mod tests {
                 .is_none_or(|safe| safe.is_none())
         );
         assert_certified_float_cold(&engine, &request, &mut retained);
-        assert!(
-            engine
-                .with_display_list(|list| serde_json::to_string(list).unwrap())
-                .unwrap()
-                .contains("\"groupId\":\"sdt@")
-        );
+        let before = checkbox(&engine);
+        assert!(!before.0.group_id.is_empty());
+        assert_eq!(before.0.checked, Some(false));
         measurement_patch_type(&engine, certified_float_offset(&engine, 17), "y");
         assert!(engine.measurement_patch().is_some());
+        {
+            let patch = engine.measurement_patch();
+            let patch = patch.as_ref().unwrap();
+            assert!(patch.replaced.end <= suffix_slot);
+            assert_eq!(patch.shift.delta, 1);
+            let render = engine.render.borrow();
+            assert!(patch.certifies_block(render.stories["body"].blocks.as_ref(), suffix_slot));
+        }
         certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
         assert_ne!(
             engine.pagination.borrow().measured_shift_safe[suffix_slot],
             Some(true),
         );
         assert_certified_float_cold(&engine, &request, &mut retained);
+        let after = checkbox(&engine);
+        assert_eq!(after.0.pos, before.0.pos + 1);
+        assert_ne!(after.0.group_id, before.0.group_id);
+        let cold = EngineSession::new(9643);
+        cold.doc()
+            .apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        cold.layout_regions_for_trigger(&request, None, RelayoutTrigger::Open)
+            .unwrap();
+        cold.build_display_list_frame("{}", 0).unwrap();
+        assert_eq!(after, checkbox(&cold));
         assert_local_patch_matches_cold(&engine, &request, "remote checkbox followed by typing");
     }
 
