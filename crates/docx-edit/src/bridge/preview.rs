@@ -327,7 +327,7 @@ impl PreviewUnits {
 }
 
 #[cfg(test)]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RecordingWork {
     pub(crate) chunks: usize,
     pub(crate) copied_chunks: usize,
@@ -392,7 +392,11 @@ struct Refresh {
     valid: bool,
 }
 
-pub(crate) fn refresh(units: &Rc<PreviewUnits>, edit: &TextEdit) -> Option<PreviewUnits> {
+pub(crate) fn refresh(
+    units: &Rc<PreviewUnits>,
+    edit: &TextEdit,
+    paragraph_edits: &[ParagraphEdit],
+) -> Option<PreviewUnits> {
     let shift = |raw: u32| {
         if raw <= edit.range.start {
             raw
@@ -404,14 +408,29 @@ pub(crate) fn refresh(units: &Rc<PreviewUnits>, edit: &TextEdit) -> Option<Previ
     let mut edited = Vec::new();
     let mut captures = Vec::new();
     for record in &units.records {
-        let start = record.seed.as_ref()?.position.story_index;
-        let end = record.after.position.story_index;
+        let mut start = record.seed.as_ref()?.position.story_index;
+        let mut end = record.after.position.story_index;
+        let mut capture = record.capture_raw?;
+        let mut changed = false;
+        for paragraph in paragraph_edits {
+            changed |= start < paragraph.raw.end && end > paragraph.raw.start;
+            let shift_paragraph = |value: u32| {
+                if value > paragraph.raw.start {
+                    u32::try_from(i64::from(value) + paragraph.delta).ok()
+                } else {
+                    Some(value)
+                }
+            };
+            start = shift_paragraph(start)?;
+            end = shift_paragraph(end)?;
+            capture = shift_paragraph(capture)?;
+        }
         if !record.after.position.safe {
             return None;
         }
         ranges.push(shift(start)..shift(end));
-        edited.push(edit.range.start < end && edit.range.end >= start);
-        captures.push(shift(record.capture_raw?));
+        edited.push(changed || edit.range.start < end && edit.range.end >= start);
+        captures.push(shift(capture));
     }
     Some(PreviewUnits {
         records: Vec::with_capacity(units.records.len()),
@@ -808,17 +827,11 @@ pub(crate) fn lower_refreshed(
         .as_ref()
         .is_some_and(|units| units.refresh.as_ref().is_some_and(|refresh| !refresh.valid))
     {
-        #[cfg(test)]
-        let retained = local.retained.take();
         *local = if local.legacy {
             local::LocalLowering::fallback(local.enabled)
         } else {
             local::LocalLowering::new(local.enabled)
         };
-        #[cfg(test)]
-        {
-            local.retained = retained;
-        }
         return lower_recorded(doc, story, env, local, true);
     }
     if let Some(units) = preview.as_mut() {
@@ -1077,6 +1090,7 @@ fn local_certification_refresh_matches_fresh_recording() {
                     inserted: 1,
                     epochs: (0, 1),
                 },
+                &[],
             )
             .unwrap();
             let lowering = || {

@@ -1188,32 +1188,25 @@ pub struct ResidentDisplayInput {
 }
 
 impl ResidentDisplayInput {
+    #[doc(hidden)]
     pub fn defer_stale_block_pruning(&mut self, defer: bool) {
         self.input.defer_stale_block_pruning = defer;
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn stale_block_pruning_passes(&self) -> usize {
-        self.input.stale_block_pruning_passes
     }
 
     pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
         &self.input.font_chains
     }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn measured_block_count(&self) -> usize {
-        self.input.measured.len()
-    }
 }
 
 impl std::fmt::Debug for ResidentDisplayInput {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ResidentDisplayInput")
+        let mut debug = formatter.debug_struct("ResidentDisplayInput");
+        debug
             .field("measured_blocks", &self.input.measured.len())
-            .field("pages", &self.input.layout.pages.len())
-            .finish_non_exhaustive()
+            .field("pages", &self.input.layout.pages.len());
+        #[cfg(any(test, feature = "test-support"))]
+        debug.field("stale_block_pruning_passes", &self.input.stale_block_pruning_passes);
+        debug.finish_non_exhaustive()
     }
 }
 

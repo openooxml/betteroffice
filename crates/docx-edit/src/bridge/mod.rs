@@ -507,17 +507,17 @@ fn lower_story_with_preview<T: ReadTxn>(
         let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
         let chunks = story.diff(txn, YChange::identity);
         let share_chunks = !local.blocked && !local.legacy;
-        #[cfg(test)]
-        let share_chunks = share_chunks || local.retained.is_some();
         let (owned_chunks, shared_chunks) = if story_id == "body" && share_chunks {
-            (Vec::new(), Some(std::rc::Rc::new(chunks)))
+            (Vec::new(), Some(std::rc::Rc::new(local::SeedChunks::new(chunks))))
         } else {
             (chunks, None)
         };
         if story_id == "body" {
             local.chunks.clone_from(&shared_chunks);
         }
-        let chunks = shared_chunks.as_deref().unwrap_or(&owned_chunks);
+        let chunks = shared_chunks
+            .as_ref()
+            .map_or(owned_chunks.as_slice(), |chunks| chunks.diffs.as_slice());
         let initial = preview::WalkPosition::new(story_slot, pm_base, map);
         let (blocks, after, _) = walk_story_chunks(
             txn,
@@ -615,36 +615,7 @@ fn walk_story_chunks<T: ReadTxn>(
         };
     }
     let mut plain = local::ParagraphSeed::default();
-    #[cfg(test)]
-    let recovering = local.retained.is_some();
-    #[cfg(test)]
-    let mut paragraph_chunk_start = 0;
-    #[cfg(test)]
-    let mut recovery_safe = false;
-    #[cfg(test)]
-    let mut recovery_units = Vec::new();
     for (chunk_index, diff) in chunks.iter().enumerate() {
-        #[cfg(test)]
-        if recovering {
-            crate::engine::TYPING_EXTRA_WORK.with(|work| {
-                let mut counts = work.get();
-                counts.recovery_chunks += 1;
-                work.set(counts);
-            });
-        }
-        #[cfg(test)]
-        if recovering && at_block_boundary && paragraph_start == story_index {
-            recovery_units.clear();
-            paragraph_chunk_start = chunk_index;
-            recovery_safe = pending_hidden_field_blocks.is_empty()
-                && pending_code_join.is_none()
-                && field_join.is_none()
-                && paragraph_runs.is_empty()
-                && paragraph_drawings.is_empty()
-                && story_id == "body"
-                && active_stories.len() == 1
-                && active_stories.contains("body");
-        }
         let local_safe = !local.legacy
             && !local.blocked
             && pending_hidden_field_blocks.is_empty()
@@ -680,10 +651,6 @@ fn walk_story_chunks<T: ReadTxn>(
         local.observe(&mut plain, diff, txn, story_id, chunk_index, width);
         match &diff.insert {
             Out::Any(Any::String(text)) => {
-                #[cfg(test)]
-                if recovering {
-                    recovery_units.push(width);
-                }
                 let text = text.as_ref();
                 push_text_chunks(
                     &mut paragraph_runs,
@@ -718,26 +685,6 @@ fn walk_story_chunks<T: ReadTxn>(
                             .is_some_and(|id| hidden_field_blocks.contains(&id)),
                 );
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
-                #[cfg(test)]
-                if recovering {
-                    local.recover_seed(
-                        &para_id,
-                        pilcrow,
-                        attributes,
-                        (
-                            paragraph_start,
-                            paragraph_pm_start,
-                            blocks.len(),
-                            map.paragraph_count(),
-                        ),
-                        paragraph_chunk_start..chunk_index,
-                        &recovery_units,
-                        recovery_safe
-                            && !hidden_field_blocks.contains(&para_id)
-                            && !values.contains_key("sectPr")
-                            && !values.contains_key("sectionBreakType"),
-                    );
-                }
                 let code_join = pending_code_join.take();
                 let sectioned =
                     values.contains_key("sectPr") || values.contains_key("sectionBreakType");

@@ -13,10 +13,7 @@ pub(crate) struct LocalLowering {
     pub(crate) legacy: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
-    pub(super) chunks: Option<Rc<Vec<yrs::types::text::Diff<YChange>>>>,
-    #[cfg(test)]
-    pub(crate) retained: Option<Box<LocalLowering>>,
-    invalidated: BTreeSet<String>,
+    pub(super) chunks: Option<Rc<SeedChunks>>,
     validation_epoch: u64,
     dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
@@ -33,15 +30,61 @@ pub(super) struct ParagraphSeed {
     slot: usize,
     source: u32,
     segments: Vec<TextSegment>,
-    chunk_units: Vec<u32>,
-    chunks: Option<(
-        Rc<Vec<yrs::types::text::Diff<YChange>>>,
-        std::ops::Range<usize>,
-    )>,
+    chunks: Option<(Rc<SeedChunks>, std::ops::Range<usize>)>,
     pilcrow: Option<MapRef>,
     mark_attrs: Option<Attrs>,
     pm_start: u64,
     validated: Option<(u64, usize)>,
+}
+
+#[derive(Debug)]
+pub(super) struct SeedChunks {
+    pub(super) diffs: Vec<yrs::types::text::Diff<YChange>>,
+    pub(super) units: Vec<std::cell::Cell<u32>>,
+}
+
+impl SeedChunks {
+    pub(super) fn new(diffs: Vec<yrs::types::text::Diff<YChange>>) -> Self {
+        Self {
+            units: vec![std::cell::Cell::new(0); diffs.len()],
+            diffs,
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn paragraph_seeds_share_chunk_widths() {
+    let doc = EditingDoc::new(9643);
+    doc.create_story("body", "α😀β", "Normal", "left").unwrap();
+    doc.split_paragraph(
+        &crate::EditCtx::local("", ""),
+        crate::Position::new("body", 3),
+        None,
+    )
+    .unwrap();
+    let env = RenderEnv::default();
+    let mut local = LocalLowering::new(true);
+    let lowered =
+        yrs_doc_to_mapped_layout_blocks_with_revealable(&doc, "body", &env, &mut local).unwrap();
+    let mut disabled = LocalLowering::new(false);
+    let cold =
+        yrs_doc_to_mapped_layout_blocks_with_revealable(&doc, "body", &env, &mut disabled).unwrap();
+    assert_eq!(lowered, cold);
+    assert_eq!(local.seeds.len(), 2);
+    assert_eq!(local.materialized_text_units, 0);
+    let mut seeds = local.seeds.values();
+    let (chunks, first) = seeds.next().unwrap().chunks.as_ref().unwrap();
+    let (shared, second) = seeds.next().unwrap().chunks.as_ref().unwrap();
+    assert!(Rc::ptr_eq(chunks, shared));
+    assert_ne!(first, second);
+    assert_eq!(chunks.diffs.len(), chunks.units.len());
+    for seed in local.seeds.values() {
+        assert!(seed.segments.is_empty());
+        for part in seed.parts() {
+            assert_eq!(part.units, utf16_len(part.text));
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -70,9 +113,12 @@ impl ParagraphSeed {
             work.set(counts);
         });
         let mut segments = Vec::new();
-        for (diff, &units) in chunks[range.clone()].iter().zip(&self.chunk_units) {
+        for (diff, units) in chunks.diffs[range.clone()]
+            .iter()
+            .zip(&chunks.units[range.clone()])
+        {
             if let Out::Any(Any::String(text)) = &diff.insert {
-                push_segment(&mut segments, text, diff.attributes.as_deref(), units);
+                push_segment(&mut segments, text, diff.attributes.as_deref(), units.get());
             }
         }
         Cow::Owned(segments)
@@ -87,13 +133,13 @@ impl ParagraphSeed {
                 attrs: Some(&segment.attrs),
             })
             .chain(self.chunks.iter().flat_map(|(chunks, range)| {
-                chunks[range.clone()]
+                chunks.diffs[range.clone()]
                     .iter()
-                    .zip(&self.chunk_units)
-                    .filter_map(|(diff, &units)| match &diff.insert {
+                    .zip(&chunks.units[range.clone()])
+                    .filter_map(|(diff, units)| match &diff.insert {
                         Out::Any(Any::String(text)) => Some(SegmentPart {
                             text: text.as_ref(),
-                            units,
+                            units: units.get(),
                             attrs: diff.attributes.as_deref(),
                         }),
                         _ => None,
@@ -482,7 +528,7 @@ impl LocalLowering {
             Out::Any(Any::String(_)) if story != "body" || paragraph.tainted => {}
             Out::Any(Any::String(text)) => {
                 if let Some(chunks) = &self.chunks {
-                    paragraph.chunk_units.push(units);
+                    chunks.units[chunk_index].set(units);
                     if let Some((_, range)) = &mut paragraph.chunks {
                         range.end = chunk_index + 1;
                     } else {
@@ -640,107 +686,24 @@ impl LocalLowering {
                 .attributes
                 .as_ref()
                 .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
-            && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
-                !self.invalidated.contains(&edit.paragraph)
-                    && patch_part_bounds(seed.parts(), edit).is_some()
-            })
+            && self
+                .seeds
+                .get(&edit.paragraph)
+                .is_some_and(|seed| patch_part_bounds(seed.parts(), edit).is_some())
     }
 
-    pub(crate) fn can_patch_after_pending(&self, edit: &TextEdit) -> bool {
-        if edit.removed > 2 {
-            return false;
-        }
+    pub(crate) fn can_patch_before_insertion(&self, paragraph: &str) -> bool {
         let Some(pending) = self.edit.as_ref() else {
-            return self.can_patch(edit);
-        };
-        if pending.paragraph != edit.paragraph {
             return false;
-        }
-        self.can_patch(pending)
-            && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
-                let Some((slot, start, end)) = patch_part_bounds(seed.parts(), pending) else {
-                    return false;
-                };
-                let mut parts: Vec<_> = seed.parts().collect();
-                let inserted = SegmentPart {
-                    text: &pending.text,
-                    units: utf16_len(&pending.text),
-                    attrs: pending.attributes.as_ref(),
-                };
-                if parts.is_empty() {
-                    parts.push(inserted);
-                } else {
-                    let segment = parts[slot];
-                    let before: u32 = parts[..slot].iter().map(|part| part.units).sum();
-                    let left_units = pending.offset - before;
-                    let replacement = [
-                        SegmentPart {
-                            text: &segment.text[..start],
-                            units: left_units,
-                            attrs: segment.attrs,
-                        },
-                        SegmentPart {
-                            attrs: pending.attributes.as_ref().or(segment.attrs),
-                            ..inserted
-                        },
-                        SegmentPart {
-                            text: &segment.text[end..],
-                            units: segment.units - left_units - pending.removed,
-                            attrs: segment.attrs,
-                        },
-                    ];
-                    parts.splice(slot..=slot, replacement);
-                }
-                patch_part_bounds(parts.into_iter().filter(|part| !part.text.is_empty()), edit)
-                    .is_some()
-            })
+        };
+        pending.paragraph == paragraph && self.can_patch(pending)
     }
 
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn recover_seed(
-        &mut self,
-        id: &str,
-        mark: &MapRef,
-        attrs: Option<&Attrs>,
-        positions: (u32, u64, usize, u32),
-        chunks: std::ops::Range<usize>,
-        chunk_units: &[u32],
-        safe: bool,
-    ) {
-        let Some(retained) = self.retained.as_mut() else {
-            return;
-        };
-        #[cfg(test)]
-        crate::engine::TYPING_EXTRA_WORK.with(|work| {
-            let mut counts = work.get();
-            counts.seed_recoveries += 1;
-            work.set(counts);
-        });
-        if retained.invalidated.is_empty() || !retained.invalidated.remove(id) {
-            return;
-        }
-        if !safe {
-            retained.seeds.remove(id);
-            return;
-        }
-        let Some(seed) = retained.seeds.get_mut(id) else {
-            return;
-        };
-        let (raw, pm, slot, source) = positions;
-        seed.raw_start = raw;
-        seed.pm_start = pm;
-        seed.slot = slot;
-        seed.source = source;
-        seed.pilcrow = Some(mark.clone());
-        seed.mark_attrs = attrs.cloned();
-        seed.segments.clear();
-        seed.chunk_units = chunk_units.to_vec();
-        seed.chunks = self
-            .chunks
-            .as_ref()
-            .map(|shared| (Rc::clone(shared), chunks));
-        seed.validated = None;
+    pub(crate) fn can_delete(&self, paragraph: &str, offset: u32, removed: u32) -> bool {
+        removed <= 2
+            && self.seeds.get(paragraph).is_some_and(|seed| {
+                patch_part_range(seed.parts(), offset, removed, true).is_some()
+            })
     }
 
     pub(crate) fn resume(&mut self) {
@@ -749,25 +712,6 @@ impl LocalLowering {
 
     pub(crate) fn discard_pending(&mut self) {
         self.suspend();
-        for id in &self.invalidated {
-            self.seeds.remove(id);
-        }
-    }
-
-    pub(crate) fn resume_without_recovery(&mut self, fallback: &mut Self) {
-        for id in std::mem::take(&mut self.invalidated) {
-            let seed = fallback.seeds.remove(&id);
-            #[cfg(test)]
-            if seed.is_some() {
-                self.discarded.remove(&id);
-            } else {
-                self.discarded.insert(id.clone());
-            }
-            if let Some(seed) = seed {
-                self.seeds.insert(id, seed);
-            }
-        }
-        self.resume();
     }
 
     #[cfg(test)]
@@ -880,17 +824,21 @@ impl LocalLowering {
 
     pub(crate) fn suspend(&mut self) {
         if let Some(edit) = self.edit.take() {
-            if edit
-                .attributes
-                .as_ref()
-                .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
-            {
-                self.seeds.remove(&edit.paragraph);
-            } else {
-                self.invalidated.insert(edit.paragraph);
-            }
+            self.discard_seed(&edit.paragraph);
         }
         self.deferred = true;
+    }
+
+    pub(crate) fn discard_seed(&mut self, paragraph: &str) {
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.seed_removals += 1;
+            work.set(counts);
+        });
+        self.seeds.remove(paragraph);
+        #[cfg(test)]
+        self.discarded.insert(paragraph.to_owned());
     }
 
     pub(crate) fn patch<T: ReadTxn>(
@@ -967,7 +915,6 @@ impl LocalLowering {
             self.materialized_text_units += old_units;
         }
         seed.chunks = None;
-        seed.chunk_units.clear();
         blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
         seed.validated = Some((self.validation_epoch, Rc::as_ptr(&blocks[slot]) as usize));
         for block in &mut blocks[slot + 1..] {
@@ -1048,48 +995,65 @@ fn same_part_attributes(left: Option<&Attrs>, right: Option<&Attrs>) -> bool {
         })
 }
 
-fn patch_part_bounds<'a>(
-    parts: impl Iterator<Item = SegmentPart<'a>> + Clone,
-    edit: &TextEdit,
-) -> Option<(usize, usize, usize)> {
-    if parts.clone().next().is_none() {
-        if edit.offset != 0 || edit.removed != 0 {
-            return None;
-        }
-        return Some((0, 0, 0));
-    }
+fn patch_part_range<'a>(
+    parts: impl Iterator<Item = SegmentPart<'a>>,
+    offset: u32,
+    removed: u32,
+    empty: bool,
+) -> Option<(usize, SegmentPart<'a>, usize, usize)> {
     let mut before = 0_u32;
     let mut previous = None;
     let mut remaining = parts.enumerate();
     let (slot, segment) = loop {
         let (slot, segment) = remaining.next()?;
         let end = before.checked_add(segment.units)?;
-        if edit.offset < end || (edit.removed == 0 && edit.offset == end) {
+        if offset < end || (removed == 0 && offset == end) {
             break (slot, segment);
         }
         before = end;
         previous = Some(segment);
     };
-    let start = edit.offset.checked_sub(before)? as usize;
-    let end = start.checked_add(edit.removed as usize)?;
+    let start = offset.checked_sub(before)? as usize;
+    let end = start.checked_add(removed as usize)?;
     if end > segment.units as usize {
         return None;
     }
+    if removed == 2 && segment.units as usize == segment.text.len() {
+        return None;
+    }
     let next = remaining.next().map(|(_, part)| part);
-    if edit.removed != 0
+    if removed != 0
         && start == 0
         && end == segment.units as usize
-        && edit.text.is_empty()
+        && empty
         && (previous.is_some() || next.is_some())
         && !previous.is_some_and(|part| same_part_attributes(part.attrs, segment.attrs))
         && !next.is_some_and(|part| same_part_attributes(part.attrs, segment.attrs))
     {
         return None;
     }
+    Some((slot, segment, start, end))
+}
+
+fn patch_part_bounds<'a>(
+    parts: impl Iterator<Item = SegmentPart<'a>> + Clone,
+    edit: &TextEdit,
+) -> Option<(usize, usize, usize)> {
+    if parts.clone().next().is_none() {
+        return (edit.offset == 0 && edit.removed == 0).then_some((0, 0, 0));
+    }
+    let (slot, segment, start, end) =
+        patch_part_range(parts, edit.offset, edit.removed, edit.text.is_empty())?;
     let mut units = 0;
     let mut start_byte = None;
     let mut end_byte = None;
     for (byte, ch) in segment.text.char_indices() {
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.preflight_text_units += ch.len_utf16();
+            work.set(counts);
+        });
         if units == start {
             start_byte = Some(byte);
         }

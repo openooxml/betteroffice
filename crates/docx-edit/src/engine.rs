@@ -280,8 +280,8 @@ pub(crate) struct TypingExtraWork {
     pub(crate) preview_certifications: usize,
     pub(crate) seed_validations: usize,
     pub(crate) seed_materializations: usize,
-    pub(crate) recovery_chunks: usize,
-    pub(crate) seed_recoveries: usize,
+    pub(crate) seed_removals: usize,
+    pub(crate) preflight_text_units: usize,
     pub(crate) seed_refreshes: usize,
     certificate_snapshots: usize,
     measurement_attempts: usize,
@@ -296,8 +296,8 @@ thread_local! {
         preview_certifications: 0,
         seed_validations: 0,
         seed_materializations: 0,
-        recovery_chunks: 0,
-        seed_recoveries: 0,
+        seed_removals: 0,
+        preflight_text_units: 0,
         seed_refreshes: 0,
         certificate_snapshots: 0,
         measurement_attempts: 0,
@@ -4044,7 +4044,8 @@ impl EngineSession {
             && seed_epoch_valid
             && range.story == "body"
             && self.pagination.borrow().measured_with_floats
-            && (text.is_none() || range.start == range.end)
+            && text.is_some()
+            && range.start == range.end
             && text.is_none_or(|text| !text.chars().any(|ch| matches!(ch, '\r' | '\n')))
         {
             let pending_env = {
@@ -4056,16 +4057,7 @@ impl EngineSession {
                     }
                     let index = self.doc.paragraph_index("body").ok()?;
                     let paragraph = index.para_at(range.start)?;
-                    let raw = index.para_span(&paragraph.para_id)?.0;
-                    let incoming = crate::bridge::local::TextEdit {
-                        paragraph: paragraph.para_id.to_string(),
-                        offset: range.start.checked_sub(raw)?,
-                        removed: range.end.checked_sub(range.start)?,
-                        text: text.unwrap_or_default().to_owned(),
-                        attributes: None,
-                        epochs: (before, before.wrapping_add(1)),
-                    };
-                    if !lowered.local.can_patch_after_pending(&incoming) {
+                    if !lowered.local.can_patch_before_insertion(&paragraph.para_id) {
                         return None;
                     }
                     Some(lowered.env.clone())
@@ -4105,6 +4097,7 @@ impl EngineSession {
             None
         };
         let mut attrs = None;
+        let mut single_delete = false;
         let measurement_patch = self.measurement_patch().take();
         let ctx = crate::EditCtx::local("", "");
         let receipt = match text {
@@ -4115,7 +4108,9 @@ impl EngineSession {
                 crate::FormatPolicy::Inherit,
                 |effective| attrs = Some(effective.clone()),
             )?,
-            None => self.doc.delete_range(&ctx, range.clone())?,
+            None => self
+                .doc
+                .delete_range_observed(&ctx, range.clone(), |single| single_delete = single)?,
         };
         if let Some(before) = index_epoch {
             match text {
@@ -4208,9 +4203,16 @@ impl EngineSession {
                     } else {
                         lowered.local.offset(paragraph, range.start)?
                     };
+                    let removed = range.end.checked_sub(range.start)?;
+                    if text.is_none()
+                        && (!single_delete || !lowered.local.can_delete(paragraph, offset, removed))
+                    {
+                        lowered.local.discard_seed(paragraph);
+                        return None;
+                    }
                     Some(crate::bridge::local::TextEdit {
                         offset,
-                        removed: range.end.checked_sub(range.start)?,
+                        removed,
                         paragraph: paragraph.clone(),
                         text: text.unwrap_or_default().to_owned(),
                         attributes: attrs,
@@ -4604,9 +4606,6 @@ impl EngineSession {
             lowered.shift_preview_positions();
         }
         let refreshed = self.render.borrow().stories.get(story).and_then(|lowered| {
-            if typing && !lowered.preview_paragraph_edits.is_empty() {
-                return None;
-            }
             #[cfg(test)]
             if !self.preview_refresh.get() {
                 return None;
@@ -4619,7 +4618,13 @@ impl EngineSession {
                     .as_ref()
                     .unwrap_or(&lowered.local)
                     .matches_source(&self.doc))
-            .then(|| crate::bridge::preview::refresh(lowered.preview.as_ref()?, edit))
+            .then(|| {
+                crate::bridge::preview::refresh(
+                    lowered.preview.as_ref()?,
+                    edit,
+                    &lowered.preview_paragraph_edits,
+                )
+            })
             .flatten()
         });
         let (blocks, map, revealable_blocks, preview) = if let Some(units) = refreshed {
@@ -4628,8 +4633,12 @@ impl EngineSession {
             crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
         };
         if let Some(mut retained) = retained_local {
-            retained.resume_without_recovery(&mut local);
-            local = retained;
+            if local.blocked {
+                retained.resume();
+                local = retained;
+            } else {
+                local.deferred = true;
+            }
         }
         let mut render = self.render.borrow_mut();
         render.generation = render.generation.wrapping_add(1);
@@ -8082,7 +8091,7 @@ impl EngineSession {
         let mut measured = Vec::with_capacity(blocks.len());
         for (index, candidate) in candidates.into_iter().enumerate() {
             if shifted_reuse.get(index) != Some(&true)
-                && (!reused[index] || (measurement_patch.is_some() && candidate.is_some()))
+                && (!reused[index] || candidate.is_some())
                 && let Some(safe) = pagination.measured_shift_safe.get_mut(index)
             {
                 *safe = None;
@@ -8290,6 +8299,9 @@ impl EngineSession {
                     reused[index] = true;
                 }
             } else {
+                if let Some(safe) = pagination.measured_shift_safe.get_mut(index) {
+                    *safe = None;
+                }
                 let mut owned = next_block.clone();
                 resolve_line_unit_spacing(
                     &mut owned,
@@ -8472,6 +8484,9 @@ impl EngineSession {
                             }
                         };
                         measured[start + offset] = entry;
+                        if let Some(safe) = pagination.measured_shift_safe.get_mut(start + offset) {
+                            *safe = None;
+                        }
                         dependencies[start + offset] = reads[offset].clone();
                         if !float_dirty[start + offset] {
                             reused_blocks -= 1;
@@ -14913,6 +14928,185 @@ mod tests {
         );
     }
 
+    fn assert_refusal_work(seed_removals: usize) {
+        TYPING_EXTRA_WORK.with(|work| {
+            assert_eq!(
+                work.get(),
+                TypingExtraWork {
+                    seed_removals,
+                    ..Default::default()
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn remote_checkbox_remeasurement_invalidates_cached_shift_safety() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) =
+            certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        measurement_patch_type(&engine, certified_float_offset(&engine, 17), "x");
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        let suffix_slot = engine.render.borrow().stories["body"]
+            .blocks
+            .iter()
+            .position(|block| matches!(block, LayoutBlock::Paragraph(paragraph)
+                if block_key(&paragraph.id) == "00000022"))
+            .unwrap();
+        assert_eq!(
+            engine.pagination.borrow().measured_shift_safe[suffix_slot],
+            Some(true),
+        );
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        let peer = EditingDoc::new(9642);
+        peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+            .unwrap();
+        peer.insert_embed(
+            &crate::EditCtx::local("", ""),
+            crate::Position::new("body", certified_float_offset(&engine, 33)),
+            "sdt",
+            vec![
+                ("sdtType".to_owned(), Any::from("checkbox")),
+                ("checked".to_owned(), Any::Bool(false)),
+            ],
+        )
+        .unwrap();
+        engine
+            .doc()
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        assert!(
+            engine
+                .pagination
+                .borrow()
+                .measured_shift_safe
+                .get(suffix_slot)
+                .is_none_or(|safe| safe.is_none())
+        );
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        assert!(
+            engine
+                .with_display_list(|list| serde_json::to_string(list).unwrap())
+                .unwrap()
+                .contains("\"groupId\":\"sdt@")
+        );
+        measurement_patch_type(&engine, certified_float_offset(&engine, 17), "y");
+        assert!(engine.measurement_patch().is_some());
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        assert_ne!(
+            engine.pagination.borrow().measured_shift_safe[suffix_slot],
+            Some(true),
+        );
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        assert_local_patch_matches_cold(&engine, &request, "remote checkbox followed by typing");
+    }
+
+    #[test]
+    fn first_ascii_selection_refusal_skips_prefix_scans() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        for prefix in ["a".repeat(4096), format!("{}aa", "α😀".repeat(1024))] {
+            let (engine, request) =
+                certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+            let start = certified_float_offset(&engine, 17);
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", start),
+                    &prefix,
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            certified_float_layout(&engine, &request, RelayoutTrigger::Bulk);
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            let offset =
+                certified_float_offset(&engine, 17) + prefix.encode_utf16().count() as u32 - 2;
+            TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset + 2),
+                    None,
+                    true,
+                )
+                .unwrap();
+            assert_refusal_work(1);
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let frame = engine.apply_and_layout("body", epoch).unwrap();
+            assert!(engine.measurement_patch().is_none());
+            assert_refusal_work(1);
+            assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
+            assert_local_patch_matches_cold(&engine, &request, "first ASCII selection refusal");
+        }
+    }
+
+    #[test]
+    fn applied_patch_then_refusal_reuses_preview_records() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, request) =
+            certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+        let (baseline, baseline_request) =
+            certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+        baseline.set_local_lowering(false);
+        for (current, current_request) in [(&engine, &request), (&baseline, &baseline_request)] {
+            let env = current.render.borrow().stories["body"].env.clone();
+            current
+                .lower_story_into_cache("body", current.doc_epoch(), &env)
+                .unwrap();
+            certified_float_layout(current, current_request, RelayoutTrigger::Bulk);
+            assert!(current.render.borrow().stories["body"].preview.is_some());
+        }
+        let mut retained = HashMap::new();
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        for current in [&engine, &baseline] {
+            let offset = certified_float_offset(current, 1);
+            current
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset),
+                    Some("x"),
+                    true,
+                )
+                .unwrap();
+        }
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        certified_float_layout(&baseline, &baseline_request, RelayoutTrigger::Interactive);
+        assert!(!engine.render.borrow().stories["body"].preview_paragraph_edits.is_empty());
+        for (current, current_request) in [(&engine, &request), (&baseline, &baseline_request)] {
+            let offset = certified_float_offset(current, 17);
+            current
+                .edit_resident_text(
+                    crate::StoryRange::new("body", offset, offset + 2),
+                    None,
+                    true,
+                )
+                .unwrap();
+            certified_float_layout(current, current_request, RelayoutTrigger::Interactive);
+        }
+        let render = engine.render.borrow();
+        let baseline_render = baseline.render.borrow();
+        let preview = render.stories["body"].preview.as_ref().unwrap();
+        let expected = baseline_render.stories["body"].preview.as_ref().unwrap();
+        assert!(expected.work.reused_units > 0);
+        assert_eq!(preview.work, expected.work);
+        assert_eq!(
+            preview.snapshot(engine.doc()),
+            expected.snapshot(baseline.doc())
+        );
+        drop(baseline_render);
+        drop(render);
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        assert_local_patch_matches_cold(&engine, &request, "patch followed by preview refresh");
+    }
+
     #[test]
     fn resident_refused_float_keys_skip_patch_work_and_resume_local_lowering() {
         let fonts = docx_layout::MeasureFonts::default();
@@ -14952,7 +15146,7 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
-            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_refusal_work(usize::from(text == Some("x")));
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
             assert_certified_float_cold(&engine, &request, &mut retained);
             assert!(
@@ -14960,15 +15154,9 @@ mod tests {
                     .local
                     .has_seed(pending_id)
             );
-            assert_eq!(
-                engine
-                    .display
-                    .borrow()
-                    .resident_input
-                    .as_ref()
-                    .unwrap()
-                    .stale_block_pruning_passes(),
-                0,
+            assert!(
+                format!("{:?}", engine.display.borrow().resident_input.as_ref().unwrap())
+                    .contains("stale_block_pruning_passes: 0")
             );
         }
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
@@ -15065,15 +15253,9 @@ mod tests {
             TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "refused region key");
-            assert_eq!(
-                engine
-                    .display
-                    .borrow()
-                    .resident_input
-                    .as_ref()
-                    .unwrap()
-                    .stale_block_pruning_passes(),
-                0,
+            assert!(
+                format!("{:?}", engine.display.borrow().resident_input.as_ref().unwrap())
+                    .contains("stale_block_pruning_passes: 0")
             );
         }
     }
@@ -15106,7 +15288,7 @@ mod tests {
             );
             assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
             assert!(engine.measurement_patch().is_none());
-            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_refusal_work(usize::from(paragraph == 18));
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
         }
         let before = engine.stats();
@@ -15117,7 +15299,7 @@ mod tests {
             before.lower_cache_misses + 1
         );
         assert!(engine.measurement_patch().is_none());
-        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        assert_refusal_work(2);
         SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
         assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
         assert_local_patch_matches_cold(&engine, &request, "queued eligible paragraphs");
@@ -15161,7 +15343,7 @@ mod tests {
                 before.lower_cache_misses + 1
             );
             assert!(engine.measurement_patch().is_none());
-            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_refusal_work(1);
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
@@ -15271,7 +15453,7 @@ mod tests {
             engine.stats().lower_cache_misses,
             before.lower_cache_misses + 1
         );
-        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        assert_refusal_work(1);
         assert_local_patch_matches_cold(&engine, &request, "cross-run refusal");
         let offset = measurement_patch_offset(&engine, 1);
         local_patch_step(&engine, &request, "body", (offset, offset, Some("x")), true);
@@ -15282,7 +15464,9 @@ mod tests {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-        for pending in [false, true] {
+        for pending_paragraph in [None, Some(17), Some(1)] {
+            let pending = pending_paragraph.is_some();
+            let same_paragraph = pending_paragraph == Some(1);
             let (engine, request) =
                 certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
             let offset = certified_float_offset(&engine, 1);
@@ -15301,13 +15485,14 @@ mod tests {
             let mut retained = HashMap::new();
             assert_certified_float_cold(&engine, &request, &mut retained);
             let offset = certified_float_offset(&engine, 1);
-            let (start, removed) = if pending {
+            let (start, removed) = if pending && !same_paragraph {
                 (offset, 3)
             } else {
                 (offset + 1, 1)
             };
-            if pending {
-                let pending_offset = certified_float_offset(&engine, 17);
+            if let Some(paragraph) = pending_paragraph {
+                let pending_offset = certified_float_offset(&engine, paragraph)
+                    + if same_paragraph { 3 } else { 0 };
                 engine
                     .edit_resident_text(
                         crate::StoryRange::new("body", pending_offset, pending_offset),
@@ -15336,7 +15521,7 @@ mod tests {
                 generation
             );
             assert!(engine.measurement_patch().is_none());
-            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_refusal_work(1 + usize::from(pending && !same_paragraph));
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
             assert_eq!(
@@ -15345,7 +15530,7 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
-            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_refusal_work(1 + usize::from(pending && !same_paragraph));
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "seeded cross-run refusal");
             measurement_patch_type(&engine, certified_float_offset(&engine, 18), "x");
@@ -15360,7 +15545,7 @@ mod tests {
     }
 
     #[test]
-    fn typing_extra_work_counts_seed_materialization_and_recovery() {
+    fn typing_extra_work_counts_production_seed_bookkeeping() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -15375,7 +15560,7 @@ mod tests {
             )
             .unwrap();
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
-        let (mut retained, env) = {
+        let (mut local, env, blocks, map) = {
             let mut render = engine.render.borrow_mut();
             let lowered = render.stories.get_mut("body").unwrap();
             let _ = lowered.local.snapshot(engine.doc(), &lowered.map);
@@ -15385,29 +15570,25 @@ mod tests {
                     crate::bridge::local::LocalLowering::new(false),
                 ),
                 lowered.env.clone(),
+                lowered.blocks.shared().to_vec(),
+                Rc::clone(&lowered.map),
             )
         };
         TYPING_EXTRA_WORK.with(|work| assert!(work.get().seed_materializations > 0));
-        retained.suspend();
-        let mut local = crate::bridge::local::LocalLowering::fallback(false);
-        local.retained = Some(Box::new(retained));
-        let (blocks, map, _) = crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
-            engine.doc(),
-            "body",
-            &env,
-            &mut local,
-        )
-        .unwrap();
+        assert!(local.can_patch(local.edit.as_ref().unwrap()));
+        TYPING_EXTRA_WORK.with(|work| assert!(work.get().preflight_text_units > 0));
+        local.suspend();
+        assert!(!local.has_seed("00000012"));
         TYPING_EXTRA_WORK.with(|work| {
-            assert!(work.get().recovery_chunks > 0);
-            assert!(work.get().seed_recoveries > 0);
+            assert_eq!(work.get().seed_removals, 1);
         });
-        let blocks: Vec<_> = blocks.into_iter().map(Rc::new).collect();
-        let mut retained = local.retained.take().unwrap();
-        retained.refresh_seeds(&blocks, &map);
-        retained
+        local.discard_pending();
+        local.resume();
+        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get().seed_removals, 1));
+        local.refresh_seeds(&blocks, &map);
+        local
             .refresh_seed(
-                "00000012",
+                "00000013",
                 &blocks,
                 &engine.doc().yrs_doc().transact(),
                 &env,
@@ -15437,7 +15618,7 @@ mod tests {
                 .unwrap();
             let epoch = engine.display.borrow().binary_frame_epoch;
             engine.apply_and_layout("body", epoch).unwrap();
-            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_refusal_work(1);
             assert_local_patch_matches_cold(&engine, &request, "repeated deferred refusal");
         }
         for (pass, text) in ["x", "y"].into_iter().enumerate() {
@@ -15714,13 +15895,11 @@ mod tests {
         let mut retained = HashMap::new();
         assert_certified_float_cold(&engine, &request, &mut retained);
         let cache_count = || {
-            engine
-                .display
-                .borrow()
-                .resident_input
-                .as_ref()
+            format!("{:?}", engine.display.borrow().resident_input.as_ref().unwrap())
+                .split(',')
+                .next()
                 .unwrap()
-                .measured_block_count()
+                .to_owned()
         };
         let shape_id = || {
             engine
