@@ -491,7 +491,7 @@ impl Session {
         let display_list = self
             .workbook
             .print_display_list(SheetId(args.sheet), range, &args.metrics, args.gridlines)
-            .map_err(|e| e.to_string())?;
+            .map_err(display_error)?;
         serde_json::to_string(&display_list).map_err(|e| e.to_string())
     }
 
@@ -506,7 +506,7 @@ impl Session {
         let display_list = self
             .workbook
             .display_list_for(SheetId(sheet), &viewport)
-            .map_err(|error| error.to_string())?;
+            .map_err(display_error)?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
 
@@ -523,7 +523,7 @@ impl Session {
         let display_list = self
             .workbook
             .display_list(&viewport)
-            .map_err(|error| error.to_string())?;
+            .map_err(display_error)?;
         let built = now();
         let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
         let encoded = now();
@@ -1151,6 +1151,20 @@ pub fn export_xlsx_markdown_json(
 pub fn render_xlsx_markdown_json(content: &str, options: &str) -> Result<String, String> {
     betteroffice_xlsx::render_xlsx_markdown_json(content, options)
         .map_err(|error| error.to_string())
+}
+
+fn display_error(error: Error) -> String {
+    let message = error.to_string();
+    match error {
+        Error::DisplayTooLarge { cells, max } => serde_json::json!({
+            "code": "displayTooLarge",
+            "cells": cells,
+            "maxCells": max,
+            "message": message,
+        })
+        .to_string(),
+        _ => message,
+    }
 }
 
 fn calculation_options(now_serial: Option<f64>) -> CalculationOptions {

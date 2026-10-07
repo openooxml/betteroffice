@@ -144,11 +144,14 @@ impl AxisLayout {
             }
         }
 
-        if frozen < limit && frozen_extent < extent {
+        let sheet_extent = edge(limit);
+        if frozen < limit && frozen_extent < extent && frozen_extent + scroll < sheet_extent {
             let body_extent = extent - frozen_extent;
             let origin = frozen_extent + scroll;
             let first = at(origin).max(frozen).min(limit - 1);
-            let last = at(origin + body_extent).max(first).min(limit - 1);
+            let last = at((origin + body_extent).min(sheet_extent))
+                .max(first)
+                .min(limit - 1);
             for index in first..=last {
                 let raw_start = edge(index) - scroll;
                 let raw_end = edge(index + 1) - scroll;
@@ -283,6 +286,9 @@ fn emit_grid_segments(
     print: Option<&PrintMetrics>,
     color: Arc<str>,
 ) -> Vec<DrawCmd> {
+    if rows.tracks.is_empty() || cols.tracks.is_empty() {
+        return Vec::new();
+    }
     let merges: Vec<_> = merges
         .iter()
         .filter(|range| {

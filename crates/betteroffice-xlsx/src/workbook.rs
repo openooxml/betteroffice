@@ -4324,11 +4324,6 @@ fn validate_display_region(
     viewport: &Viewport,
 ) -> Result<()> {
     validate_viewport(viewport)?;
-    let right = viewport.x + viewport.width;
-    let bottom = viewport.y + viewport.height;
-    if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
-        return Err(Error::InvalidViewport);
-    }
     let (rows, columns) = geometry.viewport_range(viewport);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane

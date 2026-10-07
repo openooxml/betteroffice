@@ -653,6 +653,11 @@ impl XlsxDocument {
     }
 }
 
+#[wasm_bindgen(js_name = displayListCellLimit)]
+pub fn display_list_cell_limit() -> f64 {
+    betteroffice_xlsx::MAX_DISPLAY_CELLS as f64
+}
+
 /// Export `.xlsx` bytes as read: stored formula results, no clock.
 #[wasm_bindgen(js_name = exportXlsxStructuredJson)]
 pub fn export_xlsx_structured_json(bytes: &[u8], options: &str) -> Result<String, JsValue> {
