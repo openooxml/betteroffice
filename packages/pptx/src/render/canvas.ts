@@ -444,24 +444,25 @@ function drawTiled(
   const width = sourceWidth(source);
   const height = sourceHeight(source);
   if (width <= 0 || height <= 0) return;
-  const left = Math.round(clampCrop(image.crop?.left) * width);
-  const top = Math.round(clampCrop(image.crop?.top) * height);
-  const right = width - Math.round(clampCrop(image.crop?.right) * width);
-  const bottom = height - Math.round(clampCrop(image.crop?.bottom) * height);
+  const decodeScale = imageDecodeScale(source);
+  const originalWidth = width * decodeScale.x;
+  const originalHeight = height * decodeScale.y;
+  const left = Math.round(clampCrop(image.crop?.left) * originalWidth) / decodeScale.x;
+  const top = Math.round(clampCrop(image.crop?.top) * originalHeight) / decodeScale.y;
+  const right = (originalWidth - Math.round(clampCrop(image.crop?.right) * originalWidth)) / decodeScale.x;
+  const bottom = (originalHeight - Math.round(clampCrop(image.crop?.bottom) * originalHeight)) / decodeScale.y;
   if (right <= left || bottom <= top) return;
   const cropped = left > 0 || top > 0 || right < width || bottom < height;
-  const pattern = ctx.createPattern(
-    cropped ? croppedTile(source, left, top, right - left, bottom - top) : source,
-    'repeat'
-  );
+  const tileSource = cropped ? croppedTile(source, left, top, right - left, bottom - top) : source;
+  const pattern = ctx.createPattern(tileSource, 'repeat');
   if (!pattern) return;
   ctx.save();
   buildImageOutline(ctx, image);
   ctx.clip();
-  const decodeScale = imageDecodeScale(source);
+  const tileDecodeScale = imageDecodeScale(tileSource);
   pattern.setTransform(
     new DOMMatrix().translateSelf(image.x, image.y)
-      .scaleSelf(tile.scaleX * decodeScale.x, tile.scaleY * decodeScale.y)
+      .scaleSelf(tile.scaleX * tileDecodeScale.x, tile.scaleY * tileDecodeScale.y)
   );
   ctx.fillStyle = pattern;
   ctx.fillRect(image.x, image.y, image.w, image.h);
@@ -477,10 +478,12 @@ function croppedTile(
   height: number
 ): CanvasImageSource {
   try {
-    const canvas = offscreen(width, height);
+    const canvas = offscreen(Math.max(1, Math.ceil(width)), Math.max(1, Math.ceil(height)));
     const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
     if (!canvas || !ctx) return source;
-    ctx.drawImage(source, x, y, width, height, 0, 0, width, height);
+    ctx.drawImage(source, x, y, width, height, 0, 0, canvas.width, canvas.height);
+    const scale = imageDecodeScale(source);
+    setImageDecodeScale(canvas, { x: scale.x * width / canvas.width, y: scale.y * height / canvas.height });
     return canvas as CanvasImageSource;
   } catch {
     return source;

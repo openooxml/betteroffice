@@ -77,16 +77,17 @@ export function frameImages(options: { maxDecodedBytes?: number } = {}): {
     retainedBytes = 0;
   };
   const acquire = (
-    read: (id: string) => Uint8Array | undefined, errorMessage: string, ignoreErrors = false
+    read: (id: string) => Uint8Array | undefined, errorMessage: string, ignoreErrors = false,
+    contains?: (id: string) => boolean
   ): PaintImageResolver => {
     const held = new Map<string, CachedImage>();
     let released = false;
     const resolve: CanvasImageResolver = (id) => {
-      if (disposed || released) return Promise.resolve(null);
-      const bytes = read(id);
-      if (!bytes) return Promise.resolve(null);
+      if (disposed || released || (contains && !contains(id))) return Promise.resolve(null);
       let image = held.get(id) ?? cache.get(id);
       if (!image) {
+        const bytes = read(id);
+        if (!bytes) return Promise.resolve(null);
         const entry: CachedImage = {
           promise: Promise.resolve(null), source: null, references: 0, retained: true, closed: false, bytes: 0,
         };
@@ -135,7 +136,7 @@ export function frameImages(options: { maxDecodedBytes?: number } = {}): {
     resolve: (frame) => acquire((id) => {
       const bytes = frame.media.get(id);
       return bytes && !isTiff(bytes) ? bytes : undefined;
-    }, 'Unable to decode slide image', true),
+    }, 'Unable to decode slide image', true, (id) => frame.media.has(id)),
     resolver: (read, errorMessage) => Object.assign(async (id: string) => {
       const resolve = acquire(read, errorMessage);
       try { return await resolve(id); } finally { resolve.release(); }
