@@ -441,7 +441,7 @@ struct UnitRecord {
     seed: Option<Rc<BoundaryState>>,
     after: Rc<BoundaryState>,
     capture_raw: Option<u32>,
-    local_stateful: bool,
+    local_stateful: Option<bool>,
 }
 
 struct Window {
@@ -462,16 +462,16 @@ struct Window {
 pub(super) struct UnitRecorder {
     units: PreviewUnits,
     window: Option<Window>,
-    certify: bool,
+    certify_local: bool,
 }
 
 impl UnitRecorder {
-    pub(super) fn new(mut units: PreviewUnits, certify: bool) -> Self {
-        units.untracked_state |= !certify;
+    pub(super) fn new(mut units: PreviewUnits, certify_local: bool) -> Self {
+        units.untracked_state |= !certify_local;
         Self {
             units,
             window: None,
-            certify,
+            certify_local,
         }
     }
 
@@ -496,6 +496,8 @@ impl UnitRecorder {
         }
         raw >= range.start
             && (refresh.edited[refresh.cursor]
+                || self.certify_local
+                    && refresh.previous.records[refresh.cursor].local_stateful.is_none()
                 || raw == range.start
                 || raw == refresh.captures[refresh.cursor]
                 || raw == range.end)
@@ -581,7 +583,7 @@ impl UnitRecorder {
             });
         }
         let window = self.window.as_mut().unwrap();
-        if self.certify {
+        if self.certify_local {
             #[cfg(test)]
             crate::engine::TYPING_EXTRA_WORK.with(|work| {
                 let mut counts = work.get();
@@ -655,7 +657,9 @@ impl UnitRecorder {
         let previous = window
             .reused
             .map(|index| &self.units.refresh.as_ref().unwrap().previous.records[index]);
-        window.local_stateful |= !window.position.safe || !position.safe || reads.hidden_fields;
+        if self.certify_local {
+            window.local_stateful |= !window.position.safe || !position.safe || reads.hidden_fields;
+        }
         if reads.ids.is_empty() && previous.is_none() {
             self.units.untracked_state |= window.local_stateful;
             return;
@@ -688,8 +692,10 @@ impl UnitRecorder {
             pm,
             seed: window.seed,
             capture_raw: window.capture_raw,
-            local_stateful: window.local_stateful
-                || previous.is_some_and(|record| record.local_stateful),
+            local_stateful: self.certify_local.then(|| {
+                window.local_stateful
+                    || previous.is_some_and(|record| record.local_stateful == Some(true))
+            }),
             after: Rc::new(if let Some(previous) = previous {
                 previous
                     .after
@@ -836,9 +842,12 @@ fn replace_positions<T>(
     entries.sort_by_key(key);
 }
 
-pub(crate) fn targets(units: &PreviewUnits, changed: &BTreeSet<String>) -> bool {
-    units.untracked_state
-        || units.records.is_empty()
+pub(crate) fn targets(
+    units: &PreviewUnits,
+    changed: &BTreeSet<String>,
+    local: &local::LocalLowering,
+) -> bool {
+    local.enabled && (units.untracked_state || units.records.is_empty())
         || units
             .records
             .iter()
@@ -875,7 +884,7 @@ pub(crate) fn replay(
             continue;
         }
         if local.enabled
-            && (record.local_stateful
+            && (record.local_stateful != Some(false)
                 || record
                     .chunks
                     .iter()
@@ -1012,4 +1021,72 @@ pub(crate) fn splice(
         record.ids = Rc::new(replay.ids);
     }
     local.refresh_seeds(blocks, map);
+}
+
+#[cfg(test)]
+#[test]
+fn local_certification_refresh_matches_fresh_recording() {
+    for previous_enabled in [false, true] {
+        for (enabled, legacy) in [(false, false), (true, false), (true, true)] {
+            let doc = EditingDoc::new(75272);
+            crate::seed_from_docx(&doc, &crate::engine::preview_fixture::nested()).unwrap();
+            let env = RenderEnv::default();
+            let (blocks, map, _, previous) = lower_recorded(
+                &doc,
+                "body",
+                &env,
+                &mut local::LocalLowering::new(previous_enabled),
+                true,
+            )
+            .unwrap();
+            let previous = Rc::new(previous.unwrap());
+            if !previous_enabled {
+                for record in &previous.records {
+                    assert_eq!(record.local_stateful, None);
+                }
+                let changed = BTreeSet::from(["unused".to_owned()]);
+                assert!(!targets(&previous, &changed, &local::LocalLowering::new(false)));
+                let local = local::LocalLowering::new(true);
+                assert!(targets(&previous, &changed, &local));
+                let current: Vec<_> = blocks.into_iter().map(Rc::new).collect();
+                assert!(replay(&doc, &env, &previous, &changed, &current, &map, &local).is_none());
+            }
+            let record = previous.records.last().unwrap();
+            let raw = record.seed.as_ref().unwrap().position.story_index + 1;
+            doc.insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", raw),
+                "x",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+            let units = refresh(
+                &previous,
+                &TextEdit {
+                    range: raw..raw,
+                    inserted: 1,
+                    epochs: (0, 1),
+                },
+            )
+            .unwrap();
+            let lowering = || {
+                if legacy {
+                    local::LocalLowering::fallback(enabled)
+                } else {
+                    local::LocalLowering::new(enabled)
+                }
+            };
+            crate::engine::TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+            let (_, _, _, refreshed) =
+                lower_refreshed(&doc, "body", &env, &mut lowering(), units).unwrap();
+            if !enabled || legacy {
+                crate::engine::TYPING_EXTRA_WORK.with(|work| {
+                    assert_eq!(work.get().preview_certifications, 0);
+                });
+            }
+            let (_, _, _, fresh) =
+                lower_recorded(&doc, "body", &env, &mut lowering(), true).unwrap();
+            assert_eq!(refreshed.unwrap().snapshot(&doc), fresh.unwrap().snapshot(&doc));
+        }
+    }
 }

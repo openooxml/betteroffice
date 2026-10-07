@@ -4458,7 +4458,7 @@ impl EngineSession {
             }
             lowered.shift_preview_positions();
             let units = lowered.preview.as_ref()?;
-            if crate::bridge::preview::targets(units, &changed) {
+            if crate::bridge::preview::targets(units, &changed, &lowered.local) {
                 let replays = crate::bridge::preview::replay(
                     &self.doc,
                     env,
