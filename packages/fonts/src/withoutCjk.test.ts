@@ -1,9 +1,21 @@
-import { expect, mock, test } from 'bun:test';
+import { afterEach, expect, mock, test } from 'bun:test';
 
-const importCjk = mock((): { CJK_FONT_ASSET_URLS: Record<string, () => URL> } => {
+type CjkAddon = { CJK_FONT_ASSET_URLS?: unknown };
+
+const missingCjkAddon = (): CjkAddon => {
   throw new Error("Cannot find package '@betteroffice/fonts-cjk'");
+};
+const importCjk = mock(missingCjkAddon);
+mock.module('@betteroffice/fonts-cjk', () => ({
+  then(resolve: (addon: CjkAddon) => void, reject: (error: unknown) => void) {
+    Promise.resolve().then(importCjk).then(resolve, reject);
+  },
+}));
+
+afterEach(() => {
+  importCjk.mockReset();
+  importCjk.mockImplementation(missingCjkAddon);
 });
-mock.module('@betteroffice/fonts-cjk', importCjk);
 
 test('missing CJK assets fall back without hiding unknown asset errors', async () => {
   const { BUNDLED_FONTS, loadBundledFontBytes, resolveMetricCompatFace } =
@@ -59,6 +71,21 @@ test('CJK provider loaders return shipped bytes without changing resolver metada
   expect(await provider.resolveScriptFallback('cjk-sc', true, true)!()).toBe(sans);
 });
 
+test('invalid CJK add-on exports reject without Latin fallback and remain retryable', async () => {
+  const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
+  const face = resolveScriptFallbackFace('cjk-sc', false, false)!;
+  let attempts = 0;
+  for (const addon of [{}, { CJK_FONT_ASSET_URLS: null }, { CJK_FONT_ASSET_URLS: 'invalid' }]) {
+    importCjk.mockImplementation(() => addon);
+    for (let retry = 0; retry < 2; retry++) {
+      await expect(loadBundledFontBytes(face)).rejects.toThrow(
+        /^Invalid CJK_FONT_ASSET_URLS export from @betteroffice\/fonts-cjk$/
+      );
+      expect(importCjk).toHaveBeenCalledTimes(++attempts);
+    }
+  }
+});
+
 test('CJK import failures reject without Latin fallback and retry after recovery', async () => {
   const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
   const face = { ...resolveScriptFallbackFace('cjk-sc', false, false)!, byteLength: 4 };
@@ -66,7 +93,6 @@ test('CJK import failures reject without Latin fallback and retry after recovery
   importCjk.mockImplementation(() => {
     throw failure;
   });
-  mock.module('@betteroffice/fonts-cjk', importCjk);
 
   await expect(loadBundledFontBytes(face)).rejects.toBe(failure);
 
@@ -75,7 +101,6 @@ test('CJK import failures reject without Latin fallback and retry after recovery
   importCjk.mockImplementation(() => ({
     CJK_FONT_ASSET_URLS: { [face.file]: () => url },
   }));
-  mock.module('@betteroffice/fonts-cjk', importCjk);
   const realFetch = globalThis.fetch;
   const fetchCjk = mock(async () => new Response(expected));
   globalThis.fetch = fetchCjk as unknown as typeof fetch;
