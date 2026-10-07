@@ -31,18 +31,18 @@ describe('display list viewport limits', () => {
       const corner = handle.cellRect(0, LAST_ROW, LAST_COL);
       const viewport = { x: corner.x, y: corner.y, width: corner.w * 4, height: corner.h * 4 };
       const frame = handle.displayList(viewport);
-      expect(frame.grid.startRow).toBe(LAST_ROW);
-      expect(frame.grid.startCol).toBe(LAST_COL);
-      expect(frame.grid.rowOffsets).toEqual([0, corner.h]);
-      expect(frame.grid.colOffsets).toEqual([0, corner.w]);
+      expect(frame.grid!.startRow).toBe(LAST_ROW);
+      expect(frame.grid!.startCol).toBe(LAST_COL);
+      expect(frame.grid!.rowOffsets).toEqual([0, corner.h]);
+      expect(frame.grid!.colOffsets).toEqual([0, corner.w]);
       expect(frame.commands.some((command) => command.op === 'text' && command.text === 'edge')).toBe(true);
       expect(handle.displayListProfiled(viewport).displayList).toEqual(frame);
       expect(JSON.parse(workbookDisplayListJson(handle, viewport, 0))).toEqual(frame);
       const outside = handle.displayList({
         x: corner.x + corner.w * 2, y: corner.y + corner.h * 2, width: 200, height: 100,
       });
-      expect(outside.grid.rowOffsets).toEqual([]);
-      expect(outside.grid.colOffsets).toEqual([]);
+      expect(outside.grid!.rowOffsets).toEqual([]);
+      expect(outside.grid!.colOffsets).toEqual([]);
       expect(outside.commands).toHaveLength(1);
     } finally {
       handle.dispose();

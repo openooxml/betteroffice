@@ -24,7 +24,10 @@ fn workbook() -> Workbook {
 #[test]
 fn display_lists_clamp_past_grid_end() {
     let workbook = workbook();
-    let geometry = GridGeometry::new(workbook.sheet(SheetId(0)).unwrap(), &workbook.model().styles);
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
     let x = geometry.col_x(MAX_COLS - 1);
     let y = geometry.row_y(MAX_ROWS - 1);
     let col_width = geometry.col_x(MAX_COLS) - x;
@@ -55,7 +58,10 @@ fn display_lists_clamp_past_grid_end() {
 #[test]
 fn display_lists_beyond_grid_end_have_no_tracks() {
     let workbook = workbook();
-    let geometry = GridGeometry::new(workbook.sheet(SheetId(0)).unwrap(), &workbook.model().styles);
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
     let right = geometry.col_x(MAX_COLS) + 128.0;
     let bottom = geometry.row_y(MAX_ROWS) + 40.0;
     for (x, y) in [(right, bottom), (right, 0.0), (0.0, bottom)] {
@@ -76,6 +82,67 @@ fn display_lists_beyond_grid_end_have_no_tracks() {
         assert_eq!(frame.commands.len(), 1);
         assert!(matches!(frame.commands[0], DrawCmd::FillRect { .. }));
     }
+}
+
+#[test]
+fn display_lists_custom_dimensions_clamp_at_grid_boundaries() {
+    let mut sheet = Sheet::new("Data");
+    sheet.col_widths.insert(3, 8.44);
+    sheet.row_heights.insert(3, 15.1);
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
+    let right = geometry.col_x(MAX_COLS);
+    let bottom = geometry.row_y(MAX_ROWS);
+    for (x, y, width, height) in [
+        (right, 0.0, 200.0, 6_000_000.0),
+        (right + 128.0, 0.0, 200.0, 6_000_000.0),
+        (0.0, bottom, right, 100.0),
+        (0.0, bottom + 40.0, right, 100.0),
+    ] {
+        let viewport = Viewport {
+            x,
+            y,
+            width,
+            height,
+        };
+        let (rows, cols) = geometry.viewport_range(&viewport);
+        let frame = workbook.display_list(&viewport).unwrap();
+        if x >= right {
+            assert_eq!(cols, MAX_COLS..MAX_COLS);
+            assert!(frame.grid.col_offsets.is_empty());
+        }
+        if y >= bottom {
+            assert_eq!(rows, MAX_ROWS..MAX_ROWS);
+            assert!(frame.grid.row_offsets.is_empty());
+        }
+        assert_eq!(frame.commands.len(), 1);
+        assert!(matches!(frame.commands[0], DrawCmd::FillRect { .. }));
+    }
+
+    let viewport = Viewport {
+        x: right - 32.0,
+        y: bottom - 8.0,
+        width: 32.0,
+        height: 8.0,
+    };
+    assert_eq!(
+        geometry.viewport_range(&viewport),
+        (MAX_ROWS - 1..MAX_ROWS, MAX_COLS - 1..MAX_COLS)
+    );
+    let frame = workbook.display_list(&viewport).unwrap();
+    assert_eq!(frame.grid.start_row, MAX_ROWS - 1);
+    assert_eq!(frame.grid.start_col, MAX_COLS - 1);
+    assert_eq!(frame.grid.row_offsets.len(), 2);
+    assert_eq!(frame.grid.col_offsets.len(), 2);
+    assert_eq!(frame.grid.row_offsets[1], viewport.height);
+    assert_eq!(frame.grid.col_offsets[1], viewport.width);
 }
 
 #[test]
