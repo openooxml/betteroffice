@@ -1227,18 +1227,52 @@ fn measure_paragraph_with_context(
     #[cfg(test)]
     EXTENT_MEASURE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let (extent, dependencies) = FontChainDependencies::capture(|| {
-        if !content_width.is_finite() || content_width <= 0.0 {
-            synthetic_paragraph_extent(paragraph, content_width)
-        } else {
-            crate::typed_measure::measure_paragraph(
-                paragraph,
-                content_width,
-                config,
-                floating_zones,
-                cumulative_y,
-            )
-            .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+        let measure = |paragraph: &ParagraphBlock| {
+            if !content_width.is_finite() || content_width <= 0.0 {
+                synthetic_paragraph_extent(paragraph, content_width)
+            } else {
+                crate::typed_measure::measure_paragraph(
+                    paragraph,
+                    content_width,
+                    config,
+                    floating_zones,
+                    cumulative_y,
+                )
+                .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+            }
+        };
+        let mut extent = measure(paragraph);
+        if extent.lines.len() == 1
+            && let Some(attrs) = &paragraph.attrs
+            && let Some(size) = attrs.default_font_size.filter(|size| *size > 0.0)
+            && attrs.horizontal_rules.is_empty()
+            && attrs.list_marker.as_deref().is_none_or(str::is_empty)
+            && !paragraph.runs.is_empty()
+            && paragraph.runs.iter().all(|run| {
+                matches!(run, Run::Text(text)
+                    if text.fmt.font_size.is_some_and(|run_size| run_size > size)
+                        && (attrs.doc_grid_pitch_px.is_none()
+                            || text.fmt.snap_to_grid != Some(false))
+                        && text.text.chars().all(|ch| matches!(ch, ' ' | '\u{3000}')))
+            })
+        {
+            let mark_extent = measure(&ParagraphBlock {
+                runs: Vec::new(),
+                ..paragraph.clone()
+            });
+            let line = &mut extent.lines[0];
+            if let [mark_line] = mark_extent.lines.as_slice()
+                && mark_line.line_height < line.line_height
+                && mark_extent.total_height < extent.total_height
+                && mark_line.float_skip_before == line.float_skip_before
+            {
+                line.line_height = mark_line.line_height;
+                line.ascent = mark_line.ascent;
+                line.descent = mark_line.descent;
+                extent.total_height = mark_extent.total_height;
+            }
         }
+        extent
     });
     let mut extent = extent;
     measure_horizontal_rules(paragraph, &mut extent);
@@ -3145,6 +3179,42 @@ mod tests {
             font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
             defaults: json!({"fontFamily": "Liberation Sans", "fontSize": 12}),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn grid_spacers_with_run_opt_out_keep_original_height_between_mark_and_run() {
+        let fonts = crate::MeasureFonts::default();
+        let _fonts = fonts.enter();
+        let config = cache_measurement_config();
+        for run_snaps in [[false, false], [false, true], [true, false]] {
+            let paragraph: ParagraphBlock = serde_json::from_value(json!({
+                "id": "grid-spacer",
+                "attrs": {"defaultFontSize": 9, "docGridPitchPx": 20},
+                "runs": [
+                    {"kind": "text", "text": " ", "fontSize": 18, "snapToGrid": run_snaps[0]},
+                    {"kind": "text", "text": " ", "fontSize": 18, "snapToGrid": run_snaps[1]}
+                ]
+            }))
+            .unwrap();
+            let original =
+                crate::typed_measure::measure_paragraph(&paragraph, 300.0, &config, None, 0.0)
+                    .unwrap();
+            let mut ungridded = paragraph.clone();
+            ungridded.attrs.as_mut().unwrap().doc_grid_pitch_px = None;
+            assert_eq!(
+                original,
+                crate::typed_measure::measure_paragraph(&ungridded, 300.0, &config, None, 0.0)
+                    .unwrap()
+            );
+            ungridded.runs.clear();
+            let mark =
+                crate::typed_measure::measure_paragraph(&ungridded, 300.0, &config, None, 0.0)
+                    .unwrap();
+            assert!(mark.total_height < 20.0 && 20.0 < original.total_height);
+            let actual = measure_paragraph(&paragraph, 300.0, &config).unwrap();
+            assert_eq!(actual.total_height, original.total_height);
+            assert_eq!(actual.lines, original.lines);
         }
     }
 
