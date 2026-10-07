@@ -52,6 +52,8 @@ use crate::structured::{
     ExportFailureCode, ExportRead, ExportRefusal, PageExportOptions, RevisionView, StoryKind,
 };
 
+const PREVIEW_PARAGRAPH_EDIT_CAP: usize = 16;
+
 #[derive(Debug)]
 struct LoweredStory {
     generation: u64,
@@ -4447,6 +4449,9 @@ impl EngineSession {
                 && previous.pm.start == shift.pm.start
             {
                 previous.delta += shift.delta;
+            } else if lowered.preview_paragraph_edits.len() >= PREVIEW_PARAGRAPH_EDIT_CAP {
+                lowered.preview = None;
+                lowered.preview_paragraph_edits.clear();
             } else {
                 lowered.preview_paragraph_edits.push(shift);
             }
@@ -15165,7 +15170,7 @@ mod tests {
         assert_eq!(
             preview.work,
             crate::bridge::preview::RecordingWork {
-                position_steps: 6,
+                position_steps: expected.work.refresh_records,
                 ..expected.work.clone()
             },
         );
@@ -15182,6 +15187,12 @@ mod tests {
     #[test]
     fn alternating_preview_patches_bound_refusal_refresh_work() {
         let (engine, request) = alternating_preview_patch_engine();
+        let records = engine.render.borrow().stories["body"]
+            .preview
+            .as_ref()
+            .unwrap()
+            .raw_ranges()
+            .len();
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
         let offset = measurement_patch_offset(&engine, 0);
         engine
@@ -15194,22 +15205,13 @@ mod tests {
         assert_refusal_work(1, 0);
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout("body", epoch).unwrap();
-        TYPING_EXTRA_WORK.with(|work| {
-            assert_eq!(
-                work.get(),
-                TypingExtraWork {
-                    seed_removals: 1,
-                    preview_position_steps: 1598,
-                    ..Default::default()
-                },
-            );
-        });
+        assert_refusal_work(1, 0);
         {
             let render = engine.render.borrow();
             let work = &render.stories["body"].preview.as_ref().unwrap().work;
-            assert_eq!(work.refresh_records, 200);
-            assert_eq!(work.position_steps, 1598);
-            assert_eq!(work.reused_units, 200);
+            assert_eq!(work.refresh_records, records);
+            assert_eq!(work.position_steps, records * 16);
+            assert_eq!(work.reused_units, records);
         }
         assert_local_patch_matches_cold(&engine, &request.to_string(), "alternating patch refusal");
     }
@@ -15226,6 +15228,12 @@ mod tests {
             assert_eq!(work.get().preview_position_steps, 0);
             assert_eq!(work.get().preview_shifts, 0);
         });
+        {
+            let render = engine.render.borrow();
+            let work = &render.stories["body"].preview.as_ref().unwrap().work;
+            assert_eq!(work.refresh_records, 0);
+            assert_eq!(work.position_steps, 0);
+        }
         engine
             .layout_document_with_regions_retained_json(&request.to_string())
             .unwrap();
@@ -15235,6 +15243,12 @@ mod tests {
     #[test]
     fn alternating_preview_patches_skip_unused_shifts_and_bound_replay_work() {
         let (engine, mut request) = alternating_preview_patch_engine();
+        let records = engine.render.borrow().stories["body"]
+            .preview
+            .as_ref()
+            .unwrap()
+            .raw_ranges()
+            .len();
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
         request["renderEnv"]["revisionPreview"]["unused"] = json!("rejected");
         engine
@@ -15246,7 +15260,7 @@ mod tests {
         });
         assert_eq!(
             engine.render.borrow().stories["body"].preview_paragraph_edits.len(),
-            200,
+            16,
         );
         assert_local_patch_matches_cold(&engine, &request.to_string(), "unused preview decision");
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
@@ -15255,14 +15269,54 @@ mod tests {
             .layout_document_with_regions_retained_json(&request.to_string())
             .unwrap();
         TYPING_EXTRA_WORK.with(|work| {
-            assert_eq!(work.get().preview_position_steps, 1598);
-            assert_eq!(work.get().preview_shifts, 200);
+            assert_eq!(work.get().preview_position_steps, records * 16);
+            assert_eq!(work.get().preview_shifts, 16);
         });
         assert_local_patch_matches_cold(
             &engine,
             &request.to_string(),
             "alternating preview shifts",
         );
+    }
+
+    #[test]
+    fn alternating_preview_patches_past_cap_drop_preview_before_refusal() {
+        let (engine, request) = alternating_preview_patch_engine();
+        measurement_patch_type(&engine, measurement_patch_offset(&engine, 1), "x");
+        {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            assert!(lowered.preview.is_some());
+            assert_eq!(lowered.preview_paragraph_edits.len(), 16);
+        }
+        measurement_patch_type(&engine, measurement_patch_offset(&engine, 0), "x");
+        {
+            let render = engine.render.borrow();
+            let lowered = &render.stories["body"];
+            assert!(lowered.preview.is_none());
+            assert!(lowered.preview_paragraph_edits.is_empty());
+        }
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        let offset = measurement_patch_offset(&engine, 0);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset + 2),
+                None,
+                true,
+            )
+            .unwrap();
+        assert_refusal_work(1, 0);
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        assert_refusal_work(1, 0);
+        {
+            let render = engine.render.borrow();
+            let work = &render.stories["body"].preview.as_ref().unwrap().work;
+            assert_eq!(work.refresh_records, 0);
+            assert_eq!(work.position_steps, 0);
+            assert_eq!(work.reused_units, 0);
+        }
+        assert_local_patch_matches_cold(&engine, &request.to_string(), "preview cap refusal");
     }
 
     fn alternating_preview_patch_engine() -> (EngineSession, serde_json::Value) {
@@ -15282,14 +15336,14 @@ mod tests {
         let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9644, true);
         let mut request: serde_json::Value = serde_json::from_str(&request).unwrap();
         local_patch_preview_warm_up(&engine, &mut request);
-        for index in 0..200 {
+        for index in 0..PREVIEW_PARAGRAPH_EDIT_CAP {
             measurement_patch_type(&engine, measurement_patch_offset(&engine, index % 2), "x");
         }
         {
             let render = engine.render.borrow();
             let lowered = &render.stories["body"];
             assert_eq!(lowered.preview.as_ref().unwrap().raw_ranges().len(), 200);
-            assert_eq!(lowered.preview_paragraph_edits.len(), 200);
+            assert_eq!(lowered.preview_paragraph_edits.len(), 16);
         }
         (engine, request)
     }
