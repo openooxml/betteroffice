@@ -679,7 +679,7 @@ export function CanvasPagesView({
       const signature = `${activePageIds.join(',')}|${dpr}|${zoom}|${caretColor}`;
       if (pages.length > 0 || signature !== offscreenSignatureRef.current) {
         offscreenSignatureRef.current = signature;
-        if (host) clearPresented(host);
+        if (host) clearPresented(host, { worker: true, zoom });
         const pendingAttach = { generation: replayGeneration, displayList };
         pendingAttachRef.current = pendingAttach;
         void offscreenReplay.attach(pages, activePageIds, dpr, zoom, caretStyle).then((attached) => {
@@ -706,7 +706,7 @@ export function CanvasPagesView({
           pendingAttachRef.current = null;
           const current = pendingAttach.generation === replayGenerationRef.current;
           if (attached && current && innerHostRef.current) {
-            markPresented(innerHostRef.current, pendingAttach.displayList, { worker: true });
+            markPresented(innerHostRef.current, pendingAttach.displayList, { worker: true, zoom });
           }
         }, () => {
           if (pendingAttachRef.current === pendingAttach) pendingAttachRef.current = null;
@@ -722,7 +722,7 @@ export function CanvasPagesView({
           pendingAttach.displayList = displayList;
         } else if (offscreenAttachedRef.current && host) {
           // The worker presents a frame before it replies with it, so these pages show no other.
-          markPresented(host, displayList, { worker: true });
+          markPresented(host, displayList, { worker: true, zoom });
         }
         // Heal any publish lost to ordering (StrictMode remount, late
         // resolution): the worker is attached and this pass kept it active.

@@ -27,6 +27,7 @@ import type { EditorMode } from '../components/DocxEditor/internals/editing-mode
 import {
   isPresented,
   onPresented,
+  presentationOptionsOf,
   sourceVersionOf,
   presentedWorkerVersion,
 } from '../components/DocxEditor/internals/layoutProvenance';
@@ -136,6 +137,14 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
       commands: () => latest.current.commands,
       translate: (key) => translateRef.current(key),
       geometry: () => geometryRef.current,
+      geometryReady() {
+        const geometry = geometryRef.current;
+        if (!geometry || !presentationOptionsOf(geometry.dom.pagesContainer)?.worker) return true;
+        const queries = latest.current.queries;
+        return !!queries && geometry.dom.zoom === geometry.layout.zoom &&
+          latest.current.zoom === geometry.layout.zoom &&
+          isPresented(geometry.dom.pagesContainer, queries.displayList, geometry.layout.zoom);
+      },
       layout() {
         const queries = latest.current.queries;
         const layout = latest.current.pagedEditorRef.current?.getLayout();
@@ -372,7 +381,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
           ? {
               session,
               editor,
-              presented: isPresented(dom.context.pagesContainer, dom.queries.displayList),
+              presented: isPresented(dom.context.pagesContainer, dom.queries.displayList, currentLayout.zoom),
               ...(proposalGeometry ? { proposalGeometry } : {}),
             }
           : null;
@@ -381,7 +390,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         heldCandidate() === created &&
         latest.current.zoom === currentLayout.zoom &&
         dom.context.pagesContainer.isConnected &&
-        (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
+        (isPresented(dom.context.pagesContainer, shownList, currentLayout.zoom) || queriesCurrentRef.current),
       (clientX, clientY) => readPluginPositionAtPoint(latest.current.pagedEditorRef, clientX, clientY)
     );
     const resolveAnchor = created.getAnchorGeometry;
@@ -431,10 +440,17 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   useEffect(() => {
     host.geometryChanged();
     if (!geometry || !dom) return;
-    const shown = () => isPresented(dom.context.pagesContainer, dom.queries.displayList);
+    const shown = () => isPresented(dom.context.pagesContainer, dom.queries.displayList, geometry.layout.zoom);
+    const unsubscribe = onPresented((displayList, options) => {
+      if (!options?.worker || displayList !== dom.queries.displayList ||
+        latest.current.zoom !== geometry.layout.zoom || dom.context.zoom !== geometry.layout.zoom ||
+        !shown()) return;
+      host.geometryChanged();
+      host.geometryPresented(geometry.layout);
+    });
     if (shown()) {
       host.geometryPresented(geometry.layout);
-      return;
+      return unsubscribe;
     }
     let frame = 0;
     const settle = () => {
@@ -443,10 +459,15 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         return;
       }
       host.geometryChanged();
-      host.layoutPresented(geometry.layout);
+      if (presentationOptionsOf(dom.context.pagesContainer)?.worker) {
+        host.geometryPresented(geometry.layout);
+      } else host.layoutPresented(geometry.layout);
     };
     frame = requestAnimationFrame(settle);
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      unsubscribe();
+      cancelAnimationFrame(frame);
+    };
   }, [host, geometry, dom]);
 
   const viewerTargets = useRef<{
