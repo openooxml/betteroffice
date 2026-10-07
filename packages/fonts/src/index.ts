@@ -161,12 +161,13 @@ const UNRESOLVED_CJK_ADDON =
 async function importCjkAssetUrls(): Promise<
   Record<string, () => URL> | undefined
 > {
+  let addon: typeof import('@betteroffice/fonts-cjk');
   // Keep the SYNTACTIC try/catch with the await as its direct body. Rewriting
   // this as `import(…).catch()` or a two-argument `.then()` makes webpack (and
   // so `next build`) fail hard on the absent optional peer, and esbuild starts
   // resolving the specifier eagerly the moment it stops being that direct body.
   try {
-    return (await import('@betteroffice/fonts-cjk')).CJK_FONT_ASSET_URLS;
+    addon = await import('@betteroffice/fonts-cjk');
   } catch (error) {
     const message = (error as { message?: unknown } | null)?.message;
     if (typeof message !== 'string' || !UNRESOLVED_CJK_ADDON.test(message)) {
@@ -174,6 +175,11 @@ async function importCjkAssetUrls(): Promise<
     }
     return undefined;
   }
+  const urls = addon.CJK_FONT_ASSET_URLS;
+  if (urls === null || typeof urls !== 'object') {
+    throw new TypeError('Invalid CJK_FONT_ASSET_URLS export from @betteroffice/fonts-cjk');
+  }
+  return urls;
 }
 
 /** Shares in-flight or successful CJK imports while leaving misses retryable. */
