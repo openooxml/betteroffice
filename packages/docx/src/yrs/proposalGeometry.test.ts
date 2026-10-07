@@ -471,6 +471,7 @@ describe('anchor display targets', () => {
       const targets = (version: string) => [
         { kind: 'paragraph', paragraph },
         { kind: 'search', paragraph, text: 'End' },
+        { kind: 'revision', revisionId: main.listRevisions()[0]!.revisionId },
         {
           kind: 'range',
           version,

@@ -489,7 +489,20 @@ function displayMapper(reader: ProposalGeometryReader, version: string) {
     const to = positionFor(range.end);
     return from === null || to === null ? null : { from, to };
   };
-  return { positionFor, display };
+  const target = (resolved: AnchorResolution): ProposalGeometryTarget => {
+    if (!resolved.ok) return resolved;
+    const ranges: { from: number; to: number }[] = [];
+    for (const range of resolved.ranges) {
+      const mapped = display(range);
+      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      ranges.push(mapped);
+    }
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    return { ok: true, ranges, paragraph: positionFor(resolved.paragraph) };
+  };
+  const hidden = (ranges: RawAnchorRange[]): { from: number; to: number }[] =>
+    ranges.map(display).filter((range): range is { from: number; to: number } => range !== null);
+  return { target, hidden };
 }
 
 /** @internal */
@@ -512,22 +525,12 @@ export function computeProposalGeometryMirror(
     }
     revisions = reads.proposalRevisions.revisions;
   }
-  const { positionFor, display } = displayMapper(reader, version);
+  const mapper = displayMapper(reader, version);
   const targets = Object.fromEntries(
-    snapshot.proposals.map(({ id }): [string, ProposalGeometryTarget] => {
-      const resolved = resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot, revisions);
-      if (!resolved.ok) return [id, resolved];
-      const ranges: { from: number; to: number }[] = [];
-      for (const range of resolved.ranges) {
-        const mapped = display(range);
-        if (!mapped) {
-          return [id, anchorFailure('unsupported', 'The target has no body display position')];
-        }
-        ranges.push(mapped);
-      }
-      ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      return [id, { ok: true, ranges, paragraph: positionFor(resolved.paragraph) }];
-    })
+    snapshot.proposals.map(({ id }): [string, ProposalGeometryTarget] => [
+      id,
+      mapper.target(resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot, revisions)),
+    ])
   );
   return {
     version,
@@ -537,9 +540,7 @@ export function computeProposalGeometryMirror(
     navigationTargets: includeNavigationTargets ? Object.fromEntries(snapshot.proposals.map(({ id, paragraph }) => [
       id, resolveNavigationTarget(reader, paragraph.story, paragraph.paraId),
     ])) : undefined,
-    hidden: hiddenRanges(reader, version, snapshot, revisions)
-      .map(display)
-      .filter((range): range is { from: number; to: number } => range !== null),
+    hidden: mapper.hidden(hiddenRanges(reader, version, snapshot, revisions)),
   };
 }
 
@@ -555,24 +556,11 @@ export function computeAnchorDisplayTarget(
   snapshot: DocxProposalSnapshot | null
 ): AnchorDisplayTarget {
   const version = reader.version();
-  const resolved = resolveAnchorTarget(reader, target, version, snapshot);
-  if (!resolved.ok) return resolved;
-  const { positionFor, display } = displayMapper(reader, version);
-  const ranges: { from: number; to: number }[] = [];
-  for (const range of resolved.ranges) {
-    const mapped = display(range);
-    if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
-    ranges.push(mapped);
-  }
-  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-  return {
-    ok: true,
-    ranges,
-    paragraph: positionFor(resolved.paragraph),
-    hidden: hiddenRanges(reader, version, snapshot)
-      .map(display)
-      .filter((range): range is { from: number; to: number } => range !== null),
-  };
+  const mapper = displayMapper(reader, version);
+  const mapped = mapper.target(resolveAnchorTarget(reader, target, version, snapshot));
+  return mapped.ok
+    ? { ...mapped, hidden: mapper.hidden(hiddenRanges(reader, version, snapshot)) }
+    : mapped;
 }
 
 /** @internal */
