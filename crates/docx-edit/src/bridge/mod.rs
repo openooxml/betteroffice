@@ -699,6 +699,7 @@ fn walk_story_chunks<T: ReadTxn>(
                     local.recover_seed(
                         &para_id,
                         pilcrow,
+                        &values,
                         attributes,
                         (
                             paragraph_start,
