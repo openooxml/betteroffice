@@ -1454,7 +1454,19 @@ describe('DocxEditor plugins', () => {
 });
 
 describe('DocxEditor plugins (worker engine)', () => {
-  const workers = setupWorkerEngine();
+  let attachGate: Promise<void> | null = null;
+  let attachRequested = false;
+  const workers = setupWorkerEngine((worker) => {
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (request, transfer) => {
+      if (request.type === 'attachCanvases' && request.zoom === 1.5 && attachGate) {
+        attachRequested = true;
+        void attachGate.then(() => post(request, transfer));
+        return;
+      }
+      post(request, transfer);
+    };
+  });
 
   async function mountWorker(props: Partial<DocxEditorProps> = {}) {
     const opens = workers.reduce(
@@ -1477,6 +1489,7 @@ describe('DocxEditor plugins (worker engine)', () => {
   test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
     const results: DocxAnchorGeometryResult[] = [];
     const events: (DocxAnchorGeometryResult | null)[] = [];
+    const availableZooms: { layout: number; dom: number }[] = [];
     let target: DocxGeometryTarget | null = null;
     const plugin = defineDocxPlugin({
       id: 'host.zoom-anchor',
@@ -1487,11 +1500,20 @@ describe('DocxEditor plugins (worker engine)', () => {
         }
       },
       overlay: ({ geometry }) => {
-        if (target) results.push(geometry.getAnchorGeometry(target));
+        if (target) {
+          const result = geometry.getAnchorGeometry(target);
+          results.push(result);
+          if (result.ok) availableZooms.push({ layout: geometry.layout.zoom, dom: geometry.dom.zoom });
+        }
         return null;
       },
     });
-    const { ref } = await mountWorker({ plugins: [plugin] });
+    let painted = false;
+    const { ref } = await mountWorker({
+      plugins: [plugin],
+      onFirstPagePainted: () => (painted = true),
+    });
+    await until(() => painted);
     const { paragraph } = await firstParagraph(ref);
     const identities = await ref.current!.getParagraphIdentities();
     const anchor = identities
@@ -1500,30 +1522,27 @@ describe('DocxEditor plugins (worker engine)', () => {
     const rect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
       new DOMRect(0, 0, 800, 1000)
     );
-    const present = canvasReplay.presentCanvasReplay;
-    const paints: (() => void)[] = [];
-    const held = spyOn(canvasReplay, 'presentCanvasReplay').mockImplementation(
-      async (preparations, isCurrent) => {
-        await new Promise<void>((resolve) => paints.push(resolve));
-        return present(preparations, isCurrent);
-      }
-    );
+    let releaseAttach = () => {};
+    attachRequested = false;
+    attachGate = new Promise<void>((done) => (releaseAttach = done));
     try {
+      availableZooms.length = 0;
       await act(async () => ref.current!.setZoom(1.5));
-      await until(() => events.length > 0 && paints.length > 0);
+      await until(() => events.length > 0 && attachRequested);
       expect(events).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
       expect(results.at(-1)).toMatchObject({ ok: false });
-      await act(async () => {
-        for (const paint of paints.splice(0)) paint();
-      });
-      held.mockRestore();
+      expect(availableZooms).toEqual([]);
+      await act(async () => releaseAttach());
       await until(() => {
         const last = results.at(-1);
         return !!last?.ok && last.rects.length > 0;
       });
       await until(() => events.at(-1)?.ok === true);
+      expect(availableZooms.length).toBeGreaterThan(0);
+      expect(availableZooms.every(({ layout, dom }) => layout === 1.5 && dom === 1.5)).toBe(true);
     } finally {
-      held.mockRestore();
+      releaseAttach();
+      attachGate = null;
       rect.mockRestore();
     }
   });
