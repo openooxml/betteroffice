@@ -10,8 +10,9 @@ use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offs
 use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
-    grow_content_sized_columns, resolve_cell_grid, resolve_table_column_widths,
-    resolve_table_width_px, widen_columns_to_minimums,
+    grow_content_sized_columns, resolve_cell_grid,
+    resolve_table_column_widths_with_percentage_basis, resolve_table_width_px,
+    table_percentage_basis, widen_columns_to_minimums,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition,
@@ -621,6 +622,23 @@ pub fn measure_blocks(
     blocks
         .iter_mut()
         .map(|block| measure_block(block, content_width, config))
+        .collect()
+}
+
+pub fn measure_blocks_without_table_compat_shift(
+    blocks: &mut [LayoutBlock],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<BlockExtent>, String> {
+    blocks
+        .iter_mut()
+        .map(|block| match block {
+            LayoutBlock::Table(table) => {
+                measure_table_with_compat_shift(table, content_width, config, false)
+                    .map(BlockExtent::Table)
+            }
+            _ => measure_block(block, content_width, config),
+        })
         .collect()
 }
 
@@ -2799,10 +2817,25 @@ fn measure_table(
     content_width: f64,
     config: &MeasurementConfig,
 ) -> Result<TableExtent, String> {
+    measure_table_with_compat_shift(table, content_width, config, true)
+}
+
+fn measure_table_with_compat_shift(
+    table: &mut TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    apply_compat_shift: bool,
+) -> Result<TableExtent, String> {
+    let percentage_basis = if apply_compat_shift {
+        table_percentage_basis(table, content_width)
+    } else {
+        content_width
+    };
     let explicit_width =
-        resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
+        resolve_table_width_px(table.width, table.width_type.as_deref(), percentage_basis);
     let target_width = explicit_width.unwrap_or(content_width);
-    let mut column_widths = resolve_table_column_widths(table, content_width);
+    let mut column_widths =
+        resolve_table_column_widths_with_percentage_basis(table, content_width, percentage_basis);
     let content_sized = content_sized_columns(table, content_width, &column_widths);
     if !content_sized.is_empty() {
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
@@ -4726,6 +4759,46 @@ mod tests {
         assert_eq!(lines(&tall).len(), 1);
         assert!(lines(&tall)[0].width > 200.0);
         assert_eq!(tall.rows[0].height, 508.0);
+    }
+
+    #[test]
+    fn percentage_width_nested_keeps_compat_basis_in_unshifted_story() {
+        for measure in [measure_blocks, measure_blocks_without_table_compat_shift] {
+            for algorithm in [None, Some("autofit"), Some("fixed")] {
+                let nested = json!({
+                    "kind": "table", "id": "nested", "compatibilityMode": 14,
+                    "cellMarginLeft": 7.2, "cellMarginRight": 7.2,
+                    "width": 5000, "widthType": "pct", "widthAlgorithm": algorithm,
+                    "columnWidths": [100, 100], "rows": [{"id": "nested-row", "cells": [
+                        {"id": "left", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                         "padding": {"top": 0, "bottom": 0, "left": 7.2, "right": 0}},
+                        {"id": "right", "blocks": [], "minContentWidth": 20, "maxContentWidth": 400,
+                         "padding": {"top": 0, "bottom": 0, "left": 0, "right": 7.2}}
+                    ]}]
+                });
+                let mut blocks = serde_json::from_value::<Vec<LayoutBlock>>(json!([{
+                    "kind": "table", "id": "outer", "width": 8313, "widthType": "dxa",
+                    "columnWidths": [554.2], "rows": [{"id": "outer-row", "cells": [{
+                        "id": "outer-cell", "padding": {"top": 0, "bottom": 0, "left": 0, "right": 0},
+                        "blocks": [nested]
+                    }]}]
+                }]))
+                .unwrap();
+                let measured = measure(&mut blocks, 554.2, &MeasurementConfig::default()).unwrap();
+                let BlockExtent::Table(outer) = &measured[0] else {
+                    panic!("outer table expected");
+                };
+                let BlockExtent::Table(nested) = &outer.rows[0].cells[0].blocks[0] else {
+                    panic!("nested table expected");
+                };
+                assert!((outer.total_width - 554.2).abs() < 1e-6);
+                assert!(
+                    (nested.total_width - 568.6).abs() < 1e-6,
+                    "{algorithm:?}: nested width {}, expected 568.6",
+                    nested.total_width
+                );
+            }
+        }
     }
 
     #[test]
