@@ -378,10 +378,18 @@ describe('DocxEditor toolbar prop (worker engine)', () => {
 
   test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
     const { ref } = await mountWorker({ toolbar: COMPACT });
+    const editor = ref.current!.getEditorRef()!;
+    const session = editor.getYrsSession()!;
     const read = await ref.current!.readParagraphs({ view: 'accepted' });
     if (!read.ok) throw new Error(read.failure.message);
     const paragraphs = read.paragraphs.filter((paragraph) => paragraph.story === 'body');
     const [from, to] = paragraphs.filter((paragraph) => paragraph.text.length > 0);
+    await act(async () => {
+      session.setParagraphAttr(to.paraId, 'alignment', 'right');
+      editor.syncYrsInputState(true);
+      await ref.current!.flushPendingInput();
+    });
+    const fromBefore = session.paragraphs('body').find((paragraph) => paragraph.paraId === from.paraId)!;
     const caretIn = async (paraId: string) => {
       await act(async () => {
         expect(ref.current!.scrollToParaId(paraId)).toBe(true);
@@ -390,13 +398,20 @@ describe('DocxEditor toolbar prop (worker engine)', () => {
     };
     await caretIn(from.paraId);
     const before = ref.current!.commands.getState('alignment').value;
+    expect(before).not.toBe('right');
+    expect(before).not.toBe('center');
     let moved = false;
     await act(async () => {
       moved = ref.current!.scrollToParaId(to.paraId);
-      await ref.current!.commands.execute('alignment', { value: 'center' });
+      expect(ref.current!.commands.getState('alignment').value).toBe('right');
+      const result = await ref.current!.commands.execute('alignment', { value: 'center' });
+      expect(result.ok).toBe(true);
     });
     expect(moved).toBe(true);
     expect(ref.current!.commands.getState('alignment').value).toBe('center');
+    const after = session.paragraphs('body');
+    expect(after.find((paragraph) => paragraph.paraId === to.paraId)!.properties.alignment).toBe('center');
+    expect(after.find((paragraph) => paragraph.paraId === from.paraId)).toEqual(fromBefore);
     await caretIn(from.paraId);
     expect(ref.current!.commands.getState('alignment').value).toBe(before);
   });
