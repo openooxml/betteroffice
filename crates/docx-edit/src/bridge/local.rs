@@ -210,12 +210,9 @@ fn preview_touches_state_inner<T: ReadTxn>(
                         let Ok(story) = story_ref(txn, &story_id) else {
                             return true;
                         };
-                        let stateful = story
-                            .diff(txn, YChange::identity)
-                            .iter()
-                            .any(|chunk| {
-                                preview_touches_state_inner(chunk, txn, active_stories, true)
-                            });
+                        let stateful = story.diff(txn, YChange::identity).iter().any(|chunk| {
+                            preview_touches_state_inner(chunk, txn, active_stories, true)
+                        });
                         active_stories.remove(&story_id);
                         if stateful {
                             return true;
@@ -815,7 +812,8 @@ impl LocalLowering {
                     .is_some_and(|source| seed.source > source)
                 {
                     seed.slot = seed.slot.checked_add_signed(rebase.slot_delta)?;
-                    seed.source = u32::try_from(i64::from(seed.source) + rebase.source_delta).ok()?;
+                    seed.source =
+                        u32::try_from(i64::from(seed.source) + rebase.source_delta).ok()?;
                 }
             }
             if !coordinates_match(seed) {
