@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 
-const importCjk = mock(() => {
+const importCjk = mock((): { CJK_FONT_ASSET_URLS: Record<string, () => URL> } => {
   throw new Error("Cannot find package '@betteroffice/fonts-cjk'");
 });
 mock.module('@betteroffice/fonts-cjk', importCjk);
@@ -57,4 +57,32 @@ test('CJK provider loaders return shipped bytes without changing resolver metada
   const sans = await provider.resolve('Arial', false, false)!();
   expect(await provider.resolveFamily('Noto Sans SC', false, false)!()).toBe(sans);
   expect(await provider.resolveScriptFallback('cjk-sc', true, true)!()).toBe(sans);
+});
+
+test('CJK import failures reject without Latin fallback and retry after recovery', async () => {
+  const { loadBundledFontBytes, resolveScriptFallbackFace } = await import('./index');
+  const face = { ...resolveScriptFallbackFace('cjk-sc', false, false)!, byteLength: 4 };
+  const failure = new TypeError('Failed to fetch dynamically imported module');
+  importCjk.mockImplementation(() => {
+    throw failure;
+  });
+  mock.module('@betteroffice/fonts-cjk', importCjk);
+
+  await expect(loadBundledFontBytes(face)).rejects.toBe(failure);
+
+  const expected = new Uint8Array([0x4f, 0x54, 0x54, 0x4f]);
+  const url = new URL('https://cjk-retry.example/NotoSansSC-Regular.otf');
+  importCjk.mockImplementation(() => ({
+    CJK_FONT_ASSET_URLS: { [face.file]: () => url },
+  }));
+  mock.module('@betteroffice/fonts-cjk', importCjk);
+  const realFetch = globalThis.fetch;
+  const fetchCjk = mock(async () => new Response(expected));
+  globalThis.fetch = fetchCjk as unknown as typeof fetch;
+  try {
+    expect(await loadBundledFontBytes(face)).toEqual(expected.buffer);
+    expect(fetchCjk).toHaveBeenCalledWith(url, undefined);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
