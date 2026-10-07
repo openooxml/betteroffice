@@ -461,26 +461,7 @@ export function proposalSetIdentity(snapshot: DocxProposalSnapshot): string {
   return identity;
 }
 
-/** @internal */
-export function computeProposalGeometryMirror(
-  reader: ProposalGeometryReader,
-  snapshot: DocxProposalSnapshot,
-  includeNavigationTargets = true
-): ProposalGeometryMirror {
-  const version = reader.version();
-  let revisions: readonly ProposalGeometryRevision[] | undefined;
-  if (reader.proposalRevisions) {
-    const ids = [...new Set(snapshot.proposals.flatMap(({ revisionIds }) => revisionIds))].sort();
-    const key = JSON.stringify(ids);
-    const reads = readsAt(reader, version);
-    if (reads.proposalRevisions?.ids !== key) {
-      reads.proposalRevisions = {
-        ids: key,
-        revisions: ids.length > 0 ? reader.proposalRevisions(ids) : [],
-      };
-    }
-    revisions = reads.proposalRevisions.revisions;
-  }
+function displayMapper(reader: ProposalGeometryReader, version: string) {
   const projections = new Map<string, YrsLocProjection | null>();
   const inputMaps = new Map<string, YrsInputPositionMap | null>();
   const projectionFor = (rootStory: string): YrsLocProjection | null =>
@@ -508,6 +489,30 @@ export function computeProposalGeometryMirror(
     const to = positionFor(range.end);
     return from === null || to === null ? null : { from, to };
   };
+  return { positionFor, display };
+}
+
+/** @internal */
+export function computeProposalGeometryMirror(
+  reader: ProposalGeometryReader,
+  snapshot: DocxProposalSnapshot,
+  includeNavigationTargets = true
+): ProposalGeometryMirror {
+  const version = reader.version();
+  let revisions: readonly ProposalGeometryRevision[] | undefined;
+  if (reader.proposalRevisions) {
+    const ids = [...new Set(snapshot.proposals.flatMap(({ revisionIds }) => revisionIds))].sort();
+    const key = JSON.stringify(ids);
+    const reads = readsAt(reader, version);
+    if (reads.proposalRevisions?.ids !== key) {
+      reads.proposalRevisions = {
+        ids: key,
+        revisions: ids.length > 0 ? reader.proposalRevisions(ids) : [],
+      };
+    }
+    revisions = reads.proposalRevisions.revisions;
+  }
+  const { positionFor, display } = displayMapper(reader, version);
   const targets = Object.fromEntries(
     snapshot.proposals.map(({ id }): [string, ProposalGeometryTarget] => {
       const resolved = resolveAnchorTarget(reader, { kind: 'proposal', id }, version, snapshot, revisions);
@@ -533,6 +538,38 @@ export function computeProposalGeometryMirror(
       id, resolveNavigationTarget(reader, paragraph.story, paragraph.paraId),
     ])) : undefined,
     hidden: hiddenRanges(reader, version, snapshot, revisions)
+      .map(display)
+      .filter((range): range is { from: number; to: number } => range !== null),
+  };
+}
+
+/** @internal */
+export type AnchorDisplayTarget =
+  | ({ ok: true; hidden: { from: number; to: number }[] } & ProposalDisplayTarget)
+  | AnchorResolutionFailure;
+
+/** @internal */
+export function computeAnchorDisplayTarget(
+  reader: ProposalGeometryReader,
+  target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>,
+  snapshot: DocxProposalSnapshot | null
+): AnchorDisplayTarget {
+  const version = reader.version();
+  const resolved = resolveAnchorTarget(reader, target, version, snapshot);
+  if (!resolved.ok) return resolved;
+  const { positionFor, display } = displayMapper(reader, version);
+  const ranges: { from: number; to: number }[] = [];
+  for (const range of resolved.ranges) {
+    const mapped = display(range);
+    if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+    ranges.push(mapped);
+  }
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  return {
+    ok: true,
+    ranges,
+    paragraph: positionFor(resolved.paragraph),
+    hidden: hiddenRanges(reader, version, snapshot)
       .map(display)
       .filter((range): range is { from: number; to: number } => range !== null),
   };
