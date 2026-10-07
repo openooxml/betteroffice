@@ -69,7 +69,7 @@ for (const typing of [false, true]) {
     const source = paragraphs(documentXml(buffer));
     for (let cycle = 0; cycle < 3; cycle += 1) {
       const ref = createRef<DocxEditorRef>();
-      const view = render(<DocxEditor ref={ref} documentBuffer={buffer} />);
+      const view = render(<DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} />);
       await until(() => ref.current?.commands.getState('save').enabled === true);
       if (typing) {
         const session = ref.current!.getEditorRef()!.getYrsSession()!;

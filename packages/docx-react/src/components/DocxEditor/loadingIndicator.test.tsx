@@ -62,6 +62,7 @@ test('the indicator stays over the whole editor while the chrome mounts, until t
   const placements: Placement[] = [];
   const view = render(
     <DocxEditor
+      experimentalWorkerOpen={false}
       documentBuffer={
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
       }

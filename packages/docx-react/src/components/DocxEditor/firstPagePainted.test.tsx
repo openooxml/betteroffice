@@ -109,6 +109,7 @@ test('a document reports its first page painted once its canvas presents, not at
   let painted = 0;
   const view = render(
     <DocxEditor
+      experimentalWorkerOpen={false}
       documentBuffer={fixture('page-fragments/pages.docx')}
       onFirstPagePainted={() => (painted += 1)}
     />
@@ -129,7 +130,7 @@ test('each document reports its first page painted once, however often its pages
   const ref = createRef<Editor>();
   const painted: string[] = [];
   const editor = (name: string, buffer: ArrayBuffer) => (
-    <DocxEditor ref={ref} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
+    <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} onFirstPagePainted={() => painted.push(name)} />
   );
   const view = render(editor('pages', fixture('page-fragments/pages.docx')));
   await waitFor(() => expect(painted).toEqual(['pages']), { timeout: 20_000 });

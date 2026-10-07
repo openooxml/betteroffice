@@ -166,7 +166,7 @@ async function mount(
 ) {
   const ref = createRef<DocxEditorRef>();
   const element = (next: Partial<DocxEditorProps>) => {
-    const editor = <DocxEditor ref={ref} documentBuffer={buffer} {...next} />;
+    const editor = <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={buffer} {...next} />;
     return strict ? <StrictMode>{editor}</StrictMode> : editor;
   };
   const view = render(element(props));

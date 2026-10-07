@@ -4142,7 +4142,7 @@ test('a shared collaboration update keeps the existing join path', async () => {
   shared.openDocx(bytes, true);
   const { workers } = installWorker();
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, collaboration: { initialUpdate: shared.encodeState() } },
+    initialProps: { ...initialProps, experimentalWorkerOpen: false, collaboration: { initialUpdate: shared.encodeState() } },
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   expect(workers).toHaveLength(0);

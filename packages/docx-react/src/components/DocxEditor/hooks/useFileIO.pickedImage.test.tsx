@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -13,7 +13,9 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
 const originalImage = globalThis.Image;
+const originalWarn = console.warn;
 const originalFonts = Object.getOwnPropertyDescriptor(window.document, 'fonts');
+let warn: ReturnType<typeof spyOn<typeof console, 'warn'>>;
 let addedFonts = false;
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -40,12 +42,17 @@ beforeAll(async () => {
       )
     )
   );
+  warn = spyOn(console, 'warn').mockImplementation((message, ...args) => {
+    if (typeof message === 'string' && message.startsWith('[DocxEditor] experimentalWorkerOpen={false} selects')) return;
+    originalWarn(message, ...args);
+  });
 });
 afterEach(() => {
   cleanup();
   globalThis.Image = originalImage;
 });
 afterAll(async () => {
+  warn.mockRestore();
   if (addedFonts) {
     if (originalFonts) Object.defineProperty(window.document, 'fonts', originalFonts);
     else Reflect.deleteProperty(window.document, 'fonts');
@@ -154,7 +161,7 @@ test('an image inserted through the picker keeps its media after two saves and r
   const ref = createRef<DocxEditorRef>();
   const errors: Error[] = [];
   const view = render(
-    <DocxEditor ref={ref} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
+    <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
   );
   await until(() => ref.current?.commands.getState('save').enabled === true);
   const editor = ref.current!.getEditorRef()!;

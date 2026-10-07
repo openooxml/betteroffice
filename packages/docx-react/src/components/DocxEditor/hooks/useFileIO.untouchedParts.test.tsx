@@ -232,7 +232,8 @@ async function until(done: () => boolean): Promise<void> {
   expect(done()).toBe(true);
 }
 
-async function mount(bytes: ArrayBuffer, experimentalWorkerOpen?: boolean) {
+async function mount(bytes: ArrayBuffer, options: { experimentalWorkerOpen?: boolean } = { experimentalWorkerOpen: false }) {
+  const { experimentalWorkerOpen } = options;
   const ref = createRef<DocxEditorRef>();
   const errors: Error[] = [];
   const onError = (error: Error) => errors.push(error);
@@ -460,7 +461,7 @@ test.each(sourceBufferEngines)('a package part the host replaced in originalBuff
   } as unknown as typeof Worker;
   try {
     const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
-    const editor = await mount(source.bytes, experimentalWorkerOpen);
+    const editor = await mount(source.bytes, { experimentalWorkerOpen });
     await act(async () => { await editor.ref.current!.flushPendingInput(); });
     const session = editor.ref.current!.getEditorRef()!.getYrsSession()!;
     expect(workerOpenSave(session) !== null).toBe(engine === 'default');
@@ -851,7 +852,7 @@ test('a host page-setup change is saved even when body text is untouched', async
 });
 
 test('adding and removing a header across saves keeps relationship and content-type targets', async () => {
-  const editor = await mount(fixture((p) => p(run('Body text'))).bytes, false);
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes, { experimentalWorkerOpen: false });
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
   let host = paged.getDocument()!;

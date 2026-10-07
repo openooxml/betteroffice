@@ -78,7 +78,7 @@ const COMPACT: ReactNode = <CompactToolbar onShare={() => {}} />;
 
 async function mount(props: Partial<DocxEditorProps> = {}) {
   const ref = createRef<DocxEditorRef>();
-  const view = render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+  const view = render(<DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={documentBytes()} {...props} />);
   for (let attempt = 0; attempt < 200; attempt += 1) {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -353,4 +353,3 @@ describe('DocxEditor toolbar prop', () => {
     expect(legacy).toBe(false);
   });
 });
-

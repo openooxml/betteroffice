@@ -115,9 +115,9 @@ async function settle(ms: number) {
 }
 
 test('loading another document never calls into the session it replaced', async () => {
-  const view = render(<DocxEditor documentBuffer={await commentedDocx(3)} />);
+  const view = render(<DocxEditor experimentalWorkerOpen={false} documentBuffer={await commentedDocx(3)} />);
   await settle(2500);
-  view.rerender(<DocxEditor documentBuffer={await commentedDocx(4)} />);
+  view.rerender(<DocxEditor experimentalWorkerOpen={false} documentBuffer={await commentedDocx(4)} />);
   await settle(3000);
   expect(afterDestroy).toEqual([]);
   view.unmount();
@@ -125,11 +125,11 @@ test('loading another document never calls into the session it replaced', async 
 
 test('a load that fails frees the document it replaced', async () => {
   afterDestroy.length = 0;
-  const view = render(<DocxEditor documentBuffer={await commentedDocx(2)} />);
+  const view = render(<DocxEditor experimentalWorkerOpen={false} documentBuffer={await commentedDocx(2)} />);
   await settle(2500);
   const detached = await commentedDocx(1);
   structuredClone(detached, { transfer: [detached] });
-  view.rerender(<DocxEditor documentBuffer={detached} />);
+  view.rerender(<DocxEditor experimentalWorkerOpen={false} documentBuffer={detached} />);
   await settle(1500);
   expect(live.size).toBe(0);
   expect(afterDestroy).toEqual([]);

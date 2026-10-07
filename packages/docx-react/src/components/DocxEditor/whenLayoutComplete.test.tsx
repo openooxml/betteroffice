@@ -65,7 +65,7 @@ async function layoutComplete(ref: React.RefObject<DocxEditorRef | null>) {
 
 async function mountTwoPages() {
   const ref = createRef<DocxEditorRef>();
-  render(<DocxEditor ref={ref} documentBuffer={await pagedDocx(2)} />);
+  render(<DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={await pagedDocx(2)} />);
   await until(() => ref.current !== null);
   expect(await layoutComplete(ref)).toBe(2);
   return ref;
@@ -129,7 +129,7 @@ test('each failed load rejects the wait', async () => {
 
 test('a failed load before any layout rejects the wait', async () => {
   const ref = createRef<DocxEditorRef>();
-  render(<DocxEditor ref={ref} />);
+  render(<DocxEditor ref={ref} experimentalWorkerOpen={false} />);
   await until(() => ref.current !== null);
   const detached = await pagedDocx(1);
   structuredClone(detached, { transfer: [detached] });
