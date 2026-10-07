@@ -1446,6 +1446,23 @@ mod tests {
     }
 
     #[test]
+    fn display_list_errors_carry_cell_limit() {
+        let session = Session::open(&sample_xlsx(), None).unwrap();
+        let viewport = r#"{"x":0,"y":0,"width":100,"height":6000000}"#;
+        let mut clock = || 0.0;
+        for result in [
+            session.display_list_json(viewport),
+            session.display_list_for_json(0, viewport),
+            session.display_list_profiled_json(viewport, &mut clock),
+        ] {
+            let error: serde_json::Value = serde_json::from_str(&result.unwrap_err()).unwrap();
+            assert_eq!(error["code"], "displayTooLarge");
+            assert_eq!(error["cells"], 600_002);
+            assert_eq!(error["maxCells"], betteroffice_xlsx::MAX_DISPLAY_CELLS);
+        }
+    }
+
+    #[test]
     fn preserves_display_and_sheet_info_wire_shapes() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
         let display = session
