@@ -238,8 +238,7 @@ function paintShadowLayer(
   const bottom = Math.ceil(Math.min(maxY + outline, ctx.canvas.height + spread - dy));
   if (right <= left || bottom <= top) return;
   const pixels = (right - left) * (bottom - top);
-  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining)
-    throw new Error('shadows exceed the pixel budget on one slide');
+  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining) return;
   shadowBudget.remaining -= pixels;
   const layer = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(right - left, bottom - top)

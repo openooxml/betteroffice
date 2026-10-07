@@ -917,11 +917,11 @@ impl Painter<'_, '_> {
             return Ok(());
         }
         let (scratch_w, scratch_h) = ((right - left) as u32, (bottom - top) as u32);
-        self.shadow_pixels += u64::from(scratch_w) * u64::from(scratch_h);
-        if self.shadow_pixels > self.max_shadow_pixels {
-            let limit = self.max_shadow_pixels;
-            return Err(format!("shadows cover more than {limit}px on one slide"));
+        let pixels = u64::from(scratch_w) * u64::from(scratch_h);
+        if pixels > self.max_shadow_pixels - self.shadow_pixels {
+            return Ok(());
         }
+        self.shadow_pixels += pixels;
         let Some(mut scratch) = Pixmap::new(scratch_w, scratch_h) else {
             return Ok(());
         };
