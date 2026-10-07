@@ -153,13 +153,21 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
     diff: &yrs::types::text::Diff<YChange>,
     txn: &T,
 ) -> bool {
-    preview_touches_state_inner(diff, txn, &mut BTreeSet::new())
+    preview_touches_state_inner(diff, txn, &mut BTreeSet::new(), true)
+}
+
+pub(super) fn preview_chunk_touches_state<T: ReadTxn>(
+    diff: &yrs::types::text::Diff<YChange>,
+    txn: &T,
+) -> bool {
+    preview_touches_state_inner(diff, txn, &mut BTreeSet::new(), false)
 }
 
 fn preview_touches_state_inner<T: ReadTxn>(
     diff: &yrs::types::text::Diff<YChange>,
     txn: &T,
     active_stories: &mut BTreeSet<String>,
+    descend: bool,
 ) -> bool {
     if diff
         .attributes
@@ -179,6 +187,9 @@ fn preview_touches_state_inner<T: ReadTxn>(
                 return true;
             }
             if value_string(values.get("_kind")).as_deref() == Some("table") {
+                if !descend {
+                    return false;
+                }
                 let Some(Any::Array(rows)) = values.get("rows") else {
                     return true;
                 };
@@ -202,7 +213,9 @@ fn preview_touches_state_inner<T: ReadTxn>(
                         let stateful = story
                             .diff(txn, YChange::identity)
                             .iter()
-                            .any(|chunk| preview_touches_state_inner(chunk, txn, active_stories));
+                            .any(|chunk| {
+                                preview_touches_state_inner(chunk, txn, active_stories, true)
+                            });
                         active_stories.remove(&story_id);
                         if stateful {
                             return true;

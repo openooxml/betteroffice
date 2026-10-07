@@ -657,6 +657,7 @@ fn walk_story_chunks<T: ReadTxn>(
             );
         }
         let attributes = diff.attributes.as_deref();
+        preview::observe_chunk(diff, txn);
         local.observe(&mut plain, diff, txn, story_id, chunk_index);
         match &diff.insert {
             Out::Any(Any::String(text)) => {
