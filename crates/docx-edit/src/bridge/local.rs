@@ -17,8 +17,6 @@ pub(crate) struct LocalLowering {
     pub(crate) retained: Option<Box<LocalLowering>>,
     invalidated: BTreeSet<String>,
     validation_epoch: u64,
-    rebases: Vec<SeedRebase>,
-    structural: Option<SeedRebase>,
     dependent: BTreeSet<String>,
     pub(crate) edit: Option<TextEdit>,
     #[cfg(test)]
@@ -40,15 +38,6 @@ pub(super) struct ParagraphSeed {
     mark_attrs: Option<Attrs>,
     pm_start: u64,
     validated: Option<(u64, usize)>,
-    rebased: usize,
-}
-
-#[derive(Debug)]
-struct SeedRebase {
-    after_source: Option<u32>,
-    paragraphs: BTreeSet<String>,
-    slot_delta: isize,
-    source_delta: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -153,21 +142,13 @@ pub(super) fn preview_touches_state<T: ReadTxn>(
     diff: &yrs::types::text::Diff<YChange>,
     txn: &T,
 ) -> bool {
-    preview_touches_state_inner(diff, txn, &mut BTreeSet::new(), true)
-}
-
-pub(super) fn preview_chunk_touches_state<T: ReadTxn>(
-    diff: &yrs::types::text::Diff<YChange>,
-    txn: &T,
-) -> bool {
-    preview_touches_state_inner(diff, txn, &mut BTreeSet::new(), false)
+    preview_touches_state_inner(diff, txn, &mut BTreeSet::new())
 }
 
 fn preview_touches_state_inner<T: ReadTxn>(
     diff: &yrs::types::text::Diff<YChange>,
     txn: &T,
     active_stories: &mut BTreeSet<String>,
-    descend: bool,
 ) -> bool {
     if diff
         .attributes
@@ -187,9 +168,6 @@ fn preview_touches_state_inner<T: ReadTxn>(
                 return true;
             }
             if value_string(values.get("_kind")).as_deref() == Some("table") {
-                if !descend {
-                    return false;
-                }
                 let Some(Any::Array(rows)) = values.get("rows") else {
                     return true;
                 };
@@ -210,9 +188,10 @@ fn preview_touches_state_inner<T: ReadTxn>(
                         let Ok(story) = story_ref(txn, &story_id) else {
                             return true;
                         };
-                        let stateful = story.diff(txn, YChange::identity).iter().any(|chunk| {
-                            preview_touches_state_inner(chunk, txn, active_stories, true)
-                        });
+                        let stateful = story
+                            .diff(txn, YChange::identity)
+                            .iter()
+                            .any(|chunk| preview_touches_state_inner(chunk, txn, active_stories));
                         active_stories.remove(&story_id);
                         if stateful {
                             return true;
@@ -334,11 +313,8 @@ impl LocalLowering {
         self.preview_blocked |= blocked;
     }
 
-    pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, mut replacement: Self) {
+    pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
         self.seeds.retain(|_, seed| !pm.contains(&seed.pm_start));
-        for seed in replacement.seeds.values_mut() {
-            seed.rebased = self.rebases.len();
-        }
         self.seeds.extend(replacement.seeds);
     }
 
@@ -405,7 +381,6 @@ impl LocalLowering {
             seed.source = source;
             seed.pm_start = pm;
             seed.slot = slot;
-            seed.rebased = self.rebases.len();
             true
         });
     }
@@ -637,7 +612,6 @@ impl LocalLowering {
         &mut self,
         id: &str,
         mark: &MapRef,
-        values: &BTreeMap<String, Any>,
         attrs: Option<&Attrs>,
         positions: (u32, u64, usize, u32),
         chunks: std::ops::Range<usize>,
@@ -649,49 +623,12 @@ impl LocalLowering {
         if retained.invalidated.is_empty() || !retained.invalidated.remove(id) {
             return;
         }
-        if let Some(structural) = &mut retained.structural
-            && structural.paragraphs.contains(id)
-        {
-            structural.after_source = Some(
-                structural
-                    .after_source
-                    .map_or(positions.3, |source| source.max(positions.3)),
-            );
-        }
-        if !safe || retained.dependent.contains(id) {
+        if !safe {
             retained.seeds.remove(id);
             return;
         }
-        let seed = if retained.structural.is_some() {
-            let Some(shared) = &self.chunks else {
-                retained.seeds.remove(id);
-                return;
-            };
-            if values.iter().any(|(key, value)| unsafe_value(key, value))
-                || attrs
-                    .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
-                || shared[chunks.clone()].iter().any(|diff| {
-                    !matches!(diff.insert, Out::Any(Any::String(_)))
-                        || diff.attributes.as_deref().is_some_and(|attrs| {
-                            attrs.iter().any(|(key, value)| unsafe_value(key, value))
-                        })
-                })
-            {
-                retained.seeds.remove(id);
-                return;
-            }
-            #[cfg(test)]
-            crate::engine::TYPING_EXTRA_WORK.with(|work| {
-                let mut counts = work.get();
-                counts.seeds += 1;
-                work.set(counts);
-            });
-            retained.seeds.entry(id.to_owned()).or_default()
-        } else {
-            let Some(seed) = retained.seeds.get_mut(id) else {
-                return;
-            };
-            seed
+        let Some(seed) = retained.seeds.get_mut(id) else {
+            return;
         };
         let (raw, pm, slot, source) = positions;
         seed.raw_start = raw;
@@ -706,60 +643,6 @@ impl LocalLowering {
             .as_ref()
             .map(|shared| (Rc::clone(shared), chunks));
         seed.validated = None;
-        seed.rebased = retained.rebases.len() + usize::from(retained.structural.is_some());
-    }
-
-    pub(crate) fn prepare_structural(
-        &mut self,
-        blocks: usize,
-        map: &LoweringMap,
-        paragraphs: &[String],
-    ) -> bool {
-        if self.blocked || self.legacy {
-            return false;
-        }
-        self.invalidated.extend(paragraphs.iter().cloned());
-        let structural = self.structural.get_or_insert_with(|| SeedRebase {
-            after_source: None,
-            paragraphs: BTreeSet::new(),
-            slot_delta: -(blocks as isize),
-            source_delta: -(map.paragraphs.len() as i64),
-        });
-        structural.paragraphs.extend(paragraphs.iter().cloned());
-        true
-    }
-
-    pub(crate) fn finish_structural(&mut self, blocks: &[LayoutBlock], map: &LoweringMap) {
-        if let Some(mut rebase) = self.structural.take() {
-            for id in std::mem::take(&mut rebase.paragraphs) {
-                self.invalidated.remove(&id);
-                let eligible = self.seeds.get(&id).is_some_and(|seed| {
-                    let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
-                        return false;
-                    };
-                    seed.rebased == self.rebases.len() + 1
-                        && matches!(&paragraph.id, BlockId::Str(current) if current == &id)
-                        && paragraph.attrs.is_some()
-                        && paragraph.pm_start == Some(seed.pm_start as f64)
-                        && shiftable(&blocks[seed.slot])
-                        && !page_break_changes_marker(paragraph, blocks.get(seed.slot + 1))
-                });
-                if !eligible {
-                    self.seeds.remove(&id);
-                }
-            }
-            rebase.slot_delta += blocks.len() as isize;
-            rebase.source_delta += map.paragraphs.len() as i64;
-            rebase.after_source = rebase
-                .after_source
-                .and_then(|source| u32::try_from(i64::from(source) - rebase.source_delta).ok());
-            self.rebases.push(rebase);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn structurally_deferred(&self) -> bool {
-        !self.rebases.is_empty()
     }
 
     pub(crate) fn resume(&mut self) {
@@ -773,57 +656,18 @@ impl LocalLowering {
         blocks: &[Rc<LayoutBlock>],
         map: &LoweringMap,
     ) -> Option<()> {
-        let refreshed = self.rebase_coordinates(id, raw, blocks, map);
-        if refreshed.is_none() {
-            self.invalidated.insert(id.to_owned());
-        }
-        refreshed
-    }
-
-    fn rebase_coordinates(
-        &mut self,
-        id: &str,
-        raw: u32,
-        blocks: &[Rc<LayoutBlock>],
-        map: &LoweringMap,
-    ) -> Option<()> {
-        let rebases = self.rebases.len();
         let seed = self.seeds.get_mut(id)?;
-        let coordinates_match = |seed: &ParagraphSeed| {
-            matches!(
-                blocks.get(seed.slot).map(Rc::as_ref),
-                Some(LayoutBlock::Paragraph(current))
-                    if matches!(&current.id, BlockId::Str(current_id) if current_id == id)
-            ) && map
-                .paragraphs
-                .get(seed.source as usize)
-                .is_some_and(|(story, paragraph)| *story == 0 && paragraph == id)
-        };
-        if !coordinates_match(seed) {
-            #[cfg(test)]
-            crate::engine::TYPING_EXTRA_WORK.with(|work| {
-                let mut counts = work.get();
-                counts.seed_rebases += rebases - seed.rebased;
-                work.set(counts);
-            });
-            for rebase in &self.rebases[seed.rebased..] {
-                if rebase
-                    .after_source
-                    .is_some_and(|source| seed.source > source)
-                {
-                    seed.slot = seed.slot.checked_add_signed(rebase.slot_delta)?;
-                    seed.source =
-                        u32::try_from(i64::from(seed.source) + rebase.source_delta).ok()?;
-                }
-            }
-            if !coordinates_match(seed) {
-                return None;
-            }
-        }
-        seed.rebased = rebases;
         let LayoutBlock::Paragraph(current) = blocks.get(seed.slot)?.as_ref() else {
             return None;
         };
+        if !matches!(&current.id, BlockId::Str(current_id) if current_id == id)
+            || !map
+                .paragraphs
+                .get(seed.source as usize)
+                .is_some_and(|(story, paragraph)| *story == 0 && paragraph == id)
+        {
+            return None;
+        }
         seed.raw_start = raw;
         seed.pm_start = current.pm_start? as u64;
         Some(())

@@ -8,7 +8,6 @@ use super::*;
 struct Reads {
     ids: BTreeSet<String>,
     hidden_fields: bool,
-    local_stateful: Option<bool>,
     expected: Option<Rc<BTreeSet<String>>>,
     unexpected: bool,
 }
@@ -49,22 +48,6 @@ pub(super) fn touch_hidden_fields() {
     READS.with(|reads| {
         if let Some(reads) = reads.borrow_mut().as_mut() {
             reads.hidden_fields = true;
-        }
-    });
-}
-
-pub(super) fn observe_chunk<T: ReadTxn>(diff: &yrs::types::text::Diff<YChange>, txn: &T) {
-    if diff.attributes.is_none() && matches!(diff.insert, Out::Any(Any::String(_))) {
-        return;
-    }
-    READS.with(|reads| {
-        if let Some(stateful) = reads
-            .borrow_mut()
-            .as_mut()
-            .and_then(|reads| reads.local_stateful.as_mut())
-            && !*stateful
-        {
-            *stateful = local::preview_chunk_touches_state(diff, txn);
         }
     });
 }
@@ -593,9 +576,6 @@ impl UnitRecorder {
             READS.with(|reads| {
                 *reads.borrow_mut() = Some(Reads {
                     expected,
-                    local_stateful: Some(reused.is_some_and(|index| {
-                        self.units.refresh.as_ref().unwrap().previous.records[index].local_stateful
-                    })),
                     ..Reads::default()
                 });
             });
@@ -608,6 +588,7 @@ impl UnitRecorder {
                 counts.preview_certifications += 1;
                 work.set(counts);
             });
+            window.local_stateful |= local::preview_touches_state(diff, txn);
             for key in [INS, DEL] {
                 if let Some(value) = attribute(diff.attributes.as_deref(), key) {
                     record_decision(value);
@@ -674,10 +655,7 @@ impl UnitRecorder {
         let previous = window
             .reused
             .map(|index| &self.units.refresh.as_ref().unwrap().previous.records[index]);
-        window.local_stateful |= !window.position.safe
-            || !position.safe
-            || reads.hidden_fields
-            || reads.local_stateful.unwrap_or(false);
+        window.local_stateful |= !window.position.safe || !position.safe || reads.hidden_fields;
         if reads.ids.is_empty() && previous.is_none() {
             self.units.untracked_state |= window.local_stateful;
             return;
@@ -1034,117 +1012,4 @@ pub(crate) fn splice(
         record.ids = Rc::new(replay.ids);
     }
     local.refresh_seeds(blocks, map);
-}
-
-#[cfg(test)]
-#[test]
-fn fallback_and_refreshed_records_preserve_nested_statefulness() {
-    for enabled in [false, true] {
-        let doc = EditingDoc::new(75272);
-        crate::seed_from_docx(&doc, &crate::engine::preview_fixture::nested()).unwrap();
-        let env = RenderEnv::default();
-        let (_, _, _, previous) = lower_recorded(
-            &doc,
-            "body",
-            &env,
-            &mut local::LocalLowering::new(enabled),
-            true,
-        )
-        .unwrap();
-        let previous = Rc::new(previous.unwrap());
-        assert_eq!(
-            previous
-                .records
-                .iter()
-                .filter(|record| record.local_stateful)
-                .count(),
-            2
-        );
-        let record = previous.records.last().unwrap();
-        let raw = record.seed.as_ref().unwrap().position.story_index + 1;
-        doc.insert_text(
-            &crate::EditCtx::local("", ""),
-            crate::Position::new("body", raw),
-            "x",
-            crate::FormatPolicy::Inherit,
-        )
-        .unwrap();
-        let units = refresh(
-            &previous,
-            &TextEdit {
-                range: raw..raw,
-                inserted: 1,
-                epochs: (0, 1),
-            },
-        )
-        .unwrap();
-        crate::engine::TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
-        let (_, _, _, refreshed) = lower_refreshed(
-            &doc,
-            "body",
-            &env,
-            &mut local::LocalLowering::fallback(enabled),
-            units,
-        )
-        .unwrap();
-        crate::engine::TYPING_EXTRA_WORK.with(|work| {
-            assert_eq!(work.get().preview_certifications, 0);
-        });
-        let (_, _, _, fallback) = lower_recorded(
-            &doc,
-            "body",
-            &env,
-            &mut local::LocalLowering::fallback(enabled),
-            true,
-        )
-        .unwrap();
-        let (_, _, _, fresh) = lower_recorded(
-            &doc,
-            "body",
-            &env,
-            &mut local::LocalLowering::new(enabled),
-            true,
-        )
-        .unwrap();
-        let fresh = fresh.unwrap();
-        assert_eq!(refreshed.unwrap().snapshot(&doc), fresh.snapshot(&doc));
-        assert_eq!(fallback.unwrap().snapshot(&doc), fresh.snapshot(&doc));
-        let txn = doc.yrs_doc().transact();
-        for record in &fresh.records {
-            assert_eq!(
-                record.local_stateful,
-                record
-                    .chunks
-                    .iter()
-                    .any(|chunk| local::preview_touches_state(chunk, &txn))
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn fallback_recording_tracks_stateful_table_cells() {
-    use crate::engine::preview_fixture;
-
-    let content = format!(
-        "{}{}",
-        preview_fixture::revision("ins", "1", &preview_fixture::run("Cell")),
-        preview_fixture::field("PAGE"),
-    );
-    let inner = preview_fixture::table(&preview_fixture::paragraph(1, &content));
-    let body = preview_fixture::table(&inner);
-    let doc = EditingDoc::new(75273);
-    crate::seed_from_docx(&doc, &preview_fixture::document(&body)).unwrap();
-    let (_, _, _, recorded) = lower_recorded(
-        &doc,
-        "body",
-        &RenderEnv::default(),
-        &mut local::LocalLowering::fallback(false),
-        true,
-    )
-    .unwrap();
-    let recorded = recorded.unwrap();
-    assert_eq!(recorded.records.len(), 1);
-    assert!(recorded.records[0].local_stateful);
 }

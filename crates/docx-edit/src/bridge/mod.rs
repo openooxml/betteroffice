@@ -415,7 +415,7 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
     let mut recording = if story_id == "body" {
         preview_units
             .take()
-            .map(|units| preview::UnitRecorder::new(units, !local.legacy))
+            .map(|units| preview::UnitRecorder::new(units, local.enabled && !local.legacy))
     } else {
         None
     };
@@ -657,7 +657,6 @@ fn walk_story_chunks<T: ReadTxn>(
             );
         }
         let attributes = diff.attributes.as_deref();
-        preview::observe_chunk(diff, txn);
         local.observe(&mut plain, diff, txn, story_id, chunk_index);
         match &diff.insert {
             Out::Any(Any::String(text)) => {
@@ -700,7 +699,6 @@ fn walk_story_chunks<T: ReadTxn>(
                     local.recover_seed(
                         &para_id,
                         pilcrow,
-                        &values,
                         attributes,
                         (
                             paragraph_start,

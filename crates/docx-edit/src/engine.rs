@@ -279,7 +279,6 @@ pub(crate) struct TypingExtraWork {
     pub(crate) seed_scans: usize,
     pub(crate) preview_certifications: usize,
     pub(crate) seed_validations: usize,
-    pub(crate) seed_rebases: usize,
     certificate_snapshots: usize,
     measurement_attempts: usize,
     preview_shifts: usize,
@@ -292,7 +291,6 @@ thread_local! {
         seed_scans: 0,
         preview_certifications: 0,
         seed_validations: 0,
-        seed_rebases: 0,
         certificate_snapshots: 0,
         measurement_attempts: 0,
         preview_shifts: 0,
@@ -4076,24 +4074,6 @@ impl EngineSession {
                     .doc
                     .segment_index(&range.story)?
                     .is_text_range(range.start, range.end));
-        let structural_paragraphs = if lower_locally
-            && self.local_lowering.get()
-            && seed_epoch_valid
-            && range.story == "body"
-            && text.is_none()
-            && !preview_plain
-        {
-            let index = self.doc.paragraph_index("body")?;
-            Some(
-                [range.start, range.end]
-                    .into_iter()
-                    .filter_map(|offset| index.para_at(offset))
-                    .map(|paragraph| paragraph.para_id.to_string())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        };
         let index_epoch = (self.local_lowering.get()
             && (text.is_none() || range.start == range.end))
             .then(|| self.doc.committed_epoch());
@@ -4173,25 +4153,9 @@ impl EngineSession {
             && preview_plain
             && receipt.new_para_ids.is_empty()
             && receipt.revision_ids.is_empty();
-        let mut structural_preserves_seeds = false;
         if let Some(lowered) = render.stories.get_mut(&range.story) {
             if seed_epoch_valid && lowered.doc_epoch != before {
                 lowered.local.suspend();
-            }
-            if let Some(mut paragraphs) = structural_paragraphs
-                && self.doc_epoch() == before.wrapping_add(1)
-                && receipt.revision_ids.is_empty()
-            {
-                paragraphs.extend(receipt.new_para_ids.iter().cloned());
-                if let Some(range_result) = &receipt.range {
-                    paragraphs.push(range_result.start.para.clone());
-                    paragraphs.push(range_result.end.para.clone());
-                }
-                structural_preserves_seeds = lowered.local.prepare_structural(
-                    lowered.blocks.len(),
-                    &lowered.map,
-                    &paragraphs,
-                );
             }
             let inserted = text.map_or(0, |text| text.encode_utf16().count() as u32);
             lowered.preview_edit = (preview_plain
@@ -4218,11 +4182,12 @@ impl EngineSession {
                     let paragraph = &range_result.start.para;
                     let offset = if lowered.local.deferred {
                         lowered.local.offset(paragraph, u32::MAX)?;
-                        let index = self.doc.paragraph_index(&range.story).ok()?;
-                        if index.para_id_count(paragraph) != 1 {
-                            return None;
-                        }
-                        let raw = index.para_span(paragraph)?.0;
+                        let raw = self
+                            .doc
+                            .paragraph_index(&range.story)
+                            .ok()?
+                            .para_span(paragraph)?
+                            .0;
                         if lowered.doc_epoch == before {
                             lowered.local.refresh_coordinates(
                                 paragraph,
@@ -4258,13 +4223,12 @@ impl EngineSession {
         }
         self.typing_epoch.set(Some(self.doc_epoch()));
         self.typing_preserves_seeds.set(
-            structural_preserves_seeds
-                || (preview_plain
-                    && lower_locally
-                    && seed_epoch_valid
-                    && self.doc_epoch() == before.wrapping_add(1)
-                    && receipt.new_para_ids.is_empty()
-                    && receipt.revision_ids.is_empty()),
+            preview_plain
+                && lower_locally
+                && seed_epoch_valid
+                && self.doc_epoch() == before.wrapping_add(1)
+                && receipt.new_para_ids.is_empty()
+                && receipt.revision_ids.is_empty(),
         );
         Ok(receipt)
     }
@@ -4656,7 +4620,6 @@ impl EngineSession {
             crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
         };
         if let Some(mut retained) = local.retained.take() {
-            retained.finish_structural(&blocks, &map);
             retained.resume();
             local = *retained;
         }
@@ -14560,11 +14523,7 @@ mod tests {
                 incremental.0, oracle.0,
                 "{label} cold_enabled={cold_enabled}"
             );
-            if cold_enabled == enabled
-                && !engine.render.borrow().stories["body"]
-                    .local
-                    .structurally_deferred()
-            {
+            if cold_enabled == enabled {
                 assert_eq!(incremental.1, oracle.1, "{label} seeds");
             }
         }
@@ -15105,7 +15064,7 @@ mod tests {
     }
 
     #[test]
-    fn resident_structural_deletions_preserve_eligible_typing_seeds() {
+    fn resident_structural_deletions_and_following_keys_fall_back_and_match_cold() {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
@@ -15122,6 +15081,15 @@ mod tests {
             } else {
                 crate::StoryRange::new("body", end, end + 1)
             };
+            let pending_offset = certified_float_offset(&engine, 17);
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", pending_offset, pending_offset),
+                    Some("pending"),
+                    true,
+                )
+                .unwrap();
+            assert!(engine.render.borrow().stories["body"].local.edit.is_some());
             let before = engine.stats();
             TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
             SHIFT_SAFETY_WORK.with(|work| work.set(0));
@@ -15133,19 +15101,11 @@ mod tests {
                 before.lower_cache_misses + 1
             );
             assert!(engine.measurement_patch().is_none());
-            TYPING_EXTRA_WORK.with(|work| {
-                let counts = work.get();
-                assert!((1..=2).contains(&counts.seeds));
-                assert_eq!(
-                    counts,
-                    TypingExtraWork {
-                        seeds: counts.seeds,
-                        ..Default::default()
-                    },
-                );
-            });
+            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
+            assert!(engine.render.borrow().stories["body"].local.edit.is_none());
+            assert_local_patch_matches_cold(&engine, &request, "structural deletion");
             let changed = engine
                 .doc()
                 .paragraph_index("body")
@@ -15176,13 +15136,15 @@ mod tests {
                 TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
                 SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
                 assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
+                assert_local_patch_matches_cold(
+                    &engine,
+                    &request,
+                    "typing after structural deletion",
+                );
             }
             assert_eq!(changed, id);
-            for (target, paragraph) in [changed, "00000012".to_owned(), "00000002".to_owned()]
-                .into_iter()
-                .enumerate()
-            {
-                for (pass, text) in ["x", "y"].into_iter().enumerate() {
+            for paragraph in [changed, "00000012".to_owned(), "00000002".to_owned()] {
+                for text in ["x", "y"] {
                     let offset = engine
                         .doc()
                         .paragraph_index("body")
@@ -15192,58 +15154,31 @@ mod tests {
                         .0;
                     let before = engine.stats();
                     TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
-                    measurement_patch_type(&engine, offset, text);
-                    assert!(engine.measurement_patch().is_some());
-                    let dirty = certified_float_dirty_segment(&engine);
-                    assert_eq!(
-                        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
-                        (dirty, 0),
-                        "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                    );
+                    SHIFT_SAFETY_WORK.with(|work| work.set(0));
+                    engine
+                        .edit_resident_text(
+                            crate::StoryRange::new("body", offset, offset),
+                            Some(text),
+                            true,
+                        )
+                        .unwrap();
+                    let epoch = engine.display.borrow().binary_frame_epoch;
+                    let frame = engine.apply_and_layout("body", epoch).unwrap();
                     assert_eq!(
                         engine.stats().lower_cache_misses,
-                        before.lower_cache_misses,
-                        "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        before.lower_cache_misses + 1
                     );
+                    assert!(engine.measurement_patch().is_none());
                     TYPING_EXTRA_WORK.with(|work| {
-                        let counts = work.get();
-                        assert_eq!(
-                            counts.seeds,
-                            0,
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
-                        assert_eq!(
-                            counts.seed_scans,
-                            0,
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
-                        assert_eq!(
-                            counts.preview_certifications,
-                            0,
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
-                        assert_eq!(
-                            counts.seed_validations,
-                            usize::from(pass == 0),
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
-                        assert_eq!(
-                            counts.seed_rebases,
-                            usize::from(target == 1 && pass == 0),
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
-                        assert_eq!(
-                            counts.certificate_snapshots,
-                            1,
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
-                        assert_eq!(
-                            counts.measurement_attempts,
-                            1,
-                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
-                        );
+                        assert_eq!(work.get(), TypingExtraWork::default());
                     });
-                    assert_certified_float_cold(&engine, &request, &mut retained);
+                    SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
+                    assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
+                    assert_local_patch_matches_cold(
+                        &engine,
+                        &request,
+                        "eligible paragraph after structural deletion",
+                    );
                 }
             }
         }
