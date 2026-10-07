@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef, useState } from 'react';
@@ -20,6 +20,7 @@ import type { PartEditTarget } from '../partEdit';
 import { setupWorkerEngine } from '../__fixtures__/workerEngine';
 import { useFileIO } from './useFileIO';
 import { useHeaderFooterEditing } from './useHeaderFooterEditing';
+import * as headerFooterEditing from './useHeaderFooterEditing';
 
 const { act, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
 const quiet = { error: console.error, warn: console.warn };
@@ -977,5 +978,97 @@ describe('DocxEditor saves (worker engine)', () => {
       expect(xmlElements(lastComments, W, 'comment').some((entry) => entry.getAttribute('w:id') === '1')).toBe(false);
     }
     expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
+  });
+
+  test('adding and removing a header across saves keeps relationship and content-type targets on the worker engine', async () => {
+    const useEditing = useHeaderFooterEditing;
+    let mountedHost!: Parameters<typeof useHeaderFooterEditing>[0];
+    const captureHost = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
+      mountedHost = options;
+      return useEditing(options);
+    });
+    try {
+      const editor = await mountWorker(fixture((p) => p(run('Body text'))).bytes);
+      const paged = editor.ref.current!.getEditorRef()!;
+      const session = paged.getYrsSession()!;
+      expect(session).not.toBeNull();
+      expect(mountedHost).toBeDefined();
+      let host = paged.getDocument()!;
+      const errors: Error[] = [];
+      const pagedEditorRef = {
+        current: {
+          getYrsSession: () => session,
+          getDocument: () => host,
+          flushPendingInput: () => paged.flushPendingInput(),
+        } as PagedEditorRef,
+      };
+      const hook = renderHook(() => {
+        const [document, setDocument] = useState<DocxDocument>(host);
+        const [partEditTarget, setPartEditTarget] = useState<PartEditTarget | null>(null);
+        host = document;
+        const editing = useEditing({
+          document,
+          pushDocument: (next) => {
+            mountedHost.pushDocument(next);
+            setDocument(next);
+          },
+          partEditTarget,
+          setPartEditTarget,
+        });
+        const io = useFileIO({
+          pagedEditorRef,
+          resolveImage: () => null,
+          comments: [],
+          documentName: undefined,
+          onSave: undefined,
+          downloadOnSave: false,
+          onOpen: undefined,
+          onError: (error) => errors.push(error),
+          onPrint: undefined,
+          onDocumentNameChange: undefined,
+          loadBuffer: async () => {},
+          focusActiveEditor: () => {},
+        });
+        return { editing, save: io.handleSave };
+      });
+      const workerSaves = () => workers.flatMap((worker) => worker.requests).filter((type) => type === 'save').length;
+      const save = async (): Promise<ArrayBuffer> => {
+        expect(editor.ref.current!.getEditorRef()!.getYrsSession()).toBe(session);
+        expect(mountedHost.document).toBe(host);
+        const saves = workerSaves();
+        let saved: ArrayBuffer | null = null;
+        await act(async () => {
+          saved = await hook.result.current.save();
+        });
+        expect(errors.map(({ message }) => message)).toEqual([]);
+        expect(saved).not.toBeNull();
+        expect(workerSaves()).toBe(saves + 1);
+        return saved!;
+      };
+      await act(async () => hook.result.current.editing.handleHeaderFooterDoubleClick('header', 1));
+      expect(host.package.headers?.size).toBe(1);
+      const firstSave = await save();
+      expect(unzipContainer(new Uint8Array(firstSave))['word/header1.xml']).toBeDefined();
+      await act(async () => hook.result.current.editing.handleRemoveHeaderFooter());
+      expect(host.package.headers?.size).toBe(0);
+      const lastSave = await save();
+      for (const saved of [firstSave, lastSave]) {
+        const parts = unzipContainer(new Uint8Array(saved));
+        const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
+        for (const entry of xmlElements(rels, RELS, 'Relationship')) {
+          if (entry.getAttribute('TargetMode') === 'External') continue;
+          const target = entry.getAttribute('Target')!;
+          const name = new URL(target, 'https://package.test/word/document.xml').pathname.slice(1);
+          expect(parts[name]).toBeDefined();
+        }
+        const types = new DOMParser().parseFromString(xmlPart(parts, '[Content_Types].xml'), 'application/xml');
+        for (const entry of xmlElements(types, 'http://schemas.openxmlformats.org/package/2006/content-types', 'Override')) {
+          expect(parts[entry.getAttribute('PartName')!.slice(1)]).toBeDefined();
+        }
+      }
+      expect((await reopened(lastSave)).package.document.finalSectionProperties?.headerReferences ?? []).toEqual([]);
+    } finally {
+      captureHost.mockRestore();
+    }
   });
 });
