@@ -792,33 +792,40 @@ impl LocalLowering {
     ) -> Option<()> {
         let rebases = self.rebases.len();
         let seed = self.seeds.get_mut(id)?;
-        #[cfg(test)]
-        crate::engine::TYPING_EXTRA_WORK.with(|work| {
-            let mut counts = work.get();
-            counts.seed_rebases += rebases - seed.rebased;
-            work.set(counts);
-        });
-        for rebase in &self.rebases[seed.rebased..] {
-            if rebase
-                .after_source
-                .is_some_and(|source| seed.source > source)
-            {
-                seed.slot = seed.slot.checked_add_signed(rebase.slot_delta)?;
-                seed.source = u32::try_from(i64::from(seed.source) + rebase.source_delta).ok()?;
+        let coordinates_match = |seed: &ParagraphSeed| {
+            matches!(
+                blocks.get(seed.slot).map(Rc::as_ref),
+                Some(LayoutBlock::Paragraph(current))
+                    if matches!(&current.id, BlockId::Str(current_id) if current_id == id)
+            ) && map
+                .paragraphs
+                .get(seed.source as usize)
+                .is_some_and(|(story, paragraph)| *story == 0 && paragraph == id)
+        };
+        if !coordinates_match(seed) {
+            #[cfg(test)]
+            crate::engine::TYPING_EXTRA_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.seed_rebases += rebases - seed.rebased;
+                work.set(counts);
+            });
+            for rebase in &self.rebases[seed.rebased..] {
+                if rebase
+                    .after_source
+                    .is_some_and(|source| seed.source > source)
+                {
+                    seed.slot = seed.slot.checked_add_signed(rebase.slot_delta)?;
+                    seed.source = u32::try_from(i64::from(seed.source) + rebase.source_delta).ok()?;
+                }
+            }
+            if !coordinates_match(seed) {
+                return None;
             }
         }
         seed.rebased = rebases;
         let LayoutBlock::Paragraph(current) = blocks.get(seed.slot)?.as_ref() else {
             return None;
         };
-        if !matches!(&current.id, BlockId::Str(current_id) if current_id == id)
-            || !map
-                .paragraphs
-                .get(seed.source as usize)
-                .is_some_and(|(story, paragraph)| *story == 0 && paragraph == id)
-        {
-            return None;
-        }
         seed.raw_start = raw;
         seed.pm_start = current.pm_start? as u64;
         Some(())

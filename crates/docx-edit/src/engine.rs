@@ -15175,7 +15175,11 @@ mod tests {
                 SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
                 assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             }
-            for (target, paragraph) in [changed, "00000012".to_owned()].into_iter().enumerate() {
+            assert_eq!(changed, id);
+            for (target, paragraph) in [changed, "00000012".to_owned(), "00000002".to_owned()]
+                .into_iter()
+                .enumerate()
+            {
                 for (pass, text) in ["x", "y"].into_iter().enumerate() {
                     let offset = engine
                         .doc()
@@ -15199,8 +15203,16 @@ mod tests {
                         assert_eq!(counts.seeds, 0);
                         assert_eq!(counts.seed_scans, 0);
                         assert_eq!(counts.preview_certifications, 0);
-                        assert_eq!(counts.seed_validations, usize::from(pass == 0));
-                        assert_eq!(counts.seed_rebases, usize::from(target == 1 && pass == 0));
+                        assert_eq!(
+                            counts.seed_validations,
+                            usize::from(pass == 0),
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
+                        assert_eq!(
+                            counts.seed_rebases,
+                            usize::from(target == 1 && pass == 0),
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
                         assert_eq!(counts.certificate_snapshots, 1);
                         assert_eq!(counts.measurement_attempts, 0);
                     });
