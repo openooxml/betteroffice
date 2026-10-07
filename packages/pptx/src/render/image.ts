@@ -1,10 +1,25 @@
 import { MAX_TIFF_BYTES, isTiff } from '../../../../shared/media';
 import { decodeTiffImage } from '../wasm/loader';
+import { rasterImageSize, type ImageSize } from './imageSize';
 
 const MAX_BITMAP_PIXELS = 33_554_432;
 const SVG_MEDIA_TYPE = 'image/svg+xml';
 /** Matches `MAX_SVG_BYTES` in pptx-raster: the largest SVG either backend decodes. */
 const MAX_SVG_BYTES = 4_194_304;
+const MAX_IMAGE_DIMENSION = 4096;
+const decodeScales = new WeakMap<CanvasImageSource, { x: number; y: number }>();
+
+export interface PresentationImageDecodeOptions {
+  maxDimension?: number;
+}
+
+export function imageDecodeScale(source: CanvasImageSource): { x: number; y: number } {
+  return decodeScales.get(source) ?? { x: 1, y: 1 };
+}
+
+export function setImageDecodeScale(source: CanvasImageSource, scale: { x: number; y: number }): void {
+  decodeScales.set(source, scale);
+}
 
 /** Convert presentation image formats that browsers cannot decode. */
 export function presentationImageBlob(bytes: Uint8Array): Blob {
@@ -30,23 +45,84 @@ export function needsElementDecode(blob: Blob): boolean {
  */
 export async function decodePresentationImage(
   bytes: Uint8Array,
-  errorMessage: string
+  errorMessage: string,
+  options: PresentationImageDecodeOptions = {}
 ): Promise<CanvasImageSource> {
-  const blob = presentationImageBlob(bytes);
-  if (typeof createImageBitmap === 'function' && !needsElementDecode(blob)) {
-    return createImageBitmap(blob);
+  const maximum = options.maxDimension ?? MAX_IMAGE_DIMENSION;
+  if (!Number.isSafeInteger(maximum) || maximum < 1) throw new Error('invalid image dimension limit');
+  let blob = presentationImageBlob(bytes);
+  const svg = needsElementDecode(blob) ? await blob.text() : undefined;
+  const original = svg === undefined ? rasterImageSize(new Uint8Array(await blob.arrayBuffer())) : svgImageSize(svg);
+  if (!original) throw new Error(errorMessage);
+  const factor = Math.min(1, maximum / Math.max(original.width, original.height));
+  const size = {
+    width: factor === 1 ? original.width : Math.max(1, Math.floor(original.width * factor)),
+    height: factor === 1 ? original.height : Math.max(1, Math.floor(original.height * factor)),
+  };
+  const remember = (source: CanvasImageSource) => {
+    if (factor < 1) setImageDecodeScale(source, { x: original.width / size.width, y: original.height / size.height });
+    return source;
+  };
+  if (typeof createImageBitmap === 'function' && svg === undefined) {
+    return remember(await (factor < 1
+      ? createImageBitmap(blob, { resizeWidth: size.width, resizeHeight: size.height })
+      : createImageBitmap(blob)));
   }
+  if (svg !== undefined) blob = new Blob([sizedSvg(svg, original, size)], { type: SVG_MEDIA_TYPE });
+  else if (factor < 1) throw new Error(errorMessage);
   const url = URL.createObjectURL(blob);
   try {
-    return await new Promise<HTMLImageElement>((resolve, reject) => {
+    return remember(await new Promise<HTMLImageElement>((resolve, reject) => {
       const image = new Image();
       image.onload = () => resolve(image);
       image.onerror = () => reject(new Error(errorMessage));
       image.src = url;
-    });
+    }));
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+function svgImageSize(text: string): ImageSize | undefined {
+  const tag = rootTag(text);
+  if (!tag) return;
+  const root = text.slice(tag.start, tag.end);
+  const style = root.match(/\sstyle\s*=\s*(["'])(.*?)\1/s)?.[2] ?? '';
+  const dimension = (name: string) => {
+    const attribute = root.match(new RegExp(`\\s${name}\\s*=\\s*(["'])(.*?)\\1`, 's'))?.[2];
+    const rules = [...style.matchAll(new RegExp(`(?:^|;)\\s*${name}\\s*:\\s*([^;]+)`, 'gi'))];
+    const value = (rules[rules.length - 1]?.[1] ?? attribute ?? '').replace(/\s*!important\s*$/, '').trim();
+    const match = value.match(/^([+\d.eE-]+)\s*(px|pt|pc|in|cm|mm)?$/);
+    const units: Record<string, number> = { px: 1, pt: 96 / 72, pc: 16, in: 96, cm: 96 / 2.54, mm: 96 / 25.4 };
+    const pixels = Number(match?.[1]) * (units[match?.[2] ?? 'px'] ?? 1);
+    return Number.isFinite(pixels) && pixels > 0 ? pixels : undefined;
+  };
+  const box = root.match(/\sviewBox\s*=\s*(["'])\s*[-+.\deE]+[\s,]+[-+.\deE]+[\s,]+([-+.\deE]+)[\s,]+([-+.\deE]+)\s*\1/);
+  const boxWidth = Number(box?.[2]);
+  const boxHeight = Number(box?.[3]);
+  let width = dimension('width');
+  let height = dimension('height');
+  if (boxWidth > 0 && boxHeight > 0) {
+    if (width && !height) height = width * boxHeight / boxWidth;
+    else if (height && !width) width = height * boxWidth / boxHeight;
+  }
+  width ??= 300;
+  height ??= 150;
+  return Number.isFinite(width) && Number.isFinite(height) ? { width, height } : undefined;
+}
+
+function sizedSvg(text: string, original: ImageSize, size: ImageSize): string {
+  const tag = rootTag(text)!;
+  let root = text.slice(tag.start, tag.end).replace(/\s(?:width|height)\s*=\s*(["']).*?\1/gs, '');
+  const selfClosing = root.endsWith('/');
+  if (selfClosing) root = root.slice(0, -1);
+  const dimensions = `width:${size.width}px!important;height:${size.height}px!important`;
+  if (/\sstyle\s*=/.test(root))
+    root = root.replace(/(\sstyle\s*=\s*)(["'])(.*?)\2/s, (_, prefix, quote, style) => `${prefix}${quote}${style};${dimensions}${quote}`);
+  else root += ` style="${dimensions}"`;
+  if (!/\sviewBox\s*=/.test(root)) root += ` viewBox="0 0 ${original.width} ${original.height}"`;
+  root += ` width="${size.width}" height="${size.height}"`;
+  return text.slice(0, tag.start) + root + (selfClosing ? '/' : '') + text.slice(tag.end);
 }
 
 /** An SVG a browser will decode: typed, and sized where only a `viewBox` says how big it is. */

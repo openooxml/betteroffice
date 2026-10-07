@@ -16,10 +16,14 @@ import type {
   TextBoxPrimitive,
 } from '../types';
 import type { ProposalTextChange } from '../proposals';
+import { imageDecodeScale, setImageDecodeScale } from './image';
 
-export type CanvasImageResolver = (
+export type CanvasImageResolver = ((
   assetId: string
-) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
+) => CanvasImageSource | Promise<CanvasImageSource | null> | null) & {
+  acquire?(): CanvasImageResolver;
+  release?(): void;
+};
 
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
@@ -74,8 +78,10 @@ export async function paintSlide(
   const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
   if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
     throw new Error('invalid shadow pixel budget');
-  ctx.save();
+  const images = options.resolveImage?.acquire?.() ?? options.resolveImage;
+  const paintOptions = { ...options, resolveImage: images };
   try {
+    ctx.save();
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
     ctx.clearRect(0, 0, list.width, list.height);
     if (list.background) {
@@ -83,9 +89,9 @@ export async function paintSlide(
       ctx.fillRect(0, 0, list.width, list.height);
     }
     for (const primitive of list.primitives)
-      await paintPrimitive(ctx, primitive, options, dpr * scale, shadowBudget);
+      await paintPrimitive(ctx, primitive, paintOptions, dpr * scale, shadowBudget);
   } finally {
-    ctx.restore();
+    try { ctx.restore(); } finally { images?.release?.(); }
   }
 }
 
@@ -452,8 +458,10 @@ function drawTiled(
   ctx.save();
   buildImageOutline(ctx, image);
   ctx.clip();
+  const decodeScale = imageDecodeScale(source);
   pattern.setTransform(
-    new DOMMatrix().translateSelf(image.x, image.y).scaleSelf(tile.scaleX, tile.scaleY)
+    new DOMMatrix().translateSelf(image.x, image.y)
+      .scaleSelf(tile.scaleX * decodeScale.x, tile.scaleY * decodeScale.y)
   );
   ctx.fillStyle = pattern;
   ctx.fillRect(image.x, image.y, image.w, image.h);
@@ -756,6 +764,11 @@ function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): Canva
     applyImageEffects(data.data, effects);
     ctx.putImageData(data, 0, 0);
     const result = canvas as CanvasImageSource;
+    const scale = imageDecodeScale(source);
+    setImageDecodeScale(result, {
+      x: scale.x * size.width / bounds.width,
+      y: scale.y * size.height / bounds.height,
+    });
     if (reusable) retainRecolouring(source as object, key, result, bounds.width * bounds.height);
     return result;
   } catch {
