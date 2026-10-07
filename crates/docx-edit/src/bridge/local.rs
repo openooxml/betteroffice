@@ -9,6 +9,8 @@ pub(crate) struct LocalLowering {
     pub(crate) blocked: bool,
     pub(crate) preview_blocked: bool,
     pub(super) enabled: bool,
+    pub(crate) deferred: bool,
+    pub(crate) legacy: bool,
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(super) chunks: Option<Rc<Vec<yrs::types::text::Diff<YChange>>>>,
@@ -223,7 +225,11 @@ impl LocalLowering {
     }
 
     #[cfg(test)]
-    pub(crate) fn snapshot(&self, doc: &EditingDoc) -> impl PartialEq + std::fmt::Debug + use<> {
+    pub(crate) fn snapshot(
+        &self,
+        doc: &EditingDoc,
+        map: &LoweringMap,
+    ) -> impl PartialEq + std::fmt::Debug + use<> {
         use super::preview::AnySnapshot;
         use yrs::types::ToJson;
 
@@ -238,13 +244,30 @@ impl LocalLowering {
             .seeds
             .iter()
             .map(|(id, seed)| {
+                let pm = if self.deferred {
+                    map.paragraph_blocks
+                        .iter()
+                        .find(|(_, source)| *source == seed.source)
+                        .map_or(seed.pm_start, |(pm, _)| *pm)
+                } else {
+                    seed.pm_start
+                };
+                let raw = if self.deferred {
+                    map.span_at(pm + 1)
+                        .filter(|span| span.paragraph == seed.source)
+                        .map(|span| span.raw_start)
+                        .or_else(|| doc.paragraph_index("body").ok()?.para_span(id).map(|s| s.0))
+                        .unwrap_or(seed.raw_start)
+                } else {
+                    seed.raw_start
+                };
                 (
                     id.clone(),
                     seed.tainted,
-                    seed.raw_start,
+                    raw,
                     seed.slot,
                     seed.source,
-                    seed.pm_start,
+                    pm,
                     seed.segments()
                         .iter()
                         .map(|segment| (segment.text.clone(), attrs(&segment.attrs)))
@@ -271,6 +294,13 @@ impl LocalLowering {
             preview_blocked: !enabled,
             enabled,
             ..Default::default()
+        }
+    }
+
+    pub(crate) fn fallback(enabled: bool) -> Self {
+        Self {
+            legacy: true,
+            ..Self::new(enabled)
         }
     }
 
@@ -367,6 +397,26 @@ impl LocalLowering {
             .into_iter()
             .flatten()
             .any(|(key, value)| unsafe_value(key, value));
+        if self.legacy {
+            self.block(unsafe_attrs);
+            match &diff.insert {
+                Out::Any(Any::String(_)) if story != "body" => {}
+                Out::Any(Any::String(text)) => {
+                    push_segment(&mut paragraph.segments, text, attrs);
+                }
+                Out::YMap(mark) if is_pilcrow(mark, txn) => {}
+                Out::YMap(mark) => {
+                    let values = pilcrow_values(mark, txn);
+                    self.block(
+                        values.iter().any(|(key, value)| unsafe_value(key, value))
+                            || value_string(values.get("_kind")).as_deref() != Some("table"),
+                    );
+                    *paragraph = ParagraphSeed::default();
+                }
+                _ => self.block(true),
+            }
+            return;
+        }
         self.preview_blocked |= unsafe_attrs;
         paragraph.tainted |= unsafe_attrs;
         match &diff.insert {
@@ -427,9 +477,12 @@ impl LocalLowering {
         }
         let unsafe_values = values.iter().any(|(key, value)| unsafe_value(key, value));
         let sectioned = values.contains_key("sectPr") || values.contains_key("sectionBreakType");
+        if self.legacy {
+            self.block(unsafe_values || sectioned && (story != "body" || !last));
+        }
         self.preview_blocked |= unsafe_values || sectioned && (story != "body" || !last);
         self.block(sectioned && story != "body");
-        paragraph.tainted |= unsafe_values || !safe;
+        paragraph.tainted |= unsafe_values || (!self.legacy && !safe);
         if story == "body" && !sectioned && !paragraph.tainted && !self.blocked {
             paragraph.raw_start = start;
             paragraph.pm_start = pm_start;
@@ -438,6 +491,14 @@ impl LocalLowering {
             paragraph.pilcrow = Some(mark.clone());
             paragraph.mark_attrs = attrs.cloned();
             let seed = std::mem::take(paragraph);
+            #[cfg(test)]
+            if !self.legacy {
+                crate::engine::TYPING_EXTRA_WORK.with(|work| {
+                    let mut counts = work.get();
+                    counts.seeds += 1;
+                    work.set(counts);
+                });
+            }
             self.seeds
                 .insert(value_string(values.get("paraId")).unwrap_or_default(), seed);
         }
@@ -449,6 +510,28 @@ impl LocalLowering {
             self.seeds.clear();
             return;
         }
+        if self.legacy {
+            let mut identities = BTreeSet::new();
+            self.block(map.paragraphs.iter().any(|(_, id)| !identities.insert(id)));
+            self.block(!blocks.iter().all(shiftable));
+            if self.blocked {
+                self.seeds.clear();
+                return;
+            }
+            self.seeds.retain(|_, seed| {
+                let Some(LayoutBlock::Paragraph(paragraph)) = blocks.get(seed.slot) else {
+                    return false;
+                };
+                paragraph.pm_start == Some(seed.pm_start as f64) && paragraph.attrs.is_some()
+            });
+            return;
+        }
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.seed_scans += map.paragraphs.len() + blocks.len();
+            work.set(counts);
+        });
         let mut identities = HashSet::new();
         let duplicates: HashSet<_> = map
             .paragraphs
@@ -488,6 +571,95 @@ impl LocalLowering {
             return None;
         }
         Some(self.seeds.get(&edit.paragraph)?.slot)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn refresh_seed<T: ReadTxn>(
+        &mut self,
+        id: &str,
+        raw: u32,
+        blocks: &[Rc<LayoutBlock>],
+        map: &LoweringMap,
+        txn: &T,
+        env: &RenderEnv,
+    ) -> Option<()> {
+        let seed = self.seeds.get_mut(id)?;
+        let LayoutBlock::Paragraph(current) = blocks.get(seed.slot)?.as_ref() else {
+            return None;
+        };
+        if !matches!(&current.id, BlockId::Str(current_id) if current_id == id)
+            || !map
+                .paragraphs
+                .get(seed.source as usize)
+                .is_some_and(|(story, paragraph)| *story == 0 && paragraph == id)
+        {
+            return None;
+        }
+        let pm = current.pm_start? as u64;
+        let mut runs = Vec::new();
+        let mut units = 0;
+        for segment in seed.segments().iter() {
+            push_text_chunks(
+                &mut runs,
+                &segment.text,
+                raw + units,
+                Some(&segment.attrs),
+                &[],
+                env,
+                units,
+            );
+            units += utf16_len(&segment.text);
+        }
+        let mut output = super::preview::LoweringOutput::default();
+        let mut expected = flush_paragraph(
+            runs,
+            seed.pilcrow.as_ref()?,
+            seed.mark_attrs.as_ref(),
+            txn,
+            "body",
+            env,
+            pm,
+            units,
+            &mut ListState::default(),
+            (&mut output, seed.source),
+            Vec::new(),
+        );
+        if current
+            .attrs
+            .as_ref()
+            .is_some_and(|attrs| attrs.num_pr.is_some() || attrs.list_marker.is_some())
+        {
+            expected.attrs = current.attrs.clone();
+        }
+        if expected != *current {
+            return None;
+        }
+        seed.raw_start = raw;
+        seed.pm_start = pm;
+        Some(())
+    }
+
+    pub(crate) fn suspend(&mut self) {
+        if let Some(edit) = self.edit.take() {
+            let replacement = self.seeds.get(&edit.paragraph).and_then(|seed| {
+                if edit
+                    .attributes
+                    .as_ref()
+                    .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
+                {
+                    return None;
+                }
+                update_seed_segments(&seed.segments(), &edit)
+            });
+            if let Some(segments) = replacement {
+                let seed = self.seeds.get_mut(&edit.paragraph).unwrap();
+                seed.segments = segments;
+                seed.chunks = None;
+            } else {
+                self.seeds.remove(&edit.paragraph);
+            }
+        }
+        self.deferred = true;
     }
 
     pub(crate) fn patch<T: ReadTxn>(
@@ -599,10 +771,12 @@ impl LocalLowering {
         }
         map.spans
             .splice(span_start..span_end, replacement.map.spans);
-        for seed in self.seeds.values_mut() {
-            if seed.raw_start > raw {
-                seed.raw_start = (i64::from(seed.raw_start) + delta) as u32;
-                seed.pm_start = (seed.pm_start as i64 + delta) as u64;
+        if !self.deferred {
+            for seed in self.seeds.values_mut() {
+                if seed.raw_start > raw {
+                    seed.raw_start = (i64::from(seed.raw_start) + delta) as u32;
+                    seed.pm_start = (seed.pm_start as i64 + delta) as u64;
+                }
             }
         }
         Some(super::preview::ParagraphEdit {
@@ -611,6 +785,45 @@ impl LocalLowering {
             delta,
         })
     }
+}
+
+fn update_seed_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {
+    let end = edit.offset.checked_add(edit.removed)?;
+    let mut updated = Vec::new();
+    let mut position = 0;
+    let mut inserted = false;
+    for segment in segments {
+        let units: Vec<_> = segment.text.encode_utf16().collect();
+        let next = position + units.len() as u32;
+        let prefix = edit.offset.saturating_sub(position).min(units.len() as u32) as usize;
+        let suffix = end.saturating_sub(position).min(units.len() as u32) as usize;
+        let left = String::from_utf16(&units[..prefix]).ok()?;
+        if !left.is_empty() {
+            push_segment(&mut updated, &left, Some(&segment.attrs));
+        }
+        if !inserted && edit.offset <= next {
+            if !edit.text.is_empty() {
+                push_segment(
+                    &mut updated,
+                    &edit.text,
+                    edit.attributes.as_ref().or(Some(&segment.attrs)),
+                );
+            }
+            inserted = true;
+        }
+        let right = String::from_utf16(&units[suffix..]).ok()?;
+        if !right.is_empty() {
+            push_segment(&mut updated, &right, Some(&segment.attrs));
+        }
+        position = next;
+    }
+    if end > position {
+        return None;
+    }
+    if !inserted && edit.offset == position && !edit.text.is_empty() {
+        push_segment(&mut updated, &edit.text, edit.attributes.as_ref());
+    }
+    Some(updated)
 }
 
 fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextSegment>> {

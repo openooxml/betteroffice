@@ -409,8 +409,13 @@ fn yrs_doc_to_mapped_layout_blocks_inner(
         })
         .unwrap_or_default();
     local.preview_blocked |= has_sequence_metadata;
+    if local.legacy {
+        local.block(has_sequence_metadata);
+    }
     let mut recording = if story_id == "body" {
-        preview_units.take().map(preview::UnitRecorder::new)
+        preview_units
+            .take()
+            .map(|units| preview::UnitRecorder::new(units, local.enabled && !local.legacy))
     } else {
         None
     };
@@ -500,10 +505,17 @@ fn lower_story_with_preview<T: ReadTxn>(
     let result = (|| {
         let story = story_ref(txn, story_id)?;
         let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
-        let chunks = std::rc::Rc::new(story.diff(txn, YChange::identity));
-        if story_id == "body" && !local.blocked {
-            local.chunks = Some(std::rc::Rc::clone(&chunks));
+        let chunks = story.diff(txn, YChange::identity);
+        let (owned_chunks, shared_chunks) =
+            if story_id == "body" && !local.blocked && !local.legacy {
+                (Vec::new(), Some(std::rc::Rc::new(chunks)))
+            } else {
+                (chunks, None)
+            };
+        if story_id == "body" {
+            local.chunks.clone_from(&shared_chunks);
         }
+        let chunks = shared_chunks.as_deref().unwrap_or(&owned_chunks);
         let initial = preview::WalkPosition::new(story_slot, pm_base, map);
         let (blocks, after, _) = walk_story_chunks(
             txn,
@@ -518,13 +530,13 @@ fn lower_story_with_preview<T: ReadTxn>(
             local,
             &story,
             &comments,
-            &chunks,
+            chunks,
             initial,
             BTreeSet::new(),
             recording.as_deref_mut(),
         )?;
         if let Some(recording) = recording {
-            recording.save_chunks(&chunks, comments);
+            recording.save_chunks(chunks, comments);
         }
         Ok((blocks, after.pm_cursor - pm_base))
     })();
@@ -602,13 +614,15 @@ fn walk_story_chunks<T: ReadTxn>(
     }
     let mut plain = local::ParagraphSeed::default();
     for (chunk_index, diff) in chunks.iter().enumerate() {
-        let local_safe = pending_hidden_field_blocks.is_empty()
+        let local_safe = !local.legacy
+            && !local.blocked
+            && pending_hidden_field_blocks.is_empty()
             && pending_code_join.is_none()
             && field_join.is_none()
             && story_id == "body"
             && active_stories.len() == 1
             && active_stories.contains("body");
-        if at_block_boundary && paragraph_start == story_index {
+        if !local.legacy && !local.blocked && at_block_boundary && paragraph_start == story_index {
             plain.start(local_safe && paragraph_runs.is_empty() && paragraph_drawings.is_empty());
         }
         if let Some(recording) = recording.as_deref_mut()

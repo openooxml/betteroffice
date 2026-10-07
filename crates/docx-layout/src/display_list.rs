@@ -1160,6 +1160,9 @@ pub enum DecoKind {
 /// The parsed build envelope: the measured blocks and options pagination also
 /// saw, the `Layout` it produced, and the display-only extras.
 pub struct BuildInput {
+    defer_stale_block_pruning: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    stale_block_pruning_passes: usize,
     contract_version: Option<u32>,
     measured: Vec<MeasuredBlockIn>,
     options: Value,
@@ -1185,6 +1188,15 @@ pub struct ResidentDisplayInput {
 }
 
 impl ResidentDisplayInput {
+    pub fn defer_stale_block_pruning(&mut self, defer: bool) {
+        self.input.defer_stale_block_pruning = defer;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stale_block_pruning_passes(&self) -> usize {
+        self.input.stale_block_pruning_passes
+    }
+
     pub fn font_chains(&self) -> &HashMap<String, Vec<u32>> {
         &self.input.font_chains
     }
@@ -1264,6 +1276,9 @@ impl<'de> Deserialize<'de> for BuildInput {
             .transpose()
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
+            defer_stale_block_pruning: false,
+            #[cfg(any(test, feature = "test-support"))]
+            stale_block_pruning_passes: 0,
             contract_version: wire.contract_version,
             measured: wire.measured,
             options: wire.options,
@@ -11252,6 +11267,9 @@ fn resident_build_input_for(
         .transpose()
         .map_err(|e| format!("parse resident display input: {e}"))?;
     Ok(BuildInput {
+        defer_stale_block_pruning: false,
+        #[cfg(any(test, feature = "test-support"))]
+        stale_block_pruning_passes: 0,
         contract_version: extras.contract_version,
         measured,
         options,
@@ -11749,7 +11767,11 @@ fn refresh_resident_display_pages_reading(
             "resident pagination measured block {key:?} is missing"
         ));
     }
-    if added_blocks {
+    if added_blocks && !input.defer_stale_block_pruning {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            input.stale_block_pruning_passes += 1;
+        }
         let keys: HashSet<_> = pagination
             .measured
             .iter()

@@ -7,12 +7,14 @@ use serde::{Serialize, Serializer};
 #[derive(Clone, Debug, Default)]
 pub(super) struct SharedBlocks {
     blocks: Vec<Rc<LayoutBlock>>,
+    revision: u64,
 }
 
 impl From<Vec<LayoutBlock>> for SharedBlocks {
     fn from(blocks: Vec<LayoutBlock>) -> Self {
         Self {
             blocks: blocks.into_iter().map(Rc::new).collect(),
+            revision: 0,
         }
     }
 }
@@ -27,7 +29,12 @@ impl SharedBlocks {
     }
 
     pub(super) fn shared_mut(&mut self) -> &mut Vec<Rc<LayoutBlock>> {
+        self.revision = self.revision.wrapping_add(1);
         &mut self.blocks
+    }
+
+    pub(super) fn restore_revision(&mut self, revision: u64) {
+        self.revision = revision;
     }
 
     pub(super) fn to_vec(&self) -> Vec<LayoutBlock> {
@@ -45,6 +52,10 @@ pub(super) trait BlockSource {
     fn len(&self) -> usize;
     fn get(&self, index: usize) -> Option<&LayoutBlock>;
     fn identity(&self, index: usize) -> Option<&Rc<LayoutBlock>>;
+
+    fn version(&self) -> Option<(usize, u64)> {
+        None
+    }
 }
 
 impl BlockSource for [LayoutBlock] {
@@ -76,6 +87,10 @@ impl BlockSource for Vec<LayoutBlock> {
 }
 
 impl BlockSource for SharedBlocks {
+    fn version(&self) -> Option<(usize, u64)> {
+        Some((std::ptr::from_ref(self) as usize, self.revision))
+    }
+
     fn len(&self) -> usize {
         self.blocks.len()
     }
@@ -242,6 +257,20 @@ mod tests {
             ]}]}]},
             {"kind": "paragraph", "id": "tail", "runs": [{"kind": "text", "text": "Tail"}]}
         ])).unwrap().into()
+    }
+
+    #[test]
+    fn shared_versions_change_on_mutation_without_changing_serialization() {
+        let mut blocks = blocks();
+        let before = serde_json::to_vec(&blocks).unwrap();
+        let version = blocks.version().unwrap();
+        let same = Rc::clone(&blocks.shared()[0]);
+        blocks.shared_mut()[0] = same;
+        assert_ne!(blocks.version(), Some(version));
+        assert_eq!(serde_json::to_vec(&blocks).unwrap(), before);
+        blocks.restore_revision(version.1);
+        assert_eq!(blocks.version(), Some(version));
+        assert_ne!(blocks.clone().version(), blocks.version());
     }
 
     #[test]

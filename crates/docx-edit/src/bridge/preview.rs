@@ -462,13 +462,16 @@ struct Window {
 pub(super) struct UnitRecorder {
     units: PreviewUnits,
     window: Option<Window>,
+    certify: bool,
 }
 
 impl UnitRecorder {
-    pub(super) fn new(units: PreviewUnits) -> Self {
+    pub(super) fn new(mut units: PreviewUnits, certify: bool) -> Self {
+        units.untracked_state |= !certify;
         Self {
             units,
             window: None,
+            certify,
         }
     }
 
@@ -578,10 +581,18 @@ impl UnitRecorder {
             });
         }
         let window = self.window.as_mut().unwrap();
-        window.local_stateful |= local::preview_touches_state(diff, txn);
-        for key in [INS, DEL] {
-            if let Some(value) = attribute(diff.attributes.as_deref(), key) {
-                record_decision(value);
+        if self.certify {
+            #[cfg(test)]
+            crate::engine::TYPING_EXTRA_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.preview_certifications += 1;
+                work.set(counts);
+            });
+            window.local_stateful |= local::preview_touches_state(diff, txn);
+            for key in [INS, DEL] {
+                if let Some(value) = attribute(diff.attributes.as_deref(), key) {
+                    record_decision(value);
+                }
             }
         }
         if !window.mutated && (pilcrow || standalone) {
@@ -789,7 +800,11 @@ pub(crate) fn lower_refreshed(
         .as_ref()
         .is_some_and(|units| units.refresh.as_ref().is_some_and(|refresh| !refresh.valid))
     {
-        *local = local::LocalLowering::new(local.enabled);
+        *local = if local.legacy {
+            local::LocalLowering::fallback(local.enabled)
+        } else {
+            local::LocalLowering::new(local.enabled)
+        };
         return lower_recorded(doc, story, env, local, true);
     }
     if let Some(units) = preview.as_mut() {
