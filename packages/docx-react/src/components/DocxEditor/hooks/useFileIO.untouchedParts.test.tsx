@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef, useState } from 'react';
@@ -10,6 +10,9 @@ import type { Comment } from '@betteroffice/docx/types/content';
 import type { Document as DocxDocument } from '@betteroffice/docx/types/document';
 import { getCommentText } from '@betteroffice/docx/utils/comments';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
+import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -17,6 +20,8 @@ if (ownsDom) GlobalRegistrator.register();
 import { DocxEditor, type DocxEditorRef } from '../../../index';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { PartEditTarget } from '../partEdit';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
+import { workerOpenSave } from '../internals/workerOpenSave';
 import { useFileIO } from './useFileIO';
 import { useHeaderFooterEditing } from './useHeaderFooterEditing';
 
@@ -439,16 +444,41 @@ test('no-edit React save preserves an image hyperlink and its relationship byte-
   expectUnchanged(source, saved, ['word/document.xml']);
 });
 
-test('a package part the host replaced in originalBuffer is saved', async () => {
-  const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
-  const editor = await mount(source.bytes, false);
-  const replaced = new Uint8Array([...PNG, 0]);
-  const document = editor.ref.current!.getDocument()!;
-  const parts = unzipContainer(new Uint8Array(document.originalBuffer!));
-  parts['word/media/pixel.png'] = replaced;
-  document.originalBuffer = rezipPartsToArrayBuffer(new Map(Object.entries(parts)));
-  const saved = unzipContainer(new Uint8Array(await editor.save()));
-  expect(Array.from(saved['word/media/pixel.png'] ?? [])).toEqual(Array.from(replaced));
+const sourceBufferEngines: Array<[string, boolean | undefined]> = [
+  ['default', undefined],
+  ['in-thread', false],
+];
+test.each(sourceBufferEngines)('a package part the host replaced in originalBuffer is saved with the %s engine', async (engine, experimentalWorkerOpen) => {
+  const originalWorker = globalThis.Worker;
+  const startWorker = await residentWorkerFactory();
+  const compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  setMissingWorkerCapabilitiesForTests([]);
+  globalThis.Worker = class {
+    constructor() { return startWorker(); }
+  } as unknown as typeof Worker;
+  try {
+    const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
+    const editor = await mount(source.bytes, experimentalWorkerOpen);
+    await act(async () => { await editor.ref.current!.flushPendingInput(); });
+    const session = editor.ref.current!.getEditorRef()!.getYrsSession()!;
+    expect(workerOpenSave(session) !== null).toBe(engine === 'default');
+    const replaced = new Uint8Array([...PNG, 0]);
+    const document = editor.ref.current!.getDocument()!;
+    const parts = unzipContainer(new Uint8Array(document.originalBuffer!));
+    parts['word/media/pixel.png'] = replaced;
+    document.originalBuffer = rezipPartsToArrayBuffer(new Map(Object.entries(parts)));
+    const saved = unzipContainer(new Uint8Array(await editor.save()));
+    expect(Array.from(saved['word/media/pixel.png'] ?? [])).toEqual(Array.from(replaced));
+  } finally {
+    cleanup();
+    takePreloadedResidentEngineWorker()?.destroy();
+    await act(async () => {});
+    compileModule.mockRestore();
+    resetEngineChoiceForTests();
+    globalThis.Worker = originalWorker;
+  }
 });
 
 test('no-edit React save preserves empty paragraph section properties byte-for-byte', async () => {

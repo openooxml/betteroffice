@@ -63,6 +63,7 @@ async function saveWithWorker(
     peer = (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session;
     assertCurrent();
   }
+  if (!viewer && saver.sourceReplaced?.()) return null;
   const task = () => {
     assertCurrent();
     if (!viewer && !saver.available()) {

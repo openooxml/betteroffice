@@ -136,6 +136,28 @@ test('the default opens in the worker and keeps its engine when the prop changes
   expect(errors).toEqual([]);
 });
 
+const lateOpeningOptions: Array<[string, () => DocxEditorProps]> = [
+  ['mediaTokens', () => ({ mediaTokens: true })],
+  ['collaboration.initialUpdate', () => ({ collaboration: { initialUpdate } })],
+];
+test.each(lateOpeningOptions)('late %s keeps worker opens and warns once until remount', async (prop, props) => {
+  const view = render(editor());
+  await waitFor(() => expect(openRequests()).toHaveLength(1));
+  view.rerender(editor(props()));
+  await act(async () => {});
+  expect(openRequests()).toHaveLength(1);
+  for (let load = 2; load <= 3; load += 1) {
+    view.rerender(editor({ ...props(), documentBuffer: buffer.slice(0) }));
+    await waitFor(() => expect(openRequests()).toHaveLength(load));
+  }
+  expect(workerModes.every(Boolean)).toBe(true);
+  expect(mainThreadLoads).toBe(0);
+  expect(warnings()).toHaveLength(1);
+  expect(warnings()[0]).toContain(prop);
+  expect(warnings()[0]).toContain('take effect only on remount');
+  expect(errors).toEqual([]);
+});
+
 test('bytes take precedence over an editable parsed document', async () => {
   render(editor({ document: parsed }));
   await waitFor(() => expect(openRequests()).toHaveLength(1));

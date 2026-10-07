@@ -55,13 +55,23 @@ function chooseEngine(props: EngineProps): { workerOpen: boolean; warnings: stri
 
 export function useEditorEngineChoice(props: EngineProps): boolean {
   const [choice] = useState(() => chooseEngine(props));
+  const initialUpdate = props.collaboration?.initialUpdate;
   useEffect(() => {
-    for (const warning of choice.warnings) {
+    const warnings = [...choice.warnings];
+    if (choice.workerOpen) {
+      if (props.mediaTokens === true) {
+        warnings.push('[DocxEditor] mediaTokens changes take effect only on remount; this editor keeps the worker-owned engine.');
+      }
+      if (initialUpdate !== undefined) {
+        warnings.push('[DocxEditor] collaboration.initialUpdate changes take effect only on remount; this editor keeps the worker-owned engine.');
+      }
+    }
+    for (const warning of warnings) {
       if (warned.has(warning)) continue;
       warned.add(warning);
       console.warn(warning);
     }
-  }, [choice]);
+  }, [choice, props.mediaTokens, initialUpdate]);
   return choice.workerOpen;
 }
 
