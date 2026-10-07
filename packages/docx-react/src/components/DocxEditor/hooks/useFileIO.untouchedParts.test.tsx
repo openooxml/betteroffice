@@ -532,9 +532,11 @@ async function deleteTwoCommentsAcrossSaves() {
       expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
     });
   }
+  await until(() => editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card').length === 2);
+  expect(editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card [title="More options"]')).toHaveLength(0);
   const deleteComment = async (id: number) => {
-    await until(() => !!editor.view.container.querySelector(`[data-comment-id="${id}"]`));
-    const card = editor.view.container.querySelector<HTMLElement>(`[data-comment-id="${id}"]`)!;
+    await until(() => !!editor.view.container.querySelector(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`));
+    const card = editor.view.container.querySelector<HTMLElement>(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`)!;
     await act(async () => fireEvent.click(card));
     await act(async () => fireEvent.click(within(card).getByTitle('More options')));
     await act(async () => fireEvent.click(within(card).getByRole('menuitem', { name: 'Delete', hidden: true })));
@@ -953,9 +955,11 @@ describe('DocxEditor saves (worker engine)', () => {
         expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
       });
     }
+    await until(() => editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card').length === 2);
+    expect(editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card [title="More options"]')).toHaveLength(0);
     const deleteComment = async (id: number) => {
-      await until(() => !!editor.view.container.querySelector(`[data-comment-id="${id}"]`));
-      const card = editor.view.container.querySelector<HTMLElement>(`[data-comment-id="${id}"]`)!;
+      await until(() => !!editor.view.container.querySelector(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`));
+      const card = editor.view.container.querySelector<HTMLElement>(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`)!;
       await act(async () => fireEvent.click(card));
       await act(async () => fireEvent.click(within(card).getByTitle('More options')));
       await act(async () => fireEvent.click(within(card).getByRole('menuitem', { name: 'Delete', hidden: true })));
