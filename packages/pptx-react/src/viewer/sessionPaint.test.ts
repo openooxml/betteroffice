@@ -16,6 +16,36 @@ function frame(): PresentationFrame {
   };
 }
 
+test('does not call mediaBytes on a second paint of a cached picture', async () => {
+  const original = globalThis.createImageBitmap;
+  const bitmap = { width: 4096, height: 4096, close: mock(() => {}) };
+  globalThis.createImageBitmap = (() => Promise.resolve(bitmap as ImageBitmap)) as typeof createImageBitmap;
+  const images = frameImages();
+  const image = frame();
+  const mediaBytes = mock((id: string) => image.media.get(id)?.slice());
+  const resolveImage = images.resolver(mediaBytes, 'undecodable');
+  const painted = mock(() => {});
+  const ctx = new Proxy({} as CanvasRenderingContext2D, {
+    get: (_, key) => key === 'drawImage' ? painted : () => {},
+    set: () => true,
+  });
+  try {
+    const display = {
+      ...image.displayList,
+      primitives: [{ kind: 'image' as const, objectId: 1, name: 'Picture', assetId: 'a',
+        x: 0, y: 0, w: 960, h: 540 }],
+    };
+    await paintSlide(ctx, display, 1, 1, { resolveImage });
+    expect(mediaBytes).toHaveBeenCalledTimes(1);
+    await paintSlide(ctx, display, 1, 1, { resolveImage });
+    expect(mediaBytes).toHaveBeenCalledTimes(1);
+    expect(painted).toHaveBeenCalledTimes(2);
+  } finally {
+    images.dispose();
+    globalThis.createImageBitmap = original;
+  }
+});
+
 test('evicts decoded bytes in least recently used order', async () => {
   const original = globalThis.createImageBitmap;
   const bitmaps = Array.from({ length: 4 }, () => ({ width: 4096, height: 4096, close: mock(() => {}) }));
