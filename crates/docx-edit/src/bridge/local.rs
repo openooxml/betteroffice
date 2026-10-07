@@ -695,12 +695,9 @@ impl LocalLowering {
                 .attributes
                 .as_ref()
                 .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
-            && self
-                .seeds
-                .get(&edit.paragraph)
-                .is_some_and(|seed| {
-                    edit.delete_bounds.is_some() || patch_part_bounds(seed.parts(), edit).is_some()
-                })
+            && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
+                edit.delete_bounds.is_some() || patch_part_bounds(seed.parts(), edit).is_some()
+            })
     }
 
     pub(crate) fn can_patch_before_insertion(&self, paragraph: &str) -> bool {
@@ -719,8 +716,13 @@ impl LocalLowering {
         if removed > 2 {
             return None;
         }
-        let range =
-            patch_part_range(self.seeds.get(paragraph)?.parts(), offset, removed, true, true)?;
+        let range = patch_part_range(
+            self.seeds.get(paragraph)?.parts(),
+            offset,
+            removed,
+            true,
+            true,
+        )?;
         let mut bounds = part_byte_bounds(&range, removed)?;
         bounds.slot = range.merged_slot;
         bounds.start += range.merged_bytes;
@@ -990,10 +992,7 @@ impl LocalLowering {
     }
 }
 
-fn patch_segment_bounds(
-    segments: &[TextSegment],
-    edit: &TextEdit,
-) -> Option<PatchBounds> {
+fn patch_segment_bounds(segments: &[TextSegment], edit: &TextEdit) -> Option<PatchBounds> {
     patch_part_bounds(
         segments.iter().map(|segment| SegmentPart {
             text: &segment.text,
@@ -1117,7 +1116,13 @@ fn patch_part_bounds<'a>(
             left_units: 0,
         });
     }
-    let range = patch_part_range(parts, edit.offset, edit.removed, edit.text.is_empty(), false)?;
+    let range = patch_part_range(
+        parts,
+        edit.offset,
+        edit.removed,
+        edit.text.is_empty(),
+        false,
+    )?;
     part_byte_bounds(&range, edit.removed)
 }
 
@@ -1237,16 +1242,8 @@ fn cached_delete_bounds_match_coalesced_seed_chunks() {
     let null = Attrs::from([("italic".into(), Any::Null)]);
     let chunks = Rc::new(SeedChunks::new(vec![
         yrs::types::text::Diff::with_change(Out::Any(Any::from("ab")), None, None),
-        yrs::types::text::Diff::with_change(
-            Out::Any(Any::from("α😀")),
-            Some(Box::new(null)),
-            None,
-        ),
-        yrs::types::text::Diff::with_change(
-            Out::Any(Any::from("cd")),
-            Some(Box::new(attrs)),
-            None,
-        ),
+        yrs::types::text::Diff::with_change(Out::Any(Any::from("α😀")), Some(Box::new(null)), None),
+        yrs::types::text::Diff::with_change(Out::Any(Any::from("cd")), Some(Box::new(attrs)), None),
         yrs::types::text::Diff::with_change(Out::Any(Any::from("ef")), None, None),
     ]));
     for (diff, units) in chunks.diffs.iter().zip(&chunks.units) {

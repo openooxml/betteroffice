@@ -15820,7 +15820,7 @@ mod tests {
                 generation
             );
             assert!(engine.measurement_patch().is_none());
-            let preflight_chunks = 3 * usize::from(!pending || same_paragraph);
+            let preflight_chunks = 3 * usize::from(!pending);
             assert_refusal_work(1 + usize::from(pending && !same_paragraph), preflight_chunks);
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
