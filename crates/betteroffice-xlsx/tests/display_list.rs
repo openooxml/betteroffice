@@ -211,6 +211,36 @@ fn display_lists_count_cells_when_a_start_rounds_to_the_grid_end() {
 }
 
 #[test]
+fn display_lists_past_one_grid_end_build_no_tracks_on_the_other_axis() {
+    let workbook = workbook();
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
+    let right = geometry.col_x(MAX_COLS);
+    let bottom = geometry.row_y(MAX_ROWS);
+    for viewport in [
+        Viewport {
+            x: right,
+            y: 0.0,
+            width: 200.0,
+            height: bottom,
+        },
+        Viewport {
+            x: 0.0,
+            y: bottom,
+            width: right,
+            height: 100.0,
+        },
+    ] {
+        let frame = workbook.display_list(&viewport).unwrap();
+        assert!(frame.grid.row_offsets.is_empty());
+        assert!(frame.grid.col_offsets.is_empty());
+        assert_eq!(frame.commands.len(), 1);
+    }
+}
+
+#[test]
 fn display_lists_reject_excessive_in_sheet_spans() {
     let workbook = workbook();
     let error = workbook
