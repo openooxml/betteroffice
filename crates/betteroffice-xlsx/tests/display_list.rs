@@ -185,6 +185,32 @@ fn display_lists_preserve_last_row_strip_with_frozen_pane() {
 }
 
 #[test]
+fn display_lists_count_cells_when_a_start_rounds_to_the_grid_end() {
+    let mut sheet = Sheet::new("Data");
+    sheet.col_widths.insert(0, 8.35);
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
+    let viewport = Viewport {
+        x: geometry.col_x(MAX_COLS) - 0.125,
+        y: 0.0,
+        width: 0.125,
+        height: 6_000_000.0,
+    };
+    assert_eq!(geometry.viewport_range(&viewport).1, MAX_COLS - 1..MAX_COLS);
+    assert!(matches!(
+        workbook.display_list(&viewport),
+        Err(Error::DisplayTooLarge { cells, max }) if cells > max && max == MAX_DISPLAY_CELLS
+    ));
+}
+
+#[test]
 fn display_lists_reject_excessive_in_sheet_spans() {
     let workbook = workbook();
     let error = workbook
