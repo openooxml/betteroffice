@@ -975,7 +975,9 @@ describe('DocxEditor plugins', () => {
         return null;
       },
     });
-    const { ref } = await mount({ plugins: [plugin], readOnly: true, allowHostProposals: true });
+    const { ref } = await mount({
+      plugins: [plugin], readOnly: true, allowHostProposals: true, experimentalWorkerOpen: false,
+    });
     await until(() => geometry !== null);
     const session = ref.current!.getEditorRef()!.getYrsSession()!;
     const { paragraph } = await firstParagraph(ref);

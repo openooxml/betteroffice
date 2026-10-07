@@ -127,6 +127,7 @@ for (const controlled of [false, true]) {
       const buffer = fixture('Hello world');
       const element = (open = false) => (
         <DocxEditor
+          experimentalWorkerOpen={false}
           ref={ref}
           documentBuffer={buffer}
           readOnly
@@ -205,6 +206,7 @@ test('native revisions still open the sidebar with host proposals enabled', asyn
   const ref = createRef<DocxEditorRef>();
   const view = render(
     <DocxEditor
+      experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={fixture('Hello world', 'replacement')}
       allowHostProposals
@@ -294,6 +296,7 @@ test('allowHostProposals admits only the proposal methods in a read-only editor'
   ) as ArrayBuffer;
   const element = (props: Partial<DocxEditorProps>) => (
     <DocxEditor
+      experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={buffer}
       readOnly
@@ -400,6 +403,7 @@ test("proposals' tracked changes do not open the comments sidebar; the user's st
   ) as ArrayBuffer;
   render(
     <DocxEditor
+      experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={buffer}
       onCommentsSidebarOpenChange={(open) => sidebar.push(open)}
@@ -457,6 +461,7 @@ test('host proposals stay hidden after swapping documentBuffer on the same edito
   const ref = createRef<DocxEditorRef>();
   const element = (documentBuffer: ArrayBuffer) => (
     <DocxEditor
+      experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={documentBuffer}
       readOnly
@@ -541,6 +546,7 @@ test('swapping to a document with its own revisions auto-opens the sidebar once'
   const ref = createRef<DocxEditorRef>();
   const element = (documentBuffer: ArrayBuffer) => (
     <DocxEditor
+      experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={documentBuffer}
       onCommentsSidebarOpenChange={(open) => sidebar.push(open)}
@@ -603,6 +609,7 @@ test('a user revision after a swap can auto-open the sidebar again', async () =>
   const ref = createRef<DocxEditorRef>();
   const element = (documentBuffer: ArrayBuffer) => (
     <DocxEditor
+      experimentalWorkerOpen={false}
       ref={ref}
       documentBuffer={documentBuffer}
       onCommentsSidebarOpenChange={(open) => sidebar.push(open)}

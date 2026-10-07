@@ -227,12 +227,13 @@ async function until(done: () => boolean): Promise<void> {
   expect(done()).toBe(true);
 }
 
-async function mount(bytes: ArrayBuffer) {
+async function mount(bytes: ArrayBuffer, experimentalWorkerOpen?: boolean) {
   const ref = createRef<DocxEditorRef>();
   const errors: Error[] = [];
   const onError = (error: Error) => errors.push(error);
   const view = render(
-    <DocxEditor ref={ref} documentBuffer={bytes} onError={onError} downloadOnSave={false} />
+    <DocxEditor ref={ref} documentBuffer={bytes} onError={onError} downloadOnSave={false}
+      experimentalWorkerOpen={experimentalWorkerOpen} />
   );
   await until(
     () => ref.current?.commands.getState('save').enabled === true &&
@@ -258,6 +259,7 @@ async function mount(bytes: ArrayBuffer) {
       view.rerender(
         <DocxEditor
           ref={ref}
+          experimentalWorkerOpen={experimentalWorkerOpen}
           documentBuffer={bytes}
           comments={comments}
           onError={onError}
@@ -439,7 +441,7 @@ test('no-edit React save preserves an image hyperlink and its relationship byte-
 
 test('a package part the host replaced in originalBuffer is saved', async () => {
   const source = fixture((p) => p(run('Linked image') + drawing()), { image: true });
-  const editor = await mount(source.bytes);
+  const editor = await mount(source.bytes, false);
   const replaced = new Uint8Array([...PNG, 0]);
   const document = editor.ref.current!.getDocument()!;
   const parts = unzipContainer(new Uint8Array(document.originalBuffer!));
@@ -819,7 +821,7 @@ test('a host page-setup change is saved even when body text is untouched', async
 });
 
 test('adding and removing a header across saves keeps relationship and content-type targets', async () => {
-  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
+  const editor = await mount(fixture((p) => p(run('Body text'))).bytes, false);
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
   let host = paged.getDocument()!;

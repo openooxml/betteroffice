@@ -67,6 +67,7 @@ import { createPluginClients } from '../../../plugins/createPluginClients';
 import type { DocxPlugin, DocxPluginContext, DocxPluginEvent, DocxPluginSnapshot } from '../../../plugins/types';
 import * as pluginHosts from '../../../plugins/useDocxPluginHost';
 import * as pluginHostFactories from '../../../plugins/createDocxPluginHost';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -126,6 +127,7 @@ const editModule = new WebAssembly.Module(
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
 
 beforeEach(() => {
+  setMissingWorkerCapabilitiesForTests([]);
   const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
   registerRestore(() => {
     if (fonts) Object.defineProperty(document, 'fonts', fonts);
@@ -144,6 +146,7 @@ afterEach(() => {
   try {
     cleanup();
   } finally {
+    resetEngineChoiceForTests();
     compileModule.mockRestore();
     mock.restore();
     for (const restore of [...globalRestores].reverse()) restore();

@@ -85,6 +85,7 @@ test('a preview reports its first page painted before the full document opens', 
     <DocxEditor
       ref={ref}
       previewFirstPage
+      experimentalWorkerOpen={false}
       documentBuffer={fixture('page-fragments/pages.docx')}
       onFirstPagePainted={() => (painted += 1)}
     />
