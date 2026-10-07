@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef, useState } from 'react';
@@ -17,6 +17,7 @@ if (ownsDom) GlobalRegistrator.register();
 import { DocxEditor, type DocxEditorRef } from '../../../index';
 import type { PagedEditorRef } from '../PagedEditor';
 import type { PartEditTarget } from '../partEdit';
+import { setupWorkerEngine } from '../__fixtures__/workerEngine';
 import { useFileIO } from './useFileIO';
 import { useHeaderFooterEditing } from './useHeaderFooterEditing';
 
@@ -906,4 +907,75 @@ test('an edit in one paragraph keeps the rest of the body byte-for-byte', async 
   expect(saved.slice(start, saved.length - (original.length - end)).replace(/<[^>]+>/g, '')).toBe(
     'Typed Edited here'
   );
+});
+
+describe('DocxEditor saves (worker engine)', () => {
+  const workers = setupWorkerEngine();
+
+  async function mountWorker(bytes: ArrayBuffer) {
+    const opens = workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length;
+    const ref = createRef<DocxEditorRef>();
+    const errors: Error[] = [];
+    const onError = (error: Error) => errors.push(error);
+    const view = render(
+      <DocxEditor ref={ref} experimentalWorkerOpen documentBuffer={bytes} onError={onError} downloadOnSave={false} />
+    );
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    if (unzipContainer(new Uint8Array(bytes))['word/comments.xml']) {
+      await until(() => (ref.current?.getComments().length ?? 0) > 0);
+    }
+    expect(errors.map(({ message }) => message)).toEqual([]);
+    await act(async () => { await ref.current!.flushPendingInput(); });
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length).toBeGreaterThan(opens);
+    expect(workers.some((worker) => worker.sessions.length > 0)).toBe(true);
+    return {
+      ref,
+      view,
+      async save(): Promise<ArrayBuffer> {
+        let saved: ArrayBuffer | null = null;
+        await act(async () => {
+          saved = await ref.current!.save();
+        });
+        expect(errors.map(({ message }) => message)).toEqual([]);
+        expect(saved).not.toBeNull();
+        return saved!;
+      },
+    };
+  }
+
+  async function deleteTwoCommentsAcrossSaves() {
+    const editor = await mountWorker(twoCommentFixture());
+    await until(() => editor.ref.current!.getComments().length === 2);
+    if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
+      await act(async () => {
+        expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
+      });
+    }
+    const deleteComment = async (id: number) => {
+      await until(() => !!editor.view.container.querySelector(`[data-comment-id="${id}"]`));
+      const card = editor.view.container.querySelector<HTMLElement>(`[data-comment-id="${id}"]`)!;
+      await act(async () => fireEvent.click(card));
+      await act(async () => fireEvent.click(within(card).getByTitle('More options')));
+      await act(async () => fireEvent.click(within(card).getByRole('menuitem', { name: 'Delete', hidden: true })));
+      await until(() => !editor.ref.current!.getComments().some((comment) => comment.id === id));
+    };
+    await deleteComment(1);
+    const first = unzipContainer(new Uint8Array(await editor.save()));
+    await deleteComment(2);
+    return { first, saved: await editor.save() };
+  }
+
+  test('deleting two comments across saves does not resurrect the first comment on the worker engine', async () => {
+    const { first, saved } = await deleteTwoCommentsAcrossSaves();
+    const firstComments = new DOMParser().parseFromString(xmlPart(first, 'word/comments.xml'), 'application/xml');
+    expect(xmlElements(firstComments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
+    expect(markers(xmlPart(first, 'word/document.xml'), 1).filter((marker) => marker !== 'Reference')).toEqual([]);
+    const last = unzipContainer(new Uint8Array(saved));
+    if (last['word/comments.xml']) {
+      const lastComments = new DOMParser().parseFromString(xmlPart(last, 'word/comments.xml'), 'application/xml');
+      expect(xmlElements(lastComments, W, 'comment').some((entry) => entry.getAttribute('w:id') === '1')).toBe(false);
+    }
+    expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
+  });
 });

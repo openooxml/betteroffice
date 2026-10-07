@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -8,6 +8,9 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import type { ResidentEngineWorkerRequest } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { pagedDocx } from './__fixtures__/pagedDocx';
+import { setupWorkerEngine } from './__fixtures__/workerEngine';
 
 const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 
@@ -146,3 +149,87 @@ test('each document reports its first page painted once, however often its pages
   });
   expect(painted).toEqual(['pages', 'principal']);
 }, 60_000);
+
+describe('DocxEditor first page painted (worker engine)', () => {
+  const workers = setupWorkerEngine();
+
+  test('a document on the worker engine reports its first page painted once its canvas presents, not at layout', async () => {
+    let releaseReplays = () => {};
+    holdReplays = new Promise((done) => (releaseReplays = done));
+    let painted = 0;
+    try {
+      const view = render(
+        <DocxEditor
+          experimentalWorkerOpen
+          documentBuffer={await pagedDocx(2)}
+          onFirstPagePainted={() => (painted += 1)}
+        />
+      );
+      await waitFor(() => expect(view.container.querySelector('.canvas-page')).not.toBeNull(), {
+        timeout: 20_000,
+      });
+      expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
+      await act(async () => {
+        await new Promise((done) => setTimeout(done, 200));
+      });
+      expect(painted).toBe(0);
+
+      await act(async () => releaseReplays());
+      await waitFor(() => expect(painted).toBe(1), { timeout: 20_000 });
+    } finally {
+      releaseReplays();
+    }
+  }, 40_000);
+});
+
+describe('DocxEditor first page preview (worker engine)', () => {
+  let painted = 0;
+  let fullOpenGate: Promise<void>;
+  let fullOpenError: unknown = null;
+  const fullOpens: ResidentEngineWorkerRequest[] = [];
+  const workers = setupWorkerEngine((worker) => {
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (request, transfer) => {
+      if (request.type === 'open' && request.previewBlocks === undefined) {
+        try {
+          expect(painted).toBe(1);
+        } catch (error) {
+          fullOpenError = error;
+        }
+        fullOpens.push(request);
+        void fullOpenGate.then(() => post(request, transfer));
+        return;
+      }
+      post(request, transfer);
+    };
+  });
+
+  test('a preview on the worker engine reports its first page painted before the full document opens', async () => {
+    let releaseFullOpen = () => {};
+    fullOpenGate = new Promise<void>((done) => (releaseFullOpen = done));
+    const ref = createRef<Editor>();
+    try {
+      render(
+        <DocxEditor
+          ref={ref}
+          previewFirstPage
+          experimentalWorkerOpen
+          documentBuffer={await pagedDocx(2)}
+          onFirstPagePainted={() => (painted += 1)}
+        />
+      );
+      await waitFor(() => expect(fullOpens).toHaveLength(1), { timeout: 20_000 });
+      if (fullOpenError) throw fullOpenError;
+      expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
+
+      await act(async () => releaseFullOpen());
+      await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 20_000 });
+      await act(async () => {
+        await new Promise((done) => setTimeout(done, 200));
+      });
+      expect(painted).toBe(1);
+    } finally {
+      releaseFullOpen();
+    }
+  }, 40_000);
+});

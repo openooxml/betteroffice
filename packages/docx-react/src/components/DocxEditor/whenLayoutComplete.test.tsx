@@ -1,9 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
 import { pagedDocx } from './__fixtures__/pagedDocx';
+import { setupWorkerEngine } from './__fixtures__/workerEngine';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -153,3 +154,27 @@ test('a failure without a message rejects waits during and after the load', asyn
   expect(await during).toBeInstanceOf(Error);
   expect(await layoutComplete(ref)).toBeInstanceOf(Error);
 }, 90_000);
+
+describe('DocxEditor layout waits (worker engine)', () => {
+  const workers = setupWorkerEngine();
+
+  test('a failed load before any layout rejects the wait on the worker engine', async () => {
+    const ref = createRef<DocxEditorRef>();
+    render(<DocxEditor ref={ref} experimentalWorkerOpen />);
+    await until(() => ref.current !== null);
+    const detached = await pagedDocx(1);
+    structuredClone(detached, { transfer: [detached] });
+    await act(async () => {
+      await ref.current!.loadDocumentBuffer(detached);
+    });
+    await tick(200);
+    expect(await layoutComplete(ref)).toBeInstanceOf(Error);
+
+    const bytes = await pagedDocx(1);
+    await act(async () => {
+      await ref.current!.loadDocumentBuffer(bytes);
+    });
+    expect(await layoutComplete(ref)).toBe(1);
+    expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
+  }, 90_000);
+});

@@ -35,6 +35,7 @@ import {
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
 import * as canvasReplay from '../components/DocxEditor/canvasReplay';
+import { setupWorkerEngine } from '../components/DocxEditor/__fixtures__/workerEngine';
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
@@ -1449,5 +1450,81 @@ describe('DocxEditor plugins', () => {
     });
     await settle();
     expect(errors.map((error) => [error.pluginId, error.phase])).toEqual([['raw', 'definition']]);
+  });
+});
+
+describe('DocxEditor plugins (worker engine)', () => {
+  const workers = setupWorkerEngine();
+
+  async function mountWorker(props: Partial<DocxEditorProps> = {}) {
+    const opens = workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    );
+    const editor = await mount({ ...props, experimentalWorkerOpen: true });
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.some(
+      (worker) => worker.sessions.length > 0 && worker.requests.includes('open')
+    )).toBe(true);
+    expect(workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    )).toBeGreaterThan(opens);
+    await act(async () => {
+      await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    });
+    return editor;
+  }
+
+  test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
+    const results: DocxAnchorGeometryResult[] = [];
+    const events: (DocxAnchorGeometryResult | null)[] = [];
+    let target: DocxGeometryTarget | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'host.zoom-anchor',
+      createState: () => null,
+      onEvent(context, event) {
+        if (event.type === 'layout-change' && event.layout?.zoom === 1.5 && target) {
+          events.push(context.geometry?.getAnchorGeometry(target) ?? null);
+        }
+      },
+      overlay: ({ geometry }) => {
+        if (target) results.push(geometry.getAnchorGeometry(target));
+        return null;
+      },
+    });
+    const { ref } = await mountWorker({ plugins: [plugin] });
+    const { paragraph } = await firstParagraph(ref);
+    const identities = await ref.current!.getParagraphIdentities();
+    const anchor = identities
+      .paragraphs.find((entry) => entry.session?.paraId === paragraph.paraId)!.session!;
+    target = { kind: 'paragraph', paragraph: anchor };
+    const rect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 800, 1000)
+    );
+    const present = canvasReplay.presentCanvasReplay;
+    const paints: (() => void)[] = [];
+    const held = spyOn(canvasReplay, 'presentCanvasReplay').mockImplementation(
+      async (preparations, isCurrent) => {
+        await new Promise<void>((resolve) => paints.push(resolve));
+        return present(preparations, isCurrent);
+      }
+    );
+    try {
+      await act(async () => ref.current!.setZoom(1.5));
+      await until(() => events.length > 0 && paints.length > 0);
+      expect(events).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+      expect(results.at(-1)).toMatchObject({ ok: false });
+      await act(async () => {
+        for (const paint of paints.splice(0)) paint();
+      });
+      held.mockRestore();
+      await until(() => {
+        const last = results.at(-1);
+        return !!last?.ok && last.rects.length > 0;
+      });
+      await until(() => events.at(-1)?.ok === true);
+    } finally {
+      held.mockRestore();
+      rect.mockRestore();
+    }
   });
 });
