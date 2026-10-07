@@ -145,7 +145,7 @@ impl AxisLayout {
         }
 
         let sheet_extent = edge(limit);
-        if frozen < limit && frozen_extent < extent && frozen_extent + scroll < sheet_extent {
+        if frozen < limit && frozen_extent < extent && sheet_extent - scroll > frozen_extent {
             let body_extent = extent - frozen_extent;
             let origin = frozen_extent + scroll;
             let first = at(origin).max(frozen).min(limit - 1);
@@ -287,9 +287,9 @@ fn emit_grid_segments(
     color: Arc<str>,
 ) -> Vec<DrawCmd> {
     if (rows.tracks.is_empty()
-        && geometry.row_y(rows.frozen) + rows.scroll >= geometry.row_y(MAX_ROWS))
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen))
         || (cols.tracks.is_empty()
-            && geometry.col_x(cols.frozen) + cols.scroll >= geometry.col_x(MAX_COLS))
+            && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen))
     {
         return Vec::new();
     }
