@@ -639,7 +639,10 @@ impl LocalLowering {
         seed.pilcrow = Some(mark.clone());
         seed.mark_attrs = attrs.cloned();
         seed.segments.clear();
-        seed.chunks = self.chunks.as_ref().map(|shared| (Rc::clone(shared), chunks));
+        seed.chunks = self
+            .chunks
+            .as_ref()
+            .map(|shared| (Rc::clone(shared), chunks));
         seed.validated = None;
     }
 
@@ -878,7 +881,10 @@ impl LocalLowering {
     }
 }
 
-fn patch_segment_bounds(segments: &[TextSegment], edit: &TextEdit) -> Option<(usize, usize, usize)> {
+fn patch_segment_bounds(
+    segments: &[TextSegment],
+    edit: &TextEdit,
+) -> Option<(usize, usize, usize)> {
     if segments.is_empty() {
         if edit.offset != 0 || edit.removed != 0 {
             return None;

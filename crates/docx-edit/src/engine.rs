@@ -4020,16 +4020,16 @@ impl EngineSession {
         lower_locally: bool,
     ) -> crate::OpResult<crate::Receipt> {
         let before = self.doc_epoch();
-        let seed_epoch_valid = self
-            .render
-            .borrow()
-            .stories
-            .get(&range.story)
-            .is_none_or(|lowered| {
-                lowered.doc_epoch == before
-                    || (self.typing_epoch.get() == Some(before)
-                        && self.typing_preserves_seeds.get())
-            });
+        let seed_epoch_valid =
+            self.render
+                .borrow()
+                .stories
+                .get(&range.story)
+                .is_none_or(|lowered| {
+                    lowered.doc_epoch == before
+                        || (self.typing_epoch.get() == Some(before)
+                            && self.typing_preserves_seeds.get())
+                });
         let preview_length = self.doc.story_len(&range.story)?;
         if lower_locally
             && self.local_lowering.get()
@@ -4050,7 +4050,7 @@ impl EngineSession {
                     let paragraph = index.para_at(range.start)?;
                     let raw = index.para_span(&paragraph.para_id)?.0;
                     let incoming = crate::bridge::local::TextEdit {
-                        paragraph: paragraph.para_id.clone(),
+                        paragraph: paragraph.para_id.to_string(),
                         offset: range.start.checked_sub(raw)?,
                         removed: range.end.checked_sub(range.start)?,
                         text: text.unwrap_or_default().to_owned(),
@@ -4556,30 +4556,28 @@ impl EngineSession {
                 .stories
                 .get(story)
                 .is_none_or(|lowered| lowered.doc_epoch != epoch);
-        let retained_local = if typing
-            && self.typing_preserves_seeds.get()
-            && self.local_lowering.get()
-        {
-            self.render
-                .borrow_mut()
-                .stories
-                .get_mut(story)
-                .filter(|lowered| {
-                    lowered.env == *env
-                        && lowered.media == self.doc.media_sources()
-                        && lowered.local.matches_source(&self.doc)
-                })
-                .map(|lowered| {
-                    let mut local = std::mem::replace(
-                        &mut lowered.local,
-                        crate::bridge::local::LocalLowering::new(false),
-                    );
-                    local.suspend();
-                    local
-                })
-        } else {
-            None
-        };
+        let retained_local =
+            if typing && self.typing_preserves_seeds.get() && self.local_lowering.get() {
+                self.render
+                    .borrow_mut()
+                    .stories
+                    .get_mut(story)
+                    .filter(|lowered| {
+                        lowered.env == *env
+                            && lowered.media == self.doc.media_sources()
+                            && lowered.local.matches_source(&self.doc)
+                    })
+                    .map(|lowered| {
+                        let mut local = std::mem::replace(
+                            &mut lowered.local,
+                            crate::bridge::local::LocalLowering::new(false),
+                        );
+                        local.suspend();
+                        local
+                    })
+            } else {
+                None
+            };
         let fallback = typing;
         #[cfg(test)]
         let fallback = fallback || self.force_legacy_lowering.get();
@@ -4593,9 +4591,7 @@ impl EngineSession {
         local.retained = retained_local.map(Box::new);
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
-        if !typing
-            && let Some(lowered) = self.render.borrow_mut().stories.get_mut(story)
-        {
+        if !typing && let Some(lowered) = self.render.borrow_mut().stories.get_mut(story) {
             lowered.shift_preview_positions();
         }
         let refreshed = self.render.borrow().stories.get(story).and_then(|lowered| {
@@ -14871,7 +14867,10 @@ mod tests {
                 snapshot.primitive_ids.as_ref()
             );
         }
-        assert_eq!(canonical_test_frame(&warm_frame), canonical_test_frame(&cold_frame));
+        assert_eq!(
+            canonical_test_frame(&warm_frame),
+            canonical_test_frame(&cold_frame)
+        );
         let snapshot = |engine: &EngineSession| {
             let pagination = engine.pagination.borrow();
             (
@@ -14920,7 +14919,10 @@ mod tests {
                 )
                 .unwrap();
             certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
-            assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+            assert_eq!(
+                engine.stats().lower_cache_misses,
+                before.lower_cache_misses + 1
+            );
             assert!(engine.measurement_patch().is_none());
             TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
@@ -14967,7 +14969,15 @@ mod tests {
         );
         let (engine, request) = local_patch_laid_out(&Package::new(&body).bytes(), 9639, true);
         assert!(!engine.pagination.borrow().measured_with_floats);
-        assert!(engine.regions.borrow().as_ref().unwrap().fast_path.is_none());
+        assert!(
+            engine
+                .regions
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .fast_path
+                .is_none()
+        );
         let mut retained = HashMap::new();
         let frame = engine.build_display_list_frame("{}", 0).unwrap();
         assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
@@ -15029,7 +15039,10 @@ mod tests {
             .unwrap();
         let epoch = engine.display.borrow().binary_frame_epoch;
         engine.apply_and_layout("body", epoch).unwrap();
-        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
         TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
         assert_local_patch_matches_cold(&engine, &request, "cross-run refusal");
         let offset = measurement_patch_offset(&engine, 1);
@@ -15077,12 +15090,18 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+        assert_eq!(
+            engine.render.borrow().stories["body"].generation,
+            generation
+        );
         assert!(engine.measurement_patch().is_none());
         TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
         let epoch = engine.display.borrow().binary_frame_epoch;
         let frame = engine.apply_and_layout("body", epoch).unwrap();
-        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
         TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
         assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
         assert_local_patch_matches_cold(&engine, &request, "pending seeded cross-run refusal");
@@ -15120,7 +15139,13 @@ mod tests {
         for (pass, text) in ["x", "y"].into_iter().enumerate() {
             TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
             let offset = measurement_patch_offset(&engine, 0);
-            local_patch_step(&engine, &request, "body", (offset, offset, Some(text)), true);
+            local_patch_step(
+                &engine,
+                &request,
+                "body",
+                (offset, offset, Some(text)),
+                true,
+            );
             TYPING_EXTRA_WORK.with(|work| {
                 assert_eq!(work.get().seed_validations, usize::from(pass == 0));
             });
