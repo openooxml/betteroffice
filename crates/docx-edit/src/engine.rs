@@ -4259,8 +4259,6 @@ impl EngineSession {
             return None;
         }
         if !lowered.local.can_patch(edit) {
-            lowered.local.discard_pending();
-            self.measurement_patch().take();
             return None;
         }
         let block_count = lowered.blocks.len();
@@ -14473,10 +14471,7 @@ mod tests {
         {
             let render = engine.render.borrow();
             for id in &discarded {
-                assert!(
-                    !render.stories["body"].local.has_seed(id),
-                    "{label}: {id}"
-                );
+                assert!(!render.stories["body"].local.has_seed(id), "{label}: {id}");
             }
         }
         let snapshot = |engine: &EngineSession| {
@@ -14977,12 +14972,32 @@ mod tests {
             );
         }
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        SHIFT_SAFETY_WORK.with(|work| work.set(0));
         let before = engine.stats();
-        measurement_patch_type(&engine, certified_float_offset(&engine, 17), "z");
+        let offset = certified_float_offset(&engine, 17);
+        engine
+            .edit_resident_text(
+                crate::StoryRange::new("body", offset, offset),
+                Some("z"),
+                true,
+            )
+            .unwrap();
+        let env = engine.render.borrow().stories["body"].env.clone();
+        assert!(
+            engine
+                .patch_lowered_body(engine.doc_epoch(), &env)
+                .is_none()
+        );
         assert!(engine.measurement_patch().is_none());
-        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
-        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
         TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        assert_eq!(
+            engine.stats().lower_cache_misses,
+            before.lower_cache_misses + 1
+        );
+        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
         assert_certified_float_cold(&engine, &request, &mut retained);
         measurement_patch_type(&engine, certified_float_offset(&engine, 18), "z");
         assert!(engine.measurement_patch().is_some());
@@ -15286,7 +15301,11 @@ mod tests {
             let mut retained = HashMap::new();
             assert_certified_float_cold(&engine, &request, &mut retained);
             let offset = certified_float_offset(&engine, 1);
-            let (start, removed) = if pending { (offset, 3) } else { (offset + 1, 1) };
+            let (start, removed) = if pending {
+                (offset, 3)
+            } else {
+                (offset + 1, 1)
+            };
             if pending {
                 let pending_offset = certified_float_offset(&engine, 17);
                 engine
@@ -15312,12 +15331,18 @@ mod tests {
                     true,
                 )
                 .unwrap();
-            assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+            assert_eq!(
+                engine.render.borrow().stories["body"].generation,
+                generation
+            );
             assert!(engine.measurement_patch().is_none());
             TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
-            assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+            assert_eq!(
+                engine.stats().lower_cache_misses,
+                before.lower_cache_misses + 1
+            );
             assert!(engine.measurement_patch().is_none());
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
             TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
@@ -15381,7 +15406,12 @@ mod tests {
         let mut retained = local.retained.take().unwrap();
         retained.refresh_seeds(&blocks, &map);
         retained
-            .refresh_seed("00000012", &blocks, &engine.doc().yrs_doc().transact(), &env)
+            .refresh_seed(
+                "00000012",
+                &blocks,
+                &engine.doc().yrs_doc().transact(),
+                &env,
+            )
             .unwrap();
         TYPING_EXTRA_WORK.with(|work| {
             assert!(work.get().seed_refreshes > 0);
