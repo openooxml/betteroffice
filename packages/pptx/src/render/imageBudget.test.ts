@@ -128,7 +128,7 @@ describe('presentation image decode budget', () => {
       expect(decode).toHaveBeenCalledTimes(2);
       expect(decode.mock.calls[0]).toEqual([expect.any(Blob)]);
       const canvas = decode.mock.calls[1][0] as unknown as DecodeCanvas;
-      expect(decode.mock.calls[1]).toEqual([canvas]);
+      expect(decode.mock.calls[1]).toEqual([canvas as unknown as ImageBitmapSource]);
       expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
       expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
       expect(decoded.close).toHaveBeenCalledTimes(1);
@@ -154,7 +154,7 @@ describe('presentation image decode budget', () => {
       expect(decode.mock.calls[0]).toEqual([expect.any(Blob), { resizeWidth: 4096, resizeHeight: 2048 }]);
       expect(decode).toHaveBeenCalledTimes(2);
       const canvas = decode.mock.calls[1][0] as unknown as DecodeCanvas;
-      expect(decode.mock.calls[1]).toEqual([canvas]);
+      expect(decode.mock.calls[1]).toEqual([canvas as unknown as ImageBitmapSource]);
       expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
       expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
       expect(decoded.close).toHaveBeenCalledTimes(1);
@@ -208,7 +208,7 @@ describe('presentation image decode budget', () => {
       const source = await decodePresentationImage(png(8192, 4096), 'undecodable');
       expect(createElement).toHaveBeenCalledWith('canvas');
       expect(decode).toHaveBeenCalledTimes(2);
-      expect(decode.mock.calls[1]).toEqual([canvas]);
+      expect(decode.mock.calls[1]).toEqual([canvas as unknown as ImageBitmapSource]);
       expect(source).toBe(canvas as unknown as CanvasImageSource);
       expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
       expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
@@ -242,7 +242,7 @@ describe('presentation image decode budget', () => {
       expect(getContext).toHaveBeenCalledWith('2d');
       expect(createElement).toHaveBeenCalledWith('canvas');
       expect(decode).toHaveBeenCalledTimes(2);
-      expect(decode.mock.calls[1]).toEqual([canvas]);
+      expect(decode.mock.calls[1]).toEqual([canvas as unknown as ImageBitmapSource]);
       expect(source).toBe(canvas as unknown as CanvasImageSource);
       expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
       expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
