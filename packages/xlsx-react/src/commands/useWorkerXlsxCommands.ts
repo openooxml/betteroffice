@@ -118,12 +118,10 @@ export function createWorkerXlsxCommandBinding(
   bridge: () => WorkerXlsxEditorBridge
 ): XlsxCommandBinding {
   let cache: EngineRead | null = null;
-  let admittedBridge: WorkerXlsxEditorBridge | null = null;
-  const currentBridge = () => admittedBridge ?? bridge();
   let markApplied: (() => void) | null = null;
 
   const engine = (executing: boolean): EngineRead | null => {
-    const current = currentBridge();
+    const current = bridge();
     const peer = current.peer();
     const view = current.view();
     if (!peer || current.status() !== 'ready') return null;
@@ -145,7 +143,7 @@ export function createWorkerXlsxCommandBinding(
   };
 
   const environment = (executing: boolean): XlsxCommandEnvironment => {
-    const current = currentBridge();
+    const current = bridge();
     const view = current.view();
     const read = engine(executing);
     let selection: XlsxCommandEnvironment['selection'] = null;
@@ -186,7 +184,7 @@ export function createWorkerXlsxCommandBinding(
     args: XlsxCommandArgs[K],
     env: XlsxCommandEnvironment
   ): XlsxCommandResult | Promise<XlsxCommandResult> => {
-    const current = currentBridge();
+    const current = bridge();
     const peer = current.peer();
     const fail = (code: XlsxCommandFailureCode): XlsxCommandResult => ({
       ok: false,
@@ -380,7 +378,7 @@ export function createWorkerXlsxCommandBinding(
 
   const targetOf = (id: XlsxCommandId): string => {
     if (!isCellCommand(id)) return 'document';
-    const view = currentBridge().view();
+    const view = bridge().view();
     if (view.chartSelected) return 'chart';
     return view.selection ? `${view.sheet}:${JSON.stringify(normalizeRange(view.selection))}` : 'none';
   };
@@ -388,7 +386,7 @@ export function createWorkerXlsxCommandBinding(
   const binding: XlsxCommandBinding = {
     environment,
     ordered: (id) => {
-      const current = currentBridge();
+      const current = bridge();
       if (id === 'save') void current.coordinator.requestHydration('save').catch(() => {});
       return (
         !IMMEDIATE.has(id) ||
@@ -396,32 +394,34 @@ export function createWorkerXlsxCommandBinding(
       );
     },
     refuse: (reason) => bridge().refuse?.(reason),
-    admit: (operation, id) => bridge().coordinator.runAfterPendingInput(async (_, applied) => {
-      const current = currentBridge();
-      const generation = current.generation();
-      await current.preview();
-      applied.check();
-      if (bridge().generation() !== generation) throw new XlsxCommandAdmissionError('document-replaced');
-      if (current.coordinator.error) throw current.coordinator.error;
-      markApplied = applied;
-      admittedBridge = current;
-      try {
-        const result = await operation();
-        if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === false) {
-          const reason = 'failure' in result ? result.failure as { message: string } : { message: 'Command was refused' };
-          applied.refuse(new WorkerInputRefusal(reason.message), id !== undefined && XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument);
-        }
-        return result;
-      } finally { markApplied = null; admittedBridge = null; }
-    }, { recover: id === undefined || XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument, barrier: id === 'save' }),
+    admit: (operation, id) => {
+      const readOnly = bridge().readOnly();
+      return bridge().coordinator.runAfterPendingInput(async (_, applied) => {
+        const current = bridge();
+        const generation = current.generation();
+        await current.preview();
+        applied.check();
+        if (bridge().generation() !== generation) throw new XlsxCommandAdmissionError('document-replaced');
+        if (current.coordinator.error) throw current.coordinator.error;
+        markApplied = applied;
+        try {
+          const result = await operation(readOnly);
+          if (result !== null && typeof result === 'object' && 'ok' in result && result.ok === false) {
+            const reason = 'failure' in result ? result.failure as { message: string } : { message: 'Command was refused' };
+            applied.refuse(new WorkerInputRefusal(reason.message), id !== undefined && XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument);
+          }
+          return result;
+        } finally { markApplied = null; }
+      }, { recover: id === undefined || XLSX_COMMAND_DESCRIPTORS[id].mutatesDocument, barrier: id === 'save' });
+    },
     perform,
     capture(id) {
-      const current = currentBridge();
+      const current = bridge();
       if (current.status() === 'empty') return null;
       return { generation: current.generation(), target: targetOf(id) };
     },
     resume(origin, id) {
-      const current = currentBridge();
+      const current = bridge();
       if (current.generation() !== origin.generation) {
         return 'document-replaced';
       }

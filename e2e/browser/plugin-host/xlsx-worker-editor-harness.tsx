@@ -1,9 +1,10 @@
 import { StrictMode } from 'react';
+import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import JSZip from 'jszip';
 import { XlsxEditor, defineXlsxPlugin, type XlsxPluginContext, type XlsxWorkerEditorApi } from '@betteroffice/xlsx-react';
 import { editableWorkbookSessionBackend } from '../../../packages/xlsx-react/src/worker/useEditableSessionWorkbook';
-import { cellRect, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
+import { cellRect, openWorkbookSession, rangeRect, type WorkbookEditPeer, type WorkbookFrame, type WorkbookSession } from '@betteroffice/xlsx';
 import { workbookSessionInternals, WORKBOOK_REPLAY_MUTATORS } from '../../../packages/xlsx/src/session/replay';
 import type { WorkerEditorProbe } from './xlsx-worker-editor-probe';
 
@@ -53,12 +54,13 @@ async function workbook() {
 </styleSheet>`);
   zip.file('xl/worksheets/sheet1.xml', `<?xml version="1.0" encoding="UTF-8"?>
 <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:B2"/>
+  <dimension ref="${variant === 'merged-grid' ? 'A1:D4' : 'A1:B2'}"/>
   <sheetViews><sheetView workbookViewId="0"/></sheetViews>
   <sheetFormatPr defaultRowHeight="24"/>
   <cols><col min="1" max="2" width="24" customWidth="1"/></cols>
   <sheetData><row r="1"><c r="A1" s="${variant === 'formatted' ? 2 : variant === 'styled' ? 1 : 0}" t="inlineStr"><is><t>initial</t></is></c>${variant === 'merged' || variant === 'overflow' ? '' : '<c r="B1"><v>1</v></c>'}</row></sheetData>
 ${variant === 'merged' ? '<mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells>' : ''}
+${variant === 'merged-grid' ? '<mergeCells count="1"><mergeCell ref="B2:C3"/></mergeCells>' : ''}
 <drawing r:id="rId1"/>
 </worksheet>`);
   zip.file('xl/worksheets/sheet2.xml', '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>other</t></is></c></row></sheetData></worksheet>');
@@ -181,10 +183,18 @@ let current = deferred<XlsxWorkerEditorApi>();
 let api: XlsxWorkerEditorApi | null = null;
 let context: XlsxPluginContext<null> | null = null;
 const plugin = defineXlsxPlugin({ id: 'routes', createState: () => null, initialize(value) { context = value; } });
+let source: Uint8Array;
+let readOnly = false;
+let readyCount = 0;
 const open = (bytes: Uint8Array) => {
-  const editor = <XlsxEditor file={bytes} experimentalWorkerOpen plugins={[plugin]}
+  source = bytes;
+  const editor = <XlsxEditor file={bytes} experimentalWorkerOpen readOnly={readOnly} plugins={[plugin]}
     pluginGrants={{ routes: { document: 'write', editBatches: true } }} onError={(error) => errors.push(error.message)}
-    onReady={(value) => { api = value; current.resolve(value); }} />;
+    onReady={(value) => {
+      readyCount += 1;
+      if (!('whenHydrated' in value)) throw new Error('Expected worker editor session');
+      api = value; current.resolve(value);
+    }} />;
   root.render(parameters.has('strict') ? <StrictMode>{editor}</StrictMode> : editor);
 };
 const ready = (async () => {
@@ -197,6 +207,21 @@ const ready = (async () => {
 window.__xlsxWorkerEditor = {
   ready, errors, previews, previewFrames, commitOrder, peerEntries, replayEntries,
   generation: () => generation,
+  readyCount: () => readyCount,
+  setReadOnly(value) { readOnly = value; flushSync(() => open(source)); },
+  readOnlyEditRefusal() {
+    try { api!.editCell(0, 0, 0, 'blocked'); return ''; }
+    catch (error) { return (error as Error).message; }
+  },
+  async savedInputs() {
+    const bytes = await api!.saveAsync();
+    if (!bytes) throw new Error('Workbook save returned no bytes');
+    const session = await openWorkbookSession(bytes);
+    try {
+      const result = await session.call.cellInputs(0, 'A1:B2');
+      return [result.cells[0][0].input, result.cells[1][1].input];
+    } finally { await session.dispose(); }
+  },
   releaseHydration() { holdingHydration = false; hydrationRelease.resolve(); },
   async flush() { await api!.flush(); },
   async zoom(scale) { await api!.commands.execute('zoom', { scale }); },
@@ -209,6 +234,25 @@ window.__xlsxWorkerEditor = {
     const bounds = canvas.getBoundingClientRect();
     const zoom = canvas.clientWidth / latestFrame!.viewport.width;
     return { x: bounds.x + rect.x * zoom, y: bounds.y + rect.y * zoom, width: rect.w * zoom, height: rect.h * zoom };
+  },
+  mergedGridPoints() {
+    const grid = latestFrame?.displayList.grid;
+    const canvas = rootElement.querySelector<HTMLCanvasElement>('[data-paint-source="worker"]');
+    if (!grid || !canvas) throw new Error('Worker grid geometry unavailable');
+    const merge = rangeRect(grid, { top: 1, left: 1, bottom: 2, right: 2 });
+    const first = cellRect(grid, 1, 1);
+    const last = cellRect(grid, 2, 2);
+    const below = cellRect(grid, 3, 2);
+    if (!merge || !first || !last || !below) throw new Error('Merged grid is not visible');
+    const zoom = canvas.clientWidth / latestFrame!.viewport.width;
+    const point = (x: number, y: number) => ({ x: x * zoom, y: y * zoom });
+    return {
+      background: point(first.x + first.w / 2, first.y + first.h / 2),
+      interiors: [point(last.x, first.y + first.h / 2), point(first.x + first.w / 2, last.y)],
+      edges: [point(merge.x, first.y + first.h / 2), point(merge.x + merge.w, first.y + first.h / 2),
+        point(first.x + first.w / 2, merge.y), point(first.x + first.w / 2, merge.y + merge.h)],
+      neighbour: point(last.x, below.y + below.h / 2),
+    };
   },
   chartClip() {
     const chart = latestFrame?.displayList.charts?.[0];

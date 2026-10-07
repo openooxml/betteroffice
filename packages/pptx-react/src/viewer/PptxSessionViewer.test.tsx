@@ -7,7 +7,7 @@ import { createPresentationSession } from '../../../pptx/src/session/client';
 import { createPresentationSessionHost } from '../../../pptx/src/session/host';
 import { createInProcessPair } from '../../../../shared/office-session/testing/inProcessTransport';
 import { PptxEditor } from '../PptxEditor';
-import type { PptxEditorProps, PptxWorkerViewerApi } from '../PptxEditor';
+import type { PptxWorkerViewerApi } from '../PptxEditor';
 import { EditorToolbar, ToolbarCommandButton } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
 import { presentationSessionOpener, ViewerSession } from './useSessionPresentation';
@@ -100,7 +100,10 @@ afterEach(() => {
   for (const restore of restorers.reverse()) restore();
   restorers.length = 0;
 });
-afterAll(async () => { if (ownsDom) await GlobalRegistrator.unregister(); });
+afterAll(async () => {
+  await new Promise((done) => setTimeout(done));
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
 
 describe('session viewer', () => {
   it('opens through the seam, paints active first and requests only visible thumbnails', async () => {
@@ -618,14 +621,13 @@ describe('session viewer', () => {
     expect((await api.saveAsync())!.byteLength).toBeGreaterThan(0);
   });
 
-  for (const optIn of [false, true]) it(`keeps local opening when worker mode is inactive (${optIn})`, async () => {
+  it('keeps local opening when worker mode is inactive', async () => {
     const opener = open(session().viewer);
     const init = spyOn(pptx, 'initWasm').mockResolvedValue(undefined);
     const failure = new Error('Local open reached');
     const local = spyOn(pptx, 'openPresentation').mockImplementation(() => { throw failure; });
     restorers.push(() => init.mockRestore(), () => local.mockRestore());
-    const view = render(optIn ? <PptxEditor {...{ file, fonts: [], experimentalWorkerOpen: true, readOnly: false } as PptxEditorProps} /> :
-      <PptxEditor file={file} fonts={[]} />);
+    const view = render(<PptxEditor file={file} fonts={[]} />);
     await waitFor(() => expect(view.getByText(failure.message)).toBeDefined());
     expect(local).toHaveBeenCalledTimes(1);
     expect(opener).not.toHaveBeenCalled();

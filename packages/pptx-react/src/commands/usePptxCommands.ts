@@ -104,6 +104,7 @@ export interface PptxCommandInputs {
   generationRef: RefObject<number>;
   coordinator: PptxInputCoordinator;
   status: PptxCommandEnvironment['status'];
+  workerMode?: { preparing: boolean; failed: boolean };
   readOnlyRef: RefObject<boolean>;
   zoomRef: RefObject<PptxZoom>;
   proposalsRef: RefObject<readonly Proposal[]>;
@@ -309,7 +310,7 @@ export function usePptxCommandBinding(
         available.find((proposal) => proposal.id === current.reviewSelectedIdRef.current) ??
         available[0] ??
         null;
-      const reviewEnabled = current.reviewEnabledRef.current;
+      const reviewEnabled = !current.workerMode && current.reviewEnabledRef.current;
       return {
         status: ready ? 'ready' : current.status === 'ready' ? 'loading' : current.status,
         readOnly,
@@ -345,7 +346,13 @@ export function usePptxCommandBinding(
               },
             }
           : null,
-        translate: current.t,
+        hostDisabled: current.workerMode ? (id) => current.workerMode!.preparing ||
+          ['exportPng', 'slideshow', 'proposalSelect', 'proposalDiff'].includes(id) : undefined,
+        translate: current.workerMode ? (key, vars) =>
+          key === 'commands.reasons.hostDisabled' || key === 'commands.reasons.documentLoading'
+            ? current.t(current.workerMode!.failed ? 'worker.failed' :
+              current.workerMode!.preparing ? 'worker.preparing' : 'worker.disabled')
+            : current.t(key, vars) : current.t,
       };
     };
 
