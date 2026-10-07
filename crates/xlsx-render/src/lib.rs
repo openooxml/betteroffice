@@ -442,22 +442,32 @@ fn viewport_axes(
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols))
     };
+    let cols_axis = |extent: f32| {
+        AxisLayout::new(
+            MAX_COLS,
+            frozen_cols,
+            viewport.x,
+            extent,
+            |col| geometry.col_x(col),
+            |x| geometry.col_at_x(x),
+        )
+    };
+    let mut cols = cols_axis(viewport.width);
+    let cols_off_grid = cols.tracks.is_empty()
+        && geometry.col_x(MAX_COLS) - cols.scroll <= geometry.col_x(cols.frozen);
     let mut rows = AxisLayout::new(
         MAX_ROWS,
         frozen_rows,
         viewport.y,
-        viewport.height,
+        if cols_off_grid { 0.0 } else { viewport.height },
         |row| geometry.row_y(row),
         |y| geometry.row_at_y(y),
     );
-    let mut cols = AxisLayout::new(
-        MAX_COLS,
-        frozen_cols,
-        viewport.x,
-        viewport.width,
-        |col| geometry.col_x(col),
-        |x| geometry.col_at_x(x),
-    );
+    if rows.tracks.is_empty()
+        && geometry.row_y(MAX_ROWS) - rows.scroll <= geometry.row_y(rows.frozen)
+    {
+        cols = cols_axis(0.0);
+    }
     if print {
         rows.print_extent = Some(viewport.height);
         cols.print_extent = Some(viewport.width);
