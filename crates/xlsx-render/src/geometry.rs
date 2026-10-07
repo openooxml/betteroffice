@@ -429,7 +429,7 @@ impl GridGeometry {
         let rows = if bottom - vp.y <= 0.0 {
             MAX_ROWS..MAX_ROWS
         } else {
-            let r0 = self.row_at_y(vp.y).min(MAX_ROWS);
+            let r0 = self.row_at_y(vp.y).min(MAX_ROWS - 1);
             let r1 = self
                 .row_at_y((vp.y + vp.height).min(bottom))
                 .saturating_add(1)
@@ -439,7 +439,7 @@ impl GridGeometry {
         let cols = if right - vp.x <= 0.0 {
             MAX_COLS..MAX_COLS
         } else {
-            let c0 = self.col_at_x(vp.x).min(MAX_COLS);
+            let c0 = self.col_at_x(vp.x).min(MAX_COLS - 1);
             let c1 = self
                 .col_at_x((vp.x + vp.width).min(right))
                 .saturating_add(1)
