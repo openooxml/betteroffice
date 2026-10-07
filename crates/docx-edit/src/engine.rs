@@ -14979,6 +14979,7 @@ mod tests {
                 0,
             );
         }
+        TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
         measurement_patch_type(&engine, certified_float_offset(&engine, 17), "z");
         assert!(engine.measurement_patch().is_some());
         let dirty = certified_float_dirty_segment(&engine);
@@ -14986,6 +14987,7 @@ mod tests {
             certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
             (dirty, 0),
         );
+        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get().measurement_attempts, 1));
         assert_certified_float_cold(&engine, &request, &mut retained);
     }
 
@@ -15196,13 +15198,30 @@ mod tests {
                     assert_eq!(
                         certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
                         (dirty, 0),
+                        "embed={embed} target={target} paragraph={paragraph} pass={pass}",
                     );
-                    assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses);
+                    assert_eq!(
+                        engine.stats().lower_cache_misses,
+                        before.lower_cache_misses,
+                        "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                    );
                     TYPING_EXTRA_WORK.with(|work| {
                         let counts = work.get();
-                        assert_eq!(counts.seeds, 0);
-                        assert_eq!(counts.seed_scans, 0);
-                        assert_eq!(counts.preview_certifications, 0);
+                        assert_eq!(
+                            counts.seeds,
+                            0,
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
+                        assert_eq!(
+                            counts.seed_scans,
+                            0,
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
+                        assert_eq!(
+                            counts.preview_certifications,
+                            0,
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
                         assert_eq!(
                             counts.seed_validations,
                             usize::from(pass == 0),
@@ -15213,8 +15232,16 @@ mod tests {
                             usize::from(target == 1 && pass == 0),
                             "embed={embed} target={target} paragraph={paragraph} pass={pass}",
                         );
-                        assert_eq!(counts.certificate_snapshots, 1);
-                        assert_eq!(counts.measurement_attempts, 0);
+                        assert_eq!(
+                            counts.certificate_snapshots,
+                            1,
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
+                        assert_eq!(
+                            counts.measurement_attempts,
+                            1,
+                            "embed={embed} target={target} paragraph={paragraph} pass={pass}",
+                        );
                     });
                     assert_certified_float_cold(&engine, &request, &mut retained);
                 }
