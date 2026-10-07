@@ -2336,14 +2336,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // PagedEditor selection callback: resolve sticky comment/revision coverage
   // from Yrs so the matching sidebar card opens as the caret moves.
-  const handlePagedSelectionChange = useCallback(() => {
+  const handlePagedSelectionChange = useCallback((_from: number, _to: number, initializing = false) => {
     // Body selection transitions arrive here even when the derived toolbar
     // context is unchanged. Notify the canvas live region from the authoritative
     // selection event so range/caret announcements are never lost to toolbar
     // state deduplication.
     canvasA11yNotifyRef.current?.();
     pluginHost.publishSelection();
-    if (viewerReads) return;
+    if (viewerReads || initializing) return;
     const session = pagedEditorRef.current?.getYrsSession();
     const head = session?.selection()?.head;
     if (!session || !head) return;

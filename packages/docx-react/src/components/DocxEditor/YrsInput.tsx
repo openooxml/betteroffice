@@ -143,7 +143,8 @@ export interface YrsInputProps {
     residentLayoutReady?: boolean,
     residentCaretReady?: boolean,
     updateOrigin?: LayoutUpdateOrigin,
-    inWorker?: boolean
+    inWorker?: boolean,
+    initializing?: boolean
   ): void;
   onDirectInput(stories?: string | readonly string[]): void;
   /** One-owner body text path; false until the resident frame is initialized. */
@@ -610,7 +611,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, holdInput, locToDisplayPosition, readSelection, seedSelection]);
 
   const emitSelection = useCallback(
-    (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false, inWorker = false): void => {
+    (docChanged: boolean, residentLayoutReady = false, residentCaretReady = false, inWorker = false, initializing = false): void => {
       if (heldReplayBatchRef.current) {
         heldReplayBatchRef.current.selectionChanged = true;
         return;
@@ -618,7 +619,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const selection = displaySelection();
       if (!selection) return;
       setSelectionEpoch((epoch) => epoch + 1);
-      if (inWorker) onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady, 'local', true);
+      if (initializing) onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady, 'local', inWorker, true);
+      else if (inWorker) onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady, 'local', true);
       else onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
     [displaySelection, onStateChange]
@@ -1981,7 +1983,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   useEffect(() => {
     if (!enabled || !session || !replicaReady || holdInput) return;
     if (seedSelection) ensureSelection();
-    emitSelection(false);
+    emitSelection(false, false, false, false, true);
   }, [emitSelection, enabled, ensureSelection, holdInput, seedSelection, session, replicaReady]);
 
   const focusedSessionRef = useRef<YrsSession | null>(null);
