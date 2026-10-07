@@ -245,7 +245,7 @@ describe('presentation image decode budget', () => {
       expect([bounded.width, bounded.height]).toEqual([4096, 2048]);
       expect(bounded.drawImage).toHaveBeenCalledWith(element, 0, 0, 4096, 2048);
       expect(imageDecodeScale(source)).toEqual({ x: 2, y: 2 });
-      if (kind === 'document') expect(source).toBe(canvas);
+      if (kind === 'document') expect(source).toBe(canvas as unknown as CanvasImageSource);
     } finally {
       globalThis.Image = original.image;
       URL.createObjectURL = original.url;
