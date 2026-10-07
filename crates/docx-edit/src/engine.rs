@@ -14918,14 +14918,8 @@ mod tests {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-        let (engine, request) = certified_float_engine(
-            font,
-            40,
-            &[2],
-            false,
-            false,
-            RelayoutTrigger::Interactive,
-        );
+        let (engine, request) =
+            certified_float_engine(font, 40, &[2], false, false, RelayoutTrigger::Interactive);
         let mut retained = HashMap::new();
         assert_certified_float_cold(&engine, &request, &mut retained);
         let cache_count = || {
