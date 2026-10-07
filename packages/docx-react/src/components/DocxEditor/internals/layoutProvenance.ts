@@ -113,13 +113,9 @@ export function readSessionVersion(
 
 interface PresentationOptions {
   worker?: boolean;
-  zoom?: number;
 }
 
-const presentedLists = new WeakMap<object, {
-  displayList: object | null;
-  options?: PresentationOptions;
-}>();
+const presentedLists = new WeakMap<object, object>();
 const presentListeners = new Set<(displayList: object, options?: PresentationOptions) => void>();
 
 /** Records that the canvas pages under `host` finished painting `displayList`. */
@@ -128,7 +124,7 @@ export function markPresented(
   displayList: object,
   options?: PresentationOptions
 ): void {
-  presentedLists.set(host, { displayList, options });
+  presentedLists.set(host, displayList);
   for (const listener of [...presentListeners]) listener(displayList, options);
 }
 
@@ -156,22 +152,11 @@ export function onReplayFailed(
 }
 
 /** Forgets what `host` shows, while its canvas pages repaint for a new surface or zoom. */
-export function clearPresented(host: object, options?: PresentationOptions): void {
-  if (options?.worker) presentedLists.set(host, { displayList: null, options });
-  else presentedLists.delete(host);
-}
-
-export function presentationOptionsOf(host: object | null | undefined): PresentationOptions | null {
-  return host ? (presentedLists.get(host)?.options ?? null) : null;
+export function clearPresented(host: object): void {
+  presentedLists.delete(host);
 }
 
 /** Whether the canvas pages under `host` show the pixels of `displayList`. */
-export function isPresented(
-  host: object | null | undefined,
-  displayList: object,
-  zoom?: number
-): boolean {
-  const presented = host ? presentedLists.get(host) : undefined;
-  return presented?.displayList === displayList &&
-    (zoom === undefined || !presented.options?.worker || presented.options.zoom === zoom);
+export function isPresented(host: object | null | undefined, displayList: object): boolean {
+  return !!host && presentedLists.get(host) === displayList;
 }

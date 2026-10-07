@@ -55,7 +55,6 @@ export interface DocxPluginHostAccess extends DocxPluginEditorAccess {
   translate(key: TranslationKey): string;
   /** Geometry of the layout that shows the current version, or null. */
   geometry(): DocxPluginGeometry | null;
-  geometryReady?(): boolean;
 }
 
 export interface DocxPluginHost {
@@ -270,8 +269,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   const notify = (event: DocxPluginEvent): void => runtime.notify(event);
   const hasGeometry = (): boolean => {
     const geometry = access.geometry();
-    return !!geometry && sameLayout(geometry.layout, state.layout) &&
-      (access.geometryReady?.() ?? true);
+    return !!geometry && sameLayout(geometry.layout, state.layout);
   };
   const notifyLayout = (generation: string): void => {
     if (hasGeometry()) state.geometryLayout = state.layout;
