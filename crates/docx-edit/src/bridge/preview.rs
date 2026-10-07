@@ -497,7 +497,9 @@ impl UnitRecorder {
         raw >= range.start
             && (refresh.edited[refresh.cursor]
                 || self.certify_local
-                    && refresh.previous.records[refresh.cursor].local_stateful.is_none()
+                    && refresh.previous.records[refresh.cursor]
+                        .local_stateful
+                        .is_none()
                 || raw == range.start
                 || raw == refresh.captures[refresh.cursor]
                 || raw == range.end)
@@ -1045,7 +1047,11 @@ fn local_certification_refresh_matches_fresh_recording() {
                     assert_eq!(record.local_stateful, None);
                 }
                 let changed = BTreeSet::from(["unused".to_owned()]);
-                assert!(!targets(&previous, &changed, &local::LocalLowering::new(false)));
+                assert!(!targets(
+                    &previous,
+                    &changed,
+                    &local::LocalLowering::new(false)
+                ));
                 let local = local::LocalLowering::new(true);
                 assert!(targets(&previous, &changed, &local));
                 let current: Vec<_> = blocks.into_iter().map(Rc::new).collect();
@@ -1086,7 +1092,8 @@ fn local_certification_refresh_matches_fresh_recording() {
             }
             let (_, _, _, fresh) =
                 lower_recorded(&doc, "body", &env, &mut lowering(), true).unwrap();
-            assert_eq!(refreshed.unwrap().snapshot(&doc), fresh.unwrap().snapshot(&doc));
+            let (refreshed, fresh) = (refreshed.unwrap(), fresh.unwrap());
+            assert_eq!(refreshed.snapshot(&doc), fresh.snapshot(&doc));
         }
     }
 }
