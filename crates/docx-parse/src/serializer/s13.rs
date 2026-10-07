@@ -790,26 +790,27 @@ fn ensure_header_footer_parts(
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
 ) -> Result<(), ParseError> {
-    let parts: Vec<_> = relationships
-        .iter()
-        .filter_map(|(relationship_id, relationship)| {
-            if relationship.target_mode == Some(TargetMode::External) {
-                return None;
-            }
-            let content_type = match relationship.relationship_type.as_str() {
-                relationship_types::HEADER => HEADER_CONTENT_TYPE,
-                relationship_types::FOOTER => FOOTER_CONTENT_TYPE,
-                _ => return None,
-            };
-            let target = relationship.target.clone();
-            Some((
-                relationship_id.as_str(),
-                relationship.relationship_type.as_str(),
-                target,
-                content_type,
-            ))
-        })
-        .collect();
+    let mut parts = Vec::new();
+    for (relationship_id, relationship) in relationships {
+        if relationship.target_mode == Some(TargetMode::External) {
+            continue;
+        }
+        let content_type = match relationship.relationship_type.as_str() {
+            relationship_types::HEADER => HEADER_CONTENT_TYPE,
+            relationship_types::FOOTER => FOOTER_CONTENT_TYPE,
+            _ => continue,
+        };
+        let path = resolve_relative_path(&package.document_path, &relationship.target)?;
+        if !package.contains(&path) {
+            continue;
+        }
+        parts.push((
+            relationship_id.as_str(),
+            relationship.relationship_type.as_str(),
+            relationship.target.clone(),
+            content_type,
+        ));
+    }
     if parts.is_empty() {
         return Ok(());
     }
