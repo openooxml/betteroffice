@@ -153,6 +153,11 @@ export interface FontAssetOptions {
 
 let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
+class MissingCjkAddonError extends Error {}
+
+const UNRESOLVED_CJK_ADDON =
+  /^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice\/fonts-cjk["'”]/;
+
 async function importCjkAssetUrls(): Promise<
   Record<string, () => URL> | undefined
 > {
@@ -162,7 +167,11 @@ async function importCjkAssetUrls(): Promise<
   // resolving the specifier eagerly the moment it stops being that direct body.
   try {
     return (await import('@betteroffice/fonts-cjk')).CJK_FONT_ASSET_URLS;
-  } catch {
+  } catch (error) {
+    const message = (error as { message?: unknown } | null)?.message;
+    if (typeof message !== 'string' || !UNRESOLVED_CJK_ADDON.test(message)) {
+      throw error;
+    }
     return undefined;
   }
 }
@@ -171,10 +180,15 @@ async function importCjkAssetUrls(): Promise<
 function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
   if (cjkAssetUrls === undefined) {
     const promise = importCjkAssetUrls();
-    promise.then((urls) => {
-      if (urls === undefined && cjkAssetUrls === promise)
-        cjkAssetUrls = undefined;
-    });
+    promise.then(
+      (urls) => {
+        if (urls === undefined && cjkAssetUrls === promise)
+          cjkAssetUrls = undefined;
+      },
+      () => {
+        if (cjkAssetUrls === promise) cjkAssetUrls = undefined;
+      },
+    );
     cjkAssetUrls = promise;
   }
   return cjkAssetUrls;
@@ -214,7 +228,7 @@ async function assetUrl(
     const resolveCjk = cjk?.[file];
     if (resolveCjk) return resolveCjk();
     if (!cjk) {
-      throw new Error(
+      throw new MissingCjkAddonError(
         `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
       );
     }
@@ -233,8 +247,8 @@ export function loadBundledFontBytes(
       : resolvedAssetBase(options.baseUrl);
   const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
   if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
-  return bytes.catch(async (error) => {
-    if (await loadCjkAssetUrls()) throw error;
+  return bytes.catch((error) => {
+    if (!(error instanceof MissingCjkAddonError)) throw error;
     return loadBundledFontBytes(
       resolveMetricCompatFace(
         face.family.includes('Serif') ? 'Times New Roman' : 'Arial',
