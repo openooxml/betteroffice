@@ -799,7 +799,10 @@ impl LocalLowering {
             work.set(counts);
         });
         for rebase in &self.rebases[seed.rebased..] {
-            if rebase.after_source.is_some_and(|source| seed.source > source) {
+            if rebase
+                .after_source
+                .is_some_and(|source| seed.source > source)
+            {
                 seed.slot = seed.slot.checked_add_signed(rebase.slot_delta)?;
                 seed.source = u32::try_from(i64::from(seed.source) + rebase.source_delta).ok()?;
             }
