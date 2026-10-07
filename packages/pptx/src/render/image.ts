@@ -90,21 +90,33 @@ async function boundImage(
     const factor = maximum / Math.max(width, height);
     const size = { width: Math.max(1, Math.floor(width * factor)), height: Math.max(1, Math.floor(height * factor)) };
     let canvas: OffscreenCanvas | HTMLCanvasElement | undefined;
+    let ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null | undefined;
     try {
-      if (typeof OffscreenCanvas === 'function') canvas = new OffscreenCanvas(size.width, size.height);
-      else if (typeof document !== 'undefined') {
-        canvas = document.createElement('canvas');
-        canvas.width = size.width;
-        canvas.height = size.height;
+      if (typeof OffscreenCanvas === 'function') {
+        canvas = new OffscreenCanvas(size.width, size.height);
+        ctx = canvas.getContext('2d');
       }
     } catch {
       canvas = undefined;
     }
-    const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null | undefined;
+    if (!ctx && typeof document !== 'undefined') {
+      try {
+        canvas = document.createElement('canvas');
+        canvas.width = size.width;
+        canvas.height = size.height;
+        ctx = canvas.getContext('2d');
+      } catch {
+        canvas = undefined;
+      }
+    }
     if (canvas && ctx) {
       ctx.drawImage(source, 0, 0, size.width, size.height);
       if ('close' in source && typeof source.close === 'function') source.close();
-      result = typeof createImageBitmap === 'function' ? await createImageBitmap(canvas) : canvas;
+      try {
+        result = typeof createImageBitmap === 'function' ? await createImageBitmap(canvas) : canvas;
+      } catch {
+        result = canvas;
+      }
     }
   }
   const actualWidth = 'naturalWidth' in result ? result.naturalWidth : result.width;
