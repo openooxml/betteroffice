@@ -167,6 +167,94 @@ describe('presentation image decode budget', () => {
     }
   });
 
+  test('returns the capped canvas when bitmap conversion rejects', async () => {
+    const original = { bitmap: globalThis.createImageBitmap, canvas: globalThis.OffscreenCanvas };
+    const decoded = { width: 8192, height: 4096, close: mock(() => {}) };
+    const decode = mock((source: ImageBitmapSource, _options?: ImageBitmapOptions) =>
+      source instanceof Blob ? Promise.resolve(decoded as ImageBitmap) : Promise.reject(new Error('conversion failed')));
+    try {
+      globalThis.createImageBitmap = decode as typeof createImageBitmap;
+      globalThis.OffscreenCanvas = DecodeCanvas as unknown as typeof OffscreenCanvas;
+      const source = await decodePresentationImage(png(8192, 4096), 'undecodable');
+      expect(decode).toHaveBeenCalledTimes(2);
+      expect(decode.mock.calls[0]).toEqual([expect.any(Blob), { resizeWidth: 4096, resizeHeight: 2048 }]);
+      const canvas = decode.mock.calls[1][0] as unknown as DecodeCanvas;
+      expect(source).toBe(canvas as unknown as CanvasImageSource);
+      expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
+      expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
+      expect(decoded.close).toHaveBeenCalledTimes(1);
+      expect(imageDecodeScale(source)).toEqual({ x: 2, y: 2 });
+    } finally {
+      globalThis.createImageBitmap = original.bitmap;
+      globalThis.OffscreenCanvas = original.canvas;
+    }
+  });
+
+  test('uses the document canvas when the OffscreenCanvas constructor throws', async () => {
+    const original = {
+      bitmap: globalThis.createImageBitmap, canvas: globalThis.OffscreenCanvas, document: globalThis.document,
+    };
+    const decoded = { width: 8192, height: 4096, close: mock(() => {}) };
+    const canvas = new DecodeCanvas(0, 0);
+    const createElement = mock((_tag: string) => canvas);
+    const decode = mock((source: ImageBitmapSource, _options?: ImageBitmapOptions) =>
+      Promise.resolve(source instanceof Blob ? decoded as ImageBitmap : source as ImageBitmap));
+    try {
+      globalThis.createImageBitmap = decode as typeof createImageBitmap;
+      globalThis.OffscreenCanvas = class {
+        constructor() { throw new Error('canvas unavailable'); }
+      } as unknown as typeof OffscreenCanvas;
+      globalThis.document = { createElement } as unknown as Document;
+      const source = await decodePresentationImage(png(8192, 4096), 'undecodable');
+      expect(createElement).toHaveBeenCalledWith('canvas');
+      expect(decode).toHaveBeenCalledTimes(2);
+      expect(decode.mock.calls[1]).toEqual([canvas]);
+      expect(source).toBe(canvas as unknown as CanvasImageSource);
+      expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
+      expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
+      expect(decoded.close).toHaveBeenCalledTimes(1);
+      expect(imageDecodeScale(source)).toEqual({ x: 2, y: 2 });
+    } finally {
+      globalThis.createImageBitmap = original.bitmap;
+      globalThis.OffscreenCanvas = original.canvas;
+      globalThis.document = original.document;
+    }
+  });
+
+  test('uses the document canvas when the OffscreenCanvas 2D context is null', async () => {
+    const original = {
+      bitmap: globalThis.createImageBitmap, canvas: globalThis.OffscreenCanvas, document: globalThis.document,
+    };
+    const decoded = { width: 8192, height: 4096, close: mock(() => {}) };
+    const canvas = new DecodeCanvas(0, 0);
+    const createElement = mock((_tag: string) => canvas);
+    const getContext = mock((_context: string) => null);
+    const decode = mock((source: ImageBitmapSource, _options?: ImageBitmapOptions) =>
+      Promise.resolve(source instanceof Blob ? decoded as ImageBitmap : source as ImageBitmap));
+    try {
+      globalThis.createImageBitmap = decode as typeof createImageBitmap;
+      globalThis.OffscreenCanvas = class {
+        constructor(public width: number, public height: number) {}
+        getContext = getContext;
+      } as unknown as typeof OffscreenCanvas;
+      globalThis.document = { createElement } as unknown as Document;
+      const source = await decodePresentationImage(png(8192, 4096), 'undecodable');
+      expect(getContext).toHaveBeenCalledWith('2d');
+      expect(createElement).toHaveBeenCalledWith('canvas');
+      expect(decode).toHaveBeenCalledTimes(2);
+      expect(decode.mock.calls[1]).toEqual([canvas]);
+      expect(source).toBe(canvas as unknown as CanvasImageSource);
+      expect([canvas.width, canvas.height]).toEqual([4096, 2048]);
+      expect(canvas.drawImage).toHaveBeenCalledWith(decoded, 0, 0, 4096, 2048);
+      expect(decoded.close).toHaveBeenCalledTimes(1);
+      expect(imageDecodeScale(source)).toEqual({ x: 2, y: 2 });
+    } finally {
+      globalThis.createImageBitmap = original.bitmap;
+      globalThis.OffscreenCanvas = original.canvas;
+      globalThis.document = original.document;
+    }
+  });
+
   test.each(['svg', 'svg:svg'])('preserves %s element decode bytes and bounds oversized SVGs', async (root) => {
     const original = {
       image: globalThis.Image, url: URL.createObjectURL, revoke: URL.revokeObjectURL,
