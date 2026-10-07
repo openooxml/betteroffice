@@ -279,6 +279,10 @@ pub(crate) struct TypingExtraWork {
     pub(crate) seed_scans: usize,
     pub(crate) preview_certifications: usize,
     pub(crate) seed_validations: usize,
+    pub(crate) seed_materializations: usize,
+    pub(crate) recovery_chunks: usize,
+    pub(crate) seed_recoveries: usize,
+    pub(crate) seed_refreshes: usize,
     certificate_snapshots: usize,
     measurement_attempts: usize,
     preview_shifts: usize,
@@ -291,6 +295,10 @@ thread_local! {
         seed_scans: 0,
         preview_certifications: 0,
         seed_validations: 0,
+        seed_materializations: 0,
+        recovery_chunks: 0,
+        seed_recoveries: 0,
+        seed_refreshes: 0,
         certificate_snapshots: 0,
         measurement_attempts: 0,
         preview_shifts: 0,
@@ -4211,7 +4219,11 @@ impl EngineSession {
                 });
             if measurement_patch.is_some()
                 && range.story == "body"
-                && lowered.local.edit.is_some()
+                && lowered
+                    .local
+                    .edit
+                    .as_ref()
+                    .is_some_and(|edit| lowered.local.can_patch(edit))
                 && lowered.preview_edit.is_some()
                 && lowered.media == self.doc.media_sources()
                 && lowered.local.matches_source(&self.doc)
@@ -4238,6 +4250,19 @@ impl EngineSession {
         let generation = render.generation.wrapping_add(1);
         let lowered = render.stories.get_mut("body")?;
         let edit = lowered.local.edit.as_ref()?;
+        if edit.epochs != (lowered.doc_epoch, epoch)
+            || epoch != lowered.doc_epoch.wrapping_add(1)
+            || lowered.env != *env
+            || lowered.media != self.doc.media_sources()
+            || !lowered.local.matches_source(&self.doc)
+        {
+            return None;
+        }
+        if !lowered.local.can_patch(edit) {
+            lowered.local.discard_pending();
+            self.measurement_patch().take();
+            return None;
+        }
         let block_count = lowered.blocks.len();
         let (has_floats, origin_matches) = {
             let pagination = self.pagination.borrow();
@@ -4280,19 +4305,8 @@ impl EngineSession {
             }
             (pagination.measured_with_floats, origin_matches)
         };
-        if edit.epochs != (lowered.doc_epoch, epoch)
-            || epoch != lowered.doc_epoch.wrapping_add(1)
-            || lowered.env != *env
-            || lowered.media != self.doc.media_sources()
-            || !lowered.local.matches_source(&self.doc)
-        {
-            return None;
-        }
         let slot = lowered.local.edit_slot(edit)?;
         if lowered.local.deferred {
-            if !lowered.local.can_patch(edit) {
-                return None;
-            }
             let paragraph = edit.paragraph.clone();
             lowered.local.refresh_seed(
                 &paragraph,
@@ -4572,7 +4586,7 @@ impl EngineSession {
                             &mut lowered.local,
                             crate::bridge::local::LocalLowering::new(false),
                         );
-                        local.suspend();
+                        local.discard_pending();
                         local
                     })
             } else {
@@ -4582,13 +4596,10 @@ impl EngineSession {
         #[cfg(test)]
         let fallback = fallback || self.force_legacy_lowering.get();
         let mut local = if fallback {
-            crate::bridge::local::LocalLowering::fallback(
-                self.local_lowering.get() && retained_local.is_none(),
-            )
+            crate::bridge::local::LocalLowering::fallback(self.local_lowering.get())
         } else {
             crate::bridge::local::LocalLowering::new(self.local_lowering.get())
         };
-        local.retained = retained_local.map(Box::new);
         let record = self.render.borrow().stories.contains_key(story)
             || (story == "body" && self.region_retention_valid.get());
         if !typing && let Some(lowered) = self.render.borrow_mut().stories.get_mut(story) {
@@ -4606,9 +4617,8 @@ impl EngineSession {
             (edit.epochs == (lowered.doc_epoch, epoch)
                 && lowered.env == *env
                 && lowered.media == self.doc.media_sources()
-                && local
-                    .retained
-                    .as_deref()
+                && retained_local
+                    .as_ref()
                     .unwrap_or(&lowered.local)
                     .matches_source(&self.doc))
             .then(|| crate::bridge::preview::refresh(lowered.preview.as_ref()?, edit))
@@ -4619,9 +4629,9 @@ impl EngineSession {
         } else {
             crate::bridge::preview::lower_recorded(&self.doc, story, env, &mut local, record)?
         };
-        if let Some(mut retained) = local.retained.take() {
-            retained.resume();
-            local = *retained;
+        if let Some(mut retained) = retained_local {
+            retained.resume_without_recovery(&mut local);
+            local = retained;
         }
         let mut render = self.render.borrow_mut();
         render.generation = render.generation.wrapping_add(1);
@@ -14456,6 +14466,19 @@ mod tests {
 
     fn assert_local_patch_matches_cold(engine: &EngineSession, request: &str, label: &str) {
         let enabled = engine.local_lowering.get();
+        let discarded = engine.render.borrow().stories["body"]
+            .local
+            .discarded_seeds()
+            .clone();
+        {
+            let render = engine.render.borrow();
+            for id in &discarded {
+                assert!(
+                    !render.stories["body"].local.has_seed(id),
+                    "{label}: {id}"
+                );
+            }
+        }
         let snapshot = |engine: &EngineSession| {
             let render = engine.render.borrow();
             let lowered = &render.stories["body"];
@@ -14504,6 +14527,14 @@ mod tests {
                 let previous_legacy = engine.force_legacy_lowering.replace(legacy);
                 engine.layout_document_with_regions_json(request).unwrap();
                 engine.build_display_list_frame(&extras, 0).unwrap();
+                engine
+                    .render
+                    .borrow_mut()
+                    .stories
+                    .get_mut("body")
+                    .unwrap()
+                    .local
+                    .exclude_discarded_seeds(&discarded);
                 let result = snapshot(engine);
                 $(engine.$field.replace($field);)+
                 engine.relayout_trigger.set(trigger);
@@ -14896,6 +14927,7 @@ mod tests {
             certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
         let mut retained = HashMap::new();
         assert_certified_float_cold(&engine, &request, &mut retained);
+        let pending_id = "00000012";
         for text in [Some("x"), Some("y"), None, None] {
             if text == Some("x") {
                 let offset = certified_float_offset(&engine, 17);
@@ -14924,9 +14956,15 @@ mod tests {
                 before.lower_cache_misses + 1
             );
             assert!(engine.measurement_patch().is_none());
+            assert!(engine.render.borrow().stories["body"].local.edit.is_none());
             TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
             SHIFT_SAFETY_WORK.with(|work| assert_eq!(work.get(), 0));
             assert_certified_float_cold(&engine, &request, &mut retained);
+            assert!(
+                !engine.render.borrow().stories["body"]
+                    .local
+                    .has_seed(pending_id)
+            );
             assert_eq!(
                 engine
                     .display
@@ -14939,7 +14977,14 @@ mod tests {
             );
         }
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+        let before = engine.stats();
         measurement_patch_type(&engine, certified_float_offset(&engine, 17), "z");
+        assert!(engine.measurement_patch().is_none());
+        certified_float_layout(&engine, &request, RelayoutTrigger::Interactive);
+        assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+        assert_certified_float_cold(&engine, &request, &mut retained);
+        measurement_patch_type(&engine, certified_float_offset(&engine, 18), "z");
         assert!(engine.measurement_patch().is_some());
         let dirty = certified_float_dirty_segment(&engine);
         assert_eq!(
@@ -15222,65 +15267,126 @@ mod tests {
         let fonts = docx_layout::MeasureFonts::default();
         let _scope = fonts.enter();
         let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
-        let (engine, request) =
+        for pending in [false, true] {
+            let (engine, request) =
+                certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
+            let offset = certified_float_offset(&engine, 1);
+            engine
+                .doc()
+                .format_range(
+                    &crate::EditCtx::local("", ""),
+                    crate::StoryRange::new("body", offset + 1, offset + 2),
+                    &crate::InlineFormatDelta {
+                        bold: crate::Patch::Set(true),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            certified_float_layout(&engine, &request, RelayoutTrigger::Bulk);
+            let mut retained = HashMap::new();
+            assert_certified_float_cold(&engine, &request, &mut retained);
+            let offset = certified_float_offset(&engine, 1);
+            let (start, removed) = if pending { (offset, 3) } else { (offset + 1, 1) };
+            if pending {
+                let pending_offset = certified_float_offset(&engine, 17);
+                engine
+                    .edit_resident_text(
+                        crate::StoryRange::new("body", pending_offset, pending_offset),
+                        Some("pending"),
+                        true,
+                    )
+                    .unwrap();
+                assert!(engine.render.borrow().stories["body"].local.edit.is_some());
+            } else {
+                let render = engine.render.borrow();
+                assert!(!render.stories["body"].local.deferred);
+                assert!(render.stories["body"].local.has_seed("00000002"));
+            }
+            let before = engine.stats();
+            let generation = engine.render.borrow().stories["body"].generation;
+            TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
+            engine
+                .edit_resident_text(
+                    crate::StoryRange::new("body", start, start + removed),
+                    None,
+                    true,
+                )
+                .unwrap();
+            assert_eq!(engine.render.borrow().stories["body"].generation, generation);
+            assert!(engine.measurement_patch().is_none());
+            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            let epoch = engine.display.borrow().binary_frame_epoch;
+            let frame = engine.apply_and_layout("body", epoch).unwrap();
+            assert_eq!(engine.stats().lower_cache_misses, before.lower_cache_misses + 1);
+            assert!(engine.measurement_patch().is_none());
+            assert!(engine.render.borrow().stories["body"].local.edit.is_none());
+            TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
+            assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
+            assert_local_patch_matches_cold(&engine, &request, "seeded cross-run refusal");
+            measurement_patch_type(&engine, certified_float_offset(&engine, 18), "x");
+            assert!(engine.measurement_patch().is_some());
+            let dirty = certified_float_dirty_segment(&engine);
+            assert_eq!(
+                certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
+                (dirty, 0),
+            );
+            assert_certified_float_cold(&engine, &request, &mut retained);
+        }
+    }
+
+    #[test]
+    fn typing_extra_work_counts_seed_materialization_and_recovery() {
+        let fonts = docx_layout::MeasureFonts::default();
+        let _scope = fonts.enter();
+        let font = docx_layout::register_measure_font_bytes(lowering_pages::FONT).unwrap();
+        let (engine, _) =
             certified_float_engine(font, 40, &[0, 2, 4], false, false, RelayoutTrigger::Bulk);
-        let offset = certified_float_offset(&engine, 1);
-        engine
-            .doc()
-            .format_range(
-                &crate::EditCtx::local("", ""),
-                crate::StoryRange::new("body", offset + 1, offset + 2),
-                &crate::InlineFormatDelta {
-                    bold: crate::Patch::Set(true),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        certified_float_layout(&engine, &request, RelayoutTrigger::Bulk);
-        let mut retained = HashMap::new();
-        assert_certified_float_cold(&engine, &request, &mut retained);
-        let pending_offset = certified_float_offset(&engine, 17);
+        let offset = certified_float_offset(&engine, 17);
         engine
             .edit_resident_text(
-                crate::StoryRange::new("body", pending_offset, pending_offset),
+                crate::StoryRange::new("body", offset, offset),
                 Some("pending"),
                 true,
             )
             .unwrap();
-        assert!(engine.render.borrow().stories["body"].local.edit.is_some());
-        let before = engine.stats();
-        let generation = engine.render.borrow().stories["body"].generation;
         TYPING_EXTRA_WORK.with(|work| work.set(Default::default()));
-        engine
-            .edit_resident_text(
-                crate::StoryRange::new("body", offset, offset + 3),
-                None,
-                true,
+        let (mut retained, env) = {
+            let mut render = engine.render.borrow_mut();
+            let lowered = render.stories.get_mut("body").unwrap();
+            let _ = lowered.local.snapshot(engine.doc(), &lowered.map);
+            (
+                std::mem::replace(
+                    &mut lowered.local,
+                    crate::bridge::local::LocalLowering::new(false),
+                ),
+                lowered.env.clone(),
             )
+        };
+        TYPING_EXTRA_WORK.with(|work| assert!(work.get().seed_materializations > 0));
+        retained.suspend();
+        let mut local = crate::bridge::local::LocalLowering::fallback(false);
+        local.retained = Some(Box::new(retained));
+        let (blocks, map, _) = crate::bridge::yrs_doc_to_mapped_layout_blocks_with_revealable(
+            engine.doc(),
+            "body",
+            &env,
+            &mut local,
+        )
+        .unwrap();
+        TYPING_EXTRA_WORK.with(|work| {
+            assert!(work.get().recovery_chunks > 0);
+            assert!(work.get().seed_recoveries > 0);
+        });
+        let blocks: Vec<_> = blocks.into_iter().map(Rc::new).collect();
+        let mut retained = local.retained.take().unwrap();
+        retained.refresh_seeds(&blocks, &map);
+        retained
+            .refresh_seed("00000012", &blocks, &engine.doc().yrs_doc().transact(), &env)
             .unwrap();
-        assert_eq!(
-            engine.render.borrow().stories["body"].generation,
-            generation
-        );
-        assert!(engine.measurement_patch().is_none());
-        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
-        let epoch = engine.display.borrow().binary_frame_epoch;
-        let frame = engine.apply_and_layout("body", epoch).unwrap();
-        assert_eq!(
-            engine.stats().lower_cache_misses,
-            before.lower_cache_misses + 1
-        );
-        TYPING_EXTRA_WORK.with(|work| assert_eq!(work.get(), TypingExtraWork::default()));
-        assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
-        assert_local_patch_matches_cold(&engine, &request, "pending seeded cross-run refusal");
-        measurement_patch_type(&engine, certified_float_offset(&engine, 17), "x");
-        assert!(engine.measurement_patch().is_some());
-        let dirty = certified_float_dirty_segment(&engine);
-        assert_eq!(
-            certified_float_layout(&engine, &request, RelayoutTrigger::Interactive),
-            (dirty, 0),
-        );
-        assert_certified_float_cold(&engine, &request, &mut retained);
+        TYPING_EXTRA_WORK.with(|work| {
+            assert!(work.get().seed_refreshes > 0);
+            assert!(work.get().seed_validations > 0);
+        });
     }
 
     #[test]

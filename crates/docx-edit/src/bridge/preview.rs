@@ -808,13 +808,17 @@ pub(crate) fn lower_refreshed(
         .as_ref()
         .is_some_and(|units| units.refresh.as_ref().is_some_and(|refresh| !refresh.valid))
     {
+        #[cfg(test)]
         let retained = local.retained.take();
         *local = if local.legacy {
             local::LocalLowering::fallback(local.enabled)
         } else {
             local::LocalLowering::new(local.enabled)
         };
-        local.retained = retained;
+        #[cfg(test)]
+        {
+            local.retained = retained;
+        }
         return lower_recorded(doc, story, env, local, true);
     }
     if let Some(units) = preview.as_mut() {

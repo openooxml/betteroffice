@@ -506,9 +506,10 @@ fn lower_story_with_preview<T: ReadTxn>(
         let story = story_ref(txn, story_id)?;
         let comments = std::rc::Rc::new(resolve_comment_intervals(txn, story_id, env)?);
         let chunks = story.diff(txn, YChange::identity);
-        let (owned_chunks, shared_chunks) = if story_id == "body"
-            && ((!local.blocked && !local.legacy) || local.retained.is_some())
-        {
+        let share_chunks = !local.blocked && !local.legacy;
+        #[cfg(test)]
+        let share_chunks = share_chunks || local.retained.is_some();
+        let (owned_chunks, shared_chunks) = if story_id == "body" && share_chunks {
             (Vec::new(), Some(std::rc::Rc::new(chunks)))
         } else {
             (chunks, None)
@@ -614,11 +615,26 @@ fn walk_story_chunks<T: ReadTxn>(
         };
     }
     let mut plain = local::ParagraphSeed::default();
+    #[cfg(test)]
     let recovering = local.retained.is_some();
+    #[cfg(test)]
     let mut paragraph_chunk_start = 0;
+    #[cfg(test)]
     let mut recovery_safe = false;
+    #[cfg(test)]
+    let mut recovery_units = Vec::new();
     for (chunk_index, diff) in chunks.iter().enumerate() {
+        #[cfg(test)]
+        if recovering {
+            crate::engine::TYPING_EXTRA_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.recovery_chunks += 1;
+                work.set(counts);
+            });
+        }
+        #[cfg(test)]
         if recovering && at_block_boundary && paragraph_start == story_index {
+            recovery_units.clear();
             paragraph_chunk_start = chunk_index;
             recovery_safe = pending_hidden_field_blocks.is_empty()
                 && pending_code_join.is_none()
@@ -657,9 +673,17 @@ fn walk_story_chunks<T: ReadTxn>(
             );
         }
         let attributes = diff.attributes.as_deref();
-        local.observe(&mut plain, diff, txn, story_id, chunk_index);
+        let width = match &diff.insert {
+            Out::Any(Any::String(text)) => utf16_len(text),
+            _ => 0,
+        };
+        local.observe(&mut plain, diff, txn, story_id, chunk_index, width);
         match &diff.insert {
             Out::Any(Any::String(text)) => {
+                #[cfg(test)]
+                if recovering {
+                    recovery_units.push(width);
+                }
                 let text = text.as_ref();
                 push_text_chunks(
                     &mut paragraph_runs,
@@ -670,7 +694,6 @@ fn walk_story_chunks<T: ReadTxn>(
                     env,
                     paragraph_pm_units,
                 );
-                let width = utf16_len(text);
                 story_index += width;
                 paragraph_pm_units += width;
                 at_block_boundary = false;
@@ -695,6 +718,7 @@ fn walk_story_chunks<T: ReadTxn>(
                             .is_some_and(|id| hidden_field_blocks.contains(&id)),
                 );
                 let para_id = value_string(values.get("paraId")).unwrap_or_default();
+                #[cfg(test)]
                 if recovering {
                     local.recover_seed(
                         &para_id,
@@ -707,6 +731,7 @@ fn walk_story_chunks<T: ReadTxn>(
                             map.paragraph_count(),
                         ),
                         paragraph_chunk_start..chunk_index,
+                        &recovery_units,
                         recovery_safe
                             && !hidden_field_blocks.contains(&para_id)
                             && !values.contains_key("sectPr")

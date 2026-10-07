@@ -14,6 +14,7 @@ pub(crate) struct LocalLowering {
     pub(super) source: std::sync::Weak<crate::seed::SourceMetadata>,
     pub(super) seeds: BTreeMap<String, ParagraphSeed>,
     pub(super) chunks: Option<Rc<Vec<yrs::types::text::Diff<YChange>>>>,
+    #[cfg(test)]
     pub(crate) retained: Option<Box<LocalLowering>>,
     invalidated: BTreeSet<String>,
     validation_epoch: u64,
@@ -21,6 +22,8 @@ pub(crate) struct LocalLowering {
     pub(crate) edit: Option<TextEdit>,
     #[cfg(test)]
     pub(crate) materialized_text_units: u32,
+    #[cfg(test)]
+    discarded: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -30,6 +33,7 @@ pub(super) struct ParagraphSeed {
     slot: usize,
     source: u32,
     segments: Vec<TextSegment>,
+    chunk_units: Vec<u32>,
     chunks: Option<(
         Rc<Vec<yrs::types::text::Diff<YChange>>>,
         std::ops::Range<usize>,
@@ -43,7 +47,15 @@ pub(super) struct ParagraphSeed {
 #[derive(Clone, Debug)]
 struct TextSegment {
     text: String,
+    units: u32,
     attrs: Attrs,
+}
+
+#[derive(Clone, Copy)]
+struct SegmentPart<'a> {
+    text: &'a str,
+    units: u32,
+    attrs: Option<&'a Attrs>,
 }
 
 impl ParagraphSeed {
@@ -51,13 +63,43 @@ impl ParagraphSeed {
         let Some((chunks, range)) = &self.chunks else {
             return Cow::Borrowed(&self.segments);
         };
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.seed_materializations += 1;
+            work.set(counts);
+        });
         let mut segments = Vec::new();
-        for diff in &chunks[range.clone()] {
+        for (diff, &units) in chunks[range.clone()].iter().zip(&self.chunk_units) {
             if let Out::Any(Any::String(text)) = &diff.insert {
-                push_segment(&mut segments, text, diff.attributes.as_deref());
+                push_segment(&mut segments, text, diff.attributes.as_deref(), units);
             }
         }
         Cow::Owned(segments)
+    }
+
+    fn parts(&self) -> impl Iterator<Item = SegmentPart<'_>> + Clone {
+        self.segments
+            .iter()
+            .map(|segment| SegmentPart {
+                text: &segment.text,
+                units: segment.units,
+                attrs: Some(&segment.attrs),
+            })
+            .chain(self.chunks.iter().flat_map(|(chunks, range)| {
+                chunks[range.clone()]
+                    .iter()
+                    .zip(&self.chunk_units)
+                    .filter_map(|(diff, &units)| match &diff.insert {
+                        Out::Any(Any::String(text)) => Some(SegmentPart {
+                            text: text.as_ref(),
+                            units,
+                            attrs: diff.attributes.as_deref(),
+                        }),
+                        _ => None,
+                    })
+            }))
+            .filter(|part| !part.text.is_empty())
     }
 
     pub(super) fn start(&mut self, safe: bool) {
@@ -94,14 +136,16 @@ fn same_attributes(attrs: &Attrs, other: Option<&Attrs>) -> bool {
     other().count() == attrs.len() && other().all(|(key, value)| attrs.get(key) == Some(value))
 }
 
-fn push_segment(segments: &mut Vec<TextSegment>, text: &str, attrs: Option<&Attrs>) {
+fn push_segment(segments: &mut Vec<TextSegment>, text: &str, attrs: Option<&Attrs>, units: u32) {
     if let Some(last) = segments.last_mut()
         && same_attributes(&last.attrs, attrs)
     {
         last.text.push_str(text);
+        last.units += units;
     } else {
         segments.push(TextSegment {
             text: text.to_owned(),
+            units,
             attrs: attributes(attrs),
         });
     }
@@ -315,6 +359,10 @@ impl LocalLowering {
 
     pub(super) fn replace_seeds(&mut self, pm: &std::ops::Range<u64>, replacement: Self) {
         self.seeds.retain(|_, seed| !pm.contains(&seed.pm_start));
+        #[cfg(test)]
+        for id in replacement.seeds.keys() {
+            self.discarded.remove(id);
+        }
         self.seeds.extend(replacement.seeds);
     }
 
@@ -329,6 +377,12 @@ impl LocalLowering {
         if self.seeds.is_empty() {
             return;
         }
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.seed_refreshes += 1;
+            work.set(counts);
+        });
         let mut identities = HashSet::new();
         let duplicates: HashSet<_> = map
             .paragraphs
@@ -392,6 +446,7 @@ impl LocalLowering {
         txn: &T,
         story: &str,
         chunk_index: usize,
+        units: u32,
     ) {
         if self.blocked {
             return;
@@ -406,7 +461,7 @@ impl LocalLowering {
             match &diff.insert {
                 Out::Any(Any::String(_)) if story != "body" => {}
                 Out::Any(Any::String(text)) => {
-                    push_segment(&mut paragraph.segments, text, attrs);
+                    push_segment(&mut paragraph.segments, text, attrs, units);
                 }
                 Out::YMap(mark) if is_pilcrow(mark, txn) => {}
                 Out::YMap(mark) => {
@@ -427,6 +482,7 @@ impl LocalLowering {
             Out::Any(Any::String(_)) if story != "body" || paragraph.tainted => {}
             Out::Any(Any::String(text)) => {
                 if let Some(chunks) = &self.chunks {
+                    paragraph.chunk_units.push(units);
                     if let Some((_, range)) = &mut paragraph.chunks {
                         range.end = chunk_index + 1;
                     } else {
@@ -437,7 +493,7 @@ impl LocalLowering {
                     {
                         self.materialized_text_units += utf16_len(text);
                     }
-                    push_segment(&mut paragraph.segments, text, attrs);
+                    push_segment(&mut paragraph.segments, text, attrs, units);
                 }
             }
             Out::YMap(mark) if is_pilcrow(mark, txn) => {}
@@ -586,7 +642,7 @@ impl LocalLowering {
                 .is_some_and(|attrs| attrs.iter().any(|(key, value)| unsafe_value(key, value)))
             && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
                 !self.invalidated.contains(&edit.paragraph)
-                    && patch_segment_bounds(&seed.segments(), edit).is_some()
+                    && patch_part_bounds(seed.parts(), edit).is_some()
             })
     }
 
@@ -602,11 +658,45 @@ impl LocalLowering {
         }
         self.can_patch(pending)
             && self.seeds.get(&edit.paragraph).is_some_and(|seed| {
-                patch_segments(&seed.segments(), pending)
-                    .is_some_and(|segments| patch_segment_bounds(&segments, edit).is_some())
+                let Some((slot, start, end)) = patch_part_bounds(seed.parts(), pending) else {
+                    return false;
+                };
+                let mut parts: Vec<_> = seed.parts().collect();
+                let inserted = SegmentPart {
+                    text: &pending.text,
+                    units: utf16_len(&pending.text),
+                    attrs: pending.attributes.as_ref(),
+                };
+                if parts.is_empty() {
+                    parts.push(inserted);
+                } else {
+                    let segment = parts[slot];
+                    let before: u32 = parts[..slot].iter().map(|part| part.units).sum();
+                    let left_units = pending.offset - before;
+                    let replacement = [
+                        SegmentPart {
+                            text: &segment.text[..start],
+                            units: left_units,
+                            attrs: segment.attrs,
+                        },
+                        SegmentPart {
+                            attrs: pending.attributes.as_ref().or(segment.attrs),
+                            ..inserted
+                        },
+                        SegmentPart {
+                            text: &segment.text[end..],
+                            units: segment.units - left_units - pending.removed,
+                            attrs: segment.attrs,
+                        },
+                    ];
+                    parts.splice(slot..=slot, replacement);
+                }
+                patch_part_bounds(parts.into_iter().filter(|part| !part.text.is_empty()), edit)
+                    .is_some()
             })
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn recover_seed(
         &mut self,
@@ -615,11 +705,18 @@ impl LocalLowering {
         attrs: Option<&Attrs>,
         positions: (u32, u64, usize, u32),
         chunks: std::ops::Range<usize>,
+        chunk_units: &[u32],
         safe: bool,
     ) {
         let Some(retained) = self.retained.as_mut() else {
             return;
         };
+        #[cfg(test)]
+        crate::engine::TYPING_EXTRA_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.seed_recoveries += 1;
+            work.set(counts);
+        });
         if retained.invalidated.is_empty() || !retained.invalidated.remove(id) {
             return;
         }
@@ -638,6 +735,7 @@ impl LocalLowering {
         seed.pilcrow = Some(mark.clone());
         seed.mark_attrs = attrs.cloned();
         seed.segments.clear();
+        seed.chunk_units = chunk_units.to_vec();
         seed.chunks = self
             .chunks
             .as_ref()
@@ -647,6 +745,47 @@ impl LocalLowering {
 
     pub(crate) fn resume(&mut self) {
         self.validation_epoch = self.validation_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn discard_pending(&mut self) {
+        self.suspend();
+        for id in &self.invalidated {
+            self.seeds.remove(id);
+        }
+    }
+
+    pub(crate) fn resume_without_recovery(&mut self, fallback: &mut Self) {
+        for id in std::mem::take(&mut self.invalidated) {
+            let seed = fallback.seeds.remove(&id);
+            #[cfg(test)]
+            if seed.is_some() {
+                self.discarded.remove(&id);
+            } else {
+                self.discarded.insert(id.clone());
+            }
+            if let Some(seed) = seed {
+                self.seeds.insert(id, seed);
+            }
+        }
+        self.resume();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn discarded_seeds(&self) -> &BTreeSet<String> {
+        &self.discarded
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_seed(&self, id: &str) -> bool {
+        self.seeds.contains_key(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exclude_discarded_seeds(&mut self, discarded: &BTreeSet<String>) {
+        for id in discarded {
+            self.seeds.remove(id);
+        }
+        self.discarded.clone_from(discarded);
     }
 
     pub(crate) fn refresh_coordinates(
@@ -828,6 +967,7 @@ impl LocalLowering {
             self.materialized_text_units += old_units;
         }
         seed.chunks = None;
+        seed.chunk_units.clear();
         blocks[slot] = Rc::new(LayoutBlock::Paragraph(paragraph));
         seed.validated = Some((self.validation_epoch, Rc::as_ptr(&blocks[slot]) as usize));
         for block in &mut blocks[slot + 1..] {
@@ -884,25 +1024,68 @@ fn patch_segment_bounds(
     segments: &[TextSegment],
     edit: &TextEdit,
 ) -> Option<(usize, usize, usize)> {
-    if segments.is_empty() {
+    patch_part_bounds(
+        segments.iter().map(|segment| SegmentPart {
+            text: &segment.text,
+            units: segment.units,
+            attrs: Some(&segment.attrs),
+        }),
+        edit,
+    )
+}
+
+fn same_part_attributes(left: Option<&Attrs>, right: Option<&Attrs>) -> bool {
+    let present = |attrs: Option<&Attrs>| {
+        attrs
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| **value != Any::Null)
+            .count()
+    };
+    present(left) == present(right)
+        && left.into_iter().flatten().all(|(key, value)| {
+            *value == Any::Null || right.is_some_and(|attrs| attrs.get(key) == Some(value))
+        })
+}
+
+fn patch_part_bounds<'a>(
+    parts: impl Iterator<Item = SegmentPart<'a>> + Clone,
+    edit: &TextEdit,
+) -> Option<(usize, usize, usize)> {
+    if parts.clone().next().is_none() {
         if edit.offset != 0 || edit.removed != 0 {
             return None;
         }
         return Some((0, 0, 0));
     }
-    let mut before = 0;
-    let slot = segments.iter().position(|segment| {
-        let end = before + utf16_len(&segment.text);
+    let mut before = 0_u32;
+    let mut previous = None;
+    let mut remaining = parts.enumerate();
+    let (slot, segment) = loop {
+        let (slot, segment) = remaining.next()?;
+        let end = before.checked_add(segment.units)?;
         if edit.offset < end || (edit.removed == 0 && edit.offset == end) {
-            true
-        } else {
-            before = end;
-            false
+            break (slot, segment);
         }
-    })?;
-    let segment = &segments[slot];
+        before = end;
+        previous = Some(segment);
+    };
     let start = edit.offset.checked_sub(before)? as usize;
     let end = start.checked_add(edit.removed as usize)?;
+    if end > segment.units as usize {
+        return None;
+    }
+    let next = remaining.next().map(|(_, part)| part);
+    if edit.removed != 0
+        && start == 0
+        && end == segment.units as usize
+        && edit.text.is_empty()
+        && (previous.is_some() || next.is_some())
+        && !previous.is_some_and(|part| same_part_attributes(part.attrs, segment.attrs))
+        && !next.is_some_and(|part| same_part_attributes(part.attrs, segment.attrs))
+    {
+        return None;
+    }
     let mut units = 0;
     let mut start_byte = None;
     let mut end_byte = None;
@@ -926,14 +1109,6 @@ fn patch_segment_bounds(
     if edit.removed != 0 && segment.text[start..end].chars().count() != 1 {
         return None;
     }
-    if edit.removed != 0
-        && start == 0
-        && end == segment.text.len()
-        && edit.text.is_empty()
-        && segments.len() > 1
-    {
-        return None;
-    }
     Some((slot, start, end))
 }
 
@@ -942,11 +1117,14 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
     if segments.is_empty() {
         return Some(vec![TextSegment {
             text: edit.text.clone(),
+            units: utf16_len(&edit.text),
             attrs: attributes(edit.attributes.as_ref()),
         }]);
     }
     let mut result = segments.to_vec();
     let segment = &result[slot];
+    let before: u32 = result[..slot].iter().map(|segment| segment.units).sum();
+    let left_units = edit.offset - before;
     let left = segment.text[..start].to_owned();
     let right = segment.text[end..].to_owned();
     if edit.removed != 0 && left.is_empty() && right.is_empty() && edit.text.is_empty() {
@@ -960,14 +1138,17 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
     let replacement = [
         TextSegment {
             text: left,
+            units: left_units,
             attrs: segment.attrs.clone(),
         },
         TextSegment {
             text: edit.text.clone(),
+            units: utf16_len(&edit.text),
             attrs,
         },
         TextSegment {
             text: right,
+            units: segment.units - left_units - edit.removed,
             attrs: segment.attrs.clone(),
         },
     ];
@@ -981,6 +1162,7 @@ fn patch_segments(segments: &[TextSegment], edit: &TextEdit) -> Option<Vec<TextS
             && same_attributes(&last.attrs, Some(&segment.attrs))
         {
             last.text.push_str(&segment.text);
+            last.units += segment.units;
         } else {
             merged.push(segment);
         }
