@@ -171,10 +171,12 @@ describe('DocxEditor layout waits (worker engine)', () => {
     expect(await layoutComplete(ref)).toBeInstanceOf(Error);
 
     const bytes = await pagedDocx(1);
+    let loading: Promise<void> = Promise.resolve();
     await act(async () => {
-      await ref.current!.loadDocumentBuffer(bytes);
+      loading = ref.current!.loadDocumentBuffer(bytes);
     });
     expect(await layoutComplete(ref)).toBe(1);
+    await loading;
     expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
   }, 90_000);
 });
