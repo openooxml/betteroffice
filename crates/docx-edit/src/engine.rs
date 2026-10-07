@@ -15259,7 +15259,9 @@ mod tests {
             assert_eq!(work.get().preview_shifts, 0);
         });
         assert_eq!(
-            engine.render.borrow().stories["body"].preview_paragraph_edits.len(),
+            engine.render.borrow().stories["body"]
+                .preview_paragraph_edits
+                .len(),
             16,
         );
         assert_local_patch_matches_cold(&engine, &request.to_string(), "unused preview decision");
@@ -15741,7 +15743,11 @@ mod tests {
                     assert_eq!(work.get().preflight_text_units, 2);
                 });
                 let env = engine.render.borrow().stories["body"].env.clone();
-                assert!(engine.patch_lowered_body(engine.doc_epoch(), &env).is_some());
+                assert!(
+                    engine
+                        .patch_lowered_body(engine.doc_epoch(), &env)
+                        .is_some()
+                );
                 TYPING_EXTRA_WORK.with(|work| {
                     assert_eq!(work.get().preflight_chunks, 201);
                     assert_eq!(work.get().preflight_text_units, 2);
@@ -15821,7 +15827,10 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             let preflight_chunks = 3 * usize::from(!pending);
-            assert_refusal_work(1 + usize::from(pending && !same_paragraph), preflight_chunks);
+            assert_refusal_work(
+                1 + usize::from(pending && !same_paragraph),
+                preflight_chunks,
+            );
             let epoch = engine.display.borrow().binary_frame_epoch;
             let frame = engine.apply_and_layout("body", epoch).unwrap();
             assert_eq!(
@@ -15830,7 +15839,10 @@ mod tests {
             );
             assert!(engine.measurement_patch().is_none());
             assert!(engine.render.borrow().stories["body"].local.edit.is_none());
-            assert_refusal_work(1 + usize::from(pending && !same_paragraph), preflight_chunks);
+            assert_refusal_work(
+                1 + usize::from(pending && !same_paragraph),
+                preflight_chunks,
+            );
             assert_returned_frame_matches_cold(&engine, &request, &frame, &mut retained);
             assert_local_patch_matches_cold(&engine, &request, "seeded cross-run refusal");
             measurement_patch_type(&engine, certified_float_offset(&engine, 18), "x");

@@ -1177,11 +1177,15 @@ fn paragraph_positions_preserve_intermediate_overflow_and_underflow_refusals() {
         let record = &mut units.records[0];
         let delta = match state {
             0 => {
-                Rc::make_mut(record.seed.as_mut().unwrap()).position.paragraph_start = 0;
+                Rc::make_mut(record.seed.as_mut().unwrap())
+                    .position
+                    .paragraph_start = 0;
                 -1
             }
             1 => {
-                Rc::make_mut(record.seed.as_mut().unwrap()).position.pm_cursor = 0;
+                Rc::make_mut(record.seed.as_mut().unwrap())
+                    .position
+                    .pm_cursor = 0;
                 -1
             }
             2 => {
