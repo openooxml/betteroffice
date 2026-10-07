@@ -298,7 +298,9 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     },
     scrollToParaId: (paraId, options) => {
       beforeNavigation();
-      return scrollToParaIdImpl(paraId, options);
+      const moved = scrollToParaIdImpl(paraId, options);
+      if (moved) syncYrsInputStateRef.current(false);
+      return moved;
     },
     scrollToPage: (pageNumber) => {
       beforeNavigation();
