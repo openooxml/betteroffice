@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    Cell, CellRef, CellValue, DrawCmd, Error, GridGeometry, MAX_COLS, MAX_DISPLAY_CELLS, MAX_ROWS,
-    Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+    Cell, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, MAX_COLS, MAX_DISPLAY_CELLS,
+    MAX_ROWS, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 
 fn workbook() -> Workbook {
@@ -143,6 +143,42 @@ fn display_lists_custom_dimensions_clamp_at_grid_boundaries() {
     assert_eq!(frame.grid.col_offsets.len(), 2);
     assert_eq!(frame.grid.row_offsets[1], viewport.height);
     assert_eq!(frame.grid.col_offsets[1], viewport.width);
+}
+
+#[test]
+fn display_lists_preserve_last_row_strip_with_frozen_pane() {
+    let mut sheet = Sheet::new("Data");
+    sheet.row_heights.insert(0, 14.25);
+    sheet.freeze_pane = Some(FreezePane::new(1, 0, CellRef::new(MAX_ROWS - 1, 0)));
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let geometry = GridGeometry::new(
+        workbook.sheet(SheetId(0)).unwrap(),
+        &workbook.model().styles,
+    );
+    assert_eq!(geometry.row_y(1), 19.0);
+    assert_eq!(geometry.row_y(MAX_ROWS), 20_971_520.0);
+    let viewport = Viewport {
+        x: 0.0,
+        y: 20_971_500.0,
+        width: 100.0,
+        height: 20.0,
+    };
+    assert_eq!(geometry.viewport_range(&viewport).0, MAX_ROWS - 1..MAX_ROWS);
+    let frame = workbook.display_list(&viewport).unwrap();
+    assert_eq!(frame.grid.start_row, 0);
+    assert_eq!(frame.grid.row_indices.as_deref(), Some(&[0, MAX_ROWS - 1][..]));
+    assert_eq!(frame.grid.row_offsets, vec![0.0, 19.0, 20.0]);
+    assert!(frame.commands.iter().any(|command| {
+        matches!(
+            command,
+            DrawCmd::Line { x1, y1, x2, y2, .. }
+                if x1 != x2 && *y1 == 20.0 && *y2 == 20.0
+        )
+    }));
 }
 
 #[test]
