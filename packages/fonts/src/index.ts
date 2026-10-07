@@ -1,6 +1,6 @@
 export * from './manifest';
 export type { BundledFontSource } from './provider';
-import { BUNDLED_FONTS, type BundledFontFace } from './manifest';
+import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
 
@@ -231,7 +231,18 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  return assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+  const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+  if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
+  return bytes.catch(async (error) => {
+    if (await loadCjkAssetUrls()) throw error;
+    return loadBundledFontBytes(
+      resolveMetricCompatFace(
+        face.family.includes('Serif') ? 'Times New Roman' : 'Arial',
+        face.weight === 700,
+        face.style === 'italic',
+      )!,
+    );
+  });
 }
 
 const registeredFaces = new Map<string, Promise<void>>();
