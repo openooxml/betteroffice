@@ -286,7 +286,11 @@ fn emit_grid_segments(
     print: Option<&PrintMetrics>,
     color: Arc<str>,
 ) -> Vec<DrawCmd> {
-    if rows.tracks.is_empty() || cols.tracks.is_empty() {
+    if (rows.tracks.is_empty()
+        && geometry.row_y(rows.frozen) + rows.scroll >= geometry.row_y(MAX_ROWS))
+        || (cols.tracks.is_empty()
+            && geometry.col_x(cols.frozen) + cols.scroll >= geometry.col_x(MAX_COLS))
+    {
         return Vec::new();
     }
     let merges: Vec<_> = merges

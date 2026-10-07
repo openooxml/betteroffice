@@ -580,7 +580,7 @@ function toError(e: unknown): Error {
 /** Maximum counted cells per frame, including boundary and frozen tracks; call after `initWasm`. */
 export function getDisplayListCellLimit(): number {
   requireInitialized();
-  return (xlsxWasm as unknown as { displayListCellLimit(): number }).displayListCellLimit();
+  return xlsxWasm.displayListCellLimit();
 }
 
 /**

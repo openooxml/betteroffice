@@ -426,17 +426,27 @@ impl GridGeometry {
     pub fn viewport_range(&self, vp: &Viewport) -> (Range<RowId>, Range<ColId>) {
         let bottom = self.row_y(MAX_ROWS);
         let right = self.col_x(MAX_COLS);
-        let r0 = self.row_at_y(vp.y.min(bottom)).min(MAX_ROWS);
-        let r1 = self
-            .row_at_y((vp.y + vp.height).min(bottom))
-            .saturating_add(1)
-            .min(MAX_ROWS);
-        let c0 = self.col_at_x(vp.x.min(right)).min(MAX_COLS);
-        let c1 = self
-            .col_at_x((vp.x + vp.width).min(right))
-            .saturating_add(1)
-            .min(MAX_COLS);
-        (r0..r1, c0..c1)
+        let rows = if vp.y >= bottom {
+            MAX_ROWS..MAX_ROWS
+        } else {
+            let r0 = self.row_at_y(vp.y).min(MAX_ROWS);
+            let r1 = self
+                .row_at_y((vp.y + vp.height).min(bottom))
+                .saturating_add(1)
+                .min(MAX_ROWS);
+            r0..r1
+        };
+        let cols = if vp.x >= right {
+            MAX_COLS..MAX_COLS
+        } else {
+            let c0 = self.col_at_x(vp.x).min(MAX_COLS);
+            let c1 = self
+                .col_at_x((vp.x + vp.width).min(right))
+                .saturating_add(1)
+                .min(MAX_COLS);
+            c0..c1
+        };
+        (rows, cols)
     }
 }
 
