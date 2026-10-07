@@ -29,7 +29,6 @@ const MEDIA_TOKEN = /^media:(0|[1-9]\d*)$/;
 
 interface CachedImage {
   pending: Promise<CanvasImageSource | null>;
-  image?: CanvasImageSource;
   bytes: number;
 }
 
@@ -100,7 +99,6 @@ export function createCanvasImageResolver(
     const nextScope = mediaScope?.();
     if (nextScope !== scope) {
       scope = nextScope;
-      for (const entry of cache.values()) closeImage(entry.image);
       cache.clear();
       cachedBytes = 0;
     }
@@ -119,30 +117,27 @@ export function createCanvasImageResolver(
             return null;
           }
           cache.delete(relId);
-          if (!image) return null;
           const dimensions = image as {
             naturalWidth?: number;
             naturalHeight?: number;
             width?: number;
             height?: number;
-          };
+          } | null;
           const bytes = Math.max(
             4,
-            (dimensions.naturalWidth ?? dimensions.width ?? 1) *
-              (dimensions.naturalHeight ?? dimensions.height ?? 1) *
+            (dimensions?.naturalWidth ?? dimensions?.width ?? 1) *
+              (dimensions?.naturalHeight ?? dimensions?.height ?? 1) *
               4
           );
-          entry.image = image;
           entry.bytes = bytes;
           cache.set(relId, entry);
           cachedBytes += bytes;
           for (const [key, oldest] of cache) {
             if (cachedBytes <= maxCacheBytes) break;
             if (oldest === entry) break;
-            if (!oldest.image) continue;
+            if (oldest.bytes === 0) continue;
             cache.delete(key);
             cachedBytes -= oldest.bytes;
-            queueMicrotask(() => closeImage(oldest.image));
           }
           return image;
         },
