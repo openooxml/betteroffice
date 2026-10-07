@@ -23,6 +23,12 @@ class FakeBitmap {
   }
 }
 
+class FakeCanvasContext {
+  drawImage(image: CanvasImageSource | null) {
+    if (!(image instanceof FakeBitmap) || image.closed) throw new Error('Cannot draw bitmap');
+  }
+}
+
 describe('createCanvasImageResolver', () => {
   const originalImage = globalThis.Image;
   const originalCreateImageBitmap = globalThis.createImageBitmap;
@@ -79,7 +85,7 @@ describe('createCanvasImageResolver', () => {
     expect(blobs).toEqual([]);
   });
 
-  it('evicts and closes LRU bitmaps', async () => {
+  it('evicts LRU bitmaps without closing handed-out images', async () => {
     globalThis.Image = undefined as unknown as typeof Image;
     const resolve = createCanvasImageResolver({
       media: () => ({ bytes: new Uint8Array([1]), mimeType: 'image/png' }),
@@ -88,11 +94,14 @@ describe('createCanvasImageResolver', () => {
     const first = await resolve('media:0');
     const second = await resolve('media:1');
     expect(await resolve('media:0')).toBe(first);
-    await resolve('media:2');
-    expect(bitmaps.map((bitmap) => bitmap.closed)).toEqual([false, true, false]);
+    const third = await resolve('media:2');
+    const context = new FakeCanvasContext();
+    expect(() => context.drawImage(second)).not.toThrow();
     expect(await resolve('media:0')).toBe(first);
     expect(await resolve('media:1')).not.toBe(second);
-    expect(bitmaps.map((bitmap) => bitmap.closed)).toEqual([false, true, true, false]);
+    expect(await resolve('media:2')).not.toBe(third);
+    expect(() => context.drawImage(third)).not.toThrow();
+    expect(bitmaps.every((bitmap) => !bitmap.closed)).toBe(true);
   });
 
   it('decodes local URLs in workers', async () => {
@@ -113,7 +122,7 @@ describe('createCanvasImageResolver', () => {
     ]);
   });
 
-  it('closes obsolete scope bitmaps', async () => {
+  it('closes stale decodes without closing handed-out scope bitmaps', async () => {
     globalThis.Image = undefined as unknown as typeof Image;
     const complete: ((bitmap: ImageBitmap) => void)[] = [];
     globalThis.createImageBitmap = (() =>
@@ -129,13 +138,16 @@ describe('createCanvasImageResolver', () => {
     const firstBitmap = new FakeBitmap();
     const first = resolve('media:0');
     complete[0]!(firstBitmap as unknown as ImageBitmap);
-    expect(await first).toBe(firstBitmap);
+    const firstImage = await first;
+    expect(firstImage).toBe(firstBitmap);
     const staleBitmap = new FakeBitmap();
     const stale = resolve('media:1');
     scope = 2;
     const currentBitmap = new FakeBitmap();
     const current = resolve('media:1');
-    expect(firstBitmap.closed).toBe(true);
+    expect(firstBitmap.closed).toBe(false);
+    const context = new FakeCanvasContext();
+    expect(() => context.drawImage(firstImage)).not.toThrow();
     complete[1]!(staleBitmap as unknown as ImageBitmap);
     expect(await stale).toBeNull();
     expect(staleBitmap.closed).toBe(true);
@@ -144,6 +156,11 @@ describe('createCanvasImageResolver', () => {
     expect(await current).toBe(currentBitmap);
     expect(await resolve('media:1')).toBe(currentBitmap);
     expect(currentBitmap.closed).toBe(false);
+    const redecoded = resolve('media:0');
+    expect(complete).toHaveLength(4);
+    const redecodedBitmap = new FakeBitmap();
+    complete[3]!(redecodedBitmap as unknown as ImageBitmap);
+    expect(await redecoded).toBe(redecodedBitmap);
   });
 
   it('keeps the newest oversized bitmap cached and drawable', async () => {
@@ -154,26 +171,98 @@ describe('createCanvasImageResolver', () => {
     });
     const first = await resolve('media:0');
     expect(await resolve('media:0')).toBe(first);
-    expect(bitmaps).toHaveLength(1);
-    await resolve('media:1');
-    await Promise.resolve();
-    expect(bitmaps.map((bitmap) => bitmap.closed)).toEqual([true, false]);
+    const second = await resolve('media:1');
+    expect(await resolve('media:1')).toBe(second);
+    expect(bitmaps).toHaveLength(2);
+    const context = new FakeCanvasContext();
+    expect(() => context.drawImage(first)).not.toThrow();
+    expect(() => context.drawImage(second)).not.toThrow();
   });
 
-  it('keeps concurrent bitmaps drawable', async () => {
+  it('keeps concurrent bitmaps drawable after Promise.all under a one-bitmap budget', async () => {
     globalThis.Image = undefined as unknown as typeof Image;
     const resolve = createCanvasImageResolver({
       media: () => ({ bytes: new Uint8Array([1]), mimeType: 'image/png' }),
       maxCacheBytes: 16,
     });
-    const first = resolve('media:0');
-    const second = resolve('media:1');
-    const drawFirst = Promise.resolve(first).then((image) => {
-      expect(image).toBe(bitmaps[0]);
-      expect(bitmaps[0]!.closed).toBe(false);
+    const [first, second] = await Promise.all([resolve('media:0'), resolve('media:1')]);
+    expect(first).toBe(bitmaps[0]);
+    expect(second).toBe(bitmaps[1]);
+    const context = new FakeCanvasContext();
+    expect(() => context.drawImage(first)).not.toThrow();
+    expect(() => context.drawImage(second)).not.toThrow();
+    expect(await resolve('media:1')).toBe(second);
+    expect(await resolve('media:0')).not.toBe(first);
+  });
+
+  it('keeps a cached-hit bitmap drawable when scope changes before its continuation', async () => {
+    globalThis.Image = undefined as unknown as typeof Image;
+    let scope = 1;
+    const resolve = createCanvasImageResolver({
+      media: () => ({ bytes: new Uint8Array([scope]), mimeType: 'image/png' }),
+      mediaScope: () => scope,
     });
-    await Promise.all([drawFirst, second]);
-    expect(bitmaps.map((bitmap) => bitmap.closed)).toEqual([true, false]);
+    const first = await resolve('media:0');
+    const cached = resolve('media:0');
+    const drawCached = Promise.resolve(cached).then((image) => {
+      expect(image).toBe(first);
+      expect(() => new FakeCanvasContext().drawImage(image)).not.toThrow();
+    });
+    scope = 2;
+    const current = resolve('media:1');
+    await Promise.all([drawCached, current]);
+    expect(await resolve('media:0')).not.toBe(first);
+  });
+
+  it.each(['blob:broken', 'data:image/png;base64,AQ=='])(
+    'caches failed decodes for %s until scope changes',
+    async (url) => {
+      globalThis.Image = undefined as unknown as typeof Image;
+      const fetched: string[] = [];
+      globalThis.fetch = (async (source: string) => {
+        fetched.push(source);
+        return new Response(new Blob([new Uint8Array([1])], { type: 'image/png' }));
+      }) as unknown as typeof fetch;
+      globalThis.createImageBitmap = (async (blob: Blob) => {
+        decoded.push(blob);
+        throw new Error('Decode failed');
+      }) as unknown as typeof createImageBitmap;
+      let scope = 1;
+      const resolve = createCanvasImageResolver({ mediaScope: () => scope, maxCacheBytes: 4 });
+      const failed = resolve(url);
+      expect(await failed).toBeNull();
+      expect(resolve(url)).toBe(failed);
+      expect(await resolve(url)).toBeNull();
+      expect(fetched).toEqual([url]);
+      expect(decoded).toHaveLength(1);
+      scope = 2;
+      const retry = resolve(url);
+      expect(retry).not.toBe(failed);
+      expect(await retry).toBeNull();
+      expect(fetched).toEqual([url, url]);
+      expect(decoded).toHaveLength(2);
+    }
+  );
+
+  it('bounds cached fetch failures by the byte budget', async () => {
+    globalThis.Image = undefined as unknown as typeof Image;
+    const fetched: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      fetched.push(url);
+      throw new Error('Fetch failed');
+    }) as unknown as typeof fetch;
+    const resolve = createCanvasImageResolver({ maxCacheBytes: 4 });
+    const first = resolve('blob:broken-1');
+    expect(await first).toBeNull();
+    expect(resolve('blob:broken-1')).toBe(first);
+    const second = resolve('blob:broken-2');
+    expect(await second).toBeNull();
+    expect(resolve('blob:broken-2')).toBe(second);
+    const retry = resolve('blob:broken-1');
+    expect(retry).not.toBe(first);
+    expect(await retry).toBeNull();
+    expect(fetched).toEqual(['blob:broken-1', 'blob:broken-2', 'blob:broken-1']);
+    expect(decoded).toEqual([]);
   });
 
   it('bounds main-thread image cache', async () => {
