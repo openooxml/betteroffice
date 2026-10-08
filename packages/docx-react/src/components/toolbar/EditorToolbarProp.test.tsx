@@ -234,6 +234,12 @@ describe('DocxEditor toolbar prop', () => {
     const editor = ref.current!.getEditorRef()!;
     const session = editor.getYrsSession()!;
     const [from, to] = session.paragraphs('body').filter((paragraph) => paragraph.text.length > 0);
+    await act(async () => {
+      session.setParagraphAttr(to.paraId, 'alignment', 'right');
+      editor.syncYrsInputState(true);
+      await ref.current!.flushPendingInput();
+    });
+    const fromBefore = session.paragraphs('body').find((paragraph) => paragraph.paraId === from.paraId)!;
     const caretIn = async (paraId: string) => {
       await act(async () => {
         session.setSelection({ story: 'body', paraId, offset: 0 });
@@ -242,13 +248,20 @@ describe('DocxEditor toolbar prop', () => {
     };
     await caretIn(from.paraId);
     const before = ref.current!.commands.getState('alignment').value;
+    expect(before).not.toBe('right');
+    expect(before).not.toBe('center');
     let moved = false;
     await act(async () => {
       moved = ref.current!.scrollToParaId(to.paraId);
-      await ref.current!.commands.execute('alignment', { value: 'center' });
+      expect(ref.current!.commands.getState('alignment').value).toBe('right');
+      const result = await ref.current!.commands.execute('alignment', { value: 'center' });
+      expect(result.ok).toBe(true);
     });
     expect(moved).toBe(true);
     expect(ref.current!.commands.getState('alignment').value).toBe('center');
+    const after = session.paragraphs('body');
+    expect(after.find((paragraph) => paragraph.paraId === to.paraId)!.properties.alignment).toBe('center');
+    expect(after.find((paragraph) => paragraph.paraId === from.paraId)).toEqual(fromBefore);
     await caretIn(from.paraId);
     expect(ref.current!.commands.getState('alignment').value).toBe(before);
   });

@@ -14,6 +14,7 @@ import type {
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { pagedDocx } from './__fixtures__/pagedDocx';
 import { setupWorkerEngine } from './__fixtures__/workerEngine';
+import { onPresented, presentedWorkerFrame } from './internals/layoutProvenance';
 
 const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 
@@ -238,6 +239,11 @@ describe('DocxEditor first page preview (worker engine)', () => {
     fullOpenGate = new Promise<void>((done) => (releaseFullOpen = done));
     const ref = createRef<Editor>();
     let painted = 0;
+    let fullPresented = false;
+    const offPresented = onPresented((displayList, options) => {
+      const frame = presentedWorkerFrame({ displayList });
+      if (options?.worker && frame?.preview === false) fullPresented = true;
+    });
     try {
       render(
         <DocxEditor
@@ -262,11 +268,13 @@ describe('DocxEditor first page preview (worker engine)', () => {
 
       await act(async () => releaseFullOpen());
       await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 20_000 });
+      await waitFor(() => expect(fullPresented).toBe(true), { timeout: 20_000 });
       await act(async () => {
-        await new Promise((done) => setTimeout(done, 200));
+        await new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())));
       });
       expect(painted).toBe(1);
     } finally {
+      offPresented();
       releaseFullOpen();
     }
   }, 40_000);
