@@ -4166,6 +4166,10 @@ test('a shared collaboration update keeps the existing join path', async () => {
   const warn = spyOn(console, 'warn').mockImplementation(() => {});
   const ref = createRef<DocxEditorRef>();
   const errors: Error[] = [];
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    configurable: true,
+    value: { addEventListener() {}, removeEventListener() {}, ready: Promise.resolve() },
+  });
   try {
     const view = render(
       <DocxEditor
