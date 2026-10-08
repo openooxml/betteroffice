@@ -17,7 +17,7 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import {
-  computeAnchorDisplayTarget,
+  computeAnchorDisplayTargets,
   computeProposalGeometryMirror,
   resolveNavigationTarget,
 } from './proposalGeometry';
@@ -789,10 +789,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
           request.read.expectVersion
         );
         break;
-      case 'anchorTarget':
-        value = engine.version() !== request.read.expectVersion ? null : computeAnchorDisplayTarget(
+      case 'anchorTargets':
+        value = engine.version() !== request.read.expectVersion ? null : computeAnchorDisplayTargets(
           session.geometryReader,
-          request.read.target,
+          request.read.targets,
           request.read.revisionPreview
         );
         break;

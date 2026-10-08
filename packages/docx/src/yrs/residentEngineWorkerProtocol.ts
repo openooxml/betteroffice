@@ -41,9 +41,9 @@ import type {
 import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type {
   AnchorDisplayTarget,
+  AnchorGeometryTarget,
   ProposalGeometryMirror,
   resolveNavigationTarget,
-  SessionAnchorTarget,
 } from './proposalGeometry';
 import type { DocxPageExportOptions } from './pagedExport';
 import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
@@ -100,8 +100,8 @@ export type ResidentDocumentRead =
   | { kind: 'selectionInfo'; story: string; anchor: number; head: number; expectVersion: string }
   | { kind: 'paragraphTarget'; story: string; paraId: string; expectVersion: string }
   | {
-      kind: 'anchorTarget';
-      target: SessionAnchorTarget;
+      kind: 'anchorTargets';
+      targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[];
       /** The main thread's revision preview, which decides the hidden ranges. */
       revisionPreview: ReturnType<typeof proposalRevisionPreview>;
       expectVersion: string;
@@ -131,7 +131,7 @@ export interface ResidentDocumentReadValues {
   selectionText: DocxDisplaySelectionText | null;
   selectionInfo: DocxDisplaySelectionInfo | null;
   paragraphTarget: DocxDisplayRange | null;
-  anchorTarget: AnchorDisplayTarget | null;
+  anchorTargets: AnchorDisplayTarget[] | null;
   commentTarget: DocxDisplayRange | null;
   revisionTarget: DocxDisplayRange | null;
   bookmarkPosition: number | null;

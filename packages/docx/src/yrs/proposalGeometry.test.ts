@@ -10,7 +10,7 @@ import {
   type DocxProposalResult,
 } from './proposals';
 import {
-  computeAnchorDisplayTarget,
+  computeAnchorDisplayTargets,
   computeProposalGeometryMirror,
   proposalSetIdentity,
   resolveNavigationTarget,
@@ -487,17 +487,12 @@ describe('anchor display targets', () => {
           },
         },
       ] as const;
-      const residentTargets = targets(resident.geometryReader.version());
-      targets(main.version()).forEach((target, index) => {
-        const expected = computeAnchorDisplayTarget(main, target, proposalRevisionPreview(snapshot));
-        const actual = computeAnchorDisplayTarget(
-          resident.geometryReader,
-          residentTargets[index]!,
-          proposalRevisionPreview(snapshot)
-        );
-        expect(expected).toMatchObject({ ok: true, ranges: expect.any(Array) });
-        expect(actual).toEqual(expected);
-      });
+      const preview = proposalRevisionPreview(snapshot);
+      const expected = computeAnchorDisplayTargets(main, targets(main.version()), preview);
+      expect(expected).toEqual(expected.map(() => expect.objectContaining({ ok: true, ranges: expect.any(Array) })));
+      expect(
+        computeAnchorDisplayTargets(resident.geometryReader, targets(resident.geometryReader.version()), preview)
+      ).toEqual(expected);
     } finally {
       resident.destroy();
       main.destroy();
@@ -511,15 +506,15 @@ describe('anchor display targets', () => {
         kind: 'paragraph',
         paragraph: { kind: 'persisted', story: BODY, paraId: '00000001' },
       } as const;
-      const previewed = computeAnchorDisplayTarget(
+      const [previewed] = computeAnchorDisplayTargets(
         main,
-        target,
+        [target],
         proposalRevisionPreview(main.getProposals())
       );
-      const plain = computeAnchorDisplayTarget(main, target, undefined);
+      const [plain] = computeAnchorDisplayTargets(main, [target], undefined);
       expect(previewed).toMatchObject({ ok: true });
       expect(plain).toMatchObject({ ok: true, hidden: [] });
-      if (!previewed.ok) throw new Error('unreachable');
+      if (!previewed?.ok) throw new Error('unreachable');
       expect(previewed.hidden.length).toBeGreaterThan(0);
       expect(previewed.hidden).toEqual(
         computeProposalGeometryMirror(main, main.getProposals()).hidden
@@ -529,12 +524,15 @@ describe('anchor display targets', () => {
     }
   });
 
-  test('refuses a range from another version and a missing paragraph', async () => {
+  test('answers a batch in input order with failures in place and one shared hidden list', async () => {
     const main = await proposedDocument();
     try {
-      expect(
-        computeAnchorDisplayTarget(
-          main,
+      const paragraph = (paraId: string) =>
+        ({ kind: 'paragraph', paragraph: { kind: 'persisted', story: BODY, paraId } }) as const;
+      const answers = computeAnchorDisplayTargets(
+        main,
+        [
+          paragraph('00000001'),
           {
             kind: 'range',
             version: 'stale',
@@ -545,16 +543,21 @@ describe('anchor display targets', () => {
               view: 'accepted',
             },
           },
-          undefined
-        )
-      ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
-      expect(
-        computeAnchorDisplayTarget(
-          main,
-          { kind: 'paragraph', paragraph: { kind: 'persisted', story: BODY, paraId: '0000FFFF' } },
-          undefined
-        )
-      ).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+          paragraph('0000FFFF'),
+          paragraph('00000007'),
+        ],
+        proposalRevisionPreview(main.getProposals())
+      );
+      expect(answers).toMatchObject([
+        { ok: true },
+        { ok: false, failure: { code: 'stale-version' } },
+        { ok: false, failure: { code: 'missing-target' } },
+        { ok: true },
+      ]);
+      const [first, , , last] = answers;
+      if (!first?.ok || !last?.ok) throw new Error('unreachable');
+      expect(first.paragraph).not.toBe(last.paragraph);
+      expect(last.hidden).toBe(first.hidden);
     } finally {
       main.destroy();
     }

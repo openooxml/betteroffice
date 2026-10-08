@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import {
-  computeAnchorDisplayTarget,
+  computeAnchorDisplayTargets,
   createYrsSession,
   type AnchorDisplayTarget,
   type ResidentDocumentRead,
@@ -75,18 +75,12 @@ function residentRead(engine: ResidentEngineSession, fail = () => false) {
     requests.push(request);
     if (fail()) throw new Error('worker restarting');
     const version = engine.proposalEngine.version();
-    if (request.kind === 'resolveParagraphAnchors') {
-      return {
-        version,
-        value: { results: request.anchors.map((anchor) => engine.geometryReader.resolveParagraphAnchor(anchor)) },
-      };
-    }
-    if (request.kind !== 'anchorTarget') throw new Error(`unexpected ${request.kind} read`);
+    if (request.kind !== 'anchorTargets') throw new Error(`unexpected ${request.kind} read`);
     return {
       version,
       value:
         version === request.expectVersion
-          ? computeAnchorDisplayTarget(engine.geometryReader, request.target, request.revisionPreview)
+          ? computeAnchorDisplayTargets(engine.geometryReader, request.targets, request.revisionPreview)
           : null,
     };
   }) as ResidentEngineWorkerClient['documentRead'];
@@ -238,14 +232,40 @@ test('a worker viewer reads paragraph, search, range and revision geometry from 
     expect(answer).toMatchObject({ ok: true, version: main.version(), unbuiltPages: [] });
     if (!answer.ok) throw new Error(answer.failure.message);
     expect(answer.rects.map(({ x, width }) => ({ x, width }))).toEqual(
-      shownSpans(computeAnchorDisplayTarget(main, target, undefined))
+      shownSpans(computeAnchorDisplayTargets(main, [target], undefined)[0]!)
     );
   }
   expect(requests).toHaveLength(targets.length);
   for (const request of requests) {
-    expect(request).toMatchObject({ kind: 'anchorTarget', expectVersion: workerVersion });
+    expect(request).toMatchObject({ kind: 'anchorTargets', expectVersion: workerVersion });
   }
-  expect(requests[2]).toMatchObject({ target: { kind: 'range', version: workerVersion } });
+  expect(requests[2]).toMatchObject({ targets: [{ kind: 'range', version: workerVersion }] });
+});
+
+test('a worker viewer answers a batch in input order with one worker read and reuses complete answers', async () => {
+  const { main, targets, requests, geometry } = await workerViewer();
+  const batch = [...targets, { ...targets[2]!, version: 'superseded' } as (typeof targets)[number], targets[0]!];
+  const answers = await geometry.readAnchorGeometries(batch);
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ kind: 'anchorTargets' });
+  expect((requests[0] as Extract<ResidentDocumentRead, { kind: 'anchorTargets' }>).targets).toHaveLength(targets.length);
+  const expected = computeAnchorDisplayTargets(main, targets, undefined);
+  answers.slice(0, targets.length).forEach((answer, index) => {
+    if (!answer.ok) throw new Error(answer.failure.message);
+    expect(answer.rects.map(({ x, width }) => ({ x, width }))).toEqual(shownSpans(expected[index]!));
+  });
+  expect(answers[4]).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  expect(answers[5]).toEqual(answers[0]!);
+  expect(await geometry.readAnchorGeometries(targets)).toEqual(answers.slice(0, targets.length));
+  expect(await geometry.readAnchorGeometry(targets[1]!)).toEqual(answers[1]!);
+  expect(requests).toHaveLength(1);
+});
+
+test('a worker viewer asks again for answers that reach unbuilt pages', async () => {
+  const { targets, requests, geometry } = await workerViewer({ unbuilt: true });
+  await geometry.readAnchorGeometries(targets);
+  await geometry.readAnchorGeometries(targets);
+  expect(requests).toHaveLength(2);
 });
 
 test('a worker viewer reports unbuilt pages its targets reach', async () => {
@@ -338,4 +358,5 @@ test('a main-thread session answers readAnchorGeometry exactly like getAnchorGeo
     expect(await geometry.readAnchorGeometry(target)).toEqual(expected);
   }
   expect(ok).toBeGreaterThan(0);
+  expect(await geometry.readAnchorGeometries(targets)).toEqual(targets.map((target) => geometry.getAnchorGeometry(target)));
 });

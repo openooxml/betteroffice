@@ -9,7 +9,13 @@ import {
   stampRevisionPreviewKey,
   stampWorkerFrameVersion,
 } from '../components/DocxEditor/internals/layoutProvenance';
-import { createPluginGeometry, type ReadAnchorTarget } from './geometry';
+import {
+  createAnchorReadCache,
+  createPluginGeometry,
+  type AnchorReadCache,
+  type ReadAnchorTargets,
+} from './geometry';
+import type { DocxGeometryTarget } from './types';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -30,13 +36,16 @@ const RANGE = {
 } as const;
 
 function viewerGeometry(options: {
-  read?: ReadAnchorTarget;
+  read?: ReadAnchorTargets;
+  cache?: AnchorReadCache;
   pages?: Array<{ unbuilt?: boolean; positionSpan?: [number, number] }>;
   shown?: () => boolean;
   workerVersion?: string | null;
   anchorPage?: number;
   presented?: boolean;
   paragraph?: { from: number; length: number };
+  layout?: { id?: string; version?: string; previewVersion?: number; zoom?: number };
+  previewKey?: string;
 }) {
   const pages = document.createElement('div');
   const pageList = options.pages ?? [{}];
@@ -63,7 +72,7 @@ function viewerGeometry(options: {
     hitTestRegions: () => null,
   } as unknown as DisplayListQueries;
   if (options.presented !== false) markPresented(pages, queries.displayList);
-  stampRevisionPreviewKey(queries, '');
+  stampRevisionPreviewKey(queries, options.previewKey ?? '');
   if (options.workerVersion !== null) stampWorkerFrameVersion(queries, options.workerVersion ?? 'w1');
   const session = {
     version: () => 'v1',
@@ -74,8 +83,8 @@ function viewerGeometry(options: {
   } as unknown as YrsSession;
   const base = options.paragraph?.from ?? 2;
   return createPluginGeometry(
-    { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, pageCount: pageList.length },
-    createRenderedDomContext(pages, 1),
+    { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, ...options.layout, pageCount: pageList.length },
+    createRenderedDomContext(pages, options.layout?.zoom ?? 1),
     layer,
     options.shown ?? (() => true),
     () => null,
@@ -93,11 +102,14 @@ function viewerGeometry(options: {
           },
     () => false,
     undefined,
-    options.read
+    options.read && { read: options.read, cache: options.cache ?? createAnchorReadCache() }
   );
 }
 
-const reply = (value: AnchorDisplayTarget | null): ReadAnchorTarget => async () => value;
+const reply =
+  (value: AnchorDisplayTarget | null): ReadAnchorTargets =>
+  async (targets) =>
+    value && targets.map(() => value);
 
 test('serves range rects from a worker read in a viewer without a session', async () => {
   const geometry = viewerGeometry({
@@ -116,28 +128,28 @@ test('serves range rects from a worker read in a viewer without a session', asyn
 });
 
 test('targets reach the worker at the worker frame version', async () => {
-  const calls: Parameters<ReadAnchorTarget>[] = [];
+  const calls: Parameters<ReadAnchorTargets>[] = [];
   const geometry = viewerGeometry({
     workerVersion: 'w7',
     read: async (...args) => {
       calls.push(args);
-      return { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] };
+      return args[0].map(() => ({ ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] }));
     },
   });
   const revision = { kind: 'revision', revisionId: 'r1' } as const;
   expect(await geometry.readAnchorGeometry(RANGE)).toMatchObject({ ok: true, version: 'v1' });
   expect(await geometry.readAnchorGeometry(revision)).toMatchObject({ ok: true });
   expect(calls).toEqual([
-    [{ ...RANGE, version: 'w7' }, 'w7', 0, ''],
-    [revision, 'w7', 0, ''],
+    [[{ ...RANGE, version: 'w7' }], 'w7', 0, ''],
+    [[revision], 'w7', 0, ''],
   ]);
 });
 
 test('a range of another version or a frame without a worker version is not read', async () => {
   let reads = 0;
-  const read: ReadAnchorTarget = async () => {
+  const read: ReadAnchorTargets = async (targets) => {
     reads += 1;
-    return { ok: true, ranges: [], paragraph: 2, hidden: [] };
+    return targets.map(() => ({ ok: true, ranges: [], paragraph: 2, hidden: [] }));
   };
   expect(await viewerGeometry({ read }).readAnchorGeometry({ ...RANGE, version: 'v0' })).toMatchObject({
     ok: false,
@@ -291,9 +303,9 @@ test('a layout that stops showing while the read runs refuses', async () => {
   let shown = true;
   const geometry = viewerGeometry({
     shown: () => shown,
-    read: async () => {
+    read: async (targets) => {
       shown = false;
-      return { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] };
+      return targets.map(() => ({ ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] }));
     },
   });
   expect(await geometry.readAnchorGeometry(RANGE)).toMatchObject({
@@ -306,9 +318,9 @@ test('a frame not yet presented refuses before and after the read', async () => 
   let reads = 0;
   const unpainted = viewerGeometry({
     presented: false,
-    read: async () => {
+    read: async (targets) => {
       reads += 1;
-      return { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] };
+      return targets.map(() => ({ ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] }));
     },
   });
   expect(await unpainted.readAnchorGeometry(RANGE)).toMatchObject({
@@ -318,9 +330,9 @@ test('a frame not yet presented refuses before and after the read', async () => 
   expect(reads).toBe(0);
   let host: HTMLElement | null = null;
   const repainting = viewerGeometry({
-    read: async () => {
+    read: async (targets) => {
       if (host) clearPresented(host);
-      return { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] };
+      return targets.map(() => ({ ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] }));
     },
   });
   host = repainting.dom.pagesContainer;
@@ -353,4 +365,143 @@ test('without a worker read it answers like getAnchorGeometry', async () => {
     expect(expected).toMatchObject({ ok: false });
     expect(await geometry.readAnchorGeometry(target)).toEqual(expected);
   }
+});
+
+const REVISION = { kind: 'revision', revisionId: 'r1' } as const;
+const PROPOSAL = { kind: 'proposal', id: 'p1' } as const;
+
+function counted(answer: (target: DocxGeometryTarget) => AnchorDisplayTarget = () => ({
+  ok: true,
+  ranges: [{ from: 2, to: 6 }],
+  paragraph: 2,
+  hidden: [],
+})) {
+  const calls: (readonly DocxGeometryTarget[])[] = [];
+  const read: ReadAnchorTargets = async (targets) => {
+    calls.push(targets);
+    return targets.map(answer);
+  };
+  return { read, calls };
+}
+
+test('a batch answers in input order with one worker read for its distinct targets', async () => {
+  const { read, calls } = counted((target) =>
+    target.kind === 'revision'
+      ? { ok: false, failure: { code: 'missing-target', message: 'gone' } }
+      : { ok: true, ranges: [{ from: 3, to: 5 }], paragraph: 3, hidden: [] }
+  );
+  const geometry = viewerGeometry({ read });
+  const answers = await geometry.readAnchorGeometries([RANGE, PROPOSAL, REVISION, { ...RANGE, version: 'v0' }, RANGE]);
+  expect(answers).toMatchObject([
+    { ok: true, layoutId: 'layout', rects: [{ x: 3, width: 2 }], unbuiltPages: [] },
+    { ok: false, failure: { code: 'layout-unavailable' } },
+    { ok: false, failure: { code: 'missing-target' } },
+    { ok: false, failure: { code: 'stale-version' } },
+    { ok: true, rects: [{ x: 3, width: 2 }] },
+  ]);
+  expect(calls).toEqual([[{ ...RANGE, version: 'w1' }, REVISION]]);
+  expect(await geometry.readAnchorGeometries([])).toEqual([]);
+  expect(calls).toHaveLength(1);
+});
+
+test('complete answers are reused by a later layout of the same version, preview and zoom', async () => {
+  const { read, calls } = counted();
+  const cache = createAnchorReadCache();
+  const first = await viewerGeometry({ read, cache, layout: { id: 'a' } }).readAnchorGeometries([RANGE, REVISION]);
+  const repainted = viewerGeometry({ read, cache, layout: { id: 'b' } });
+  const second = await repainted.readAnchorGeometries([REVISION, RANGE]);
+  expect(calls).toHaveLength(1);
+  expect(second).toEqual([first[1], first[0]].map((answer) => ({ ...answer!, layoutId: 'b' })));
+  expect(await repainted.readAnchorGeometry(RANGE)).toEqual(second[1]!);
+  expect(calls).toHaveLength(1);
+});
+
+test('a new version, preview version, preview or zoom asks the worker again', async () => {
+  const { read, calls } = counted();
+  const cache = createAnchorReadCache();
+  const variants = [
+    {},
+    { layout: { version: 'v2' } },
+    { layout: { previewVersion: 1 } },
+    { previewKey: 'accepted' },
+    { layout: { zoom: 2 } },
+    { workerVersion: 'w2' },
+    {},
+  ];
+  for (const variant of variants) {
+    expect(await viewerGeometry({ read, cache, ...variant }).readAnchorGeometry(REVISION)).toMatchObject({ ok: true });
+  }
+  expect(calls).toHaveLength(variants.length);
+});
+
+test('provisional and failed answers are never reused', async () => {
+  const cache = createAnchorReadCache();
+  const unbuilt = counted(() => ({ ok: true, ranges: [{ from: 150, to: 160 }], paragraph: 150, hidden: [] }));
+  const pages = [{}, { unbuilt: true, positionSpan: [100, 200] as [number, number] }];
+  for (let round = 0; round < 2; round += 1) {
+    expect(await viewerGeometry({ read: unbuilt.read, cache, pages }).readAnchorGeometry(REVISION)).toMatchObject({
+      ok: true,
+      unbuiltPages: [1],
+    });
+  }
+  expect(unbuilt.calls).toHaveLength(2);
+  const failing = [
+    reply({ ok: false, failure: { code: 'missing-target', message: 'gone' } }),
+    reply(null),
+    async () => {
+      throw new Error('worker gone');
+    },
+  ];
+  let reads = 0;
+  for (const read of failing) {
+    const counting: ReadAnchorTargets = (...args) => {
+      reads += 1;
+      return read(...args);
+    };
+    expect(await viewerGeometry({ read: counting, cache }).readAnchorGeometry(RANGE)).toMatchObject({ ok: false });
+    expect(await viewerGeometry({ read: counting, cache }).readAnchorGeometry(RANGE)).toMatchObject({ ok: false });
+  }
+  expect(reads).toBe(failing.length * 2);
+});
+
+test('a superseded worker version makes every read target of the batch stale', async () => {
+  const geometry = viewerGeometry({ read: reply(null) });
+  expect(await geometry.readAnchorGeometries([RANGE, PROPOSAL, REVISION])).toMatchObject([
+    { ok: false, failure: { code: 'stale-version' } },
+    { ok: false, failure: { code: 'layout-unavailable' } },
+    { ok: false, failure: { code: 'stale-version' } },
+  ]);
+});
+
+test('concurrent reads of one target share a single worker read', async () => {
+  let release: (value: readonly AnchorDisplayTarget[]) => void = () => {};
+  const calls: (readonly DocxGeometryTarget[])[] = [];
+  const read: ReadAnchorTargets = (targets) => {
+    calls.push(targets);
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  };
+  const cache = createAnchorReadCache();
+  const first = viewerGeometry({ read, cache, layout: { id: 'a' } }).readAnchorGeometries([RANGE, REVISION]);
+  const second = viewerGeometry({ read, cache, layout: { id: 'b' } }).readAnchorGeometries([REVISION, RANGE]);
+  release([
+    { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] },
+    { ok: true, ranges: [{ from: 3, to: 4 }], paragraph: 3, hidden: [] },
+  ]);
+  expect(await first).toMatchObject([{ rects: [{ x: 2 }] }, { rects: [{ x: 3 }] }]);
+  expect(await second).toMatchObject([
+    { layoutId: 'b', rects: [{ x: 3 }] },
+    { layoutId: 'b', rects: [{ x: 2 }] },
+  ]);
+  expect(calls).toHaveLength(1);
+});
+
+test('without a worker read a batch answers like getAnchorGeometry', async () => {
+  const geometry = viewerGeometry({});
+  const paragraph = { kind: 'paragraph', paragraph: { kind: 'session', sessionId: 's', story: 'body', paraId: 'p' } } as const;
+  const targets = [paragraph, { ...RANGE, version: 'v0' }, PROPOSAL];
+  expect(await geometry.readAnchorGeometries(targets)).toEqual(
+    targets.map((target) => geometry.getAnchorGeometry(target))
+  );
 });

@@ -41,38 +41,37 @@ export function resolveAnchorTarget(
 }
 
 /**
- * Resolves `target` in the worker at its `version` under the session's revision preview, refusing
- * when that preview is not the rendered `previewKey`; null once the worker moved past `version`.
- * Persisted anchors resolve on the main thread when it holds the document, else in the worker.
+ * Resolves `targets` in the worker at its `version` under the session's revision preview with one
+ * read, refusing when that preview is not the rendered `previewKey`; null once the worker moved past
+ * `version`. Persisted anchors resolve on the main thread when it holds the document, else in the worker.
  */
-export async function readWorkerAnchorTarget(
+export async function readWorkerAnchorTargets(
   read: ResidentEngineWorkerClient['documentRead'],
   session: YrsSession,
-  target: Exclude<DocxGeometryTarget, { kind: 'proposal' }>,
+  targets: readonly Exclude<DocxGeometryTarget, { kind: 'proposal' }>[],
   version: string,
   previewVersion: number,
   previewKey: string
-): Promise<AnchorDisplayTarget | null> {
-  const rendered = (revisionPreview = revisionPreviewOf(session)) =>
-    (proposalSnapshot(session)?.previewVersion ?? 0) === previewVersion &&
-    revisionPreviewKey(revisionPreview) === previewKey;
-  const unrendered = () =>
-    anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
-  if (!rendered()) return unrendered();
-  let resolver: Pick<AnchorReader, 'resolveParagraphAnchor'> = session;
-  if (
-    (target.kind === 'paragraph' || target.kind === 'search') &&
-    target.paragraph.kind !== 'session' &&
-    !workerOpenReplicaReady(session)
-  ) {
-    const resolved = await read({ kind: 'resolveParagraphAnchors', anchors: [target.paragraph] });
-    if (resolved.version !== version) return null;
-    resolver = { resolveParagraphAnchor: () => resolved.value.results[0]! };
-  }
-  const posted = sessionAnchorTarget(resolver, target);
-  if ('ok' in posted) return posted;
+): Promise<AnchorDisplayTarget[] | null> {
   const revisionPreview = revisionPreviewOf(session);
-  if (!rendered(revisionPreview)) return unrendered();
-  const reply = await read({ kind: 'anchorTarget', target: posted, revisionPreview, expectVersion: version });
-  return reply.version === version ? reply.value : null;
+  if (
+    (proposalSnapshot(session)?.previewVersion ?? 0) !== previewVersion ||
+    revisionPreviewKey(revisionPreview) !== previewKey
+  ) {
+    return targets.map(() =>
+      anchorFailure('layout-unavailable', 'No rendered layout shows this target yet')
+    );
+  }
+  const onMain = workerOpenReplicaReady(session);
+  const converted = targets.map((target) =>
+    onMain ? sessionAnchorTarget(session, target, session.version()) : target
+  );
+  const posted = converted.filter((target): target is (typeof targets)[number] => !('ok' in target));
+  let answers: Iterator<AnchorDisplayTarget> = [].values();
+  if (posted.length > 0) {
+    const reply = await read({ kind: 'anchorTargets', targets: posted, revisionPreview, expectVersion: version });
+    if (reply.version !== version || !reply.value) return null;
+    answers = reply.value.values();
+  }
+  return converted.map((target) => ('ok' in target ? target : answers.next().value!));
 }

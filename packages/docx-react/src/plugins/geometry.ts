@@ -123,16 +123,34 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
+type WorkerTarget = Exclude<DocxGeometryTarget, { kind: 'proposal' }>;
+
 /**
- * Resolves a target in the worker at the worker `version` under the rendered `previewKey`; null once
- * the worker moved past it.
+ * Resolves targets in the worker at the worker `version` under the rendered `previewKey`, in input
+ * order; null once the worker moved past it.
  */
-export type ReadAnchorTarget = (
-  target: Exclude<DocxGeometryTarget, { kind: 'proposal' }>,
+export type ReadAnchorTargets = (
+  targets: readonly WorkerTarget[],
   version: string,
   previewVersion: number,
   previewKey: string
-) => Promise<AnchorDisplayTarget | null>;
+) => Promise<readonly AnchorDisplayTarget[] | null>;
+
+interface AnchorPlacement {
+  rects: readonly DisplayListRect[];
+  anchor: DisplayListRect;
+}
+
+/** Worker answers shared by every layout of one version, preview and zoom; undefined is a failed read. */
+export interface AnchorReadCache {
+  key: string;
+  placed: Map<string, AnchorPlacement>;
+  pending: Map<string, Promise<AnchorDisplayTarget | null | undefined>>;
+}
+
+export function createAnchorReadCache(): AnchorReadCache {
+  return { key: '', placed: new Map(), pending: new Map() };
+}
 
 interface Interval {
   from: number;
@@ -209,7 +227,7 @@ export function createPluginGeometry(
   access: () => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
   readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
-  readTarget?: ReadAnchorTarget
+  workerReads?: { read: ReadAnchorTargets; cache: AnchorReadCache }
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const painted = () => shown() && isPresented(dom.pagesContainer, queries.displayList);
@@ -273,17 +291,12 @@ export function createPluginGeometry(
     const end = lastUnitEnd(from, to);
     return end === null ? null : caretAt(end, true);
   };
-  const pageAnchor = (pageIndex: number): DocxAnchorRect | null => {
-    const bounds = projector.getPageBounds(pageIndex);
-    return bounds
-      ? {
-          ...toOverlayRect(dom.pagesContainer, layer, dom.zoom, { ...bounds, width: 0, height: 0 }),
-          pageIndex,
-        }
-      : null;
+  const pageOrigin = (pageIndex: number): DisplayListRect | null => {
+    const bounds = queries.pageBounds(pageIndex);
+    return bounds && { ...bounds, pageIndex, width: 0, height: 0 };
   };
   /**
-   * Projects display `ranges` less `hidden`. Unless `deferUnbuilt`, a fragment on a visible
+   * Places display `ranges` less `hidden`. Unless `deferUnbuilt`, a fragment on a visible
    * unbuilt page refuses; with it, such fragments are left out and their pages listed.
    */
   const place = (
@@ -291,7 +304,9 @@ export function createPluginGeometry(
     hidden: readonly Interval[],
     paragraph: number | null,
     deferUnbuilt: boolean
-  ): DocxAnchorGeometryResult => {
+  ):
+    | (AnchorPlacement & { ok: true; unbuiltPages: number[] })
+    | Extract<DocxAnchorGeometryResult, { ok: false }> => {
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
     const window = displayWindowOf(queries)?.read();
     const pages = queries.displayList?.pages ?? [];
@@ -328,7 +343,6 @@ export function createPluginGeometry(
       if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
       else union.push({ ...range });
     }
-    const rects: DocxAnchorRect[] = [];
     const drawn: DisplayListRect[] = [];
     let tail: Interval | null = null;
     for (const { from, to } of union) {
@@ -340,18 +354,15 @@ export function createPluginGeometry(
           if (deferUnbuilt) continue;
           return unavailable();
         }
-        const projected = project(rect);
-        if (!projected) return unavailable();
-        rects.push(projected);
         drawn.push(rect);
         placed = true;
       }
       if (placed) tail = { from, to };
     }
-    let anchor: DocxAnchorRect | null;
+    let anchor: DisplayListRect | null;
     const lastUnbuilt = unbuiltPages.at(-1);
     if (lastUnbuilt !== undefined && drawn.every(({ pageIndex }) => pageIndex < lastUnbuilt)) {
-      anchor = pageAnchor(lastUnbuilt);
+      anchor = pageOrigin(lastUnbuilt);
     } else {
       const last = ranges.at(-1);
       const gap = last && widen(last, hidden);
@@ -376,25 +387,29 @@ export function createPluginGeometry(
         unbuiltPages.sort((a, b) => a - b);
       }
       anchor = pending !== undefined
-        ? pageAnchor(pending)
-        : end
-          ? project(end)
-          : fallback
-            ? project({ ...fallback, width: 0 })
-            : null;
+        ? pageOrigin(pending)
+        : (end ?? (fallback && { ...fallback, width: 0 }));
     }
-    if (!anchor) return unavailable();
+    return anchor ? { ok: true, rects: drawn, anchor, unbuiltPages } : unavailable();
+  };
+  /** Projects a placement onto the pages as they stand now. */
+  const answer = (
+    { rects, anchor }: AnchorPlacement,
+    unbuiltPages?: readonly number[]
+  ): DocxAnchorGeometryResult => {
+    const projected = rects.map(project);
+    const anchorRect = project(anchor);
     const page = projector.getPageBounds(anchor.pageIndex);
-    if (!page) return unavailable();
+    if (!anchorRect || !page || projected.some((rect) => rect === null)) return unavailable();
     return {
       ok: true,
       version: layout.version,
       previewVersion: layout.previewVersion,
       layoutId: layout.id,
-      rects,
-      anchor,
+      rects: projected as DocxAnchorRect[],
+      anchor: anchorRect,
       pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
-      ...(deferUnbuilt ? { unbuiltPages } : {}),
+      ...(unbuiltPages ? { unbuiltPages } : {}),
     };
   };
   const geometry: DocxPluginGeometry = {
@@ -471,29 +486,67 @@ export function createPluginGeometry(
         : resolved?.ok
           ? editor.yrsLocToDisplayPosition(resolved.paragraph)
           : null;
-      return place(ranges, hidden, paragraph, false);
+      const placed = place(ranges, hidden, paragraph, false);
+      return placed.ok ? answer(placed) : placed;
     },
     async readAnchorGeometry(target) {
-      if (!readTarget || target.kind === 'proposal') return geometry.getAnchorGeometry(target);
-      if (!painted()) return unavailable();
-      const version = workerFrameVersionOf(queries);
-      if (version === null) return unavailable();
-      if (target.kind === 'range' && target.version !== layout.version) return stale();
-      let reply: AnchorDisplayTarget | null;
-      try {
-        reply = await readTarget(
-          target.kind === 'range' ? { ...target, version } : target,
-          version,
-          layout.previewVersion,
-          renderedPreviewKey(queries)
+      return (await geometry.readAnchorGeometries([target]))[0]!;
+    },
+    async readAnchorGeometries(targets) {
+      const answers = targets.map((target) =>
+        !workerReads || target.kind === 'proposal' ? geometry.getAnchorGeometry(target) : null
+      );
+      const version = painted() ? workerFrameVersionOf(queries) : null;
+      if (!workerReads || version === null) return answers.map((answer) => answer ?? unavailable());
+      const { read, cache } = workerReads;
+      const previewKey = renderedPreviewKey(queries);
+      const key = JSON.stringify([layout.version, version, layout.previewVersion, layout.zoom, previewKey]);
+      if (cache.key !== key) Object.assign(cache, createAnchorReadCache(), { key });
+      const { placed, pending } = cache;
+      const ids = targets.map((target) => JSON.stringify(target));
+      const missing = new Map<string, WorkerTarget>();
+      targets.forEach((target, index) => {
+        if (target.kind === 'proposal') return;
+        if (target.kind === 'range' && target.version !== layout.version) answers[index] = stale();
+        else if (!placed.has(ids[index]!) && !pending.has(ids[index]!)) {
+          missing.set(ids[index]!, target.kind === 'range' ? { ...target, version } : target);
+        }
+      });
+      if (missing.size > 0) {
+        const request = new Promise<readonly AnchorDisplayTarget[] | null>((resolve) =>
+          resolve(read([...missing.values()], version, layout.previewVersion, previewKey))
         );
-      } catch {
-        return unavailable();
+        [...missing.keys()].forEach((id, index) => {
+          const reply = request.then((replies) => (replies ? replies[index]! : null), () => undefined);
+          pending.set(id, reply);
+          void reply.then(() => {
+            if (pending.get(id) === reply) pending.delete(id);
+          });
+        });
       }
-      if (!painted()) return unavailable();
-      if (!reply) return stale();
-      if (!reply.ok) return reply;
-      return place([...reply.ranges], reply.hidden, reply.paragraph, true);
+      const replies = await Promise.all(
+        targets.map((_, index) => (answers[index] ? null : pending.get(ids[index]!)))
+      );
+      const shown = painted();
+      return targets.map((_, index) => {
+        const done = answers[index];
+        if (done) return done;
+        if (!shown) return unavailable();
+        const id = ids[index]!;
+        const hit = placed.get(id);
+        if (hit) return answer(hit, []);
+        const reply = replies[index];
+        if (reply === undefined) return unavailable();
+        if (reply === null) return stale();
+        if (!reply.ok) return reply;
+        const placement = place([...reply.ranges], reply.hidden, reply.paragraph, true);
+        if (!placement.ok) return placement;
+        const result = answer(placement, placement.unbuiltPages);
+        if (result.ok && placement.unbuiltPages.length === 0 && cache.key === key) {
+          cache.placed.set(id, { rects: placement.rects, anchor: placement.anchor });
+        }
+        return result;
+      });
     },
   };
   return geometry;

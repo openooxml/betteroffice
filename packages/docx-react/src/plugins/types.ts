@@ -217,9 +217,15 @@ export interface DocxPluginGeometry {
    * Resolves a target asynchronously, from the worker in worker viewers, where fragments on pages
    * not built yet are left out of `rects` and their pages listed in `unbuiltPages`, provisional
    * until built; elsewhere it answers like `getAnchorGeometry`. Does not wait for paint: refuses
-   * with `layout-unavailable` until the pages show the layout.
+   * with `layout-unavailable` until the pages show the layout. Prefer {@link readAnchorGeometries}
+   * for many targets.
    */
   readAnchorGeometry(target: DocxGeometryTarget): Promise<DocxAnchorGeometryResult>;
+  /**
+   * `readAnchorGeometry` for many targets, answered in input order with one worker read. Complete
+   * answers are reused until the version, preview or zoom changes.
+   */
+  readAnchorGeometries(targets: readonly DocxGeometryTarget[]): Promise<DocxAnchorGeometryResult[]>;
 }
 
 export type DocxPluginNavigationFailureCode =

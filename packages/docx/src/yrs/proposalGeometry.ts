@@ -258,15 +258,25 @@ function sessionAnchor(
   return resolved.anchor;
 }
 
+function resolveSessionAnchor(
+  session: AnchorReader,
+  anchor: DocxParagraphAnchor,
+  version: string
+): DocxSessionParagraphAnchor | AnchorResolutionFailure {
+  return sessionAnchor(
+    once(readsAt(session, version).anchors, JSON.stringify(anchor), () =>
+      session.resolveParagraphAnchor(anchor)
+    )
+  );
+}
+
 function resolveParagraph(
   session: AnchorReader,
   anchor: DocxParagraphAnchor,
   version: string
 ): { ok: true; loc: YrsLoc; length: number } | AnchorResolutionFailure {
   const reads = readsAt(session, version);
-  const resolved = sessionAnchor(
-    once(reads.anchors, JSON.stringify(anchor), () => session.resolveParagraphAnchor(anchor))
-  );
+  const resolved = resolveSessionAnchor(session, anchor, version);
   if ('ok' in resolved) return resolved;
   const { story, paraId } = resolved;
   const spans = once(reads.spans, story, () => session.paragraphSpans(story)).filter(
@@ -567,29 +577,33 @@ export type SessionAnchorTarget =
       paragraph: DocxSessionParagraphAnchor;
     });
 
-/** Resolves a target's paragraph anchor to a session anchor. @internal */
+/** Resolves a target's paragraph anchor at `version` to a session anchor. @internal */
 export function sessionAnchorTarget(
-  reader: Pick<AnchorReader, 'resolveParagraphAnchor'>,
-  target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>
+  reader: AnchorReader,
+  target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>,
+  version: string
 ): SessionAnchorTarget | AnchorResolutionFailure {
   if (target.kind === 'revision' || target.kind === 'range') return target;
   if (target.paragraph.kind === 'session') return { ...target, paragraph: target.paragraph };
-  const paragraph = sessionAnchor(reader.resolveParagraphAnchor(target.paragraph));
+  const paragraph = resolveSessionAnchor(reader, target.paragraph, version);
   return 'ok' in paragraph ? paragraph : { ...target, paragraph };
 }
 
-/** @internal */
-export function computeAnchorDisplayTarget(
+/** Display targets in input order; every answer shares one hidden list. @internal */
+export function computeAnchorDisplayTargets(
   reader: ProposalGeometryReader,
-  target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>,
+  targets: readonly Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[],
   preview: ReturnType<typeof proposalRevisionPreview>
-): AnchorDisplayTarget {
+): AnchorDisplayTarget[] {
   const version = reader.version();
   const mapper = displayMapper(reader, version);
-  const mapped = mapper.target(resolveAnchorTarget(reader, target, version));
-  return mapped.ok
-    ? { ...mapped, hidden: mapper.hidden(hiddenRangesForPreview(reader, version, preview)) }
-    : mapped;
+  let hidden: { from: number; to: number }[] | undefined;
+  return targets.map((target) => {
+    const mapped = mapper.target(resolveAnchorTarget(reader, target, version));
+    if (!mapped.ok) return mapped;
+    hidden ??= mapper.hidden(hiddenRangesForPreview(reader, version, preview));
+    return { ...mapped, hidden };
+  });
 }
 
 /** @internal */

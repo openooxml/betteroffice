@@ -9,7 +9,7 @@ import { syntheticDocx } from './__fixtures__/previewChain';
 import { isLayoutMetaV1, type LayoutMetaV1 } from './layoutMeta';
 import type { Layout } from '../layout/pagination';
 import { proposalRevisionPreview, type DocxProposalSnapshot } from './proposals';
-import { computeAnchorDisplayTarget, sessionAnchorTarget } from './proposalGeometry';
+import { computeAnchorDisplayTargets, sessionAnchorTarget } from './proposalGeometry';
 import { createYrsSession } from './index';
 import { readSidebar, readOutlineHeadings } from './sidebarReads';
 import { sidebarDocx } from './__fixtures__/sidebarDocx';
@@ -584,31 +584,41 @@ test('anchor target reads resolve against the worker reader at the expected vers
     },
   });
   const paragraph = { kind: 'session', sessionId: 'session', story: 'body', paraId: '00000001' } as const;
+  const persisted = { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '00000002' } as const;
   const missing = await w.send({
     type: 'documentRead',
     read: {
-      kind: 'anchorTarget',
-      target: { kind: 'paragraph', paragraph },
+      kind: 'anchorTargets',
+      targets: [
+        { kind: 'paragraph', paragraph },
+        { kind: 'search', paragraph: persisted, text: 'x' },
+      ],
       revisionPreview: undefined,
       expectVersion: 'current',
     },
   });
   expect(missing).toMatchObject({
     ok: true,
-    read: { version: 'current', value: { ok: false, failure: { code: 'missing-target' } } },
+    read: {
+      version: 'current',
+      value: [
+        { ok: false, failure: { code: 'missing-target' } },
+        { ok: false, failure: { code: 'missing-target' } },
+      ],
+    },
   });
-  expect(anchors).toEqual([paragraph]);
+  expect(anchors).toEqual([paragraph, persisted]);
   const stale = await w.send({
     type: 'documentRead',
     read: {
-      kind: 'anchorTarget',
-      target: { kind: 'paragraph', paragraph },
+      kind: 'anchorTargets',
+      targets: [{ kind: 'paragraph', paragraph }],
       revisionPreview: undefined,
       expectVersion: 'older',
     },
   });
   expect(stale).toMatchObject({ ok: true, read: { version: 'current', value: null } });
-  expect(anchors).toHaveLength(1);
+  expect(anchors).toHaveLength(2);
 });
 
 test.each([false, true])(
@@ -2813,31 +2823,29 @@ describe('worker proposals during sliced completion', () => {
         status: 'unsupported',
         reason: 'no-source-package',
       });
-      for (const target of [
+      const targets = [
         { kind: 'paragraph', paragraph },
         { kind: 'search', paragraph, text: 'text' },
-      ] as const) {
-        const posted = sessionAnchorTarget(main, target);
-        if ('ok' in posted) throw new Error(posted.failure.message);
-        expect(posted).toMatchObject({ paragraph: { kind: 'session' } });
-        const reply = await w.send({
-          type: 'documentRead',
-          read: {
-            kind: 'anchorTarget',
-            target: posted,
-            revisionPreview: undefined,
-            expectVersion: engine.proposalEngine.version(),
-          },
-        });
-        if (!reply.ok || !reply.read) throw new Error('expected an anchor read');
-        const expected = computeAnchorDisplayTarget(main, target, undefined);
-        expect(expected).toMatchObject({ ok: true, ranges: [expect.any(Object)] });
-        expect(reply.read.value).toEqual(expected);
-      }
+      ] as const;
+      const posted = targets.map((target) => sessionAnchorTarget(main, target, main.version()));
+      expect(posted).toMatchObject(targets.map(() => ({ paragraph: { kind: 'session' } })));
+      const reply = await w.send({
+        type: 'documentRead',
+        read: {
+          kind: 'anchorTargets',
+          targets: posted as Exclude<(typeof posted)[number], { ok: false }>[],
+          revisionPreview: undefined,
+          expectVersion: engine.proposalEngine.version(),
+        },
+      });
+      if (!reply.ok || !reply.read) throw new Error('expected an anchor read');
+      const expected = computeAnchorDisplayTargets(main, targets, undefined);
+      expect(expected).toMatchObject(targets.map(() => ({ ok: true, ranges: [expect.any(Object)] })));
+      expect(reply.read.value).toEqual(expected);
       expect(sessionAnchorTarget(main, {
         kind: 'paragraph',
         paragraph: { ...paragraph, paraId: '0000FFFF' },
-      })).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
+      }, main.version())).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
     } finally {
       main.destroy();
       engine.destroy();
@@ -3113,13 +3121,13 @@ describe('worker proposals during sliced completion', () => {
       } as const;
       const reply = await w.send({
         type: 'documentRead',
-        read: { kind: 'anchorTarget', target, revisionPreview: preview, expectVersion: mirror.version },
+        read: { kind: 'anchorTargets', targets: [target], revisionPreview: preview, expectVersion: mirror.version },
       });
       if (!reply.ok || !reply.read) throw new Error('expected an anchor read');
-      const expected = computeAnchorDisplayTarget(main, target, preview);
-      if (!expected.ok) throw new Error(expected.failure.message);
+      const [expected] = computeAnchorDisplayTargets(main, [target], preview);
+      if (!expected?.ok) throw new Error('expected an anchor');
       expect(expected.hidden).toHaveLength(2);
-      expect(reply.read.value).toEqual(expected);
+      expect(reply.read.value).toEqual([expected]);
       expect(expected.hidden).toEqual(geometry.hidden);
     } finally {
       main.destroy();
