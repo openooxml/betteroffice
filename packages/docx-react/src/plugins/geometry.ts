@@ -6,6 +6,8 @@ import {
 import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugin-api';
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
+  anchorDisplayRoot,
+  anchorDisplayTarget,
   proposalSetIdentity,
   type AnchorDisplayTarget,
   type DocxParagraphAnchor,
@@ -26,7 +28,12 @@ import {
   resolveAnchorTarget,
   type RawAnchorRange,
 } from './anchorGeometry';
-import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
+import {
+  currentPreviewKey,
+  proposalSnapshot,
+  renderedPreviewKey,
+  revisionPreviewOf,
+} from './proposalPreview';
 import type {
   DocxAnchorGeometryResult,
   DocxAnchorRect,
@@ -251,6 +258,17 @@ function subtract(ranges: readonly Interval[], holes: readonly Interval[]): Inte
   return pieces.sort((a, b) => a.from - b.from || a.to - b.to);
 }
 
+/** Overlapping `ranges`, in document order, merged. */
+function unionOf(ranges: readonly Interval[]): Interval[] {
+  const union: Interval[] = [];
+  for (const range of ranges) {
+    const previous = union.at(-1);
+    if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
+    else union.push({ ...range });
+  }
+  return union;
+}
+
 function sameLine(a: DisplayListRect, b: DisplayListRect): boolean {
   return a.pageIndex === b.pageIndex && a.y < b.y + b.height && b.y < a.y + a.height;
 }
@@ -396,15 +414,9 @@ export function createPluginGeometry(
       ? pages.flatMap((page, pageIndex) => (reaches(page, drawable) ? [pageIndex] : []))
       : [];
     if (!deferUnbuilt && window && pages.slice(window[0], window[1]).some((page) => reaches(page))) return unavailable();
-    const union: Interval[] = [];
-    for (const range of shownRanges) {
-      const previous = union.at(-1);
-      if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
-      else union.push({ ...range });
-    }
     const drawn: DisplayListRect[] = [];
     let tail: Interval | null = null;
-    for (const { from, to } of union) {
+    for (const { from, to } of unionOf(shownRanges)) {
       if (from >= to) continue;
       let placed = false;
       for (const rect of queries.rangeRects(from, to)) {
@@ -451,6 +463,77 @@ export function createPluginGeometry(
     }
     return anchor ? { ok: true, rects: drawn, anchor, unbuiltPages } : unavailable();
   };
+  /**
+   * {@link place} for the header or footer `root`, which repeats on every page that paints it.
+   * The anchor sits on the first such page.
+   */
+  const placeRepeated = (
+    root: string,
+    ranges: Interval[],
+    hidden: readonly Interval[],
+    paragraph: number | null,
+    deferUnbuilt: boolean
+  ): ReturnType<typeof place> => {
+    const rId = root.slice('hf:'.length);
+    const pages = queries.displayList?.pages ?? [];
+    const regionOf = ({ header, footer, hfParts }: (typeof pages)[number]) =>
+      header?.rId === rId || hfParts?.header === rId
+        ? ('header' as const)
+        : footer?.rId === rId || hfParts?.footer === rId
+          ? ('footer' as const)
+          : null;
+    const region = pages.map(regionOf).find((found) => found !== null);
+    if (!region) {
+      return anchorFailure('layout-unavailable', 'No laid-out page paints this header or footer');
+    }
+    const unbuilt = pages.flatMap((page, pageIndex) =>
+      page.unbuilt && page.hfParts?.[region] === rId ? [pageIndex] : []
+    );
+    const window = displayWindowOf(queries)?.read();
+    if (!deferUnbuilt && window && unbuilt.some((page) => page >= window[0] && page < window[1])) {
+      return unavailable();
+    }
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    const drawn: DisplayListRect[] = [];
+    for (const { from, to } of unionOf(subtract(ranges, hidden))) {
+      if (from >= to) continue;
+      for (const rect of queries.hfRangeRects(region, rId, from, to)) {
+        if (rect.width > 0) drawn.push(rect);
+      }
+    }
+    const firstOf = (candidates: readonly DisplayListRect[]) =>
+      candidates.reduce<DisplayListRect | null>(
+        (first, rect) => (!first || rect.pageIndex < first.pageIndex ? rect : first),
+        null
+      );
+    const first = firstOf(drawn);
+    const gap = ranges.length ? widen(ranges.at(-1)!, hidden) : null;
+    const end = first
+      ? lastInReadingOrder(drawn.filter(({ pageIndex }) => pageIndex === first.pageIndex))
+      : firstOf([
+          ...(gap ? queries.hfCaretRects(region, rId, gap.from) : []),
+          ...(paragraph === null ? [] : queries.hfAnchorRects(region, rId, paragraph)),
+        ]);
+    const firstUnbuilt = deferUnbuilt ? unbuilt[0] : undefined;
+    const anchor =
+      firstUnbuilt !== undefined && (!end || firstUnbuilt < end.pageIndex)
+        ? pageOrigin(firstUnbuilt)
+        : end && { ...end, width: 0 };
+    return anchor
+      ? { ok: true, rects: drawn, anchor, unbuiltPages: deferUnbuilt ? unbuilt : [] }
+      : unavailable();
+  };
+  /** Places a display target in the story it is painted from. */
+  const placeDisplay = (
+    { ranges, hidden, paragraph, root }: Pick<
+      Extract<AnchorDisplayTarget, { ok: true }>,
+      'ranges' | 'hidden' | 'paragraph' | 'root'
+    >,
+    deferUnbuilt: boolean
+  ) =>
+    root
+      ? placeRepeated(root, [...ranges], hidden, paragraph, deferUnbuilt)
+      : place([...ranges], hidden, paragraph, deferUnbuilt);
   /** Projects a placement onto the pages as they stand now. */
   const answer = (
     { rects, anchor }: AnchorPlacement,
@@ -506,6 +589,12 @@ export function createPluginGeometry(
     if (mirrored && !mirrored.ok) return mirrored;
     const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
     if (resolved && !resolved.ok) return resolved;
+    if (resolved && anchorDisplayRoot(resolved.paragraph.story) !== 'body') {
+      const shown = anchorDisplayTarget(session, resolved, revisionPreviewOf(session));
+      if (!shown.ok) return shown;
+      const placed = placeDisplay(shown, deferUnbuilt);
+      return placed.ok ? answer(placed, deferUnbuilt ? placed.unbuiltPages : undefined) : placed;
+    }
     const display = (range: RawAnchorRange): Interval | null => {
       const from = editor.yrsLocToDisplayPosition(range.start);
       const to = editor.yrsLocToDisplayPosition(range.end);
@@ -605,7 +694,7 @@ export function createPluginGeometry(
           if (cache.replies.size >= cache.limit) cache.replies.clear();
           cache.replies.set(entry.id, reply);
         }
-        const placement = place([...reply.ranges], reply.hidden, reply.paragraph, true);
+        const placement = placeDisplay(reply, true);
         return placement.ok ? answer(placement, placement.unbuiltPages) : placement;
       });
     },

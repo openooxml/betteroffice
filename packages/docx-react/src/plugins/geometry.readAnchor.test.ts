@@ -44,7 +44,7 @@ const RANGE = {
 function viewerGeometry(options: {
   read?: ReadAnchorTargets;
   cache?: AnchorReadCache;
-  pages?: Array<{ unbuilt?: boolean; positionSpan?: [number, number] }>;
+  pages?: Array<{ unbuilt?: boolean; positionSpan?: [number, number]; hfParts?: { header?: string } }>;
   shown?: () => boolean;
   workerVersion?: string | null;
   anchorPage?: number;
@@ -641,4 +641,15 @@ test('a proposal in a batch lists the unbuilt pages it reaches like the worker t
   const sync = geometry.getAnchorGeometry(PROPOSAL);
   expect(sync).toMatchObject({ ok: true, anchor: { pageIndex: 0 } });
   expect(sync).not.toHaveProperty('unbuiltPages');
+});
+
+test('a header or footer no laid-out page paints is unavailable', async () => {
+  const geometry = viewerGeometry({
+    pages: [{}, { unbuilt: true, positionSpan: [100, 200], hfParts: { header: 'rIdOther' } }],
+    read: reply({ ok: true, root: 'hf:rIdH', ranges: [{ from: 1, to: 4 }], paragraph: 1, hidden: [] }),
+  });
+  expect(await geometry.readAnchorGeometry(RANGE)).toEqual({
+    ok: false,
+    failure: { code: 'layout-unavailable', message: 'No laid-out page paints this header or footer' },
+  });
 });
