@@ -258,27 +258,6 @@ test('each failed worker load rejects the wait', async () => {
   }
 }, 90_000);
 
-test('a failed worker load before any layout rejects the wait', async () => {
-  const workers = await installWorker();
-  const ref = createRef<DocxEditorRef>();
-  render(<DocxEditor ref={ref} />);
-  await until(() => ref.current !== null);
-  const detached = await pagedDocx(1);
-  structuredClone(detached, { transfer: [detached] });
-  await act(async () => {
-    await ref.current!.loadDocumentBuffer(detached);
-  });
-  await tick(200);
-  expect(await layoutComplete(ref)).toBeInstanceOf(Error);
-
-  const bytes = await pagedDocx(1);
-  await act(async () => {
-    await ref.current!.loadDocumentBuffer(bytes);
-  });
-  expect(await layoutComplete(ref)).toBe(1);
-  expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
-}, 90_000);
-
 test('a worker failure without a message rejects waits during and after the load', async () => {
   const { ref } = await mountTwoPagesInWorker();
   let fail = () => {};

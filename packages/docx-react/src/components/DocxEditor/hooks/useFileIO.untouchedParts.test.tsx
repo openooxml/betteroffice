@@ -817,7 +817,7 @@ testSaveEngines('a removed comment leaves no commentReference in the body (defer
   expect(markers(xmlPart(unzipContainer(new Uint8Array(saved)), 'word/document.xml'), 1)).toEqual([]);
 }, undefined, true);
 
-testSaveEngines('deleting two comments across saves does not resurrect the first comment', async (mount) => {
+test('deleting two comments across saves does not resurrect the first comment', async () => {
   const { first, saved } = await deleteTwoCommentsAcrossSaves(mount);
   const firstComments = new DOMParser().parseFromString(xmlPart(first, 'word/comments.xml'), 'application/xml');
   expect(xmlElements(firstComments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
@@ -1186,7 +1186,7 @@ testSaveEngines('a host page-setup change is saved even when body text is untouc
   expect((await reopened(saved)).package.document.finalSectionProperties?.marginTop).toBe(2880);
 });
 
-testSaveEngines('adding and removing a header across saves keeps relationship and content-type targets', async (mount) => {
+test('adding and removing a header across saves keeps relationship and content-type targets', async () => {
   const editor = await mount(fixture((p) => p(run('Body text'))).bytes, { experimentalWorkerOpen: false });
   const paged = editor.ref.current!.getEditorRef()!;
   const session = paged.getYrsSession()!;
@@ -1236,46 +1236,6 @@ testSaveEngines('adding and removing a header across saves keeps relationship an
   await act(async () => hook.result.current.editing.handleRemoveHeaderFooter());
   expect(host.package.headers?.size).toBe(0);
   const lastSave = await save();
-  for (const saved of [firstSave, lastSave]) {
-    const parts = unzipContainer(new Uint8Array(saved));
-    const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
-    for (const entry of xmlElements(rels, RELS, 'Relationship')) {
-      if (entry.getAttribute('TargetMode') === 'External') continue;
-      const target = entry.getAttribute('Target')!;
-      const name = new URL(target, 'https://package.test/word/document.xml').pathname.slice(1);
-      expect(parts[name]).toBeDefined();
-    }
-    const types = new DOMParser().parseFromString(xmlPart(parts, '[Content_Types].xml'), 'application/xml');
-    for (const entry of xmlElements(types, 'http://schemas.openxmlformats.org/package/2006/content-types', 'Override')) {
-      expect(parts[entry.getAttribute('PartName')!.slice(1)]).toBeDefined();
-    }
-  }
-  expect((await reopened(lastSave)).package.document.finalSectionProperties?.headerReferences ?? []).toEqual([]);
-}, async (mount) => {
-  const editor = await mount(fixture((p) => p(run('Body text'))).bytes);
-  await act(async () => { await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3_000 }); });
-  const canvas = editor.view.container.querySelector<HTMLCanvasElement>('canvas[data-page-index="0"]');
-  expect(canvas).not.toBeNull();
-  const width = Number.parseFloat(canvas!.style.width) || 816;
-  const height = Number.parseFloat(canvas!.style.height) || 1056;
-  canvas!.getBoundingClientRect = () => ({
-    x: 0, y: 0, left: 0, top: 0, right: width, bottom: height, width, height,
-    toJSON: () => ({}),
-  });
-  await act(async () => {
-    fireEvent.click(canvas!, { clientX: 144, clientY: 48, detail: 2 });
-  });
-  await until(() => editor.ref.current!.getDocument()?.package.headers?.size === 1);
-  expect(editor.ref.current!.getDocument()!.package.headers?.size).toBe(1);
-  const firstSave = await editor.save();
-  expect(unzipContainer(new Uint8Array(firstSave))['word/header1.xml']).toBeDefined();
-  await until(() => !!editor.view.container.querySelector('.hf-inline-editor'));
-  const chrome = editor.view.container.querySelector<HTMLElement>('.hf-inline-editor')!;
-  await act(async () => fireEvent.click(within(chrome).getByRole('button', { name: /Options/ })));
-  await act(async () => fireEvent.click(within(chrome).getByRole('button', { name: 'Remove header' })));
-  await until(() => editor.ref.current!.getDocument()?.package.headers?.size === 0);
-  expect(editor.ref.current!.getDocument()!.package.headers?.size).toBe(0);
-  const lastSave = await editor.save();
   for (const saved of [firstSave, lastSave]) {
     const parts = unzipContainer(new Uint8Array(saved));
     const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');

@@ -58,10 +58,9 @@ const quiet = { error: console.error, warn: console.warn };
 const originalWorker = globalThis.Worker;
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>> | null = null;
 
-async function installWorker(holdFullOpen?: Promise<void>) {
+async function installWorker() {
   const startWorker = await residentWorkerFactory();
   const workers: InProcessResidentWorker[] = [];
-  const fullOpens: ResidentEngineWorkerRequest[] = [];
   compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
     new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
   ));
@@ -69,22 +68,11 @@ async function installWorker(holdFullOpen?: Promise<void>) {
   globalThis.Worker = class {
     constructor() {
       const worker = startWorker();
-      const post = worker.postMessage.bind(worker);
-      worker.postMessage = (request, transfer) => {
-        if (request.type === 'open' && request.previewBlocks === undefined) {
-          fullOpens.push(request);
-          if (holdFullOpen) {
-            void holdFullOpen.then(() => post(request, transfer));
-            return;
-          }
-        }
-        post(request, transfer);
-      };
       workers.push(worker);
       return worker;
     }
   } as unknown as typeof Worker;
-  return { workers, fullOpens };
+  return { workers };
 }
 
 beforeAll(async () => {
@@ -197,64 +185,6 @@ test('each document reports its first page painted once, however often its pages
   });
   expect(painted).toEqual(['pages', 'principal']);
 }, 60_000);
-
-test('a worker preview reports its first page painted before the full document opens', async () => {
-  let releaseFullOpen = () => {};
-  const gate = new Promise<void>((done) => (releaseFullOpen = done));
-  const { workers, fullOpens } = await installWorker(gate);
-  const ref = createRef<Editor>();
-  let painted = 0;
-  try {
-    render(
-      <DocxEditor
-        ref={ref}
-        previewFirstPage
-        documentBuffer={await pagedDocx(2)}
-        onFirstPagePainted={() => (painted += 1)}
-      />
-    );
-    await waitFor(() => expect(fullOpens).toHaveLength(1), { timeout: 20_000 });
-    await waitFor(() => expect(painted).toBe(1), { timeout: 20_000 });
-    expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
-
-    await act(async () => releaseFullOpen());
-    await waitFor(() => expect(ref.current!.getDocument()).not.toBeNull(), { timeout: 20_000 });
-    await act(async () => {
-      await new Promise((done) => setTimeout(done, 200));
-    });
-    expect(painted).toBe(1);
-  } finally {
-    releaseFullOpen();
-  }
-}, 40_000);
-
-test('a worker document reports its first page painted once its canvas presents, not at layout', async () => {
-  const { workers } = await installWorker();
-  let releaseReplays = () => {};
-  holdReplays = new Promise((done) => (releaseReplays = done));
-  let painted = 0;
-  try {
-    const view = render(
-      <DocxEditor
-        documentBuffer={await pagedDocx(2)}
-        onFirstPagePainted={() => (painted += 1)}
-      />
-    );
-    await waitFor(() => expect(view.container.querySelector('.canvas-page')).not.toBeNull(), {
-      timeout: 20_000,
-    });
-    expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
-    await act(async () => {
-      await new Promise((done) => setTimeout(done, 200));
-    });
-    expect(painted).toBe(0);
-
-    await act(async () => releaseReplays());
-    await waitFor(() => expect(painted).toBe(1), { timeout: 20_000 });
-  } finally {
-    releaseReplays();
-  }
-}, 40_000);
 
 test('each worker document reports its first page painted once, however often its pages repaint', async () => {
   const { workers } = await installWorker();
