@@ -1027,6 +1027,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
 
         if (partEdit && activeYrsRootStory !== 'body') {
+          lastPublishedBodySelectionKeyRef.current = null;
           onYrsPartSelectionChangeRef.current?.(partEdit, {
             from: selection.anchor,
             to: selection.head,
