@@ -525,7 +525,8 @@ function twoCommentFixture(): ArrayBuffer {
 }
 
 async function clickCommentAfterHeaderReturn(
-  mountEditor: (bytes: ArrayBuffer) => Promise<Pick<Awaited<ReturnType<typeof mount>>, 'ref' | 'view'>>
+  mountEditor: (bytes: ArrayBuffer) => Promise<Pick<Awaited<ReturnType<typeof mount>>, 'ref' | 'view'>>,
+  moveBodyCaret = true
 ) {
   const useEditing = useHeaderFooterEditing;
   let editing!: ReturnType<typeof useHeaderFooterEditing>;
@@ -553,10 +554,14 @@ async function clickCommentAfterHeaderReturn(
     await until(() => !!editor.view.container.querySelector('.docx-unified-sidebar .docx-comment-card[data-comment-id="1"]'));
     const card = editor.view.container.querySelector<HTMLElement>('.docx-unified-sidebar .docx-comment-card[data-comment-id="1"]')!;
     expect(within(card).queryByTitle('More options')).toBeNull();
-    await act(async () => {
-      expect(editor.ref.current!.scrollToParaId(second!.paraId)).toBe(true);
-    });
-    expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: second!.paraId, offset: 0 });
+    if (moveBodyCaret) {
+      await act(async () => {
+        expect(editor.ref.current!.scrollToParaId(second!.paraId)).toBe(true);
+      });
+      expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: second!.paraId, offset: 0 });
+    } else {
+      expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: first!.paraId, offset: 0 });
+    }
     await act(async () => editing.handleHeaderFooterDoubleClick('header', 1));
     await until(() => session.selection()?.head.story === 'hf:header');
     await act(async () => {
@@ -592,6 +597,10 @@ async function clickCommentAfterHeaderReturn(
 
 test('clicking the first body caret after header editing expands its covering comment', async () => {
   await clickCommentAfterHeaderReturn(mount);
+}, 30_000);
+
+test('clicking the startup body caret after header editing expands its covering comment without prior navigation', async () => {
+  await clickCommentAfterHeaderReturn(mount, false);
 }, 30_000);
 
 async function deleteTwoCommentsAcrossSaves() {
@@ -1019,6 +1028,10 @@ describe('DocxEditor saves (worker engine)', () => {
 
   test('clicking the first body caret after header editing expands its covering comment on the worker engine', async () => {
     await clickCommentAfterHeaderReturn(mountWorker);
+  }, 30_000);
+
+  test('clicking the startup body caret after header editing expands its covering comment without prior navigation on the worker engine', async () => {
+    await clickCommentAfterHeaderReturn(mountWorker, false);
   }, 30_000);
 
   async function deleteTwoCommentsAcrossSaves() {
