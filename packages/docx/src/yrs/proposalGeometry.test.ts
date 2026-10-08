@@ -4,7 +4,11 @@ import { resolve } from 'node:path';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
-import type { DocxProposalInput, DocxProposalResult } from './proposals';
+import {
+  proposalRevisionPreview,
+  type DocxProposalInput,
+  type DocxProposalResult,
+} from './proposals';
 import {
   computeAnchorDisplayTarget,
   computeProposalGeometryMirror,
@@ -485,11 +489,11 @@ describe('anchor display targets', () => {
       ] as const;
       const residentTargets = targets(resident.geometryReader.version());
       targets(main.version()).forEach((target, index) => {
-        const expected = computeAnchorDisplayTarget(main, target, snapshot);
+        const expected = computeAnchorDisplayTarget(main, target, proposalRevisionPreview(snapshot));
         const actual = computeAnchorDisplayTarget(
           resident.geometryReader,
           residentTargets[index]!,
-          snapshot
+          proposalRevisionPreview(snapshot)
         );
         expect(expected).toMatchObject({ ok: true, ranges: expect.any(Array) });
         expect(actual).toEqual(expected);
@@ -507,8 +511,12 @@ describe('anchor display targets', () => {
         kind: 'paragraph',
         paragraph: { kind: 'persisted', story: BODY, paraId: '00000001' },
       } as const;
-      const previewed = computeAnchorDisplayTarget(main, target, main.getProposals());
-      const plain = computeAnchorDisplayTarget(main, target, null);
+      const previewed = computeAnchorDisplayTarget(
+        main,
+        target,
+        proposalRevisionPreview(main.getProposals())
+      );
+      const plain = computeAnchorDisplayTarget(main, target, undefined);
       expect(previewed).toMatchObject({ ok: true });
       expect(plain).toMatchObject({ ok: true, hidden: [] });
       if (!previewed.ok) throw new Error('unreachable');
@@ -537,14 +545,14 @@ describe('anchor display targets', () => {
               view: 'accepted',
             },
           },
-          null
+          undefined
         )
       ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
       expect(
         computeAnchorDisplayTarget(
           main,
           { kind: 'paragraph', paragraph: { kind: 'persisted', story: BODY, paraId: '0000FFFF' } },
-          null
+          undefined
         )
       ).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
     } finally {

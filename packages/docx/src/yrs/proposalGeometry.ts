@@ -1,6 +1,10 @@
 import type { YrsLoc, YrsSession, YrsStorySegment } from './index';
 import type { DocxTextRange, DocxTextView } from './edits';
-import type { DocxParagraphAnchor } from './paragraphIdentity';
+import type {
+  DocxParagraphAnchor,
+  DocxParagraphAnchorResult,
+  DocxSessionParagraphAnchor,
+} from './paragraphIdentity';
 import { proposalRevisionPreview, type DocxOccurrence, type DocxProposalSnapshot } from './proposals';
 import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
@@ -235,15 +239,9 @@ export function textRangeToRaw(
   return rawRange(viewParagraphs(segments, range.view), range);
 }
 
-function resolveParagraph(
-  session: AnchorReader,
-  anchor: DocxParagraphAnchor,
-  version: string
-): { ok: true; loc: YrsLoc; length: number } | AnchorResolutionFailure {
-  const reads = readsAt(session, version);
-  const resolved = once(reads.anchors, JSON.stringify(anchor), () =>
-    session.resolveParagraphAnchor(anchor)
-  );
+function sessionAnchor(
+  resolved: DocxParagraphAnchorResult
+): DocxSessionParagraphAnchor | AnchorResolutionFailure {
   if (resolved.status === 'missing') {
     return anchorFailure('missing-target', 'The paragraph no longer exists');
   }
@@ -257,7 +255,20 @@ function resolveParagraph(
   ) {
     return anchorFailure('unsupported', 'The paragraph has no body display position');
   }
-  const { story, paraId } = resolved.anchor;
+  return resolved.anchor;
+}
+
+function resolveParagraph(
+  session: AnchorReader,
+  anchor: DocxParagraphAnchor,
+  version: string
+): { ok: true; loc: YrsLoc; length: number } | AnchorResolutionFailure {
+  const reads = readsAt(session, version);
+  const resolved = sessionAnchor(
+    once(reads.anchors, JSON.stringify(anchor), () => session.resolveParagraphAnchor(anchor))
+  );
+  if ('ok' in resolved) return resolved;
+  const { story, paraId } = resolved;
   const spans = once(reads.spans, story, () => session.paragraphSpans(story)).filter(
     (paragraph) => paragraph.paraId === paraId
   );
@@ -549,17 +560,35 @@ export type AnchorDisplayTarget =
   | ({ ok: true; hidden: { from: number; to: number }[] } & ProposalDisplayTarget)
   | AnchorResolutionFailure;
 
+/** A non-proposal target whose paragraph anchors are session anchors. @internal */
+export type SessionAnchorTarget =
+  | Extract<AnchorGeometryTarget, { kind: 'revision' | 'range' }>
+  | (Extract<AnchorGeometryTarget, { kind: 'paragraph' | 'search' }> & {
+      paragraph: DocxSessionParagraphAnchor;
+    });
+
+/** Resolves a target's paragraph anchor to a session anchor. @internal */
+export function sessionAnchorTarget(
+  reader: Pick<AnchorReader, 'resolveParagraphAnchor'>,
+  target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>
+): SessionAnchorTarget | AnchorResolutionFailure {
+  if (target.kind === 'revision' || target.kind === 'range') return target;
+  if (target.paragraph.kind === 'session') return { ...target, paragraph: target.paragraph };
+  const paragraph = sessionAnchor(reader.resolveParagraphAnchor(target.paragraph));
+  return 'ok' in paragraph ? paragraph : { ...target, paragraph };
+}
+
 /** @internal */
 export function computeAnchorDisplayTarget(
   reader: ProposalGeometryReader,
   target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>,
-  snapshot: DocxProposalSnapshot | null
+  preview: ReturnType<typeof proposalRevisionPreview>
 ): AnchorDisplayTarget {
   const version = reader.version();
   const mapper = displayMapper(reader, version);
-  const mapped = mapper.target(resolveAnchorTarget(reader, target, version, snapshot));
+  const mapped = mapper.target(resolveAnchorTarget(reader, target, version));
   return mapped.ok
-    ? { ...mapped, hidden: mapper.hidden(hiddenRanges(reader, version, snapshot)) }
+    ? { ...mapped, hidden: mapper.hidden(hiddenRangesForPreview(reader, version, preview)) }
     : mapped;
 }
 
