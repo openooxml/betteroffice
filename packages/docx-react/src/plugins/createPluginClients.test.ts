@@ -5,6 +5,7 @@ import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/
 import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import {
+  createYrsPositionProjection,
   createYrsSession,
   computeProposalGeometryMirror,
   proposalSetIdentity,
@@ -39,7 +40,7 @@ const WORD = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
 const run = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
 const paragraph = (id: string, text: string) => `<w:p w14:paraId="${id}">${run(text)}</w:p>`;
 
-function fixture(): Uint8Array {
+function fixture(extraBody = ''): Uint8Array {
   const parts = new Map<string, Uint8Array>();
   parts.set(
     '[Content_Types].xml',
@@ -68,7 +69,7 @@ function fixture(): Uint8Array {
       )}<w:sdt><w:sdtPr><w:lock w:val="contentLocked"/></w:sdtPr><w:sdtContent>${paragraph(
         '0000A001',
         'Locked'
-      )}</w:sdtContent></w:sdt><w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>`
+      )}</w:sdtContent></w:sdt>${extraBody}<w:sectPr><w:headerReference w:type="default" r:id="rIdHeader"/></w:sectPr></w:body></w:document>`
     )
   );
   parts.set('word/header1.xml', toBytes(`<w:hdr ${NS}>${paragraph('0000E001', 'Header')}</w:hdr>`));
@@ -125,11 +126,11 @@ function navigationClock() {
 }
 
 async function setup(
-  options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void> } = {}
+  options: { grant?: DocxPluginGrant; flush?: () => void | Promise<void>; extraBody?: string } = {}
 ) {
   const session = await createYrsSession();
   sessions.push(session);
-  session.openDocx(fixture(), true);
+  session.openDocx(fixture(options.extraBody), true);
   const events: string[] = [];
   const editor = {
     getYrsSession: () => session,
@@ -1243,6 +1244,21 @@ describe('plugin read and navigation clients', () => {
       ok: false,
       failure: { code: 'document-replaced' },
     });
+  });
+
+  test('scrolls to a table cell paragraph', async () => {
+    const env = await setup({
+      extraBody: `<w:tbl><w:tr><w:tc>${paragraph('0000C001', 'Cell')}</w:tc></w:tr></w:tbl>`,
+    });
+    const target = { story: 'body:t0:r0c0', paraId: '0000C001' };
+    expect(
+      await env.clients.navigation.scrollToParagraph(target, { expectVersion: env.session.version() })
+    ).toEqual({ ok: true });
+    const position = createYrsPositionProjection(env.session, 'body')!.positionForLoc({
+      ...target,
+      offset: 0,
+    });
+    expect(env.events.at(-1)).toBe(`scroll:${position}`);
   });
 
   test('scrolls to a unique body paragraph without moving focus unless asked', async () => {
