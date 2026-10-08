@@ -8,7 +8,6 @@ import {
   computeAnchorDisplayTarget,
   createYrsSession,
   type AnchorDisplayTarget,
-  type DocxGeometryTarget,
   type ResidentDocumentRead,
   type ResidentEngineWorkerClient,
   type YrsSession,
@@ -28,6 +27,7 @@ import {
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import { defineDocxPlugin } from './defineDocxPlugin';
 import { currentPreviewKey } from './proposalPreview';
+import type { DocxGeometryTarget } from './types';
 import { useDocxPluginHost, type UseDocxPluginHostOptions } from './useDocxPluginHost';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
