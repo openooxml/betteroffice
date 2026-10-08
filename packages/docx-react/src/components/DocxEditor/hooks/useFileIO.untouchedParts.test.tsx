@@ -524,6 +524,76 @@ function twoCommentFixture(): ArrayBuffer {
   return rezipPartsToArrayBuffer(source.parts);
 }
 
+async function clickCommentAfterHeaderReturn(
+  mountEditor: (bytes: ArrayBuffer) => Promise<Pick<Awaited<ReturnType<typeof mount>>, 'ref' | 'view'>>
+) {
+  const useEditing = useHeaderFooterEditing;
+  let editing!: ReturnType<typeof useHeaderFooterEditing>;
+  const captureEditing = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
+    editing = useEditing(options);
+    return editing;
+  });
+  try {
+    const source = fixture((p) =>
+      p('<w:commentRangeStart w:id="1"/>' + run('Body text') + '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>') +
+      p(run('Second paragraph')),
+      { comments: true, header: true }
+    );
+    const editor = await mountEditor(source.bytes);
+    await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    await act(async () => { await editor.ref.current!.flushPendingInput(); });
+    const paged = editor.ref.current!.getEditorRef()!;
+    const session = paged.getYrsSession()!;
+    const [first, second] = session.paragraphs('body');
+    if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
+      await act(async () => {
+        expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
+      });
+    }
+    await until(() => !!editor.view.container.querySelector('.docx-unified-sidebar .docx-comment-card[data-comment-id="1"]'));
+    const card = editor.view.container.querySelector<HTMLElement>('.docx-unified-sidebar .docx-comment-card[data-comment-id="1"]')!;
+    expect(within(card).queryByTitle('More options')).toBeNull();
+    await act(async () => {
+      expect(editor.ref.current!.scrollToParaId(second!.paraId)).toBe(true);
+    });
+    expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: second!.paraId, offset: 0 });
+    await act(async () => editing.handleHeaderFooterDoubleClick('header', 1));
+    await until(() => session.selection()?.head.story === 'hf:header');
+    await act(async () => {
+      paged.insertText('Edited ');
+      await paged.flushPendingInput();
+    });
+    expect(session.paragraphs('hf:header')[0]!.text).toBe('Edited Header');
+    await act(async () => editing.handleBodyClick());
+    await until(() => session.selection()?.head.story === 'body');
+    expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: first!.paraId, offset: 0 });
+    await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    const page = paged.getLayout()!.pages[0]!;
+    const fragment = page.fragments.find((entry) => entry.kind === 'paragraph')!;
+    const canvas = editor.view.container.querySelector<HTMLCanvasElement>('canvas[data-page-index="0"]')!;
+    canvas.getBoundingClientRect = () => new DOMRect(0, 0, page.size.w, page.size.h);
+    const point = { clientX: fragment.x, clientY: fragment.y + fragment.height / 2, button: 0 };
+    await until(() => paged.getPositionAtPoint(point.clientX, point.clientY)?.target.start.offset === 0);
+    expect(paged.getPositionAtPoint(point.clientX, point.clientY)?.target).toMatchObject({
+      story: 'body', start: { paraId: first!.paraId, offset: 0 }, end: { paraId: first!.paraId, offset: 0 },
+    });
+    await act(async () => {
+      fireEvent.mouseDown(canvas, point);
+      fireEvent.mouseUp(canvas, point);
+      fireEvent.click(canvas, point);
+      await paged.flushPendingInput();
+    });
+    expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: first!.paraId, offset: 0 });
+    expect(within(card).queryByTitle('More options')).not.toBeNull();
+  } finally {
+    captureEditing.mockRestore();
+  }
+}
+
+test('clicking the first body caret after header editing expands its covering comment', async () => {
+  await clickCommentAfterHeaderReturn(mount);
+}, 30_000);
+
 async function deleteTwoCommentsAcrossSaves() {
   const editor = await mount(twoCommentFixture());
   await until(() => editor.ref.current!.getComments().length === 2);
@@ -946,6 +1016,10 @@ describe('DocxEditor saves (worker engine)', () => {
       },
     };
   }
+
+  test('clicking the first body caret after header editing expands its covering comment on the worker engine', async () => {
+    await clickCommentAfterHeaderReturn(mountWorker);
+  }, 30_000);
 
   async function deleteTwoCommentsAcrossSaves() {
     const editor = await mountWorker(twoCommentFixture());
