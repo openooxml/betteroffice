@@ -242,7 +242,7 @@ test('a worker viewer reads paragraph, search, range and revision geometry from 
   expect(requests[2]).toMatchObject({ targets: [{ kind: 'range', version: workerVersion }] });
 });
 
-test('a worker viewer answers a batch in input order with one worker read and reuses complete answers', async () => {
+test('a worker viewer answers a batch in input order with one worker read and reuses its replies', async () => {
   const { main, targets, requests, geometry } = await workerViewer();
   const batch = [...targets, { ...targets[2]!, version: 'superseded' } as (typeof targets)[number], targets[0]!];
   const answers = await geometry.readAnchorGeometries(batch);
@@ -261,11 +261,14 @@ test('a worker viewer answers a batch in input order with one worker read and re
   expect(requests).toHaveLength(1);
 });
 
-test('a worker viewer asks again for answers that reach unbuilt pages', async () => {
+test('a worker viewer keeps answers provisional while pages are unbuilt without reading again', async () => {
   const { targets, requests, geometry } = await workerViewer({ unbuilt: true });
-  await geometry.readAnchorGeometries(targets);
-  await geometry.readAnchorGeometries(targets);
-  expect(requests).toHaveLength(2);
+  for (let round = 0; round < 2; round += 1) {
+    expect(await geometry.readAnchorGeometries(targets)).toEqual(
+      targets.map(() => expect.objectContaining({ ok: true, unbuiltPages: [1] }))
+    );
+  }
+  expect(requests).toHaveLength(1);
 });
 
 test('a worker viewer reports unbuilt pages its targets reach', async () => {

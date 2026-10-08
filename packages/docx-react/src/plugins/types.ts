@@ -222,8 +222,8 @@ export interface DocxPluginGeometry {
    */
   readAnchorGeometry(target: DocxGeometryTarget): Promise<DocxAnchorGeometryResult>;
   /**
-   * `readAnchorGeometry` for many targets, answered in input order with one worker read. Complete
-   * answers are reused until the version, preview or zoom changes.
+   * `readAnchorGeometry` for many targets, answered in input order. Worker viewers make at most one
+   * worker read per call and reuse its answers until the version or proposal preview changes.
    */
   readAnchorGeometries(targets: readonly DocxGeometryTarget[]): Promise<DocxAnchorGeometryResult[]>;
 }

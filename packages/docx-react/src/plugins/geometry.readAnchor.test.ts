@@ -404,64 +404,145 @@ test('a batch answers in input order with one worker read for its distinct targe
   expect(calls).toHaveLength(1);
 });
 
-test('complete answers are reused by a later layout of the same version, preview and zoom', async () => {
+test('worker replies are placed again on later layouts of any zoom or main version', async () => {
   const { read, calls } = counted();
   const cache = createAnchorReadCache();
   const first = await viewerGeometry({ read, cache, layout: { id: 'a' } }).readAnchorGeometries([RANGE, REVISION]);
   const repainted = viewerGeometry({ read, cache, layout: { id: 'b' } });
   const second = await repainted.readAnchorGeometries([REVISION, RANGE]);
-  expect(calls).toHaveLength(1);
   expect(second).toEqual([first[1], first[0]].map((answer) => ({ ...answer!, layoutId: 'b' })));
   expect(await repainted.readAnchorGeometry(RANGE)).toEqual(second[1]!);
+  for (const layout of [{ zoom: 2 }, { version: 'v2' }]) {
+    expect(await viewerGeometry({ read, cache, layout }).readAnchorGeometry(REVISION)).toMatchObject({ ok: true });
+  }
   expect(calls).toHaveLength(1);
 });
 
-test('a new version, preview version, preview or zoom asks the worker again', async () => {
+test('a new worker version, preview version or preview asks the worker again', async () => {
   const { read, calls } = counted();
   const cache = createAnchorReadCache();
-  const variants = [
-    {},
-    { layout: { version: 'v2' } },
-    { layout: { previewVersion: 1 } },
-    { previewKey: 'accepted' },
-    { layout: { zoom: 2 } },
-    { workerVersion: 'w2' },
-    {},
-  ];
+  const variants = [{}, { workerVersion: 'w2' }, { layout: { previewVersion: 1 } }, { previewKey: 'accepted' }, {}];
   for (const variant of variants) {
     expect(await viewerGeometry({ read, cache, ...variant }).readAnchorGeometry(REVISION)).toMatchObject({ ok: true });
   }
   expect(calls).toHaveLength(variants.length);
 });
 
-test('provisional and failed answers are never reused', async () => {
+test('a reply placed on unbuilt pages completes once they build, without another read', async () => {
+  const { read, calls } = counted(() => ({ ok: true, ranges: [{ from: 2, to: 150 }], paragraph: 2, hidden: [] }));
   const cache = createAnchorReadCache();
-  const unbuilt = counted(() => ({ ok: true, ranges: [{ from: 150, to: 160 }], paragraph: 150, hidden: [] }));
-  const pages = [{}, { unbuilt: true, positionSpan: [100, 200] as [number, number] }];
-  for (let round = 0; round < 2; round += 1) {
-    expect(await viewerGeometry({ read: unbuilt.read, cache, pages }).readAnchorGeometry(REVISION)).toMatchObject({
-      ok: true,
-      unbuiltPages: [1],
-    });
-  }
-  expect(unbuilt.calls).toHaveLength(2);
-  const failing = [
-    reply({ ok: false, failure: { code: 'missing-target', message: 'gone' } }),
-    reply(null),
-    async () => {
-      throw new Error('worker gone');
-    },
+  const span = (unbuilt: boolean) => [
+    { positionSpan: [0, 99] as [number, number] },
+    { unbuilt, positionSpan: [100, 200] as [number, number] },
+  ];
+  expect(await viewerGeometry({ read, cache, pages: span(true) }).readAnchorGeometry(REVISION)).toMatchObject({
+    ok: true,
+    unbuiltPages: [1],
+  });
+  expect(await viewerGeometry({ read, cache, pages: span(false) }).readAnchorGeometry(REVISION)).toMatchObject({
+    ok: true,
+    rects: [{ pageIndex: 0 }],
+    unbuiltPages: [],
+  });
+  expect(calls).toHaveLength(1);
+});
+
+test('failed and superseded replies are never reused', async () => {
+  const cache = createAnchorReadCache();
+  const failing: Array<[ReadAnchorTargets, string]> = [
+    [reply({ ok: false, failure: { code: 'missing-target', message: 'gone' } }), 'missing-target'],
+    [reply(null), 'stale-version'],
+    [
+      async () => {
+        throw new Error('worker gone');
+      },
+      'layout-unavailable',
+    ],
   ];
   let reads = 0;
-  for (const read of failing) {
+  for (const [read, code] of failing) {
     const counting: ReadAnchorTargets = (...args) => {
       reads += 1;
       return read(...args);
     };
-    expect(await viewerGeometry({ read: counting, cache }).readAnchorGeometry(RANGE)).toMatchObject({ ok: false });
-    expect(await viewerGeometry({ read: counting, cache }).readAnchorGeometry(RANGE)).toMatchObject({ ok: false });
+    for (let round = 0; round < 2; round += 1) {
+      expect(await viewerGeometry({ read: counting, cache }).readAnchorGeometry(RANGE)).toMatchObject({
+        ok: false,
+        failure: { code },
+      });
+    }
   }
   expect(reads).toBe(failing.length * 2);
+});
+
+test('a reply that arrives after its preview was replaced is not kept for the new one', async () => {
+  let release: (value: readonly AnchorDisplayTarget[]) => void = () => {};
+  const calls: string[] = [];
+  const cache = createAnchorReadCache();
+  const held = viewerGeometry({
+    cache,
+    read: (_, __, ___, previewKey) => {
+      calls.push(previewKey);
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    },
+  }).readAnchorGeometry(REVISION);
+  const failing = viewerGeometry({
+    cache,
+    previewKey: 'b',
+    read: async (targets, _, __, previewKey) => {
+      calls.push(previewKey);
+      return targets.map(() => ({ ok: false, failure: { code: 'missing-target', message: 'gone' } }));
+    },
+  });
+  expect(await failing.readAnchorGeometry(REVISION)).toMatchObject({ ok: false });
+  release([{ ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] }]);
+  expect(await held).toMatchObject({ ok: true });
+  expect(await failing.readAnchorGeometry(REVISION)).toMatchObject({ ok: false });
+  expect(calls).toEqual(['', 'b', 'b']);
+});
+
+test('a reply that arrives after the layout stopped showing is not kept', async () => {
+  let shown = true;
+  const { read, calls } = counted();
+  const cache = createAnchorReadCache();
+  const hiding: ReadAnchorTargets = async (...args) => {
+    shown = false;
+    return read(...args);
+  };
+  expect(await viewerGeometry({ read: hiding, cache, shown: () => shown }).readAnchorGeometry(REVISION)).toMatchObject({
+    ok: false,
+    failure: { code: 'layout-unavailable' },
+  });
+  expect(await viewerGeometry({ read, cache }).readAnchorGeometry(REVISION)).toMatchObject({ ok: true });
+  expect(calls).toHaveLength(2);
+});
+
+test('the reply cache is cleared once it holds its limit', async () => {
+  const { read, calls } = counted();
+  const cache = createAnchorReadCache(2);
+  const revision = (revisionId: string) => ({ kind: 'revision', revisionId }) as const;
+  const geometry = viewerGeometry({ read, cache });
+  await geometry.readAnchorGeometries([revision('a'), revision('b'), revision('c')]);
+  expect(cache.replies.size).toBe(1);
+  await geometry.readAnchorGeometries([revision('c')]);
+  expect(calls).toHaveLength(1);
+  await geometry.readAnchorGeometries([revision('a')]);
+  expect(calls).toHaveLength(2);
+});
+
+test('targets are sent and cached by their known fields only', async () => {
+  const { read, calls } = counted();
+  const geometry = viewerGeometry({ read });
+  const noisy = { revisionId: 'r1', kind: 'revision', note: 'host data' } as unknown as DocxGeometryTarget;
+  const range = {
+    range: { ...RANGE.range, extra: true, start: { offset: 0, paraId: 'p', extra: 1 } },
+    kind: 'range',
+    version: 'v1',
+  } as unknown as DocxGeometryTarget;
+  await geometry.readAnchorGeometries([noisy, REVISION, range, RANGE]);
+  expect(calls).toEqual([[REVISION, { ...RANGE, version: 'w1' }]]);
 });
 
 test('a superseded worker version makes every read target of the batch stale', async () => {

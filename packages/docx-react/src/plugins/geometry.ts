@@ -8,6 +8,7 @@ import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/Rendere
 import {
   proposalSetIdentity,
   type AnchorDisplayTarget,
+  type DocxParagraphAnchor,
   type ProposalGeometryMirror,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -141,15 +142,73 @@ interface AnchorPlacement {
   anchor: DisplayListRect;
 }
 
-/** Worker answers shared by every layout of one version, preview and zoom; undefined is a failed read. */
+/**
+ * Resolved worker replies of one worker version and rendered preview, placed again on every
+ * layout; at most `limit` are kept. `pending` holds reads in flight.
+ */
 export interface AnchorReadCache {
   key: string;
-  placed: Map<string, AnchorPlacement>;
+  limit: number;
+  replies: Map<string, Extract<AnchorDisplayTarget, { ok: true }>>;
   pending: Map<string, Promise<AnchorDisplayTarget | null | undefined>>;
 }
 
-export function createAnchorReadCache(): AnchorReadCache {
-  return { key: '', placed: new Map(), pending: new Map() };
+export function createAnchorReadCache(limit = 4096): AnchorReadCache {
+  return { key: '', limit, replies: new Map(), pending: new Map() };
+}
+
+function paragraphAnchor(anchor: DocxParagraphAnchor): DocxParagraphAnchor {
+  switch (anchor.kind) {
+    case 'session':
+      return { kind: 'session', sessionId: anchor.sessionId, story: anchor.story, paraId: anchor.paraId };
+    case 'source':
+      return {
+        kind: 'source',
+        packageSha256: anchor.packageSha256,
+        partUri: anchor.partUri,
+        paragraphOrdinal: anchor.paragraphOrdinal,
+      };
+    case 'persisted': {
+      const { story } = anchor;
+      return {
+        kind: 'persisted',
+        story: 'itemId' in story
+          ? { partUri: story.partUri, kind: story.kind, itemId: story.itemId }
+          : { partUri: story.partUri, kind: story.kind },
+        paraId: anchor.paraId,
+      };
+    }
+  }
+}
+
+/** `target` with only the fields that resolve it. */
+function normalTarget(target: WorkerTarget): WorkerTarget {
+  switch (target.kind) {
+    case 'revision':
+      return { kind: 'revision', revisionId: target.revisionId };
+    case 'paragraph':
+      return { kind: 'paragraph', paragraph: paragraphAnchor(target.paragraph) };
+    case 'search':
+      return {
+        kind: 'search',
+        paragraph: paragraphAnchor(target.paragraph),
+        text: target.text,
+        ...(target.occurrence === undefined ? {} : { occurrence: target.occurrence }),
+      };
+    case 'range': {
+      const { story, start, end, view } = target.range;
+      return {
+        kind: 'range',
+        version: target.version,
+        range: {
+          story,
+          start: { paraId: start.paraId, offset: start.offset },
+          end: { paraId: end.paraId, offset: end.offset },
+          view,
+        },
+      };
+    }
+  }
 }
 
 interface Interval {
@@ -493,59 +552,56 @@ export function createPluginGeometry(
       return (await geometry.readAnchorGeometries([target]))[0]!;
     },
     async readAnchorGeometries(targets) {
-      const answers = targets.map((target) =>
-        !workerReads || target.kind === 'proposal' ? geometry.getAnchorGeometry(target) : null
-      );
+      if (!workerReads) return targets.map((target) => geometry.getAnchorGeometry(target));
       const version = painted() ? workerFrameVersionOf(queries) : null;
-      if (!workerReads || version === null) return answers.map((answer) => answer ?? unavailable());
       const { read, cache } = workerReads;
       const previewKey = renderedPreviewKey(queries);
-      const key = JSON.stringify([layout.version, version, layout.previewVersion, layout.zoom, previewKey]);
-      if (cache.key !== key) Object.assign(cache, createAnchorReadCache(), { key });
-      const { placed, pending } = cache;
-      const ids = targets.map((target) => JSON.stringify(target));
-      const missing = new Map<string, WorkerTarget>();
-      targets.forEach((target, index) => {
-        if (target.kind === 'proposal') return;
-        if (target.kind === 'range' && target.version !== layout.version) answers[index] = stale();
-        else if (!placed.has(ids[index]!) && !pending.has(ids[index]!)) {
-          missing.set(ids[index]!, target.kind === 'range' ? { ...target, version } : target);
-        }
+      const key = JSON.stringify([version, layout.previewVersion, previewKey]);
+      if (version !== null && cache.key !== key) {
+        Object.assign(cache, createAnchorReadCache(cache.limit), { key });
+      }
+      const { replies, pending } = cache;
+      const entries = targets.map((target) => {
+        if (version === null || target.kind === 'proposal') return null;
+        if (target.kind === 'range' && target.version !== layout.version) return null;
+        const sent = normalTarget(target.kind === 'range' ? { ...target, version } : target);
+        return { id: JSON.stringify(sent), sent };
       });
-      if (missing.size > 0) {
+      const missing = new Map<string, WorkerTarget>();
+      for (const entry of entries) {
+        if (entry && !replies.has(entry.id) && !pending.has(entry.id)) missing.set(entry.id, entry.sent);
+      }
+      if (version !== null && missing.size > 0) {
         const request = new Promise<readonly AnchorDisplayTarget[] | null>((resolve) =>
           resolve(read([...missing.values()], version, layout.previewVersion, previewKey))
         );
         [...missing.keys()].forEach((id, index) => {
-          const reply = request.then((replies) => (replies ? replies[index]! : null), () => undefined);
+          const reply = request.then((answers) => (answers ? answers[index]! : null), () => undefined);
           pending.set(id, reply);
           void reply.then(() => {
             if (pending.get(id) === reply) pending.delete(id);
           });
         });
       }
-      const replies = await Promise.all(
-        targets.map((_, index) => (answers[index] ? null : pending.get(ids[index]!)))
+      const resolved = await Promise.all(
+        entries.map((entry) => entry && (replies.get(entry.id) ?? pending.get(entry.id)))
       );
       const shown = painted();
-      return targets.map((_, index) => {
-        const done = answers[index];
-        if (done) return done;
+      return targets.map((target, index) => {
+        if (target.kind === 'proposal') return geometry.getAnchorGeometry(target);
+        const entry = entries[index];
+        if (!entry) return version === null ? unavailable() : stale();
         if (!shown) return unavailable();
-        const id = ids[index]!;
-        const hit = placed.get(id);
-        if (hit) return answer(hit, []);
-        const reply = replies[index];
+        const reply = resolved[index];
         if (reply === undefined) return unavailable();
         if (reply === null) return stale();
         if (!reply.ok) return reply;
-        const placement = place([...reply.ranges], reply.hidden, reply.paragraph, true);
-        if (!placement.ok) return placement;
-        const result = answer(placement, placement.unbuiltPages);
-        if (result.ok && placement.unbuiltPages.length === 0 && cache.key === key) {
-          cache.placed.set(id, { rects: placement.rects, anchor: placement.anchor });
+        if (cache.key === key && !cache.replies.has(entry.id)) {
+          if (cache.replies.size >= cache.limit) cache.replies.clear();
+          cache.replies.set(entry.id, reply);
         }
-        return result;
+        const placement = place([...reply.ranges], reply.hidden, reply.paragraph, true);
+        return placement.ok ? answer(placement, placement.unbuiltPages) : placement;
       });
     },
   };
