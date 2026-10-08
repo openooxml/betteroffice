@@ -32,6 +32,7 @@ function viewerGeometry(options: {
   pages?: Array<{ unbuilt?: boolean; positionSpan?: [number, number] }>;
   shown?: () => boolean;
   workerVersion?: string | null;
+  anchorPage?: number;
 }) {
   const pages = document.createElement('div');
   const pageList = options.pages ?? [{}];
@@ -53,7 +54,7 @@ function viewerGeometry(options: {
       from < 10 && to > 0 && !pageList[0]?.unbuilt
         ? [{ pageIndex: 0, x: from, y: 10, width: Math.min(to, 10) - from, height: 12 }]
         : [],
-    anchorRect: (position: number) => ({ pageIndex: 0, x: position, y: 10, width: 1, height: 12 }),
+    anchorRect: (position: number) => ({ pageIndex: options.anchorPage ?? 0, x: position, y: 10, width: 1, height: 12 }),
     pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: pageIndex * 200, width: 100, height: 200 }),
     hitTestRegions: () => null,
   } as unknown as DisplayListQueries;
@@ -116,8 +117,8 @@ test('targets reach the worker at the worker frame version', async () => {
   expect(await geometry.readAnchorGeometry(RANGE)).toMatchObject({ ok: true, version: 'v1' });
   expect(await geometry.readAnchorGeometry(revision)).toMatchObject({ ok: true });
   expect(calls).toEqual([
-    [{ ...RANGE, version: 'w7' }, 'w7', 0],
-    [revision, 'w7', 0],
+    [{ ...RANGE, version: 'w7' }, 'w7', 0, ''],
+    [revision, 'w7', 0, ''],
   ]);
 });
 
@@ -157,6 +158,33 @@ test('a target ending on an unbuilt page keeps its built rects and anchors on th
     rects: [{ pageIndex: 0, x: 2, width: 8 }],
     unbuiltPages: [1],
     anchor: { pageIndex: 1 },
+  });
+});
+
+test('an anchor placed on an unbuilt page the ranges do not reach lists that page', async () => {
+  const geometry = viewerGeometry({
+    pages: [{}, { unbuilt: true }],
+    anchorPage: 1,
+    read: reply({ ok: true, ranges: [{ from: 150, to: 150 }], paragraph: 150, hidden: [] }),
+  });
+  expect(await geometry.readAnchorGeometry(RANGE)).toMatchObject({
+    ok: true,
+    rects: [],
+    unbuiltPages: [1],
+    anchor: { pageIndex: 1 },
+  });
+});
+
+test('an unbuilt page reached only by hidden text is not listed and does not take the anchor', async () => {
+  const geometry = viewerGeometry({
+    pages: [{ positionSpan: [0, 99] }, { unbuilt: true, positionSpan: [100, 200] }],
+    read: reply({ ok: true, ranges: [{ from: 2, to: 150 }], paragraph: 2, hidden: [{ from: 99, to: 150 }] }),
+  });
+  expect(await geometry.readAnchorGeometry(RANGE)).toMatchObject({
+    ok: true,
+    rects: [{ pageIndex: 0, x: 2, width: 8 }],
+    unbuiltPages: [],
+    anchor: { pageIndex: 0 },
   });
 });
 

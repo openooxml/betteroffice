@@ -119,11 +119,15 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
-/** Resolves a target in the worker at the worker `version`; null once the worker moved past it. */
+/**
+ * Resolves a target in the worker at the worker `version` under the rendered `previewKey`; null once
+ * the worker moved past it.
+ */
 export type ReadAnchorTarget = (
   target: Exclude<DocxGeometryTarget, { kind: 'proposal' }>,
   version: string,
-  previewVersion: number
+  previewVersion: number,
+  previewKey: string
 ) => Promise<AnchorDisplayTarget | null>;
 
 interface Interval {
@@ -289,16 +293,21 @@ export function createPluginGeometry(
     const pendingPage = (pageIndex: number): boolean =>
       pages[pageIndex]?.unbuilt === true &&
       (deferUnbuilt || (!!window && pageIndex >= window[0] && pageIndex < window[1]));
-    const reaches = ({ unbuilt, positionSpan }: (typeof pages)[number]) =>
+    const reaches = (
+      { unbuilt, positionSpan }: (typeof pages)[number],
+      spans: readonly Interval[] = ranges
+    ) =>
       !!unbuilt &&
       !!positionSpan &&
-      ranges.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0]);
+      spans.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0]);
+    const shownRanges = subtract(ranges, hidden);
+    const reached = shownRanges.length > 0 ? shownRanges : ranges;
     const unbuiltPages = deferUnbuilt
-      ? pages.flatMap((page, pageIndex) => (reaches(page) ? [pageIndex] : []))
+      ? pages.flatMap((page, pageIndex) => (reaches(page, reached) ? [pageIndex] : []))
       : [];
-    if (!deferUnbuilt && window && pages.slice(window[0], window[1]).some(reaches)) return unavailable();
+    if (!deferUnbuilt && window && pages.slice(window[0], window[1]).some((page) => reaches(page))) return unavailable();
     const union: Interval[] = [];
-    for (const range of subtract(ranges, hidden)) {
+    for (const range of shownRanges) {
       const previous = union.at(-1);
       if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
       else union.push({ ...range });
@@ -338,6 +347,10 @@ export function createPluginGeometry(
       const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
       const pending = [end, fallback].find((rect) => rect && pendingPage(rect.pageIndex));
       if (pending && !deferUnbuilt) return unavailable();
+      if (pending && !unbuiltPages.includes(pending.pageIndex)) {
+        unbuiltPages.push(pending.pageIndex);
+        unbuiltPages.sort((a, b) => a - b);
+      }
       anchor = pending
         ? pageAnchor(pending.pageIndex)
         : end
@@ -447,7 +460,8 @@ export function createPluginGeometry(
         reply = await readTarget(
           target.kind === 'range' ? { ...target, version } : target,
           version,
-          layout.previewVersion
+          layout.previewVersion,
+          renderedPreviewKey(queries)
         );
       } catch {
         return unavailable();

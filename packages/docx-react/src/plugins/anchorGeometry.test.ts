@@ -331,6 +331,8 @@ describe('anchor reads through the document worker', () => {
       if (resolved.status !== 'found' || resolved.anchor.kind !== 'session') throw new Error('expected a session anchor');
       const session = resolved.anchor;
       const range = { kind: 'range' as const, version: main.version(), range: found.matches[0]!.range };
+      const key = currentPreviewKey(main);
+      const aligned = { ...main, version: () => engine.proposalEngine.version() } as YrsSession;
       const targets = [
         { kind: 'paragraph' as const, paragraph: persisted },
         { kind: 'paragraph' as const, paragraph: session },
@@ -342,19 +344,24 @@ describe('anchor reads through the document worker', () => {
         const sent = target.kind === 'range' ? { ...target, version: engine.proposalEngine.version() } : target;
         const expected = computeAnchorDisplayTarget(main, target, undefined);
         expect(expected).toMatchObject({ ok: true, ranges: expect.arrayContaining([expect.any(Object)]) });
-        expect(await readWorkerAnchorTarget(read, main, sent, engine.proposalEngine.version(), 0)).toEqual(expected);
+        expect(await readWorkerAnchorTarget(read, aligned, sent, engine.proposalEngine.version(), 0, key)).toEqual(expected);
       }
       expect(requests.map((request) => request.kind)).toEqual(targets.map(() => 'anchorTarget'));
+      expect(await readWorkerAnchorTarget(read, main, targets[0]!, engine.proposalEngine.version(), 0, key)).toMatchObject({
+        ok: false,
+        failure: { code: 'unsupported' },
+      });
+      expect(requests.at(-1)?.kind).toBe('resolveParagraphAnchors');
       expect(engine.proposalEngine.version()).not.toBe(main.version());
-      expect(await readWorkerAnchorTarget(read, main, range, engine.proposalEngine.version(), 0)).toMatchObject({
+      expect(await readWorkerAnchorTarget(read, main, range, engine.proposalEngine.version(), 0, key)).toMatchObject({
         ok: false,
         failure: { code: 'stale-version' },
       });
       expect(requests).toContainEqual(
         expect.objectContaining({ target: expect.objectContaining({ paragraph: expect.objectContaining({ kind: 'session', paraId: '00000003' }) }) })
       );
-      expect(await readWorkerAnchorTarget(read, main, targets[3]!, 'superseded', 0)).toBeNull();
-      expect(await readWorkerAnchorTarget(read, main, targets[3]!, engine.proposalEngine.version(), 1)).toMatchObject({
+      expect(await readWorkerAnchorTarget(read, main, targets[3]!, 'superseded', 0, key)).toBeNull();
+      expect(await readWorkerAnchorTarget(read, main, targets[3]!, engine.proposalEngine.version(), 1, key)).toMatchObject({
         ok: false,
         failure: { code: 'layout-unavailable' },
       });
@@ -379,12 +386,12 @@ describe('anchor reads through the document worker', () => {
       const target = { kind: 'search' as const, paragraph: persisted, text: 'xy' };
       const expected = computeAnchorDisplayTarget(reference, target, undefined);
       expect(expected).toMatchObject({ ok: true });
-      expect(await readWorkerAnchorTarget(read, main, target, engine.proposalEngine.version(), 0)).toEqual(expected);
+      expect(await readWorkerAnchorTarget(read, main, target, engine.proposalEngine.version(), 0, currentPreviewKey(main))).toEqual(expected);
       expect(requests.map((request) => request.kind)).toEqual(['resolveParagraphAnchors', 'anchorTarget']);
-      expect(await readWorkerAnchorTarget(read, main, target, 'superseded', 0)).toBeNull();
+      expect(await readWorkerAnchorTarget(read, main, target, 'superseded', 0, currentPreviewKey(main))).toBeNull();
       expect(requests.at(-1)?.kind).toBe('resolveParagraphAnchors');
       expect(
-        await readWorkerAnchorTarget(read, main, { ...target, paragraph: { ...persisted, paraId: '0000FFFF' } }, engine.proposalEngine.version(), 0)
+        await readWorkerAnchorTarget(read, main, { ...target, paragraph: { ...persisted, paraId: '0000FFFF' } }, engine.proposalEngine.version(), 0, currentPreviewKey(main))
       ).toMatchObject({ ok: false, failure: { code: 'missing-target' } });
     } finally {
       main.destroy();
@@ -404,7 +411,7 @@ describe('revision preview of an editor peer', () => {
   });
 
   test('hidden ranges, the preview key and worker anchor reads share the merged preview', async () => {
-    const local = { version: 'worker-1', previewVersion: 1, proposals: [record('local', 'rejected', 'r2')] };
+    let local = { version: 'worker-1', previewVersion: 1, proposals: [record('local', 'rejected', 'r2')] };
     const revision = (revisionId: string, kind: 'insertion' | 'deletion', offset: number) => ({
       revisionId,
       kind,
@@ -465,11 +472,19 @@ describe('revision preview of an editor peer', () => {
       return { version: 'worker-1', value: { ok: true, ranges: [], paragraph: 0, hidden: [] } };
     }) as ResidentEngineWorkerClient['documentRead'];
     const previewVersion = proposalSnapshot(session)!.previewVersion;
+    const key = currentPreviewKey(session);
     expect(
-      await readWorkerAnchorTarget(read, session, { kind: 'revision', revisionId: 'r3' }, 'worker-1', previewVersion)
+      await readWorkerAnchorTarget(read, session, { kind: 'revision', revisionId: 'r3' }, 'worker-1', previewVersion, key)
     ).toMatchObject({ ok: true });
     expect(requests).toEqual([
       { kind: 'anchorTarget', target: { kind: 'revision', revisionId: 'r3' }, revisionPreview: merged, expectVersion: 'worker-1' },
     ]);
+    local = { ...local, proposals: [record('local', 'accepted', 'r2')] };
+    expect(proposalSnapshot(session)!.previewVersion).toBe(previewVersion);
+    expect(currentPreviewKey(session)).not.toBe(key);
+    expect(
+      await readWorkerAnchorTarget(read, session, { kind: 'revision', revisionId: 'r3' }, 'worker-1', previewVersion, key)
+    ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+    expect(requests).toHaveLength(1);
   });
 });

@@ -9,6 +9,7 @@ import {
   type ResidentEngineWorkerClient,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
+import { revisionPreviewKey } from '../components/DocxEditor/internals/layoutProvenance';
 import { workerOpenReplicaReady } from '../components/DocxEditor/internals/workerOpenReplica';
 import { proposalSnapshot, revisionPreviewOf } from './proposalPreview';
 import type { DocxGeometryTarget } from './types';
@@ -40,22 +41,30 @@ export function resolveAnchorTarget(
 }
 
 /**
- * Resolves `target` in the worker at its `version` under the session's revision preview; null once
- * the worker moved past `version`. Persisted anchors resolve on the main thread when it holds the
- * document, else in the worker.
+ * Resolves `target` in the worker at its `version` under the session's revision preview, refusing
+ * when that preview is not the rendered `previewKey`; null once the worker moved past `version`.
+ * Persisted anchors resolve on the main thread when it holds the document at `version`, else in
+ * the worker.
  */
 export async function readWorkerAnchorTarget(
   read: ResidentEngineWorkerClient['documentRead'],
   session: YrsSession,
   target: Exclude<DocxGeometryTarget, { kind: 'proposal' }>,
   version: string,
-  previewVersion: number
+  previewVersion: number,
+  previewKey: string
 ): Promise<AnchorDisplayTarget | null> {
+  const rendered = () =>
+    (proposalSnapshot(session)?.previewVersion ?? 0) === previewVersion &&
+    revisionPreviewKey(revisionPreviewOf(session)) === previewKey;
+  const unrendered = () =>
+    anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
+  if (!rendered()) return unrendered();
   let resolver: Pick<AnchorReader, 'resolveParagraphAnchor'> = session;
   if (
     (target.kind === 'paragraph' || target.kind === 'search') &&
     target.paragraph.kind !== 'session' &&
-    !workerOpenReplicaReady(session)
+    !(workerOpenReplicaReady(session) && session.version() === version)
   ) {
     const resolved = await read({ kind: 'resolveParagraphAnchors', anchors: [target.paragraph] });
     if (resolved.version !== version) return null;
@@ -63,14 +72,12 @@ export async function readWorkerAnchorTarget(
   }
   const posted = sessionAnchorTarget(resolver, target);
   if ('ok' in posted) return posted;
-  if ((proposalSnapshot(session)?.previewVersion ?? 0) !== previewVersion) {
-    return anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
-  }
-  const reply = await read({
-    kind: 'anchorTarget',
-    target: posted,
-    revisionPreview: revisionPreviewOf(session),
-    expectVersion: version,
-  });
+  const revisionPreview = revisionPreviewOf(session);
+  if (
+    (proposalSnapshot(session)?.previewVersion ?? 0) !== previewVersion ||
+    revisionPreviewKey(revisionPreview) !== previewKey
+  )
+    return unrendered();
+  const reply = await read({ kind: 'anchorTarget', target: posted, revisionPreview, expectVersion: version });
   return reply.version === version ? reply.value : null;
 }
