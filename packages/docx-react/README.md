@@ -490,6 +490,8 @@ const review = defineDocxPlugin<State>({
   same rules, proposals included. In worker viewers it makes at most one worker
   read per call and reuses the worker's answers until the version or proposal
   preview changes; main-thread and proposal answers are not cached.
+  Targets in a header or footer have rects on every page that paints it, and
+  their anchor sits on the first such page.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit
