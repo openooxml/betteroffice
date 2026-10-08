@@ -43,6 +43,7 @@ import {
   type DocxPluginActivation,
   type DocxPluginHost,
 } from './createDocxPluginHost';
+import { readWorkerAnchorTarget } from './anchorGeometry';
 import { resolveParagraph } from './createPluginClients';
 import { createPluginGeometry, pluginLayout, readPluginPositionAtPoint } from './geometry';
 import { managedSidebarItems } from './PluginSidebarItems';
@@ -343,6 +344,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
   const currentLayout = layoutStable.current;
   layoutRef.current = currentLayout;
 
+  const viewer = options.viewerDocumentRead !== undefined;
   const geometry = useMemo(() => {
     if (!currentLayout || !dom || dom.queries !== options.queries || !layer) return null;
     const shownList = dom.queries.displayList;
@@ -386,7 +388,14 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
         (isPresented(dom.context.pagesContainer, shownList) || queriesCurrentRef.current),
       (clientX, clientY) => readPluginPositionAtPoint(
         latest.current.pagedEditorRef, clientX, clientY, latest.current.experimentalWorkerOpen === true
-      )
+      ),
+      viewer
+        ? (target, version, previewVersion, previewKey) => {
+            const { viewerDocumentRead, session } = latest.current;
+            if (!viewerDocumentRead || !session) throw new Error('No document worker to read from');
+            return readWorkerAnchorTarget(viewerDocumentRead, session, target, version, previewVersion, previewKey);
+          }
+        : undefined
     );
     const resolveAnchor = created.getAnchorGeometry;
     created.getAnchorGeometry = (target) => {
@@ -398,7 +407,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
     return created;
     // `moved` rebuilds the geometry when its elements move without a new frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host, currentLayout, dom, options.queries, layer, moved]);
+  }, [host, currentLayout, dom, options.queries, layer, moved, viewer]);
   geometryRef.current = geometry;
   // Overlays keep the geometry the host last adopted until geometry for its next layout exists.
   const adopted = geometry && host.layoutId() === geometry.layout.id ? geometry : null;
