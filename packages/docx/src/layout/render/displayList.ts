@@ -47,6 +47,8 @@ export interface DisplayPage {
   unbuilt?: boolean;
   /** For an unbuilt page, the lowest and highest body position its layout places. */
   positionSpan?: [number, number];
+  /** For an unbuilt page, the relationship ids of the header and footer parts its build paints. */
+  hfParts?: { header?: string; footer?: string };
 }
 
 /** A page-local rectangle emitted as display-list metadata. */

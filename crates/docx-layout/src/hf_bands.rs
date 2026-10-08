@@ -60,10 +60,11 @@
 use serde::Deserialize;
 
 use crate::display_list::{
-    BlockIn, BlockRef, FieldWidthEntry, FieldWidthMap, FloatingTablePositionIn, HfKind, HfRegion,
-    MeasureIn, MeasuredBlockIn, PageIn, ParagraphFragmentIn, Primitive, RenderCtx, ShapeFonts,
-    TableFragmentIn, WatermarkIn, capped_alt_text, emit_hf_shape, emit_paragraph_fragment,
-    emit_table_fragment, px, rotation_degrees, sanitized_href, table_total_width,
+    BlockIn, BlockRef, FieldWidthEntry, FieldWidthMap, FloatingTablePositionIn, HfKind, HfParts,
+    HfRegion, MeasureIn, MeasuredBlockIn, PageIn, ParagraphFragmentIn, Primitive, RenderCtx,
+    ShapeFonts, TableFragmentIn, WatermarkIn, capped_alt_text, emit_hf_shape,
+    emit_paragraph_fragment, emit_table_fragment, px, rotation_degrees, sanitized_href,
+    table_total_width,
 };
 use crate::display_list::{Crop, ImagePrimitive, PageHeaderFooterRefsIn};
 use crate::header_footer::{HeaderFooterKind, HeaderFooterType};
@@ -482,6 +483,30 @@ fn stacked_height(measured: &[MeasuredBlockIn]) -> f64 {
         .sum()
 }
 
+/// The header and footer variants a page paints; automatic parity fillers paint none.
+fn page_variants<'a>(
+    hf: &'a HeadersFootersIn,
+    page: &'a PageIn,
+    page_number: u64,
+) -> (Option<&'a HfVariantIn>, Option<&'a HfVariantIn>) {
+    if page.parity_filler == Some(true) {
+        return (None, None);
+    }
+    (
+        resolve_variant(hf, page, HfKind::Header, page_number),
+        resolve_variant(hf, page, HfKind::Footer, page_number),
+    )
+}
+
+/// The header and footer parts [`compose_page_regions`] paints on a page.
+pub(crate) fn page_parts(hf: &HeadersFootersIn, page: &PageIn, page_index: usize) -> HfParts {
+    let (header, footer) = page_variants(hf, page, page.number.unwrap_or(page_index as u64 + 1));
+    HfParts {
+        header: header.map(|variant| variant.r_id.clone()),
+        footer: footer.map(|variant| variant.r_id.clone()),
+    }
+}
+
 /// Resolves both bands for one page. Automatic parity fillers stay blank.
 ///
 /// `page_number` is the layout's own 1-based `Page.number` (falling back to
@@ -495,11 +520,9 @@ pub(crate) fn compose_page_regions<'a>(
     cached_page_totals: bool,
     shape: Option<&'a ShapeFonts<'a>>,
 ) -> (Option<HfRegion>, Option<HfRegion>) {
-    if page.parity_filler == Some(true) {
-        return (None, None);
-    }
     let page_number = page.number.unwrap_or(page_index as u64 + 1);
-    let header = resolve_variant(hf, page, HfKind::Header, page_number).map(|v| {
+    let (header, footer) = page_variants(hf, page, page_number);
+    let header = header.map(|v| {
         compose_region(
             v,
             HfKind::Header,
@@ -512,7 +535,7 @@ pub(crate) fn compose_page_regions<'a>(
             shape,
         )
     });
-    let footer = resolve_variant(hf, page, HfKind::Footer, page_number).map(|v| {
+    let footer = footer.map(|v| {
         compose_region(
             v,
             HfKind::Footer,

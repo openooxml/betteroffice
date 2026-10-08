@@ -146,6 +146,19 @@ pub struct DisplayPage {
     /// places, so a host can find the page a position is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position_span: Option<[i64; 2]>,
+    /// For an unbuilt page, the header and footer parts its build paints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_parts: Option<HfParts>,
+}
+
+/// Relationship ids of the header and footer parts a page paints.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HfParts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub footer: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -5341,6 +5354,7 @@ fn build_display_list_selected(
             note_areas,
             unbuilt: false,
             position_span: None,
+            hf_parts: None,
         });
     }
 
@@ -10970,6 +10984,7 @@ pub fn build_resident_display_list_partial_with_fonts_observed(
                 page,
                 index,
                 layout_page_position_span(&layout.pages[index], &blocks)?,
+                input.headers_footers.as_ref(),
             )),
         })
         .collect::<Result<_, String>>()?;
@@ -11056,6 +11071,7 @@ pub fn release_resident_display_pages(
                 &page,
                 index,
                 layout_page_position_span(&layout.pages[index], &blocks)?,
+                resident.input.headers_footers.as_ref(),
             );
             Ok((index, page, placeholder))
         })
@@ -11109,6 +11125,7 @@ fn unbuilt_page_with_span(
     page: &PageIn,
     page_index: usize,
     position_span: Option<[i64; 2]>,
+    headers_footers: Option<&crate::hf_bands::HeadersFootersIn>,
 ) -> DisplayPage {
     let (content_bounds, column_bounds) = page_content_geometry(page);
     DisplayPage {
@@ -11131,6 +11148,9 @@ fn unbuilt_page_with_span(
         note_areas: Vec::new(),
         unbuilt: true,
         position_span,
+        hf_parts: headers_footers
+            .map(|hf| crate::hf_bands::page_parts(hf, page, page_index))
+            .filter(|parts| parts.header.is_some() || parts.footer.is_some()),
     }
 }
 
@@ -11672,6 +11692,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
                 &resident.input.layout.pages[page_index],
                 page_index,
                 layout_page_position_span(&layout.pages[page_index], &blocks)?,
+                resident.input.headers_footers.as_ref(),
             );
         }
     }
@@ -12260,6 +12281,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unbuilt_placeholders_name_the_header_and_footer_parts_their_build_paints() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut names: Vec<String> = std::fs::read_dir(&fixtures)
+            .unwrap()
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().into_string().ok()?;
+                name.strip_suffix(".input.json").map(str::to_owned)
+            })
+            .collect();
+        names.sort();
+        let extras = r#"{"contractVersion":2,"fontChains":{"arial|0|0":[]},"headersFooters":{
+            "titlePg":true,"evenAndOddHeaders":true,"variants":[
+            {"rId":"rIdH1","kind":"header","type":"default"},
+            {"rId":"rIdH2","kind":"header","type":"even"},
+            {"rId":"rIdF1","kind":"footer","type":"first"}]}}"#;
+        let fonts = ooxml_text::FontStore::default();
+        let mut headers = std::collections::BTreeSet::new();
+        for name in names {
+            let text =
+                std::fs::read_to_string(fixtures.join(format!("{name}.input.json"))).unwrap();
+            let Ok(mut pagination) = serde_json::from_str::<crate::types::Input>(&text) else {
+                continue;
+            };
+            let Ok(layout) = crate::compute_layout_input(&mut pagination) else {
+                continue;
+            };
+            let full = build_display_list(
+                &resident_build_input(&pagination, &layout, extras).unwrap(),
+                &fonts,
+            );
+            let (_, partial) = build_resident_display_list_partial_with_fonts_observed(
+                &pagination,
+                &layout,
+                extras,
+                &fonts,
+                &|index| index == 0,
+                &mut || {},
+            )
+            .unwrap();
+            for (built, placeholder) in full.pages.iter().zip(&partial.pages).skip(1) {
+                let painted = HfParts {
+                    header: built.header.as_ref().map(|region| region.r_id.clone()),
+                    footer: built.footer.as_ref().map(|region| region.r_id.clone()),
+                };
+                assert!(placeholder.unbuilt, "{name}");
+                assert_eq!(
+                    placeholder.hf_parts.clone().unwrap_or_default(),
+                    painted,
+                    "{name}"
+                );
+                headers.extend(painted.header);
+            }
+            assert_eq!(
+                full.pages[0]
+                    .footer
+                    .as_ref()
+                    .map(|region| region.r_id.as_str()),
+                Some("rIdF1"),
+                "{name}"
+            );
+        }
+        assert_eq!(headers.into_iter().collect::<Vec<_>>(), ["rIdH1", "rIdH2"]);
+    }
+
     fn table_split_fixture() -> crate::types::Input {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/table-splits-with-repeated-header.input.json");
@@ -12577,7 +12663,7 @@ mod tests {
             )
             .unwrap();
             assert!(metadata.fragments.is_empty());
-            let mut page = unbuilt_page_with_span(&metadata, 0, Some([10, 20]));
+            let mut page = unbuilt_page_with_span(&metadata, 0, Some([10, 20]), None);
             shift_unbuilt_span(
                 &mut page,
                 Some(&layout.pages[0]),
