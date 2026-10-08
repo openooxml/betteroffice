@@ -11,7 +11,11 @@ import {
   type ProposalGeometryMirror,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
-import { sourceVersionOf, workerFrameVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import {
+  isPresented,
+  sourceVersionOf,
+  workerFrameVersionOf,
+} from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
@@ -208,6 +212,7 @@ export function createPluginGeometry(
   readTarget?: ReadAnchorTarget
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
+  const painted = () => shown() && isPresented(dom.pagesContainer, queries.displayList);
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
   const project = (rect: DisplayListRect): DocxAnchorRect | null => {
     const projected = projector.projectRect(rect);
@@ -451,7 +456,7 @@ export function createPluginGeometry(
     },
     async readAnchorGeometry(target) {
       if (!readTarget || target.kind === 'proposal') return geometry.getAnchorGeometry(target);
-      if (!shown()) return unavailable();
+      if (!painted()) return unavailable();
       const version = workerFrameVersionOf(queries);
       if (version === null) return unavailable();
       if (target.kind === 'range' && target.version !== layout.version) return stale();
@@ -466,7 +471,7 @@ export function createPluginGeometry(
       } catch {
         return unavailable();
       }
-      if (!shown()) return unavailable();
+      if (!painted()) return unavailable();
       if (!reply) return stale();
       if (!reply.ok) return reply;
       return place([...reply.ranges], reply.hidden, reply.paragraph, true);

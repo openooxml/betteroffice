@@ -4,6 +4,8 @@ import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import type { AnchorDisplayTarget, YrsSession } from '@betteroffice/docx/yrs';
 import {
+  clearPresented,
+  markPresented,
   stampRevisionPreviewKey,
   stampWorkerFrameVersion,
 } from '../components/DocxEditor/internals/layoutProvenance';
@@ -33,6 +35,7 @@ function viewerGeometry(options: {
   shown?: () => boolean;
   workerVersion?: string | null;
   anchorPage?: number;
+  presented?: boolean;
 }) {
   const pages = document.createElement('div');
   const pageList = options.pages ?? [{}];
@@ -58,6 +61,7 @@ function viewerGeometry(options: {
     pageBounds: (pageIndex: number) => ({ pageIndex, x: 0, y: pageIndex * 200, width: 100, height: 200 }),
     hitTestRegions: () => null,
   } as unknown as DisplayListQueries;
+  if (options.presented !== false) markPresented(pages, queries.displayList);
   stampRevisionPreviewKey(queries, '');
   if (options.workerVersion !== null) stampWorkerFrameVersion(queries, options.workerVersion ?? 'w1');
   const session = {
@@ -216,6 +220,34 @@ test('a layout that stops showing while the read runs refuses', async () => {
     },
   });
   expect(await geometry.readAnchorGeometry(RANGE)).toMatchObject({
+    ok: false,
+    failure: { code: 'layout-unavailable' },
+  });
+});
+
+test('a frame not yet presented refuses before and after the read', async () => {
+  let reads = 0;
+  const unpainted = viewerGeometry({
+    presented: false,
+    read: async () => {
+      reads += 1;
+      return { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] };
+    },
+  });
+  expect(await unpainted.readAnchorGeometry(RANGE)).toMatchObject({
+    ok: false,
+    failure: { code: 'layout-unavailable' },
+  });
+  expect(reads).toBe(0);
+  let host: HTMLElement | null = null;
+  const repainting = viewerGeometry({
+    read: async () => {
+      if (host) clearPresented(host);
+      return { ok: true, ranges: [{ from: 2, to: 6 }], paragraph: 2, hidden: [] };
+    },
+  });
+  host = repainting.dom.pagesContainer;
+  expect(await repainting.readAnchorGeometry(RANGE)).toMatchObject({
     ok: false,
     failure: { code: 'layout-unavailable' },
   });

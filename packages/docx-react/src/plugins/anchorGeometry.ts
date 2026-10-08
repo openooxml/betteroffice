@@ -53,9 +53,9 @@ export async function readWorkerAnchorTarget(
   previewVersion: number,
   previewKey: string
 ): Promise<AnchorDisplayTarget | null> {
-  const rendered = () =>
+  const rendered = (revisionPreview = revisionPreviewOf(session)) =>
     (proposalSnapshot(session)?.previewVersion ?? 0) === previewVersion &&
-    revisionPreviewKey(revisionPreviewOf(session)) === previewKey;
+    revisionPreviewKey(revisionPreview) === previewKey;
   const unrendered = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
   if (!rendered()) return unrendered();
@@ -72,11 +72,7 @@ export async function readWorkerAnchorTarget(
   const posted = sessionAnchorTarget(resolver, target);
   if ('ok' in posted) return posted;
   const revisionPreview = revisionPreviewOf(session);
-  if (
-    (proposalSnapshot(session)?.previewVersion ?? 0) !== previewVersion ||
-    revisionPreviewKey(revisionPreview) !== previewKey
-  )
-    return unrendered();
+  if (!rendered(revisionPreview)) return unrendered();
   const reply = await read({ kind: 'anchorTarget', target: posted, revisionPreview, expectVersion: version });
   return reply.version === version ? reply.value : null;
 }
