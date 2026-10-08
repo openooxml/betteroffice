@@ -211,6 +211,9 @@ of `rects` and lists their zero-based indexes in `unbuiltPages`; elsewhere it
 answers like `getAnchorGeometry`. It does not wait for paint: until the pages
 show the layout it refuses with `layout-unavailable`, so retry on the next
 `layout-change`.
+`geometry.readAnchorGeometries(targets)` answers many targets in order with one
+worker read and reuses complete answers until the version, preview or zoom
+changes.
 `geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
