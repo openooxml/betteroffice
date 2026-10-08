@@ -478,6 +478,12 @@ const review = defineDocxPlugin<State>({
   stale or unpainted layout, and `layout-change` repeats once the pages have painted
   a layout that arrived before its pixels; `layout.previewVersion` is the proposal
   preview the pixels show.
+  `geometry.readAnchorGeometry(target)` answers the same targets asynchronously
+  and also works in viewers opened with `experimentalWorkerOpen`, where the
+  document lives in the worker and answers wait for the painted layout. In those
+  viewers, fragments on pages not built yet are left out of `rects` and their
+  zero-based indexes listed in `unbuiltPages`; elsewhere it answers like
+  `getAnchorGeometry`.
   The layer ignores the
   pointer; interactive overlay elements set `pointer-events: auto`.
   `snapshot.selection.displayRange` belongs to one layout and is never an edit

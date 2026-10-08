@@ -213,9 +213,10 @@ export interface DocxPluginGeometry {
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
   /**
-   * Resolves a target like `getAnchorGeometry`, reading worker viewers from the worker. Fragments
-   * on unbuilt pages are left out of `rects` and their pages listed in `unbuiltPages`; such an
-   * answer is provisional until those pages are built.
+   * Resolves a target asynchronously, reading worker viewers from the worker once the pages show
+   * the layout. In those viewers, fragments on pages not built yet are left out of `rects` and
+   * their pages listed in `unbuiltPages`, provisional until built; elsewhere it answers like
+   * `getAnchorGeometry`.
    */
   readAnchorGeometry(target: DocxGeometryTarget): Promise<DocxAnchorGeometryResult>;
 }
