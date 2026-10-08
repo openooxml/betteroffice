@@ -250,7 +250,7 @@ export interface PagedEditorProps {
   /** Callback when the native Yrs undo/redo availability changes. */
   onYrsHistoryChange?: (canUndo: boolean, canRedo: boolean) => void;
   /** Callback when selection changes. */
-  onSelectionChange?: (from: number, to: number) => void;
+  onSelectionChange?: (from: number, to: number, initializing?: boolean) => void;
   /** Yrs-authoritative toolbar state, emitted while standard yrs input is active. */
   onYrsSelectionChange?: (selection: YrsToolbarSelection) => void;
   onViewerSelectionChange?: (selection: ViewerSelectionChange) => void;
@@ -977,7 +977,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         residentLayoutReady = false,
         residentCaretReady = false,
         updateOrigin: LayoutUpdateOrigin = 'local',
-        inWorker?: boolean
+        inWorker?: boolean,
+        initializing = false
       ): void => {
         const session = yrsCore.session;
         if (session) {
@@ -1026,6 +1027,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         }
 
         if (partEdit && activeYrsRootStory !== 'body') {
+          lastPublishedBodySelectionKeyRef.current = null;
           onYrsPartSelectionChangeRef.current?.(partEdit, {
             from: selection.anchor,
             to: selection.head,
@@ -1041,7 +1043,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           // projection. React state consumes the authoritative yrs positions
           // directly.
           if (!docChanged && selectionChanged) {
-            onSelectionChangeRef.current?.(selection.anchor, selection.head);
+            onSelectionChangeRef.current?.(selection.anchor, selection.head, initializing);
           }
         }
         // Layout reads the same authoritative selection, but selection state

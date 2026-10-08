@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef, useState } from 'react';
@@ -22,8 +22,10 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { PartEditTarget } from '../partEdit';
 import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 import { workerOpenSave } from '../internals/workerOpenSave';
+import { setupWorkerEngine } from '../__fixtures__/workerEngine';
 import { useFileIO } from './useFileIO';
 import { useHeaderFooterEditing } from './useHeaderFooterEditing';
+import * as headerFooterEditing from './useHeaderFooterEditing';
 
 const { act, cleanup, fireEvent, render, renderHook, within } = await import('@testing-library/react');
 const quiet = { error: console.error, warn: console.warn };
@@ -690,6 +692,85 @@ function twoCommentFixture(): ArrayBuffer {
   return rezipPartsToArrayBuffer(source.parts);
 }
 
+async function clickCommentAfterHeaderReturn(
+  mountEditor: (bytes: ArrayBuffer) => Promise<Pick<Awaited<ReturnType<typeof mount>>, 'ref' | 'view'>>,
+  moveBodyCaret = true
+) {
+  const useEditing = useHeaderFooterEditing;
+  let editing!: ReturnType<typeof useHeaderFooterEditing>;
+  const captureEditing = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
+    editing = useEditing(options);
+    return editing;
+  });
+  try {
+    const source = fixture((p) =>
+      p('<w:commentRangeStart w:id="1"/>' + run('Body text') + '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>') +
+      p(run('Second paragraph')),
+      { comments: true, header: true }
+    );
+    const editor = await mountEditor(source.bytes);
+    await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    await act(async () => { await editor.ref.current!.flushPendingInput(); });
+    const paged = editor.ref.current!.getEditorRef()!;
+    const session = paged.getYrsSession()!;
+    const [first, second] = session.paragraphs('body');
+    if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
+      await act(async () => {
+        expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
+      });
+    }
+    await until(() => !!editor.view.container.querySelector('.docx-unified-sidebar .docx-comment-card[data-comment-id="1"]'));
+    const card = editor.view.container.querySelector<HTMLElement>('.docx-unified-sidebar .docx-comment-card[data-comment-id="1"]')!;
+    expect(within(card).queryByTitle('More options')).toBeNull();
+    if (moveBodyCaret) {
+      await act(async () => {
+        expect(editor.ref.current!.scrollToParaId(second!.paraId)).toBe(true);
+      });
+      expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: second!.paraId, offset: 0 });
+    } else {
+      expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: first!.paraId, offset: 0 });
+    }
+    await act(async () => editing.handleHeaderFooterDoubleClick('header', 1));
+    await until(() => session.selection()?.head.story === 'hf:header');
+    await act(async () => {
+      paged.insertText('Edited ');
+      await paged.flushPendingInput();
+    });
+    expect(session.paragraphs('hf:header')[0]!.text).toBe('Edited Header');
+    await act(async () => editing.handleBodyClick());
+    await until(() => session.selection()?.head.story === 'body');
+    expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: first!.paraId, offset: 0 });
+    await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    const page = paged.getLayout()!.pages[0]!;
+    const fragment = page.fragments.find((entry) => entry.kind === 'paragraph')!;
+    const canvas = editor.view.container.querySelector<HTMLCanvasElement>('canvas[data-page-index="0"]')!;
+    canvas.getBoundingClientRect = () => new DOMRect(0, 0, page.size.w, page.size.h);
+    const point = { clientX: fragment.x, clientY: fragment.y + fragment.height / 2, button: 0 };
+    await until(() => paged.getPositionAtPoint(point.clientX, point.clientY)?.target.start.offset === 0);
+    expect(paged.getPositionAtPoint(point.clientX, point.clientY)?.target).toMatchObject({
+      story: 'body', start: { paraId: first!.paraId, offset: 0 }, end: { paraId: first!.paraId, offset: 0 },
+    });
+    await act(async () => {
+      fireEvent.mouseDown(canvas, point);
+      fireEvent.mouseUp(canvas, point);
+      fireEvent.click(canvas, point);
+      await paged.flushPendingInput();
+    });
+    expect(session.selection()?.head).toMatchObject({ story: 'body', paraId: first!.paraId, offset: 0 });
+    expect(within(card).queryByTitle('More options')).not.toBeNull();
+  } finally {
+    captureEditing.mockRestore();
+  }
+}
+
+test('clicking the first body caret after header editing expands its covering comment', async () => {
+  await clickCommentAfterHeaderReturn(mount);
+}, 30_000);
+
+test('clicking the startup body caret after header editing expands its covering comment without prior navigation', async () => {
+  await clickCommentAfterHeaderReturn(mount, false);
+}, 30_000);
+
 async function deleteTwoCommentsAcrossSaves(mountEditor: typeof mount = mount) {
   const editor = await mountEditor(twoCommentFixture());
   await until(() => editor.ref.current!.getComments().length === 2);
@@ -698,9 +779,11 @@ async function deleteTwoCommentsAcrossSaves(mountEditor: typeof mount = mount) {
       expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
     });
   }
+  await until(() => editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card').length === 2);
+  expect(editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card [title="More options"]')).toHaveLength(0);
   const deleteComment = async (id: number) => {
-    await until(() => !!editor.view.container.querySelector(`[data-comment-id="${id}"]`));
-    const card = editor.view.container.querySelector<HTMLElement>(`[data-comment-id="${id}"]`)!;
+    await until(() => !!editor.view.container.querySelector(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`));
+    const card = editor.view.container.querySelector<HTMLElement>(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`)!;
     await act(async () => fireEvent.click(card));
     await act(async () => fireEvent.click(within(card).getByTitle('More options')));
     await act(async () => fireEvent.click(within(card).getByRole('menuitem', { name: 'Delete', hidden: true })));
@@ -1231,4 +1314,177 @@ testSaveEngines('an edit in one paragraph keeps the rest of the body byte-for-by
   expect(saved.slice(start, saved.length - (original.length - end)).replace(/<[^>]+>/g, '')).toBe(
     'Typed Edited here'
   );
+});
+
+describe('DocxEditor saves (worker engine)', () => {
+  const workers = setupWorkerEngine();
+
+  async function mountWorker(bytes: ArrayBuffer) {
+    const opens = workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length;
+    const ref = createRef<DocxEditorRef>();
+    const errors: Error[] = [];
+    const onError = (error: Error) => errors.push(error);
+    const view = render(
+      <DocxEditor ref={ref} experimentalWorkerOpen documentBuffer={bytes} onError={onError} downloadOnSave={false} />
+    );
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    if (unzipContainer(new Uint8Array(bytes))['word/comments.xml']) {
+      await until(() => (ref.current?.getComments().length ?? 0) > 0);
+    }
+    expect(errors.map(({ message }) => message)).toEqual([]);
+    await act(async () => { await ref.current!.flushPendingInput(); });
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.flatMap((worker) => worker.requests).filter((type) => type === 'open').length).toBeGreaterThan(opens);
+    expect(workers.some((worker) => worker.sessions.length > 0)).toBe(true);
+    return {
+      ref,
+      view,
+      async save(): Promise<ArrayBuffer> {
+        let saved: ArrayBuffer | null = null;
+        await act(async () => {
+          saved = await ref.current!.save();
+        });
+        expect(errors.map(({ message }) => message)).toEqual([]);
+        expect(saved).not.toBeNull();
+        return saved!;
+      },
+    };
+  }
+
+  test('clicking the first body caret after header editing expands its covering comment on the worker engine', async () => {
+    await clickCommentAfterHeaderReturn(mountWorker);
+  }, 30_000);
+
+  test('clicking the startup body caret after header editing expands its covering comment without prior navigation on the worker engine', async () => {
+    await clickCommentAfterHeaderReturn(mountWorker, false);
+  }, 30_000);
+
+  async function deleteTwoCommentsAcrossSaves() {
+    const editor = await mountWorker(twoCommentFixture());
+    await until(() => editor.ref.current!.getComments().length === 2);
+    if (!editor.ref.current!.commands.getState('commentsSidebar').active) {
+      await act(async () => {
+        expect((await editor.ref.current!.commands.execute('commentsSidebar', null)).ok).toBe(true);
+      });
+    }
+    await until(() => editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card').length === 2);
+    expect(editor.view.container.querySelectorAll('.docx-unified-sidebar .docx-comment-card [title="More options"]')).toHaveLength(0);
+    const deleteComment = async (id: number) => {
+      await until(() => !!editor.view.container.querySelector(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`));
+      const card = editor.view.container.querySelector<HTMLElement>(`.docx-unified-sidebar .docx-comment-card[data-comment-id="${id}"]`)!;
+      await act(async () => fireEvent.click(card));
+      await act(async () => fireEvent.click(within(card).getByTitle('More options')));
+      await act(async () => fireEvent.click(within(card).getByRole('menuitem', { name: 'Delete', hidden: true })));
+      await until(() => !editor.ref.current!.getComments().some((comment) => comment.id === id));
+    };
+    await deleteComment(1);
+    const first = unzipContainer(new Uint8Array(await editor.save()));
+    await deleteComment(2);
+    return { first, saved: await editor.save() };
+  }
+
+  test('deleting two comments across saves does not resurrect the first comment on the worker engine', async () => {
+    const { first, saved } = await deleteTwoCommentsAcrossSaves();
+    const firstComments = new DOMParser().parseFromString(xmlPart(first, 'word/comments.xml'), 'application/xml');
+    expect(xmlElements(firstComments, W, 'comment').map((entry) => entry.getAttribute('w:id'))).toEqual(['2']);
+    expect(markers(xmlPart(first, 'word/document.xml'), 1).filter((marker) => marker !== 'Reference')).toEqual([]);
+    const last = unzipContainer(new Uint8Array(saved));
+    if (last['word/comments.xml']) {
+      const lastComments = new DOMParser().parseFromString(xmlPart(last, 'word/comments.xml'), 'application/xml');
+      expect(xmlElements(lastComments, W, 'comment').some((entry) => entry.getAttribute('w:id') === '1')).toBe(false);
+    }
+    expect((await reopened(saved)).package.document.comments?.some((comment) => comment.id === 1) ?? false).toBe(false);
+  });
+
+  test('adding and removing a header across saves keeps relationship and content-type targets on the worker engine', async () => {
+    const useEditing = useHeaderFooterEditing;
+    let mountedHost!: Parameters<typeof useHeaderFooterEditing>[0];
+    const captureHost = spyOn(headerFooterEditing, 'useHeaderFooterEditing').mockImplementation((options) => {
+      mountedHost = options;
+      return useEditing(options);
+    });
+    try {
+      const editor = await mountWorker(fixture((p) => p(run('Body text'))).bytes);
+      const paged = editor.ref.current!.getEditorRef()!;
+      const session = paged.getYrsSession()!;
+      expect(session).not.toBeNull();
+      expect(mountedHost).toBeDefined();
+      let host = paged.getDocument()!;
+      const errors: Error[] = [];
+      const pagedEditorRef = {
+        current: {
+          getYrsSession: () => session,
+          getDocument: () => host,
+          flushPendingInput: () => paged.flushPendingInput(),
+        } as PagedEditorRef,
+      };
+      const hook = renderHook(() => {
+        const [document, setDocument] = useState<DocxDocument>(host);
+        const [partEditTarget, setPartEditTarget] = useState<PartEditTarget | null>(null);
+        host = document;
+        const editing = useEditing({
+          document,
+          pushDocument: (next) => {
+            mountedHost.pushDocument(next);
+            setDocument(next);
+          },
+          partEditTarget,
+          setPartEditTarget,
+        });
+        const io = useFileIO({
+          pagedEditorRef,
+          resolveImage: () => null,
+          comments: [],
+          documentName: undefined,
+          onSave: undefined,
+          downloadOnSave: false,
+          onOpen: undefined,
+          onError: (error) => errors.push(error),
+          onPrint: undefined,
+          onDocumentNameChange: undefined,
+          loadBuffer: async () => {},
+          focusActiveEditor: () => {},
+        });
+        return { editing, save: io.handleSave };
+      });
+      const workerSaves = () => workers.flatMap((worker) => worker.requests).filter((type) => type === 'save').length;
+      const save = async (): Promise<ArrayBuffer> => {
+        expect(editor.ref.current!.getEditorRef()!.getYrsSession()).toBe(session);
+        expect(mountedHost.document).toBe(host);
+        const saves = workerSaves();
+        let saved: ArrayBuffer | null = null;
+        await act(async () => {
+          saved = await hook.result.current.save();
+        });
+        expect(errors.map(({ message }) => message)).toEqual([]);
+        expect(saved).not.toBeNull();
+        expect(workerSaves()).toBe(saves + 1);
+        return saved!;
+      };
+      await act(async () => hook.result.current.editing.handleHeaderFooterDoubleClick('header', 1));
+      expect(host.package.headers?.size).toBe(1);
+      const firstSave = await save();
+      expect(unzipContainer(new Uint8Array(firstSave))['word/header1.xml']).toBeDefined();
+      await act(async () => hook.result.current.editing.handleRemoveHeaderFooter());
+      expect(host.package.headers?.size).toBe(0);
+      const lastSave = await save();
+      for (const saved of [firstSave, lastSave]) {
+        const parts = unzipContainer(new Uint8Array(saved));
+        const rels = new DOMParser().parseFromString(xmlPart(parts, 'word/_rels/document.xml.rels'), 'application/xml');
+        for (const entry of xmlElements(rels, RELS, 'Relationship')) {
+          if (entry.getAttribute('TargetMode') === 'External') continue;
+          const target = entry.getAttribute('Target')!;
+          const name = new URL(target, 'https://package.test/word/document.xml').pathname.slice(1);
+          expect(parts[name]).toBeDefined();
+        }
+        const types = new DOMParser().parseFromString(xmlPart(parts, '[Content_Types].xml'), 'application/xml');
+        for (const entry of xmlElements(types, 'http://schemas.openxmlformats.org/package/2006/content-types', 'Override')) {
+          expect(parts[entry.getAttribute('PartName')!.slice(1)]).toBeDefined();
+        }
+      }
+      expect((await reopened(lastSave)).package.document.finalSectionProperties?.headerReferences ?? []).toEqual([]);
+    } finally {
+      captureHost.mockRestore();
+    }
+  });
 });

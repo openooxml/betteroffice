@@ -49,6 +49,9 @@ import {
   resetEngineChoiceForTests,
   setMissingWorkerCapabilitiesForTests,
 } from '../components/DocxEditor/internals/engineChoice';
+import { setupWorkerEngine } from '../components/DocxEditor/__fixtures__/workerEngine';
+
+const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, false, documentBytes(), false);
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
@@ -1599,5 +1602,100 @@ describe.each(editorEngines)('DocxEditor plugins (%s engine)', (_engine, experim
     });
     await settle();
     expect(errors.map((error) => [error.pluginId, error.phase])).toEqual([['raw', 'definition']]);
+  });
+});
+
+describe('DocxEditor plugins (worker engine)', () => {
+  let attachGate: Promise<void> | null = null;
+  let attachRequested = false;
+  const workers = setupWorkerEngine((worker) => {
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (request, transfer) => {
+      if (request.type === 'attachCanvases' && request.zoom === 1.5 && attachGate) {
+        attachRequested = true;
+        void attachGate.then(() => post(request, transfer));
+        return;
+      }
+      post(request, transfer);
+    };
+  });
+
+  async function mountWorker(props: Partial<DocxEditorProps> = {}) {
+    const opens = workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    );
+    const editor = await mount({ ...props, experimentalWorkerOpen: true });
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.some(
+      (worker) => worker.sessions.length > 0 && worker.requests.includes('open')
+    )).toBe(true);
+    expect(workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    )).toBeGreaterThan(opens);
+    await act(async () => {
+      await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    });
+    return editor;
+  }
+
+  test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
+    const results: DocxAnchorGeometryResult[] = [];
+    const events: (DocxAnchorGeometryResult | null)[] = [];
+    const availableZooms: { layout: number; dom: number }[] = [];
+    let target: DocxGeometryTarget | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'host.zoom-anchor',
+      createState: () => null,
+      onEvent(context, event) {
+        if (event.type === 'layout-change' && event.layout?.zoom === 1.5 && target) {
+          events.push(context.geometry?.getAnchorGeometry(target) ?? null);
+        }
+      },
+      overlay: ({ geometry }) => {
+        if (target) {
+          const result = geometry.getAnchorGeometry(target);
+          results.push(result);
+          if (result.ok) availableZooms.push({ layout: geometry.layout.zoom, dom: geometry.dom.zoom });
+        }
+        return null;
+      },
+    });
+    let painted = false;
+    const { ref } = await mountWorker({
+      plugins: [plugin],
+      onFirstPagePainted: () => (painted = true),
+    });
+    await until(() => painted);
+    const { paragraph } = await firstParagraph(ref);
+    const identities = await ref.current!.getParagraphIdentities();
+    const anchor = identities
+      .paragraphs.find((entry) => entry.session?.paraId === paragraph.paraId)!.session!;
+    target = { kind: 'paragraph', paragraph: anchor };
+    const rect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 800, 1000)
+    );
+    let releaseAttach = () => {};
+    attachRequested = false;
+    attachGate = new Promise<void>((done) => (releaseAttach = done));
+    try {
+      availableZooms.length = 0;
+      await act(async () => ref.current!.setZoom(1.5));
+      await until(() => events.length > 0 && attachRequested);
+      expect(events).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+      expect(results.at(-1)).toMatchObject({ ok: false });
+      expect(availableZooms).toEqual([]);
+      await act(async () => releaseAttach());
+      await until(() => {
+        const last = results.at(-1);
+        return !!last?.ok && last.rects.length > 0;
+      });
+      await until(() => events.at(-1)?.ok === true);
+      expect(availableZooms.length).toBeGreaterThan(0);
+      expect(availableZooms.every(({ layout, dom }) => layout === 1.5 && dom === 1.5)).toBe(true);
+    } finally {
+      releaseAttach();
+      attachGate = null;
+      rect.mockRestore();
+    }
   });
 });
