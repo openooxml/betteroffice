@@ -44,11 +44,16 @@ export function observeProposals(
   return () => { unsubscribe(); unsubscribeWorker(); };
 }
 
+/** The revision preview the session's layouts render and its anchors hide. */
+export function revisionPreviewOf(session: object | null): ReturnType<typeof proposalRevisionPreview> {
+  if (session && hasEditorWorkerProposalRounds(session as YrsSession)) return registeredWorkerProposalAuthority(session as YrsSession)!.revisionPreview();
+  const snapshot = proposalSnapshot(session);
+  return snapshot ? proposalRevisionPreview(snapshot) : undefined;
+}
+
 /** The preview key a layout of the session's current preview carries. */
 export function currentPreviewKey(session: object | null): string {
-  if (session && hasEditorWorkerProposalRounds(session as YrsSession)) return revisionPreviewKey(registeredWorkerProposalAuthority(session as YrsSession)!.revisionPreview());
-  const snapshot = proposalSnapshot(session);
-  return revisionPreviewKey(snapshot ? proposalRevisionPreview(snapshot) : undefined);
+  return revisionPreviewKey(revisionPreviewOf(session));
 }
 
 /** The preview key of the layout `queries` answer for. */

@@ -180,6 +180,8 @@ export type DocxAnchorGeometryResult =
       rects: readonly DocxAnchorRect[];
       anchor: DocxAnchorRect;
       pageRect: DocxPluginRect;
+      /** Laid-out pages the target reaches that are not built yet; `readAnchorGeometry` only. */
+      unbuiltPages?: readonly number[];
     }
   | {
       ok: false;
@@ -207,9 +209,15 @@ export interface DocxPluginGeometry {
   /**
    * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
-   * Refuses stale or unrendered layouts.
+   * Refuses stale or unrendered layouts. Non-proposal targets prefer {@link readAnchorGeometry}.
    */
   getAnchorGeometry(target: DocxGeometryTarget): DocxAnchorGeometryResult;
+  /**
+   * Resolves a target like `getAnchorGeometry`, reading worker viewers from the worker. Fragments
+   * on unbuilt pages are left out of `rects` and their pages listed in `unbuiltPages`; such an
+   * answer is provisional until those pages are built.
+   */
+  readAnchorGeometry(target: DocxGeometryTarget): Promise<DocxAnchorGeometryResult>;
 }
 
 export type DocxPluginNavigationFailureCode =

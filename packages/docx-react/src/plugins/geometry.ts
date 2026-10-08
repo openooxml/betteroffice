@@ -7,10 +7,11 @@ import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugi
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   proposalSetIdentity,
+  type AnchorDisplayTarget,
   type ProposalGeometryMirror,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
-import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
+import { sourceVersionOf, workerFrameVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
 import { displayWindowOf } from '../components/DocxEditor/internals/displayWindow';
 import type { PagedEditorRef } from '../components/DocxEditor/PagedEditor';
 import type { DocxPointPosition } from '../components/DocxEditor/types';
@@ -21,7 +22,14 @@ import {
   type RawAnchorRange,
 } from './anchorGeometry';
 import { currentPreviewKey, proposalSnapshot, renderedPreviewKey } from './proposalPreview';
-import type { DocxAnchorRect, DocxPluginGeometry, DocxPluginLayout, DocxPluginRect } from './types';
+import type {
+  DocxAnchorGeometryResult,
+  DocxAnchorRect,
+  DocxGeometryTarget,
+  DocxPluginGeometry,
+  DocxPluginLayout,
+  DocxPluginRect,
+} from './types';
 
 import { flushEditorInput } from '../components/DocxEditor/editorBatches';
 import { isWorkerViewer } from '../components/DocxEditor/internals/workerViewer';
@@ -111,6 +119,13 @@ export interface AnchorGeometryAccess {
   presented: boolean;
 }
 
+/** Resolves a target in the worker at the worker `version`; null once the worker moved past it. */
+export type ReadAnchorTarget = (
+  target: Exclude<DocxGeometryTarget, { kind: 'proposal' }>,
+  version: string,
+  previewVersion: number
+) => Promise<AnchorDisplayTarget | null>;
+
 interface Interval {
   from: number;
   to: number;
@@ -185,7 +200,8 @@ export function createPluginGeometry(
   queries: DisplayListQueries,
   access: () => AnchorGeometryAccess | null,
   held: () => boolean = () => false,
-  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>
+  readPoint?: (clientX: number, clientY: number) => Promise<DocxPointPosition | null>,
+  readTarget?: ReadAnchorTarget
 ): DocxPluginGeometry {
   const shown = () => dom.zoom === layout.zoom && current();
   const projector = createCanvasHostProjector(dom.pagesContainer, queries, dom.zoom);
@@ -200,6 +216,7 @@ export function createPluginGeometry(
   };
   const unavailable = () =>
     anchorFailure('layout-unavailable', 'No rendered layout shows this target yet');
+  const stale = () => anchorFailure('stale-version', 'The document changed after that version');
   /** Just past the last unit of `[from, to)` that draws, found by bisecting its visible suffix. */
   const lastUnitEnd = (from: number, to: number): number | null => {
     const draws = (start: number) => queries.rangeRects(start, to).some((rect) => rect.width > 0);
@@ -247,7 +264,103 @@ export function createPluginGeometry(
     const end = lastUnitEnd(from, to);
     return end === null ? null : caretAt(end, true);
   };
-  return {
+  const pageAnchor = (pageIndex: number): DocxAnchorRect | null => {
+    const bounds = projector.getPageBounds(pageIndex);
+    return bounds
+      ? {
+          ...toOverlayRect(dom.pagesContainer, layer, dom.zoom, { ...bounds, width: 0, height: 0 }),
+          pageIndex,
+        }
+      : null;
+  };
+  /**
+   * Projects display `ranges` less `hidden`. Unless `deferUnbuilt`, a fragment on a visible
+   * unbuilt page refuses; with it, such fragments are left out and their pages listed.
+   */
+  const place = (
+    ranges: Interval[],
+    hidden: readonly Interval[],
+    paragraph: number | null,
+    deferUnbuilt: boolean
+  ): DocxAnchorGeometryResult => {
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    const window = displayWindowOf(queries)?.read();
+    const pages = queries.displayList?.pages ?? [];
+    const pendingPage = (pageIndex: number): boolean =>
+      pages[pageIndex]?.unbuilt === true &&
+      (deferUnbuilt || (!!window && pageIndex >= window[0] && pageIndex < window[1]));
+    const reaches = ({ unbuilt, positionSpan }: (typeof pages)[number]) =>
+      !!unbuilt &&
+      !!positionSpan &&
+      ranges.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0]);
+    const unbuiltPages = deferUnbuilt
+      ? pages.flatMap((page, pageIndex) => (reaches(page) ? [pageIndex] : []))
+      : [];
+    if (!deferUnbuilt && window && pages.slice(window[0], window[1]).some(reaches)) return unavailable();
+    const union: Interval[] = [];
+    for (const range of subtract(ranges, hidden)) {
+      const previous = union.at(-1);
+      if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
+      else union.push({ ...range });
+    }
+    const rects: DocxAnchorRect[] = [];
+    const drawn: DisplayListRect[] = [];
+    let tail: Interval | null = null;
+    for (const { from, to } of union) {
+      if (from >= to) continue;
+      let placed = false;
+      for (const rect of queries.rangeRects(from, to)) {
+        if (rect.width <= 0) continue;
+        if (pendingPage(rect.pageIndex)) {
+          if (deferUnbuilt) continue;
+          return unavailable();
+        }
+        const projected = project(rect);
+        if (!projected) return unavailable();
+        rects.push(projected);
+        drawn.push(rect);
+        placed = true;
+      }
+      if (placed) tail = { from, to };
+    }
+    let anchor: DocxAnchorRect | null;
+    const lastUnbuilt = unbuiltPages.at(-1);
+    if (lastUnbuilt !== undefined && drawn.every(({ pageIndex }) => pageIndex < lastUnbuilt)) {
+      anchor = pageAnchor(lastUnbuilt);
+    } else {
+      const last = ranges.at(-1);
+      const gap = last && widen(last, hidden);
+      const end =
+        tail !== null
+          ? (endOf(tail) ?? lastInReadingOrder(drawn))
+          : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
+            (paragraph === null ? null : caretAt(paragraph)));
+      const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
+      const pending = [end, fallback].find((rect) => rect && pendingPage(rect.pageIndex));
+      if (pending && !deferUnbuilt) return unavailable();
+      anchor = pending
+        ? pageAnchor(pending.pageIndex)
+        : end
+          ? project(end)
+          : fallback
+            ? project({ ...fallback, width: 0 })
+            : null;
+    }
+    if (!anchor) return unavailable();
+    const page = projector.getPageBounds(anchor.pageIndex);
+    if (!page) return unavailable();
+    return {
+      ok: true,
+      version: layout.version,
+      previewVersion: layout.previewVersion,
+      layoutId: layout.id,
+      rects,
+      anchor,
+      pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
+      ...(deferUnbuilt ? { unbuiltPages } : {}),
+    };
+  };
+  const geometry: DocxPluginGeometry = {
     layout,
     dom,
     toOverlayRect: (rect) =>
@@ -272,9 +385,7 @@ export function createPluginGeometry(
       const live = access();
       if (!live || !live.presented || live.editor.hasPendingInput()) return unavailable();
       const { session, editor } = live;
-      if (session.version() !== layout.version) {
-        return anchorFailure('stale-version', 'The document changed after that version');
-      }
+      if (session.version() !== layout.version) return stale();
       const snapshot = proposalSnapshot(session);
       if (
         (snapshot?.previewVersion ?? 0) !== layout.previewVersion ||
@@ -300,12 +411,6 @@ export function createPluginGeometry(
       if (mirrored && !mirrored.ok) return mirrored;
       const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
       if (resolved && !resolved.ok) return resolved;
-      const window = displayWindowOf(queries)?.read();
-      const pendingPage = (pageIndex: number): boolean =>
-        !!window &&
-        pageIndex >= window[0] &&
-        pageIndex < window[1] &&
-        queries.displayList?.pages[pageIndex]?.unbuilt === true;
       const display = (range: RawAnchorRange): Interval | null => {
         const from = editor.yrsLocToDisplayPosition(range.start);
         const to = editor.yrsLocToDisplayPosition(range.end);
@@ -317,17 +422,6 @@ export function createPluginGeometry(
         if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
         ranges.push(mapped);
       }
-      ranges.sort((a, b) => a.from - b.from || a.to - b.to);
-      if (
-        window &&
-        queries.displayList?.pages.slice(window[0], window[1]).some(
-          ({ unbuilt, positionSpan }) =>
-            unbuilt &&
-            positionSpan &&
-            ranges.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0])
-        )
-      )
-        return unavailable();
       const hidden =
         (mirror && (!hasEditorWorkerProposalRounds(session) || !workerOpenReplicaReady(session))
           ? mirror.hidden
@@ -335,56 +429,34 @@ export function createPluginGeometry(
         hiddenRanges(session, layout.version)
           .map(display)
           .filter((range): range is Interval => range !== null);
-      const union: Interval[] = [];
-      for (const range of subtract(ranges, hidden)) {
-        const previous = union.at(-1);
-        if (previous && range.from < previous.to) previous.to = Math.max(previous.to, range.to);
-        else union.push({ ...range });
-      }
-      const rects: DocxAnchorRect[] = [];
-      const drawn: DisplayListRect[] = [];
-      let tail: Interval | null = null;
-      for (const { from, to } of union) {
-        if (from >= to) continue;
-        const visible = queries.rangeRects(from, to).filter((rect) => rect.width > 0);
-        for (const rect of visible) {
-          if (pendingPage(rect.pageIndex)) return unavailable();
-          const projected = project(rect);
-          if (!projected) return unavailable();
-          rects.push(projected);
-          drawn.push(rect);
-        }
-        if (visible.length > 0) tail = { from, to };
-      }
-      const last = ranges.at(-1);
-      const gap = last && widen(last, hidden);
       const paragraph = mirrored?.ok
         ? mirrored.paragraph
         : resolved?.ok
           ? editor.yrsLocToDisplayPosition(resolved.paragraph)
           : null;
-      const end =
-        tail !== null
-          ? (endOf(tail) ?? lastInReadingOrder(drawn))
-          : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
-            (paragraph === null ? null : caretAt(paragraph)));
-      const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
-      if ((end && pendingPage(end.pageIndex)) || (fallback && pendingPage(fallback.pageIndex))) {
+      return place(ranges, hidden, paragraph, false);
+    },
+    async readAnchorGeometry(target) {
+      if (!readTarget || target.kind === 'proposal') return geometry.getAnchorGeometry(target);
+      if (!shown()) return unavailable();
+      const version = workerFrameVersionOf(queries);
+      if (version === null) return unavailable();
+      if (target.kind === 'range' && target.version !== layout.version) return stale();
+      let reply: AnchorDisplayTarget | null;
+      try {
+        reply = await readTarget(
+          target.kind === 'range' ? { ...target, version } : target,
+          version,
+          layout.previewVersion
+        );
+      } catch {
         return unavailable();
       }
-      const anchor = end ? project(end) : fallback ? project({ ...fallback, width: 0 }) : null;
-      if (!anchor) return unavailable();
-      const page = projector.getPageBounds(anchor.pageIndex);
-      if (!page) return unavailable();
-      return {
-        ok: true,
-        version: layout.version,
-        previewVersion: layout.previewVersion,
-        layoutId: layout.id,
-        rects,
-        anchor,
-        pageRect: toOverlayRect(dom.pagesContainer, layer, dom.zoom, page),
-      };
+      if (!shown()) return unavailable();
+      if (!reply) return stale();
+      if (!reply.ok) return reply;
+      return place([...reply.ranges], reply.hidden, reply.paragraph, true);
     },
   };
+  return geometry;
 }
