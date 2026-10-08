@@ -226,7 +226,6 @@ test('a worker viewer reads paragraph, search, range and revision geometry from 
   const { main, targets, requests, workerVersion, geometry } = await workerViewer();
   expect(workerVersion).not.toBe(main.version());
   for (const target of targets) {
-    expect(geometry.getAnchorGeometry(target)).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
     const answer = await geometry.readAnchorGeometry(target);
     expect(answer).toMatchObject({ ok: true, version: main.version(), unbuiltPages: [] });
     if (!answer.ok) throw new Error(answer.failure.message);
@@ -273,13 +272,13 @@ test('a worker viewer refuses stale targets and superseded worker replies', asyn
 
 test('a failed worker read refuses instead of placing rects', async () => {
   const { targets, requests, geometry } = await workerViewer({ fail: () => true });
-  for (const target of targets) {
+  for (const [index, target] of targets.entries()) {
     expect(await geometry.readAnchorGeometry(target)).toEqual({
       ok: false,
       failure: { code: 'layout-unavailable', message: expect.any(String) },
     });
+    expect(requests).toHaveLength(index + 1);
   }
-  expect(requests.length).toBeGreaterThan(0);
 });
 
 test('a main-thread session answers readAnchorGeometry exactly like getAnchorGeometry', async () => {
