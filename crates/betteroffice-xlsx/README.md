@@ -67,6 +67,11 @@ text and links only to `http`, `https` and `mailto` destinations.
 work from bytes (opened for reading, never recalculated) or content without a
 session.
 
+`stored_cell_addresses(sheet, after, limit)` pages through stored cells in
+row-major order, including formatted blanks. `after` is the last address from
+the previous page; limits from 1 to 10,000 are accepted. This avoids scanning
+a large empty rectangle when auditing a sparse sheet.
+
 ## Collaboration
 
 Every replica needs an explicit client ID, assigned by the host. Yrs cannot
