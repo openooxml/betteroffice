@@ -446,11 +446,11 @@ describe('proposal geometry readers', () => {
       const mirror = computeProposalGeometryMirror(reader, main.getProposals());
       expect(mirror.targets.cell).toEqual({
         ok: false,
-        failure: { code: 'unsupported', message: 'The target has no body display position' },
+        failure: { code: 'unsupported', message: 'The target has no display position' },
       });
       expect(mirror.targets.delete).toEqual({
         ok: false,
-        failure: { code: 'unsupported', message: 'The target has no body display position' },
+        failure: { code: 'unsupported', message: 'The target has no display position' },
       });
       expect(mirror.hidden).toHaveLength(1);
     } finally {
@@ -458,6 +458,42 @@ describe('proposal geometry readers', () => {
     }
   });
 });
+
+function headerFixture(): Uint8Array {
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+  const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const deleted = (id: number, text: string) =>
+    `<w:del w:id="${id}" w:author="Reviewer"><w:r><w:delText>${text}</w:delText></w:r></w:del>`;
+  const parts: PartsMap = new Map();
+  parts.set(
+    '[Content_Types].xml',
+    toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>')
+  );
+  parts.set(
+    '_rels/.rels',
+    toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="${REL}/officeDocument" Target="word/document.xml"/></Relationships>`)
+  );
+  parts.set(
+    'word/_rels/document.xml.rels',
+    toBytes(`<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="${REL}/header" Target="header1.xml"/></Relationships>`)
+  );
+  parts.set(
+    'word/header1.xml',
+    toBytes(
+      `<w:hdr ${W}><w:p w14:paraId="0000E001"><w:r><w:t>Head</w:t></w:r>${deleted(1, 'gone')}<w:r><w:t>tail</w:t></w:r></w:p>` +
+        '<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:p w14:paraId="0000E002"><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+        '<w:p w14:paraId="0000E003"/></w:hdr>'
+    )
+  );
+  parts.set(
+    'word/document.xml',
+    toBytes(
+      `<w:document ${W} xmlns:r="${REL}"><w:body><w:p w14:paraId="00000001"><w:r><w:t>Body</w:t></w:r>${deleted(2, 'cut')}</w:p>` +
+        '<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr></w:body></w:document>'
+    )
+  );
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
 
 describe('anchor display targets', () => {
   test('resident and main readers resolve paragraph, search and range targets alike', async () => {
@@ -493,6 +529,67 @@ describe('anchor display targets', () => {
       expect(
         computeAnchorDisplayTargets(resident.geometryReader, targets(resident.geometryReader.version()), preview)
       ).toEqual(expected);
+    } finally {
+      resident.destroy();
+      main.destroy();
+    }
+  });
+
+  test('header targets and their cells map into the header story, with its hidden ranges only', async () => {
+    const main = await createYrsSession({ clientId: 79102 });
+    const resident = await createResidentEngineSession();
+    try {
+      main.openDocx(headerFixture(), true);
+      resident.loadState(main.encodeState());
+      const preview = Object.fromEntries(
+        main.listRevisions().map(({ revisionId }) => [revisionId, 'accepted' as const])
+      );
+      const range = (version: string, story: string, paraId: string, end: number) =>
+        ({
+          kind: 'range',
+          version,
+          range: { story, start: { paraId, offset: 0 }, end: { paraId, offset: end }, view: 'accepted' },
+        }) as const;
+      const targets = (version: string) =>
+        [
+          range(version, 'hf:rIdH', '0000E001', 8),
+          range(version, 'hf:rIdH:t0:r0c0', '0000E002', 4),
+          {
+            kind: 'paragraph',
+            paragraph: {
+              kind: 'persisted',
+              story: { partUri: '/word/header1.xml', kind: 'header' },
+              paraId: '0000E001',
+            },
+          },
+          range(version, 'body', '00000001', 4),
+          range(version, 'fn:1', '0000E001', 1),
+        ] as const;
+      const answers = computeAnchorDisplayTargets(main, targets(main.version()), preview);
+      const [header, cell, persisted, body, note] = answers;
+      expect(header).toEqual({
+        ok: true,
+        root: 'hf:rIdH',
+        ranges: [{ from: 1, to: 13 }],
+        paragraph: 1,
+        hidden: [{ from: 5, to: 9 }],
+      });
+      expect(cell).toMatchObject({ ok: true, root: 'hf:rIdH', hidden: [{ from: 5, to: 9 }] });
+      if (!cell?.ok) throw new Error('unreachable');
+      expect(cell.ranges[0]!.from).toBeGreaterThan(13);
+      expect(persisted).toMatchObject({ ok: true, root: 'hf:rIdH', paragraph: 1 });
+      expect(body).toMatchObject({ ok: true, ranges: [{ from: 1, to: 5 }], hidden: [{ from: 5, to: 8 }] });
+      expect(body).not.toHaveProperty('root');
+      expect(note).toMatchObject({ ok: false, failure: { code: 'unsupported' } });
+      const sessionTargets = (version: string) =>
+        targets(version).filter((target) => target.kind === 'range');
+      expect(
+        computeAnchorDisplayTargets(
+          resident.geometryReader,
+          sessionTargets(resident.geometryReader.version()),
+          preview
+        )
+      ).toEqual(computeAnchorDisplayTargets(main, sessionTargets(main.version()), preview));
     } finally {
       resident.destroy();
       main.destroy();

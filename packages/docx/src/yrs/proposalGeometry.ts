@@ -72,7 +72,8 @@ export interface RawAnchorRange {
   end: YrsLoc;
 }
 
-type AnchorResolution =
+/** @internal */
+export type AnchorResolution =
   | { ok: true; ranges: RawAnchorRange[]; paragraph: YrsLoc }
   | AnchorResolutionFailure;
 
@@ -124,6 +125,14 @@ export function anchorFailure(
 /** @internal */
 export function isBodyStory(story: string): boolean {
   return story === 'body' || story.startsWith('body:');
+}
+
+/**
+ * The story whose display positions `story` uses: `body` for the body and its cells, `hf:<rId>`
+ * for a header or footer and its cells, else null. @internal
+ */
+export function anchorDisplayRoot(story: string): string | null {
+  return isBodyStory(story) ? 'body' : (/^hf:[^:]+/.exec(story)?.[0] ?? null);
 }
 
 interface ViewSpan {
@@ -251,9 +260,9 @@ function sessionAnchor(
   if (
     resolved.status === 'unsupported' ||
     resolved.anchor.kind !== 'session' ||
-    !isBodyStory(resolved.anchor.story)
+    anchorDisplayRoot(resolved.anchor.story) === null
   ) {
-    return anchorFailure('unsupported', 'The paragraph has no body display position');
+    return anchorFailure('unsupported', 'The paragraph has no display position');
   }
   return resolved.anchor;
 }
@@ -332,8 +341,8 @@ export function resolveAnchorTarget(
     if (target.version !== version) {
       return anchorFailure('stale-version', 'The document changed after that version');
     }
-    if (!isBodyStory(target.range.story)) {
-      return anchorFailure('unsupported', 'The range has no body display position');
+    if (anchorDisplayRoot(target.range.story) === null) {
+      return anchorFailure('unsupported', 'The range has no display position');
     }
     if (!session.hasStory(target.range.story)) {
       return anchorFailure('missing-target', 'The story no longer exists');
@@ -368,11 +377,18 @@ export function resolveAnchorTarget(
       start: { story, ...range.start },
       end: { story, ...range.end },
     }));
-    if (ranges.some((range) => !isBodyStory(range.start.story))) {
-      return anchorFailure('unsupported', 'The revision has no body display position');
+    if (
+      ranges.some(({ start }) =>
+        proposal ? !isBodyStory(start.story) : anchorDisplayRoot(start.story) === null
+      )
+    ) {
+      return anchorFailure('unsupported', 'The revision has no display position');
     }
     if (proposal) {
       const paragraph = resolveParagraph(session, proposal.paragraph, version);
+      if (paragraph.ok && !isBodyStory(paragraph.loc.story)) {
+        return anchorFailure('unsupported', 'The paragraph has no display position');
+      }
       return paragraph.ok ? { ok: true, ranges, paragraph: paragraph.loc } : paragraph;
     }
     return { ok: true, ranges, paragraph: { ...ranges[0]!.start, offset: 0 } };
@@ -482,7 +498,7 @@ export function proposalSetIdentity(snapshot: DocxProposalSnapshot): string {
   return identity;
 }
 
-function displayMapper(reader: ProposalGeometryReader, version: string) {
+function displayMapper(reader: ProposalGeometryReader, version: string, root = 'body') {
   const projections = new Map<string, YrsLocProjection | null>();
   const inputMaps = new Map<string, YrsInputPositionMap | null>();
   const projectionFor = (rootStory: string): YrsLocProjection | null =>
@@ -504,7 +520,9 @@ function displayMapper(reader: ProposalGeometryReader, version: string) {
         : null
     );
   const positionFor = (loc: YrsLoc): number | null =>
-    yrsLocToProjectedDisplayPosition(reader, projectionFor, loc, 'body', inputMap);
+    anchorDisplayRoot(loc.story) === root
+      ? yrsLocToProjectedDisplayPosition(reader, projectionFor, loc, root, inputMap)
+      : null;
   const display = (range: RawAnchorRange): { from: number; to: number } | null => {
     const from = positionFor(range.start);
     const to = positionFor(range.end);
@@ -515,7 +533,7 @@ function displayMapper(reader: ProposalGeometryReader, version: string) {
     const ranges: { from: number; to: number }[] = [];
     for (const range of resolved.ranges) {
       const mapped = display(range);
-      if (!mapped) return anchorFailure('unsupported', 'The target has no body display position');
+      if (!mapped) return anchorFailure('unsupported', 'The target has no display position');
       ranges.push(mapped);
     }
     ranges.sort((a, b) => a.from - b.from || a.to - b.to);
@@ -567,7 +585,12 @@ export function computeProposalGeometryMirror(
 
 /** @internal */
 export type AnchorDisplayTarget =
-  | ({ ok: true; hidden: { from: number; to: number }[] } & ProposalDisplayTarget)
+  | ({
+      ok: true;
+      hidden: { from: number; to: number }[];
+      /** The header or footer story whose positions these are; absent for the body. */
+      root?: string;
+    } & ProposalDisplayTarget)
   | AnchorResolutionFailure;
 
 /** A non-proposal target whose paragraph anchors are session anchors. @internal */
@@ -589,21 +612,45 @@ export function sessionAnchorTarget(
   return 'ok' in paragraph ? paragraph : { ...target, paragraph };
 }
 
-/** Display targets in input order; every answer shares one hidden list. @internal */
+/** Display targets in input order; answers in one story share one hidden list. @internal */
 export function computeAnchorDisplayTargets(
   reader: ProposalGeometryReader,
   targets: readonly Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[],
   preview: ReturnType<typeof proposalRevisionPreview>
 ): AnchorDisplayTarget[] {
   const version = reader.version();
-  const mapper = displayMapper(reader, version);
-  let hidden: { from: number; to: number }[] | undefined;
-  return targets.map((target) => {
-    const mapped = mapper.target(resolveAnchorTarget(reader, target, version));
+  const display = anchorDisplays(reader, version, preview);
+  return targets.map((target) => display(resolveAnchorTarget(reader, target, version)));
+}
+
+/** Maps a resolved target to display positions in the story it is painted from. @internal */
+export function anchorDisplayTarget(
+  reader: ProposalGeometryReader,
+  resolved: AnchorResolution,
+  preview: ReturnType<typeof proposalRevisionPreview>
+): AnchorDisplayTarget {
+  return anchorDisplays(reader, reader.version(), preview)(resolved);
+}
+
+function anchorDisplays(
+  reader: ProposalGeometryReader,
+  version: string,
+  preview: ReturnType<typeof proposalRevisionPreview>
+): (resolved: AnchorResolution) => AnchorDisplayTarget {
+  const roots = new Map<
+    string,
+    { mapper: ReturnType<typeof displayMapper>; hidden?: { from: number; to: number }[] }
+  >();
+  return (resolved) => {
+    if (!resolved.ok) return resolved;
+    const root = anchorDisplayRoot(resolved.paragraph.story) ?? 'body';
+    let entry = roots.get(root);
+    if (!entry) roots.set(root, (entry = { mapper: displayMapper(reader, version, root) }));
+    const mapped = entry.mapper.target(resolved);
     if (!mapped.ok) return mapped;
-    hidden ??= mapper.hidden(hiddenRangesForPreview(reader, version, preview));
-    return { ...mapped, hidden };
-  });
+    entry.hidden ??= entry.mapper.hidden(hiddenRangesForPreview(reader, version, preview));
+    return { ...mapped, hidden: entry.hidden, ...(root === 'body' ? {} : { root }) };
+  };
 }
 
 /** @internal */
