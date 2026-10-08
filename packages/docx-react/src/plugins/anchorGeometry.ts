@@ -43,8 +43,7 @@ export function resolveAnchorTarget(
 /**
  * Resolves `target` in the worker at its `version` under the session's revision preview, refusing
  * when that preview is not the rendered `previewKey`; null once the worker moved past `version`.
- * Persisted anchors resolve on the main thread when it holds the document at `version`, else in
- * the worker.
+ * Persisted anchors resolve on the main thread when it holds the document, else in the worker.
  */
 export async function readWorkerAnchorTarget(
   read: ResidentEngineWorkerClient['documentRead'],
@@ -64,7 +63,7 @@ export async function readWorkerAnchorTarget(
   if (
     (target.kind === 'paragraph' || target.kind === 'search') &&
     target.paragraph.kind !== 'session' &&
-    !(workerOpenReplicaReady(session) && session.version() === version)
+    !workerOpenReplicaReady(session)
   ) {
     const resolved = await read({ kind: 'resolveParagraphAnchors', anchors: [target.paragraph] });
     if (resolved.version !== version) return null;

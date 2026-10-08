@@ -311,7 +311,7 @@ describe('anchor reads through the document worker', () => {
     paraId: '00000003',
   };
 
-  test('a worker bootstrapped from main state answers every target kind like the main thread', async () => {
+  test('a worker bootstrapped from main state at another version answers every target kind like the main thread, persisted anchors resolved on main', async () => {
     const main = await createYrsSession({ clientId: 815 });
     const engine = await createResidentEngineSession(undefined, 816);
     try {
@@ -332,7 +332,6 @@ describe('anchor reads through the document worker', () => {
       const session = resolved.anchor;
       const range = { kind: 'range' as const, version: main.version(), range: found.matches[0]!.range };
       const key = currentPreviewKey(main);
-      const aligned = { ...main, version: () => engine.proposalEngine.version() } as YrsSession;
       const targets = [
         { kind: 'paragraph' as const, paragraph: persisted },
         { kind: 'paragraph' as const, paragraph: session },
@@ -344,15 +343,10 @@ describe('anchor reads through the document worker', () => {
         const sent = target.kind === 'range' ? { ...target, version: engine.proposalEngine.version() } : target;
         const expected = computeAnchorDisplayTarget(main, target, undefined);
         expect(expected).toMatchObject({ ok: true, ranges: expect.arrayContaining([expect.any(Object)]) });
-        expect(await readWorkerAnchorTarget(read, aligned, sent, engine.proposalEngine.version(), 0, key)).toEqual(expected);
+        expect(await readWorkerAnchorTarget(read, main, sent, engine.proposalEngine.version(), 0, key)).toEqual(expected);
       }
-      expect(requests.map((request) => request.kind)).toEqual(targets.map(() => 'anchorTarget'));
-      expect(await readWorkerAnchorTarget(read, main, targets[0]!, engine.proposalEngine.version(), 0, key)).toMatchObject({
-        ok: false,
-        failure: { code: 'unsupported' },
-      });
-      expect(requests.at(-1)?.kind).toBe('resolveParagraphAnchors');
       expect(engine.proposalEngine.version()).not.toBe(main.version());
+      expect(requests.map((request) => request.kind)).toEqual(targets.map(() => 'anchorTarget'));
       expect(await readWorkerAnchorTarget(read, main, range, engine.proposalEngine.version(), 0, key)).toMatchObject({
         ok: false,
         failure: { code: 'stale-version' },
