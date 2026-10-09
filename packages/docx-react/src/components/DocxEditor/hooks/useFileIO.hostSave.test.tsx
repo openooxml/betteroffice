@@ -5,10 +5,15 @@ import { resolve } from 'node:path';
 import { parseDocx } from '@betteroffice/docx/docx';
 import type { Document } from '@betteroffice/docx/types/document';
 import { isMacPlatform } from '../../../commands/descriptors';
+import { InputOperationQueue } from '../inputOperationQueue';
 import type { PagedEditorRef } from '../PagedEditor';
 import { useFileIO } from './useFileIO';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
-import { useDocxCommandBinding, type DocxCommandInputs } from './useDocxCommands';
+import {
+  useDocxCommandBinding,
+  type DocxCommandInputs,
+  type DocxSaveOutcome,
+} from './useDocxCommands';
 import type { PagedEditorCommandBridge } from './usePagedEditorRefApi';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -95,6 +100,7 @@ function setup(
   options: {
     onSaveRequest?: () => boolean | void | Promise<boolean | void>;
     flush?: () => Promise<void>;
+    write?: () => void;
     focused?: boolean;
   } = {}
 ) {
@@ -105,7 +111,10 @@ function setup(
   const session = {
     paragraphIdentities: () => ({ sessionId: '', packageSha256: null, paragraphs: [] }),
     paragraphSavePlan: () => ({ assignments: [], patchedParts: [] }),
-    writtenParagraphIds: () => ({}),
+    writtenParagraphIds: () => {
+      options.write?.();
+      return {};
+    },
     recordSavedParagraphIds: () => [],
     canUndo: () => false,
     canRedo: () => false,
@@ -228,11 +237,78 @@ test('built-in export waits for input and aborts if the document changes', async
   const state = setup({ flush: () => gate });
   const saved = state.hook.result.current.io.handleSave();
   expect(state.events).toEqual(['flush']);
-  state.pagedEditorRef.current = { ...state.editor };
+  state.pagedEditorRef.current = { ...state.editor, getYrsSession: () => ({}) } as PagedEditorRef;
   release();
   expect(await saved).toBeNull();
   expect(state.events).toEqual(['flush']);
   expect(state.errors[0].message).toContain('document changed');
+});
+
+const SAVE_STAGES = ['request', 'flush', 'write'] as const;
+
+/** Swaps the editor handle at one stage of a Save, keeping or replacing its session. */
+function swapHandleDuringSave(stage: (typeof SAVE_STAGES)[number], replaceSession: boolean) {
+  const swap = (at: (typeof SAVE_STAGES)[number]) => {
+    if (at !== stage) return;
+    const session = replaceSession ? {} : state.editor.getYrsSession();
+    const rebuilt = { ...state.editor, getYrsSession: () => session };
+    state.pagedEditorRef.current = rebuilt as PagedEditorRef;
+  };
+  const state = setup({
+    onSaveRequest: () => {
+      swap('request');
+      return true;
+    },
+    flush: async () => swap('flush'),
+    write: () => swap('write'),
+  });
+  return state;
+}
+
+async function download(state: ReturnType<typeof setup>): Promise<DocxSaveOutcome> {
+  let outcome!: DocxSaveOutcome;
+  await act(async () => {
+    outcome = await state.hook.result.current.io.handleDownloadDocument();
+  });
+  return outcome;
+}
+
+test('a handle rebuilt for the same document during Save keeps the save', async () => {
+  for (const stage of SAVE_STAGES) {
+    const state = swapHandleDuringSave(stage, false);
+    expect({ stage, outcome: await download(state), errors: state.errors }).toEqual({
+      stage,
+      outcome: 'saved',
+      errors: [],
+    });
+    expect(state.saved).toHaveLength(1);
+  }
+});
+
+test('a document replaced during Save aborts it', async () => {
+  for (const stage of SAVE_STAGES) {
+    const state = swapHandleDuringSave(stage, true);
+    expect({ stage, outcome: await download(state) }).toEqual({ stage, outcome: 'failed' });
+    expect(state.saved).toEqual([]);
+    expect(state.errors[0].message).toContain('document changed');
+  }
+});
+
+test('failed input fails only the save waiting for it', async () => {
+  const queue = new InputOperationQueue(() => {});
+  const lost = new Error('input lost');
+  const state = setup({ flush: () => queue.flush() });
+  queue.enqueue(() => {
+    throw lost;
+  });
+  const waiting = state.hook.result.current.io.handleSave();
+  let results: unknown[] = [];
+  await act(async () => {
+    results = [await waiting, await state.hook.result.current.io.handleSave()];
+  });
+  expect(state.errors).toEqual([lost]);
+  expect(state.saved).toHaveLength(1);
+  expect(results).toEqual([null, state.saved[0]]);
 });
 
 test('failed input flush prevents serialization', async () => {

@@ -9,8 +9,9 @@ use std::collections::HashMap;
 
 use docx_edit::content_controls::{
     Anchor, ContentControl, ContentControlQuery, ContentControlsOptions, ContentControlsSnapshot,
-    ControlPlacement, ControlValue, DiagnosticCode, StorySelection, ValueUnavailable,
-    find_docx_content_controls, list_docx_content_controls, list_package_content_controls,
+    ControlMetadata, ControlPlacement, ControlValue, DiagnosticCode, EffectiveLock, StorySelection,
+    ValueUnavailable, find_docx_content_controls, list_docx_content_controls,
+    list_package_content_controls,
 };
 use docx_edit::structured::{
     BlockKind, ExportFailureCode, ExportOptions, InlineKind, RevisionView, export_docx_structured,
@@ -29,6 +30,24 @@ fn template() -> Vec<u8> {
         "/../../packages/docx/src/yrs/__fixtures__/content-controls/template.docx"
     ))
     .unwrap()
+}
+
+/// The template with its multi-line plain-text address control turned into a rich-text one.
+fn rich_address_template() -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(&template())
+        .unwrap()
+        .into_iter()
+        .map(|(path, bytes)| match path.as_str() {
+            "word/document.xml" => {
+                let xml = String::from_utf8(bytes).unwrap();
+                let rich = xml.replace(r#"<w:text w:multiLine="1"/>"#, "<w:richText/>");
+                assert_ne!(rich, xml);
+                (path, rich.into_bytes())
+            }
+            _ => (path, bytes),
+        })
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
 }
 
 fn open(bytes: &[u8]) -> EditingDoc {
@@ -513,7 +532,7 @@ fn fills_two_controls_by_id_as_one_undo_step() {
         applied.receipts[0].control.as_ref().unwrap().control_id,
         "body|10000002|0"
     );
-    assert_eq!(applied.receipts[1].new_paragraphs.len(), 1);
+    assert!(applied.receipts[1].new_paragraphs.is_empty());
     assert_eq!(
         applied.receipts[1].control.as_ref().unwrap().anchor,
         Anchor::Control {
@@ -557,7 +576,7 @@ fn fills_two_controls_by_id_as_one_undo_step() {
         !attrs.contains_key("runStyle"),
         "placeholder formatting is not inherited"
     );
-    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 2);
+    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 1);
 
     assert!(undo.undo());
     let undone = list(&doc);
@@ -565,6 +584,77 @@ fn fills_two_controls_by_id_as_one_undo_step() {
         serde_json::to_value(&undone.controls).unwrap(),
         serde_json::to_value(&before.controls).unwrap()
     );
+}
+
+#[test]
+fn plain_text_block_fills_break_lines_within_one_paragraph() {
+    let doc = open(&template());
+    let undo = UndoSession::new();
+    let applied = apply(
+        &doc,
+        &undo,
+        vec![by_id("body:sdt0", "Line one\n\nLine two")],
+    );
+    assert!(applied.receipts[0].new_paragraphs.is_empty());
+    let paragraphs = doc.paragraphs("body:sdt0").unwrap();
+    assert_eq!(paragraphs.len(), 1);
+    assert_eq!(paragraphs[0].para_id, "10000006");
+    let kinds: Vec<String> = doc
+        .story_segments("body:sdt0")
+        .unwrap()
+        .into_iter()
+        .map(|segment| match segment.content {
+            SegmentContent::Text(text) => text,
+            SegmentContent::OtherEmbed { kind, .. } => kind,
+            SegmentContent::Pilcrow(_) => "pilcrow".to_owned(),
+        })
+        .collect();
+    assert_eq!(kinds, ["Line one", "break", "break", "Line two", "pilcrow"]);
+    assert_eq!(
+        text(by_tag(&list(&doc), "customer.address")),
+        "Line one\n\nLine two"
+    );
+    let again = apply(
+        &doc,
+        &undo,
+        vec![by_id("body:sdt0", "Line one\n\nLine two")],
+    );
+    assert!(!again.receipts[0].changed);
+
+    let authored = package(&format!(
+        r#"<w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>{}{}</w:sdtContent></w:sdt>"#,
+        para("0E000010", &run("a")),
+        para("0E000011", &run("b"))
+    ));
+    let doc = open(&authored);
+    let applied = apply(
+        &doc,
+        &UndoSession::new(),
+        vec![by_tag_step("lines", "c\nd")],
+    );
+    assert_eq!(
+        applied.receipts[0]
+            .removed_paragraphs
+            .iter()
+            .map(|paragraph| paragraph.para_id.as_str())
+            .collect::<Vec<_>>(),
+        ["0E000011"]
+    );
+    let paragraphs = doc.paragraphs("body:sdt0").unwrap();
+    assert_eq!(paragraphs.len(), 1);
+    assert_eq!(paragraphs[0].para_id, "0E000010");
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "c\nd");
+
+    let doc = open(&authored);
+    let undo = UndoSession::new();
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+    let applied = apply(&doc, &undo, vec![by_tag_step("lines", "a\nb")]);
+    assert!(applied.receipts[0].changed);
+    assert_eq!(applied.receipts[0].removed_paragraphs.len(), 1);
+    assert_eq!(doc.paragraphs("body:sdt0").unwrap().len(), 1);
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+    let again = apply(&doc, &undo, vec![by_tag_step("lines", "a\nb")]);
+    assert!(!again.receipts[0].changed);
 }
 
 #[test]
@@ -763,7 +853,7 @@ fn equal_text_is_a_no_op_unless_the_placeholder_shows() {
 
 #[test]
 fn shrinks_blocks_and_empties_controls() {
-    let doc = open(&template());
+    let doc = open(&rich_address_template());
     let undo = UndoSession::new();
     apply(&doc, &undo, vec![by_id("body:sdt0", "one\ntwo\nthree")]);
     let ids: Vec<String> = doc
@@ -795,7 +885,7 @@ fn shrinks_blocks_and_empties_controls() {
 
 #[test]
 fn refusals_are_data_and_change_nothing() {
-    let doc = open(&template());
+    let doc = open(&rich_address_template());
     let state = doc.encode_state_as_update_v1();
     let version = doc.version();
     let cases: Vec<(Vec<Value>, EditFailureCode, Option<EditFailureReason>)> = vec![
@@ -890,7 +980,7 @@ fn refusals_are_data_and_change_nothing() {
         .unwrap()
         .unwrap_err();
     assert_eq!(refusal.failure.code, EditFailureCode::StaleVersion);
-    let fresh = open(&template());
+    let fresh = open(&rich_address_template());
     apply(
         &fresh,
         &UndoSession::new(),
@@ -936,7 +1026,7 @@ fn conflicts_reserve_the_control_and_its_paragraph() {
 
 #[test]
 fn validation_previews_the_resolved_control_and_reserves_nothing() {
-    let doc = open(&template());
+    let doc = open(&rich_address_template());
     let state = doc.encode_state_as_update_v1();
     let validation = doc
         .validate_edits(&request(
@@ -1508,6 +1598,45 @@ fn diverged_copies_of_a_header_part_refuse_fills() {
     );
 }
 
+#[test]
+fn a_fill_that_only_normalizes_a_header_copy_reports_the_change() {
+    let header = format!(
+        r#"<w:hdr {}><w:sdt><w:sdtPr><w:tag w:val="lines"/><w:text w:multiLine="1"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}</w:hdr>"#,
+        fixture::namespaces(),
+        para("0D000011", r#"<w:r><w:t>a</w:t><w:br/><w:t>b</w:t></w:r>"#),
+        para("0D000012", "")
+    );
+    let body = format!(
+        r#"<w:p w14:paraId="0D000002"><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rIdA"/></w:sectPr></w:pPr>{}</w:p>{}<w:sectPr><w:headerReference w:type="default" r:id="rIdB"/></w:sectPr>"#,
+        run("One"),
+        para("0D000003", &run("Two"))
+    );
+    let doc = open(
+        &Package::new(&body)
+            .part("header1.xml", "rIdA", "header", "header", &header)
+            .rel("rIdB", "header", "header1.xml")
+            .bytes(),
+    );
+    let ctx = docx_edit::EditCtx::local("", "");
+    doc.delete_range(&ctx, docx_edit::StoryRange::new("hf:rIdB:sdt0", 1, 2))
+        .unwrap();
+    doc.split_paragraph(&ctx, docx_edit::Position::new("hf:rIdB:sdt0", 1), None)
+        .unwrap();
+    assert_eq!(doc.paragraphs("hf:rIdB:sdt0").unwrap().len(), 2);
+    assert_eq!(text(by_tag(&list(&doc), "lines")), "a\nb");
+
+    let steps = || vec![by_tag_step("lines", "a\nb")];
+    let validation = doc
+        .validate_edits(&request(&doc, steps()))
+        .unwrap()
+        .unwrap();
+    assert!(validation.previews[0].would_change);
+    let applied = apply(&doc, &UndoSession::new(), steps());
+    assert!(applied.receipts[0].changed);
+    assert_eq!(doc.paragraphs("hf:rIdB:sdt0").unwrap().len(), 1);
+    assert!(!apply(&doc, &UndoSession::new(), steps()).receipts[0].changed);
+}
+
 fn block_sdt(tag: &str, content: &str) -> String {
     format!(
         r#"<w:sdt><w:sdtPr><w:tag w:val="{tag}"/><w:richText/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"#
@@ -1620,7 +1749,130 @@ fn controls_locked_against_deletion_are_filled() {
 }
 
 #[test]
-fn controls_parsing_leaves_out_block_tag_writes() {
+fn controls_inside_revisions_are_listed_as_tracked() {
+    let tagged = |id: &str, text: &str| {
+        inline_sdt(
+            &format!(r#"<w:tag w:val="customer.name"/><w:id w:val="{id}"/><w:text/>"#),
+            &run(text),
+        )
+    };
+    for wrapper in ["ins", "moveTo"] {
+        for tracked_ooxml_id in ["1", "2"] {
+            let bytes = package(&format!(
+                r#"{}<w:p w14:paraId="0F000011"><w:{wrapper} w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z">{}</w:{wrapper}></w:p>"#,
+                para("0F000010", &tagged("1", "kept")),
+                tagged(tracked_ooxml_id, "tracked")
+            ));
+            let snapshot =
+                list_docx_content_controls(&bytes, &ContentControlsOptions::default()).unwrap();
+            assert_eq!(snapshot.controls.len(), 2, "{wrapper}");
+            assert_eq!(text(&snapshot.controls[0]), "kept");
+            assert_eq!(
+                snapshot.controls[1],
+                ContentControl {
+                    metadata: ControlMetadata {
+                        control_id: "body|0F000011|0".to_owned(),
+                        ooxml_id: Some(tracked_ooxml_id.to_owned()),
+                        control_type: "plainText".to_owned(),
+                        tag: Some("customer.name".to_owned()),
+                        alias: None,
+                        lock: None,
+                        showing_placeholder: false,
+                        data_bound: false,
+                    },
+                    placement: ControlPlacement::Inline,
+                    anchor: Anchor::Control {
+                        story: "body".to_owned(),
+                        control_id: "body|0F000011|0".to_owned(),
+                    },
+                    parent_control_id: None,
+                    value: ControlValue::Unavailable {
+                        reason: ValueUnavailable::TrackedRevisions,
+                    },
+                    multi_line: Some(false),
+                    effective_lock: EffectiveLock {
+                        content: false,
+                        control: false,
+                        known: true,
+                    },
+                },
+                "{wrapper}"
+            );
+            assert!(snapshot.complete, "{wrapper}: {:?}", snapshot.diagnostics);
+            assert!(
+                snapshot
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != DiagnosticCode::ProvenanceUnavailable),
+                "{wrapper}: {:?}",
+                snapshot.diagnostics
+            );
+            let doc = open(&bytes);
+            let session = list(&doc);
+            assert_eq!(session.controls, snapshot.controls, "{wrapper}");
+            assert!(session.complete, "{wrapper}");
+            assert!(
+                session
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code != DiagnosticCode::ProvenanceUnavailable),
+                "{wrapper}: {:?}",
+                session.diagnostics
+            );
+            assert_eq!(
+                reason(&doc, vec![by_tag_step("customer.name", "x")]),
+                (
+                    EditFailureCode::AmbiguousTarget,
+                    Some(EditFailureReason::AmbiguousTag)
+                ),
+                "{wrapper}"
+            );
+            assert_eq!(
+                reason(
+                    &doc,
+                    vec![by_id(&snapshot.controls[1].metadata.control_id, "x")]
+                ),
+                (EditFailureCode::TrackedRevisionConflict, None),
+                "{wrapper}"
+            );
+            let undo = UndoSession::new();
+            if tracked_ooxml_id == "1" {
+                assert_eq!(
+                    reason(&doc, vec![by_ooxml_id_step("1", "x")]),
+                    (
+                        EditFailureCode::AmbiguousTarget,
+                        Some(EditFailureReason::AmbiguousOoxmlId)
+                    ),
+                    "{wrapper}"
+                );
+            } else {
+                assert_eq!(
+                    reason(&doc, vec![by_ooxml_id_step("2", "x")]),
+                    (EditFailureCode::TrackedRevisionConflict, None),
+                    "{wrapper}"
+                );
+                assert!(apply(&doc, &undo, vec![by_ooxml_id_step("1", "x")]).applied);
+                assert_eq!(text(&list(&doc).controls[0]), "x");
+                assert!(undo.undo());
+                assert_eq!(list(&doc).controls, snapshot.controls, "{wrapper}");
+            }
+            assert!(
+                apply(
+                    &doc,
+                    &undo,
+                    vec![by_id(&snapshot.controls[0].metadata.control_id, "filled")],
+                )
+                .applied
+            );
+            let filled = list(&doc);
+            assert_eq!(text(by_tag(&filled, "customer.name")), "filled");
+            assert_eq!(filled.controls[1], snapshot.controls[1], "{wrapper}");
+        }
+    }
+}
+
+#[test]
+fn controls_omitted_inside_hyperlinks_block_tag_writes() {
     for wrapper in ["ins", "moveTo"] {
         let tagged = |id: &str, text: &str| {
             inline_sdt(
@@ -1629,7 +1881,7 @@ fn controls_parsing_leaves_out_block_tag_writes() {
             )
         };
         let bytes = package(&format!(
-            r#"{}<w:p w14:paraId="0F000011"><w:{wrapper} w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z">{}</w:{wrapper}></w:p>"#,
+            r#"{}<w:p w14:paraId="0F000011"><w:hyperlink w:anchor="target"><w:{wrapper} w:id="7" w:author="Ada" w:date="2026-01-01T00:00:00Z">{}</w:{wrapper}></w:hyperlink></w:p>"#,
             para("0F000010", &tagged("1", "kept")),
             tagged("2", "tracked")
         ));
@@ -1643,7 +1895,7 @@ fn controls_parsing_leaves_out_block_tag_writes() {
                     && matches!(
                         &diagnostic.anchor,
                         Some(Anchor::SourcePart { part, path, .. })
-                            if part == "word/document.xml" && path == &[0, 1, 0, 0]
+                            if part == "word/document.xml" && path == &[0, 1, 0, 0, 0]
                     )
             }),
             "{wrapper}: {:?}",

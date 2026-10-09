@@ -1,7 +1,10 @@
+const MAX_RECENT_FAILURES = 16;
+
 export class InputOperationQueue {
   private pending: Promise<void> = Promise.resolve();
   private interactionEpoch = 0;
-  private failure: { error: unknown } | null = null;
+  private failures = 0;
+  private recentFailures: Array<{ seq: number; error: unknown }> = [];
   private depth = 0;
 
   constructor(
@@ -9,19 +12,22 @@ export class InputOperationQueue {
     private readonly onPendingChange?: (pending: boolean) => void
   ) {}
 
-  /** Admits accepted input; its failure marks the queue as having lost input. */
+  /** Admits accepted input; its failure is reported and fails only what was waiting for it. */
   enqueue(operation: () => void | Promise<void>): void {
     void this.admit(operation, true).catch(() => undefined);
   }
 
-  /** Admits an operation in input order and settles with its own outcome. */
-  run<T>(operation: () => T | Promise<T>): Promise<T> {
-    return this.admit(operation, false);
+  /**
+   * Admits an operation in input order and settles with its own outcome; `inputLost` is whether
+   * input failed after the `since` checkpoint.
+   */
+  run<T>(operation: (inputLost: boolean) => T | Promise<T>, since = this.failures): Promise<T> {
+    return this.admit(() => operation(this.failures !== since), false);
   }
 
-  /** Whether an earlier input operation failed. */
-  get failed(): boolean {
-    return this.failure !== null;
+  /** Checkpoint for {@link run} and {@link flush} requested before their admission. */
+  failureCheckpoint(): number {
+    return this.failures;
   }
 
   hasPending(): boolean {
@@ -32,10 +38,10 @@ export class InputOperationQueue {
     return this.pending;
   }
 
-  /** Waits for accepted operations and rejects if this queue has lost input. */
-  flush(): Promise<void> {
+  /** Waits for accepted operations and rejects if input failed after the `since` checkpoint. */
+  flush(since = this.failures): Promise<void> {
     return this.pending.then(() => {
-      if (this.failure) throw this.failure.error;
+      if (this.failures !== since) throw this.firstFailureAfter(since);
     });
   }
 
@@ -59,13 +65,20 @@ export class InputOperationQueue {
       () => this.settle(),
       (error) => {
         if (input) {
-          this.failure ??= { error };
+          this.failures += 1;
+          this.recentFailures.push({ seq: this.failures, error });
+          if (this.recentFailures.length > MAX_RECENT_FAILURES) this.recentFailures.shift();
           this.reportError(error);
         }
         this.settle();
       }
     );
     return result;
+  }
+
+  private firstFailureAfter(since: number): unknown {
+    const recent = this.recentFailures;
+    return (recent.find(({ seq }) => seq > since) ?? recent[recent.length - 1])?.error;
   }
 
   private settle(): void {

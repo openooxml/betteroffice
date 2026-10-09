@@ -1,6 +1,5 @@
 //! Table, row, cell, and table-property serializers.
 
-use crate::block::BlockContent;
 use crate::borders::Borders;
 use crate::formatting::{
     CellMargins, FloatingTableProperties, TableCellFormatting, TableFormatting, TableLook,
@@ -17,10 +16,10 @@ use super::context::SerializerContext;
 use super::foundation::{
     BorderSide, serialize_conditional_format_style, serialize_table_grid, write_border,
 };
-use super::paragraph::serialize_paragraph;
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, write_shading,
 };
+use super::sdt::serialize_block_content;
 use super::xml_writer::{XmlWriter, int_attr};
 
 pub fn serialize_table(
@@ -163,26 +162,10 @@ pub fn serialize_table_cell(
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:tc");
     append_generated(&mut writer, &properties);
-    let mut emitted = false;
     for block in &cell.content {
-        match block {
-            BlockContent::Paragraph(paragraph) => {
-                append_generated(&mut writer, &serialize_paragraph(paragraph, context)?);
-                emitted = true;
-            }
-            BlockContent::Table(table) => {
-                append_generated(&mut writer, &serialize_table(table, context)?);
-                emitted = true;
-            }
-            BlockContent::BlockSdt(_) => {}
-            BlockContent::RawXml(raw) => {
-                super::raw::validate_replayed_fragment(&raw.xml)?;
-                append_generated(&mut writer, &raw.xml);
-                emitted = true;
-            }
-        }
+        append_generated(&mut writer, &serialize_block_content(block, context)?);
     }
-    if !emitted {
+    if cell.content.is_empty() {
         writer.start_element("w:p").end_element();
     }
     writer.end_element();

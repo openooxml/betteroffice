@@ -14,10 +14,10 @@
  * from its offset space). Story-global indices never cross this boundary.
  */
 
-import type { EditSession } from './wasm/index';
+import type { RetainedLayoutMeta } from './layoutMeta';
+import type { ResidentEngineWorkerFontSync } from './residentEngineWorkerProtocol';
 import type { Document } from '../types/document';
-import { registerSessionInternals } from './sessionInternals';
-import { noteYrsStoriesDirty } from './yrsToDocument';
+import type { CompatibilityFlags } from '../docx/settingsParser';
 import type {
   DocxParagraphAnchor,
   DocxParagraphAnchorResult,
@@ -25,7 +25,6 @@ import type {
   DocxParagraphIdentitySnapshot,
   DocxParagraphSavePlan,
 } from './paragraphIdentity';
-import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -44,6 +43,14 @@ import type {
   DocxValidationResult,
 } from './edits';
 import type { DocxParagraphHeading } from './readTypes';
+import {
+  type DocxProposalRegistryState,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
+} from './proposals';
 import type {
   DocxContentControlQuery,
   DocxContentControlsOptions,
@@ -62,29 +69,78 @@ import type {
   DocxPagedStructuredContent,
   DocxSnapshotLayoutMap,
 } from './pagedExport';
+import { preparedDigests, randomClientId, wrapSession } from './yrsSessionFacade';
+export { decodeDocxHostJson } from './yrsSessionFacade';
 
+export * from './layoutMeta';
 export * from './edits';
 export * from './contentControls';
 export * from './readTypes';
+export * from './findParagraphs';
+export { findBodyMatches, type DocxFindDisplayMatch } from './findMatches';
 export * from './structuredExport';
 export * from './pagedExport';
 export * from './inputPositionMap';
+export * from './storyPlainText';
+export type { DocxResolvedPointPosition } from './pointPosition';
+export type { ResidentDocumentRead } from './residentEngineWorkerProtocol';
+export type {
+  DocxDisplayRange,
+  DocxDisplaySelectionInfo,
+  DocxDisplaySelectionText,
+  DocxSelectionUnit,
+} from './viewerSelection';
+export { readSidebar, readOutlineHeadings } from './sidebarReads';
+export type {
+  DocxSidebarReader,
+  DocxSidebarAnchorPoints,
+  DocxSidebarRead,
+  DocxOutlineHeading,
+} from './sidebarReads';
 export {
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
+  ResidentWorkerOutOfMemoryError,
   canUseResidentEngineWorker,
+  preloadResidentEngineWorker,
+  retainPreloadedResidentEngineWorker,
+  takePreloadedResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,
+  type ResidentEngineWorkerOpened,
+  type ResidentProposalReply,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export { preloadDocxEngine } from './preloadDocxEngine';
 export {
   residentCaretSnapshotForFrame,
   residentCaretDeviceRect,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
+export {
+  WASM32_MEMORY_LIMIT_BYTES,
+  wasmModuleMemories,
+  type WasmHeapStats,
+  type WasmModuleMemory,
+} from '../wasm/loadWasmAsset';
 export { documentToYrs } from './documentToYrs';
-export { yrsToDocument } from './yrsToDocument';
+export { ownProjectedParagraphs, yrsToDocument } from './yrsToDocument';
 export * from './paragraphIdentity';
+export {
+  proposalRevisionPreview,
+  type DocxOccurrence,
+  type DocxProposalFailure,
+  type DocxProposalInput,
+  type DocxProposalRecord,
+  type DocxProposalRegistryState,
+  type DocxProposalRequest,
+  type DocxProposalResult,
+  type DocxProposalSnapshot,
+  type DocxProposalState,
+  type DocxProposalStateRequest,
+  type DocxProposalWithdrawRequest,
+} from './proposals';
 export {
   captureSessionSave,
   saveYrsDocx,
@@ -93,10 +149,35 @@ export {
   type DocxSavedParagraph,
   type DocxSessionSave,
 } from './saveYrsDocx';
+export { sessionSourcePackage } from './sessionInternals';
+export { PeerMetadataError, peerMetadataTags } from './peerMetadata';
+export {
+  DirtyProjectionStories,
+  dirtyProjectionStory,
+  EditorDirtyStories,
+  hostSaveMetadata,
+  mergeDocxHostMetadata,
+  proposalProjectionStories,
+  saveEditorDocument,
+  serialWorkerSaves,
+  type EditorSaveRecord,
+} from './editorSave';
+export { editorSaveKeys } from './editorSaveKeys';
+export * from './yrsPositionProjection';
+export * from './proposalGeometry';
 
 export interface YrsDocxHost {
   document: Document;
   referencedFonts: string[];
+  /**
+   * The `referencedFonts` a document seeded from its package names only for
+   * East Asian or complex-script text it does not contain, so no text is
+   * measured or drawn with them. Empty when its stories were not seeded; a
+   * preview's cover only its own first pages.
+   */
+  unusedScriptFonts?: string[];
+  /** A preview whose cut holds the whole body. */
+  wholeBody?: true;
   embeddedFonts: Map<string, ArrayBuffer>;
   fontTableRelationshipsXml?: string;
 }
@@ -203,6 +284,40 @@ export interface YrsOpeningOptions {
    * as one session. Each opening mints a fresh one by default.
    */
   generation?: string;
+  /**
+   * Seeds images as `media:{n}` tokens naming their part of the package,
+   * instead of `data:` URLs, keeping them out of the document state. Only a
+   * replica opened from the same package on a version that reads tokens
+   * shows them, so every client of a shared room must be one. Off by default.
+   */
+  mediaTokens?: boolean;
+}
+
+/**
+ * A copy of `bytes` whose SHA-256 the platform takes off the calling thread,
+ * where it has Web Crypto. Opening that copy unchanged skips hashing the
+ * package on the calling thread; any other bytes open as before.
+ * @internal
+ */
+export async function prepareDocxBytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const copy = new Uint8Array(bytes);
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) return copy;
+  try {
+    const hash = new Uint8Array(await subtle.digest('SHA-256', copy));
+    preparedDigests.set(
+      copy,
+      Array.from(hash, (byte) => byte.toString(16).padStart(2, '0')).join('')
+    );
+  } catch {
+    // Opening hashes the copy itself.
+  }
+  return copy;
+}
+
+/** The SHA-256 {@link prepareDocxBytes} took of `bytes`, if it took one. @internal */
+export function preparedDocxDigest(bytes: Uint8Array): string | undefined {
+  return preparedDigests.get(bytes);
 }
 
 /** Snapshot of one paragraph from {@link YrsSession.paragraphs}. */
@@ -396,6 +511,14 @@ export interface YrsRevisionReceipt {
 }
 
 /**
+ * Where an edit landed, in whole characters: the inserted text (after the struck-out text when
+ * suggesting), or what a delete left (collapsed when plain, the struck-out text when suggesting).
+ */
+export interface YrsReplaceReceipt extends YrsRevisionReceipt {
+  range?: YrsStoryRange;
+}
+
+/**
  * Receipt of {@link YrsSession.splitParagraph}. The first half keeps the
  * original paraId and the second half is re-minted; suggesting
  * mode stamps a `pPrIns` revision on the first half.
@@ -440,6 +563,7 @@ export type YrsRawOp =
 
 /** Host context for {@link YrsSession.yrsBlocksForStory} (theme + list numbering). */
 export interface YrsRenderEnv {
+  compatibilityFlags?: Partial<CompatibilityFlags>;
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
@@ -455,6 +579,13 @@ export interface YrsRenderEnv {
   numericIds?: Record<string, number>;
   /** Include hidden text in visible layout without changing the document. */
   showHiddenText?: boolean;
+  /** Revision id → decision shown in layout; unlisted revisions render as tracked changes. */
+  revisionPreview?: Readonly<Record<string, 'accepted' | 'rejected'>>;
+  /**
+   * Lay the opened package's images out as `media:{n}` tokens, which a
+   * resolver given the session's `mediaSource` reads. @internal
+   */
+  mediaTokens?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */
@@ -520,6 +651,14 @@ export function sameYrsSelection(left: YrsSelection | null, right: YrsSelection 
   );
 }
 
+/** How far a region layout begun with {@link YrsSession.beginRegionLayout} has come. */
+export interface YrsRegionLayoutProgress {
+  measuredBlocks: number;
+  bodyBlocks: number;
+  /** The retained region layout reply, once the pass is complete. */
+  layoutJson?: string;
+}
+
 /** Opt-in internal stage timings for one resident engine input. @internal */
 export interface YrsEngineApplyProfile {
   selectionMs: number;
@@ -553,14 +692,15 @@ export type YrsResidentFontRegistration =
   | Uint8Array
   | { substituteOf: number; family: string };
 
-export interface YrsResidentWorkerSnapshot {
+export interface YrsResidentWorkerSnapshot extends ResidentEngineWorkerFontSync {
+  /** @internal */
+  workerAuthoritative?: true;
   clientId: number;
   /** Full document state, or a state-vector diff when the caller supplied
    * the worker's known vector — both apply through the same merge path. */
   state: Uint8Array;
   selection: YrsSelection | null;
-  /** Empty when the caller declared the worker's fonts current
-   * (`knownFontsRevision` matches); the worker then keeps its registrations. */
+  /** Full registrations, or a possibly empty suffix after `fontsBaseRevision`. */
   fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
@@ -569,6 +709,12 @@ export interface YrsResidentWorkerSnapshot {
   layoutInput: string;
   layoutWithRegions: boolean;
   layoutRevision: number;
+  /** The document is a preview's cut of a package: its layouts render NUMPAGES empty. */
+  partialDocument?: boolean;
+  /** Which seeded `data:` image sources lay out as `media:{n}` tokens. @internal */
+  mediaSources?: string;
+  /** The opened package's footnote/endnote separator notes, for replicas without its source. @internal */
+  noteSeparators?: Uint8Array;
 }
 
 /**
@@ -713,6 +859,8 @@ export interface YrsTableReceipt {
   columns: number;
   createdStoryIds: string[];
   deletedStoryIds: string[];
+  /** Existing stories whose content changed: the table's story, plus a merge's surviving cell. */
+  changedStoryIds: string[];
   newParaIds: string[];
   deletedTable: boolean;
   revisionIds: string[];
@@ -759,6 +907,18 @@ export interface YrsSelectionText {
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
  */
+/** An embedded image's bytes, as its `media:{n}` source displays them. */
+export interface YrsMediaSource {
+  bytes: Uint8Array;
+  mimeType: string;
+}
+
+/** @internal */
+export interface YrsWorkerDocumentMirror {
+  version: string;
+  proposals: DocxProposalRegistryState;
+}
+
 export interface YrsSession extends CollaborationReplica {
   /** The yrs client id this replica writes with. */
   readonly clientId: number;
@@ -786,18 +946,58 @@ export interface YrsSession extends CollaborationReplica {
   /** Same pass, but the reply omits the measured arena (fetch it on demand
    * through {@link YrsSession.retainedKernelInputsJson}). */
   layoutDocumentWithRegionsRetainedJson(input: string): string;
+  layoutDocumentWithRegionsRetainedMeta(input: string): RetainedLayoutMeta;
+  retainedLayoutJson(): string;
+  /**
+   * {@link YrsSession.layoutDocumentWithRegionsRetainedJson} a step at a time:
+   * this lowers the body, and each {@link YrsSession.resumeRegionLayout}
+   * measures up to `blocks` more body blocks. `layoutJson` arrives with the
+   * step that completes the pass, equal to the one-call reply. A document
+   * change, a font registration or another layout in between abandons the
+   * pass, and resuming it then throws.
+   */
+  beginRegionLayout(input: string): YrsRegionLayoutProgress;
+  resumeRegionLayout(blocks: number): YrsRegionLayoutProgress;
   /** Retained `{ measured, options }` for the main-thread display fallback. */
   retainedKernelInputsJson(expectedLayoutRevision: number): string;
+  /**
+   * Record region layout `input` as the resident layout without running it
+   * here: a resident worker replica runs it, and snapshots carry it there.
+   * Returns the new layout revision. @internal
+   */
+  adoptResidentWorkerLayout?(input: string): number;
+  /** The current resident layout ran only in a worker replica. @internal */
+  residentLayoutInWorker?(): boolean;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
   buildDisplayListFrame(input: string, expectedFrameEpoch: number): Uint8Array;
+  /**
+   * Limit full display builds to pages `start..end` plus the pages already
+   * built; the rest stay unbuilt placeholders carrying their geometry. @internal
+   */
+  setDisplayWindow(start: number, end: number): void;
+  /** Keep every previously built page while windowed builds are on. @internal */
+  setDisplayRetainBuiltPages(retain: boolean): void;
+  /** @internal */
+  setWindowedIncrementalBuilds(enabled: boolean): void;
+  /** Build the listed unbuilt pages into a FrameDelta v1. @internal */
+  buildDisplayPagesFrame(pages: readonly number[], expectedFrameEpoch: number): Uint8Array;
+  /** Release built pages; null means the request was superseded. @internal */
+  releaseDisplayPagesFrame(pages: number[], expectedFrameEpoch: number): Uint8Array | null;
+  /** Make the next frame a full one, for a host taking over from another engine; no-op once destroyed. */
+  resetFrameBase(): void;
   /** Caret geometry from the current resident display frame. */
   residentCaretSnapshot(): YrsResidentCaretSnapshot;
   /** Apply a collapsed plain-text insertion and return its resident FrameDelta. */
   applyInput(text: string, expectedFrameEpoch: number): Uint8Array;
-  /** Apply a collapsed character deletion/paragraph merge and return its resident FrameDelta. */
-  applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number): Uint8Array;
+  /**
+   * Apply up to `count` (default 1) collapsed character deletions/paragraph
+   * merges, lay out once, and return the resident FrameDelta.
+   */
+  applyDelete(direction: 'backward' | 'forward', expectedFrameEpoch: number, count?: number): Uint8Array;
+  /** Characters the last resident deletion removed; fewer than asked at a document boundary. */
+  residentDeletedUnits(): number;
   /** Instrumented apply used only by opt-in browser performance traces. */
   applyInputProfiled(
     text: string,
@@ -806,7 +1006,8 @@ export interface YrsSession extends CollaborationReplica {
   /** Instrumented deletion used only by opt-in browser performance traces. */
   applyDeleteProfiled(
     direction: 'backward' | 'forward',
-    expectedFrameEpoch: number
+    expectedFrameEpoch: number,
+    count?: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
   residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
@@ -825,6 +1026,13 @@ export interface YrsSession extends CollaborationReplica {
     goalX: number
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson(
     region: 'body' | 'header' | 'footer',
     rId: string,
@@ -838,6 +1046,14 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Hydrates from an encoded yrs v1 update (typically a peer's {@link encodeState} output). */
   loadState(update: Uint8Array): void;
+  encodePeerMetadata(): Uint8Array;
+  bootstrapPeer(
+    state: Uint8Array,
+    metadata: Uint8Array,
+    source: Uint8Array | undefined,
+    host: YrsDocxHost,
+    options?: YrsOpeningOptions
+  ): YrsDocxHost;
   /** Parses a DOCX, seeds its stories, and returns thin host metadata; see {@link openDocx}. */
   seedFromDocx(bytes: Uint8Array, options?: YrsOpeningOptions): YrsDocxHost;
   /**
@@ -847,13 +1063,60 @@ export interface YrsSession extends CollaborationReplica {
    */
   openDocx(bytes: Uint8Array, seedStories: boolean, options?: YrsOpeningOptions): YrsDocxHost;
   /**
+   * Opens a DOCX for display only, from the body's first `blocks` blocks:
+   * enough to lay out its first pages with a prefix pass before the whole
+   * document is opened. With `paragraphBudget`, the cut also ends at the first
+   * whole block (from the 32nd on) where the paragraphs read, table cells
+   * included, reach the budget, only when the block limit would also cut the body.
+   * The session cannot save. `null`, opening nothing,
+   * for a document with a float placed from outside the text or a section
+   * with columns, which no cut of the body lays out like the whole: open it
+   * with {@link openDocx}. @internal
+   */
+  openDocxPreview(bytes: Uint8Array, blocks: number, paragraphBudget?: number): YrsDocxHost | null;
+  /** Opened by {@link openDocxPreview}: its document refuses every change. @internal */
+  isDisplayOnly(): boolean;
+  /**
+   * Marks this empty session as showing a preview another engine opened: it refuses every
+   * change, and {@link openDocxPreview} can still load the preview here. @internal
+   */
+  markDisplayOnly(): void;
+  /**
+   * Marks whether the document is a preview's, as a replica of one is: its
+   * layouts render NUMPAGES empty. @internal
+   */
+  setPartialDocument(partial: boolean): void;
+  /**
+   * The region layout of only as much of the body as fills `pages` pages;
+   * a reply marked `provisional` covers a prefix. @internal
+   */
+  layoutDocumentWithRegionsPrefixRetainedJson(input: string, pages: number): string;
+  /**
    * Starts a new opening of the document: its generation, replicated to
    * every replica, becomes part of every session anchor. Every seeding entry
    * point calls it; call it after building a document another way.
    */
   beginOpening(generation?: string): void;
+  /** Unions seeded opaque sequence names into document state. @internal */
+  seedOpaqueSequences(names: readonly string[]): void;
   /** Materializes the retained canonical package for compatibility APIs. */
   materializeDocx(): Document | null;
+  /**
+   * The displayed bytes and media type of the package part a `media:{n}`
+   * image source names, or `null` for any other source or a destroyed session.
+   */
+  mediaSource(token: string): YrsMediaSource | null;
+  /** Changes on package opening and session destruction. */
+  mediaScope(): number;
+  /** The `data:` URL a token stands for, or `null` when unavailable or destroyed. */
+  mediaDataUrl(token: string): string | null;
+  /**
+   * Lays this replica's `data:` image sources out as the `media:{n}` tokens a
+   * snapshot's `mediaSources` names. @internal
+   */
+  loadMediaSources(json: string): void;
+  /** Loads the opened package's separator notes for this replica. @internal */
+  loadNoteSeparators(state: Uint8Array): void;
   /**
    * Seeds stories and returns paragraph IDs in document order. Seeding a
    * document that has no opening yet starts one; see {@link beginOpening}.
@@ -869,6 +1132,8 @@ export interface YrsSession extends CollaborationReplica {
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
   /** Apply a same-user worker update under the local undo origin. @internal */
   applyLocalUpdate(update: Uint8Array): void;
+  /** Adopt another replica's host batch outside undo history. @internal */
+  applyHostUpdate(update: Uint8Array, stories?: readonly string[]): void;
   /**
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
@@ -956,14 +1221,14 @@ export interface YrsSession extends CollaborationReplica {
   /** Sets the table-wide preferred width in twips. */
   setTableWidth(table: YrsTableLoc, widthTwips: number): YrsTableReceipt;
   /** Inserts paragraph-break-free text. Suggesting mode mints a revision. */
-  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
    */
-  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  deleteRange(range: YrsStoryRange, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /** Replaces a range with text in one transaction (one shared revision when suggesting). */
-  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
+  replaceRange(range: YrsStoryRange, text: string, suggesting?: YrsAuthor): YrsReplaceReceipt;
   /**
    * Splits a paragraph by inserting one pilcrow. The FIRST half keeps the
    * original paraId; the SECOND half is re-minted (`secondParaId`).
@@ -992,7 +1257,7 @@ export interface YrsSession extends CollaborationReplica {
     at: YrsLoc,
     image: Readonly<Record<string, unknown>>,
     suggesting?: YrsAuthor
-  ): YrsRevisionReceipt;
+  ): YrsReplaceReceipt;
   /**
    * Sets the value of a content-control embed addressed by stable payload id. A string fills a
    * text control's content as one version-checked step and throws when the fill is refused.
@@ -1021,7 +1286,10 @@ export interface YrsSession extends CollaborationReplica {
    * promotes an editor-only paragraph they author into.
    */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
-  /** Applies seed raw operations with deterministic item ordering. */
+  /**
+   * Applies seed raw operations with deterministic item ordering. A
+   * `setComment` for a comment already seeded adds its ranges to it.
+   */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;
@@ -1061,6 +1329,8 @@ export interface YrsSession extends CollaborationReplica {
   listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
+  /** Whether the document has a story with this id, without listing them all. */
+  hasStory(story: string): boolean;
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
   storyLength(story: string): number;
   /** Returns the story's canonical-stream checksum. */
@@ -1075,8 +1345,28 @@ export interface YrsSession extends CollaborationReplica {
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
   storySegments(story: string): YrsStorySegment[];
+  /**
+   * The current story revision and the sorted ids of the stories created,
+   * edited, or deleted after revision `since` (0 lists every story).
+   */
+  storiesChangedSince(since: number): { revision: number; stories: string[] };
+  /**
+   * One digest per unit of {@link YrsSession.storySegments}, split after each
+   * pilcrow. Equal digests mean equal segments.
+   */
+  storySegmentUnitDigests(story: string): string[];
+  /** The segments of the listed units, each as {@link YrsSession.storySegments} gives them. */
+  storySegmentUnits(story: string, units: readonly number[]): YrsStorySegment[][];
+  /**
+   * The payload of the story's `tableIndex`-th table embed, as
+   * {@link YrsSession.storySegments} gives it, or null when there is no such
+   * table. Reads the one table rather than the whole story.
+   */
+  tablePayload(story: string, tableIndex: number): Record<string, unknown> | null;
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
+  /** How many paragraphs of `story` carry `paraId`: 0, 1, or 2 for two or more. */
+  paragraphIdCount(story: string, paraId: string): number;
 
   // -- paragraph identity --
 
@@ -1140,6 +1430,39 @@ export interface YrsSession extends CollaborationReplica {
   ): YrsTargetEditResult;
   /** Accepted-view texts around a paragraph-keyed selection. @internal */
   selectionText(range: YrsStoryRange): YrsSelectionText;
+
+  // -- host proposals --
+
+  /**
+   * Proposes a round of tracked changes: every new proposal resolves against `expectVersion` and
+   * the round applies as one batch outside undo history, or nothing changes. A retried id with
+   * the same edit is a no-op; the same id with another edit refuses. Opening another document
+   * forgets every proposal.
+   * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
+   */
+  proposeChanges(request: DocxProposalRequest): DocxProposalResult;
+  /**
+   * Sets how proposals render. Decisions change neither the document, its version nor undo
+   * history; each call that changes one increments `previewVersion`.
+   * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
+   */
+  setProposalStates(request: DocxProposalStateRequest): DocxProposalResult;
+  /**
+   * Withdraws proposals, settling each as its decision previews it: accepted ones apply for good,
+   * rejected and undecided ones are removed. The settlement is one change against `expectVersion`
+   * outside undo history, so a later round resolves against the text the preview showed.
+   * On an editor peer this registry is peer-local, invisible to worker rounds and ref API results.
+   */
+  withdrawProposals(request: DocxProposalWithdrawRequest): DocxProposalResult;
+  /** The proposals in the order they were made. */
+  getProposals(): DocxProposalSnapshot;
+  /** @internal */
+  mirrorWorkerDocument(mirror: YrsWorkerDocumentMirror | null): void;
+  createWorkerProposalRegistry(state: DocxProposalRegistryState): import('./proposals').DocxProposalRegistry;
+  /** @internal */
+  workerDocumentMirrored(): boolean;
+  /** Listens for new proposals, decisions and a forgotten registry. Returns the unsubscribe. */
+  onProposalChange(listener: (snapshot: DocxProposalSnapshot) => void): () => void;
 
   // -- structured export --
 
@@ -1215,1068 +1538,6 @@ export interface CreateYrsSessionOptions {
    * 32-bit id, yjs-style.
    */
   clientId?: number;
-}
-
-function randomClientId(): number {
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    const buffer = new Uint32Array(1);
-    crypto.getRandomValues(buffer);
-    return buffer[0];
-  }
-  return Math.floor(Math.random() * 0xffffffff);
-}
-
-function wireChangeTarget(target: YrsChangeTarget): string {
-  return JSON.stringify(
-    'revisionId' in target
-      ? { revisionId: target.revisionId }
-      : {
-          story: target.story,
-          startPara: target.start.paraId,
-          startOffset: target.start.offset,
-          endPara: target.end.paraId,
-          endOffset: target.end.offset,
-        }
-  );
-}
-
-function wireRanges(ranges: readonly YrsStoryRange[]): string {
-  return JSON.stringify(
-    ranges.map((range) => ({
-      story: range.story,
-      startPara: range.start.paraId,
-      startOffset: range.start.offset,
-      endPara: range.end.paraId,
-      endOffset: range.end.offset,
-    }))
-  );
-}
-
-function targetStory(target: DocxTextTarget): string {
-  return target.kind === 'search' ? target.within.story : target.story;
-}
-
-function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
-  if (
-    bytes.buffer instanceof ArrayBuffer &&
-    bytes.byteOffset === 0 &&
-    bytes.byteLength === bytes.buffer.byteLength
-  ) {
-    return bytes.buffer;
-  }
-  return bytes.slice().buffer as ArrayBuffer;
-}
-
-function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
-  const value: unknown = JSON.parse(json);
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new TypeError('DOCX host metadata must be an object');
-  }
-  const wire = value as Record<string, unknown>;
-  if (
-    !Array.isArray(wire.referencedFonts) ||
-    !wire.referencedFonts.every((name) => typeof name === 'string')
-  ) {
-    throw new TypeError('DOCX host referencedFonts must be a string array');
-  }
-  const result = decodeS9EnvelopeValue(wire.envelope, docxSourceBuffer(source));
-  return {
-    document: result.document,
-    referencedFonts: wire.referencedFonts,
-    embeddedFonts: result.embeddedFonts,
-    ...(result.fontTableRelationshipsXml === undefined
-      ? {}
-      : { fontTableRelationshipsXml: result.fontTableRelationshipsXml }),
-  };
-}
-
-function wrapSession(session: EditSession, clientId: number): YrsSession {
-  const listeners = new Map<
-    number,
-    (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
-  >();
-  const pendingUpdates: Array<{
-    update: Uint8Array;
-    origin: CollaborationUpdateOrigin;
-  }> = [];
-  let observing = false;
-  let destroyed = false;
-  let nextListenerId = 0;
-  let wasmCallDepth = 0;
-  let flushingUpdates = false;
-  let undoTracked = false;
-  let cachedSelection: YrsSelection | null | undefined;
-  let cachedSelectionContext: { key: string; json: string } | null = null;
-  const residentFonts: YrsResidentFontRegistration[] = [];
-  const residentRenderInputs = new Map<string, YrsRenderEnv>();
-  const residentMeasureInputs = new Map<string, string>();
-  let residentLayoutInput: string | null = null;
-  let residentLayoutWithRegions = false;
-  let residentLayoutRevision = 0;
-  let residentFontsRevision = 0;
-  let ownsResidentFontStore = false;
-  let docxSource: Uint8Array | null = null;
-
-  const invalidateReadCaches = (): void => {
-    cachedSelection = undefined;
-    cachedSelectionContext = null;
-  };
-
-  const flushUpdates = (): void => {
-    if (destroyed || flushingUpdates || wasmCallDepth !== 0) return;
-    flushingUpdates = true;
-    try {
-      while (!destroyed && pendingUpdates.length > 0) {
-        const event = pendingUpdates.shift();
-        if (!event) break;
-        for (const [id, listener] of [...listeners]) {
-          if (destroyed) return;
-          if (listeners.get(id) !== listener) continue;
-          try {
-            listener(event.update.slice(), event.origin);
-          } catch {}
-        }
-      }
-    } finally {
-      flushingUpdates = false;
-      if (destroyed) pendingUpdates.length = 0;
-    }
-  };
-
-  const mutate = <T>(operation: () => T): T => {
-    invalidateReadCaches();
-    wasmCallDepth += 1;
-    try {
-      return operation();
-    } finally {
-      wasmCallDepth -= 1;
-      if (wasmCallDepth === 0) flushUpdates();
-    }
-  };
-
-  const cloneSelection = (value: YrsSelection | null): YrsSelection | null =>
-    value
-      ? {
-          anchor: { ...value.anchor },
-          head: { ...value.head },
-        }
-      : null;
-
-  const ensureUndo = (targetStory?: string): void => {
-    if (!undoTracked) {
-      session.track_undo();
-      undoTracked = true;
-    }
-    if (targetStory !== undefined) {
-      session.select_story(targetStory);
-      markDirty(targetStory);
-    }
-  };
-
-  const markDirty = (stories: 'all' | string | Iterable<string>): void => {
-    noteYrsStoriesDirty(facade, stories);
-  };
-
-  const markReceiptStories = (receipt: YrsTableReceipt): YrsTableReceipt => {
-    markDirty(receipt.createdStoryIds);
-    markDirty(receipt.deletedStoryIds);
-    return receipt;
-  };
-
-  const selectionStory = (): 'all' | string =>
-    (
-      (cachedSelection !== undefined
-        ? cachedSelection
-        : (JSON.parse(session.selection()) as YrsSelection | null))?.head.story ?? 'all'
-    );
-
-  const ensureObserver = () => {
-    if (observing) return;
-    session.set_update_observer((update: Uint8Array, origin: number) => {
-      if (origin !== 0 && origin !== 1) return;
-      pendingUpdates.push({
-        update: update.slice(),
-        origin: origin === 0 ? 'local' : 'remote',
-      });
-      flushUpdates();
-    });
-    observing = true;
-  };
-
-  const clearUnusedObserver = (): void => {
-    if (!observing || listeners.size > 0 || destroyed) return;
-    pendingUpdates.length = 0;
-    session.clear_update_observer();
-    observing = false;
-  };
-
-  const openDocx = (
-    bytes: Uint8Array,
-    seedStories: boolean,
-    options: YrsOpeningOptions = {}
-  ): YrsDocxHost => {
-    const source = bytes.slice();
-    markDirty('all');
-    const json = mutate(() => session.open_docx(source, seedStories, options.generation));
-    const host = decodeDocxHost(json, source);
-    docxSource = source;
-    return host;
-  };
-
-  const facade: YrsSession = {
-    clientId,
-
-    registerFont: (bytes) => {
-      // The Rust font store is module-global, while document sessions are
-      // replaceable. Claim a fresh id space on the first registration for a
-      // new session so a worker replay sees the same dense ids (0..N) after a
-      // document load; otherwise ids would retain gaps from the old session.
-      if (!ownsResidentFontStore) {
-        session.clear_measure_fonts();
-        ownsResidentFontStore = true;
-      }
-      const id = session.register_measure_font(bytes);
-      residentFonts.push(bytes.slice());
-      residentFontsRevision += 1;
-      return id;
-    },
-    registerSubstituteFont: (base, family) => {
-      const id = session.register_substitute_measure_font(base, family);
-      if (id === base) return id;
-      residentFonts.push({ substituteOf: base, family });
-      residentFontsRevision += 1;
-      return id;
-    },
-    clearFonts: () => {
-      session.clear_measure_fonts();
-      residentFonts.length = 0;
-      residentMeasureInputs.clear();
-      residentFontsRevision += 1;
-      ownsResidentFontStore = true;
-    },
-    measureParagraphJson: (input) => {
-      const output = session.measure_paragraph_json(input);
-      residentMeasureInputs.set(input, input);
-      return output;
-    },
-    layoutDocumentJson: (input) => {
-      const output = session.layout_document_json(input);
-      residentLayoutInput = input;
-      residentLayoutWithRegions = false;
-      residentLayoutRevision += 1;
-      return output;
-    },
-    layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
-    layoutDocumentWithRegionsJson: (input) => {
-      const output = session.layout_document_with_regions_json(input);
-      residentLayoutInput = input;
-      residentLayoutWithRegions = true;
-      residentLayoutRevision += 1;
-      return output;
-    },
-    layoutDocumentWithRegionsRetainedJson: (input) => {
-      const output = session.layout_document_with_regions_retained_json(input);
-      residentLayoutInput = input;
-      residentLayoutWithRegions = true;
-      residentLayoutRevision += 1;
-      return output;
-    },
-    retainedKernelInputsJson: (expectedLayoutRevision) => {
-      if (expectedLayoutRevision !== residentLayoutRevision) {
-        throw new Error(
-          `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
-        );
-      }
-      return session.retained_kernel_inputs_json();
-    },
-    buildDisplayListJson: (input) => session.build_display_list_json(input),
-    buildDisplayListFrame: (input, expectedFrameEpoch) =>
-      session.build_display_list_frame(input, expectedFrameEpoch),
-    residentCaretSnapshot: () =>
-      JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
-    applyInput: (text, expectedFrameEpoch) => {
-      ensureUndo();
-      markDirty(selectionStory());
-      return mutate(() => session.apply_input(text, expectedFrameEpoch));
-    },
-    applyDelete: (direction, expectedFrameEpoch) => {
-      ensureUndo();
-      markDirty(selectionStory());
-      return mutate(() => session.apply_delete(direction, expectedFrameEpoch));
-    },
-    applyInputProfiled: (text, expectedFrameEpoch) => {
-      ensureUndo();
-      markDirty(selectionStory());
-      const frame = mutate(() => session.apply_input_profiled(text, expectedFrameEpoch));
-      const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
-      return { frame, profile };
-    },
-    applyDeleteProfiled: (direction, expectedFrameEpoch) => {
-      ensureUndo();
-      markDirty(selectionStory());
-      const frame = mutate(() => session.apply_delete_profiled(direction, expectedFrameEpoch));
-      const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
-      return { frame, profile };
-    },
-    residentWorkerSnapshot: (options) => {
-      if (!residentLayoutInput) return null;
-      if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
-      const selectionJson = session.selection();
-      const fontsCurrent = options?.knownFontsRevision === residentFontsRevision;
-      let state: Uint8Array | null = null;
-      if (options?.knownStateVector) {
-        try {
-          state = session.encode_diff(options.knownStateVector.slice());
-        } catch {
-          state = null;
-        }
-      }
-      return {
-        clientId,
-        state: state ?? session.encode_state(),
-        selection: JSON.parse(selectionJson) as YrsSelection | null,
-        fonts: fontsCurrent
-          ? []
-          : residentFonts.map((font) =>
-              font instanceof Uint8Array ? font.slice() : { ...font }
-            ),
-        fontsRevision: residentFontsRevision,
-        renderInputs: [...residentRenderInputs].map(([story, env]) => ({
-          story,
-          env: structuredClone(env),
-        })),
-        measureInputs: [...residentMeasureInputs.values()],
-        layoutInput: residentLayoutInput,
-        layoutWithRegions: residentLayoutWithRegions,
-        layoutRevision: residentLayoutRevision,
-      };
-    },
-    residentWorkerProbe: () => {
-      if (!residentLayoutInput) return null;
-      if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;
-      return { layoutRevision: residentLayoutRevision };
-    },
-    displayHitTestRegionsJson: (pageIndex, x, y) =>
-      session.display_hit_test_regions_json(pageIndex, x, y),
-    displayVerticalMoveJson: (position, direction, goalX) =>
-      session.display_vertical_move_json(position, direction, goalX),
-    displayRangeRectsJson: (from, to) => session.display_range_rects_json(from, to),
-    displayRangeRectsRegionJson: (region, rId, from, to) =>
-      session.display_range_rects_region_json(region, rId, from, to),
-    outlineGlyphJson: (fontId, glyphId) => session.outline_glyph_json(fontId, glyphId),
-
-    loadState: (update) => {
-      markDirty('all');
-      mutate(() => session.load(update));
-    },
-    seedFromDocx: (bytes, options) => openDocx(bytes, true, options),
-    openDocx,
-    beginOpening: (generation) => mutate(() => session.begin_opening(generation)),
-    materializeDocx: () => {
-      const source = docxSource;
-      const json = session.materialize_docx();
-      if (!source || json === undefined) return null;
-      return decodeS9Envelope(json, docxSourceBuffer(source)).document;
-    },
-    loadStories: (stories) => {
-      markDirty(stories.map((seed) => seed.storyId));
-      return mutate(
-        () => JSON.parse(session.load_json(JSON.stringify(stories))) as Record<string, string[]>
-      );
-    },
-    encodeState: () => session.encode_state(),
-    encodeStateVector: () => session.encode_state_vector(),
-    encodeStateAsUpdate: (remoteStateVector) =>
-      remoteStateVector === undefined
-        ? session.encode_state()
-        : session.encode_diff(remoteStateVector.slice()),
-    applyUpdate: (update) => {
-      markDirty('all');
-      return mutate(
-        () =>
-          JSON.parse(
-            session.apply_update_with_inference(update)
-          ) as CollaborationTextInsertion | null
-      );
-    },
-    applyLocalUpdate: (update) => {
-      ensureUndo();
-      markDirty('all');
-      mutate(() => session.apply_local_update(update));
-    },
-    onUpdate: (listener) => {
-      if (destroyed) throw new Error('yrs session is destroyed');
-      if (typeof listener !== 'function') throw new TypeError('update listener must be a function');
-      const id = nextListenerId++;
-      listeners.set(id, listener);
-      ensureObserver();
-      let subscribed = true;
-      return () => {
-        if (!subscribed) return;
-        subscribed = false;
-        listeners.delete(id);
-        clearUnusedObserver();
-      };
-    },
-
-    encodeStickyPosition: (loc) => ({
-      story: loc.story,
-      encoded: session.encode_sticky_position(loc.story, loc.paraId, loc.offset),
-    }),
-    resolveStickyPosition: (position) => {
-      try {
-        return JSON.parse(
-          session.resolve_sticky_position(position.story, position.encoded)
-        ) as YrsLoc;
-      } catch {
-        return null;
-      }
-    },
-    setSelection: (anchor, head = anchor) => {
-      if (anchor.story !== head.story) throw new Error('yrs selection must stay inside one story');
-      session.set_selection(anchor.story, anchor.paraId, anchor.offset, head.paraId, head.offset);
-      cachedSelection = {
-        anchor: { ...anchor },
-        head: { ...head },
-      };
-    },
-    selection: () => {
-      if (cachedSelection !== undefined) return cloneSelection(cachedSelection);
-      cachedSelection = JSON.parse(session.selection()) as YrsSelection | null;
-      return cloneSelection(cachedSelection);
-    },
-    encodeSelection: () => {
-      const encoded = JSON.parse(session.encoded_selection()) as {
-        story: string;
-        anchor: number[];
-        head: number[];
-      } | null;
-      return encoded
-        ? {
-            story: encoded.story,
-            anchor: Uint8Array.from(encoded.anchor),
-            head: Uint8Array.from(encoded.head),
-          }
-        : null;
-    },
-    resolveSelection: (cursor) => {
-      try {
-        return JSON.parse(
-          session.resolve_encoded_selection(cursor.story, cursor.anchor, cursor.head)
-        ) as YrsSelection;
-      } catch {
-        return null;
-      }
-    },
-    setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
-    cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
-    beginUndoCapture: ensureUndo,
-    addUndoBoundary: () => session.add_undo_boundary(),
-    setUndoCaptureMode: (mode) => session.set_undo_capture_mode(mode),
-    undoCaptureMode: () => session.undo_capture_mode() as YrsUndoCaptureMode,
-    historyStories: () => session.history_stories(),
-    undo: () =>
-      mutate(() => {
-        const applied = session.undo();
-        if (applied) markDirty(session.history_stories());
-        return applied;
-      }),
-    redo: () =>
-      mutate(() => {
-        const applied = session.redo();
-        if (applied) markDirty(session.history_stories());
-        return applied;
-      }),
-    canUndo: () => session.can_undo(),
-    canRedo: () => session.can_redo(),
-
-    createStory: (storyId, initialText, pStyle = 'Normal', alignment = 'left') => {
-      markDirty(storyId);
-      return mutate(
-        () =>
-          JSON.parse(session.create_story(storyId, initialText, pStyle, alignment)) as {
-            paraId: string;
-          }
-      );
-    },
-    deleteStory: (storyId) => {
-      markDirty(storyId);
-      return mutate(() => session.delete_story(storyId));
-    },
-    insertTable: (at, rows, columns, suggesting) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(
-              session.insert_table(
-                at.story,
-                at.paraId,
-                at.offset,
-                rows,
-                columns,
-                suggesting?.name,
-                suggesting?.date
-              )
-            ) as YrsTableReceipt
-          )
-      );
-    },
-    insertRow: (at, side, suggesting) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(
-              session.insert_row(
-                JSON.stringify(at),
-                side === 'below',
-                suggesting?.name,
-                suggesting?.date
-              )
-            ) as YrsTableReceipt
-          )
-      );
-    },
-    insertColumn: (at, side) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(session.insert_column(JSON.stringify(at), side === 'right')) as YrsTableReceipt
-          )
-      );
-    },
-    deleteRow: (range, suggesting) => {
-      ensureUndo(range.anchor.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(
-              session.delete_row(JSON.stringify(range), suggesting?.name, suggesting?.date)
-            ) as YrsTableReceipt
-          )
-      );
-    },
-    deleteColumn: (range) => {
-      ensureUndo(range.anchor.story);
-      return mutate(
-        () => markReceiptStories(JSON.parse(session.delete_column(JSON.stringify(range))) as YrsTableReceipt)
-      );
-    },
-    deleteTable: (table) => {
-      ensureUndo(table.story);
-      return mutate(
-        () => markReceiptStories(JSON.parse(session.delete_table(JSON.stringify(table))) as YrsTableReceipt)
-      );
-    },
-    mergeCells: (range) => {
-      ensureUndo(range.anchor.story);
-      return mutate(
-        () => markReceiptStories(JSON.parse(session.merge_cells(JSON.stringify(range))) as YrsTableReceipt)
-      );
-    },
-    splitCell: (at, rows, columns) => {
-      ensureUndo(at.story);
-      return mutate(
-        () => markReceiptStories(JSON.parse(session.split_cell(JSON.stringify(at), rows, columns)) as YrsTableReceipt)
-      );
-    },
-    setCellShading: (range, color) => {
-      ensureUndo(range.anchor.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(
-              session.set_cell_shading(JSON.stringify(range), color ?? undefined)
-            ) as YrsTableReceipt
-          )
-      );
-    },
-    setCellTextFormat: (range, patch) => {
-      ensureUndo(range.anchor.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(
-              session.set_cell_text_format(JSON.stringify(range), JSON.stringify(patch))
-            ) as YrsTableReceipt
-          )
-      );
-    },
-    setCellBorders: (range, borders) => {
-      ensureUndo(range.anchor.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(
-              session.set_cell_borders(JSON.stringify(range), JSON.stringify(borders))
-            ) as YrsTableReceipt
-          )
-      );
-    },
-    setColumnWidth: (at, widthTwips) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(session.set_column_width(JSON.stringify(at), widthTwips)) as YrsTableReceipt
-          )
-      );
-    },
-    setTableWidth: (table, widthTwips) => {
-      ensureUndo(table.story);
-      return mutate(
-        () =>
-          markReceiptStories(
-            JSON.parse(session.set_table_width(JSON.stringify(table), widthTwips)) as YrsTableReceipt
-          )
-      );
-    },
-    insertText: (at, text, suggesting) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          JSON.parse(
-            session.insert_text(
-              at.story,
-              at.paraId,
-              at.offset,
-              text,
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsRevisionReceipt
-      );
-    },
-    deleteRange: (range, suggesting) => {
-      ensureUndo(range.story);
-      return mutate(
-        () =>
-          JSON.parse(
-            session.delete_range(
-              range.story,
-              range.start.paraId,
-              range.start.offset,
-              range.end.paraId,
-              range.end.offset,
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsRevisionReceipt
-      );
-    },
-    replaceRange: (range, text, suggesting) => {
-      ensureUndo(range.story);
-      return mutate(
-        () =>
-          JSON.parse(
-            session.replace_range(
-              range.story,
-              range.start.paraId,
-              range.start.offset,
-              range.end.paraId,
-              range.end.offset,
-              text,
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsRevisionReceipt
-      );
-    },
-    splitParagraph: (at, suggesting) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          JSON.parse(
-            session.split_paragraph(
-              at.story,
-              at.paraId,
-              at.offset,
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsSplitReceipt
-      );
-    },
-    mergeParagraphs: (story, paraId, suggesting) => {
-      ensureUndo(story);
-      return mutate(
-        () =>
-          JSON.parse(
-            session.merge_paragraphs(story, paraId, suggesting?.name, suggesting?.date)
-          ) as YrsRevisionReceipt
-      );
-    },
-    toggleMark: (range, mark) => {
-      ensureUndo(range.story);
-      mutate(() =>
-        session.toggle_mark(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset,
-          JSON.stringify(mark)
-        )
-      );
-    },
-    formatRange: (range, delta) => {
-      ensureUndo(range.story);
-      mutate(() =>
-        session.format_range(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset,
-          JSON.stringify(delta)
-        )
-      );
-    },
-    setHyperlink: (range, hyperlink) => {
-      ensureUndo(range.story);
-      mutate(() =>
-        session.set_hyperlink(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset,
-          JSON.stringify(hyperlink)
-        )
-      );
-    },
-    clearFormatting: (range) => {
-      ensureUndo(range.story);
-      mutate(() =>
-        session.clear_formatting(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset
-        )
-      );
-    },
-    applyParagraphStyle: (range, styleId, suggesting) => {
-      ensureUndo(range.story);
-      mutate(() =>
-        session.apply_paragraph_style(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset,
-          styleId,
-          suggesting?.name,
-          suggesting?.date
-        )
-      );
-    },
-    setParagraphAttrs: (range, attrs, suggesting) => {
-      ensureUndo(range.story);
-      mutate(() =>
-        session.set_paragraph_attrs(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset,
-          JSON.stringify(attrs),
-          suggesting?.name,
-          suggesting?.date
-        )
-      );
-    },
-    insertImage: (at, image, suggesting) => {
-      ensureUndo(at.story);
-      return mutate(
-        () =>
-          JSON.parse(
-            session.insert_image(
-              at.story,
-              at.paraId,
-              at.offset,
-              JSON.stringify(image),
-              suggesting?.name,
-              suggesting?.date
-            )
-          ) as YrsRevisionReceipt
-      );
-    },
-    setContentControlValue: (embedId, value) => {
-      ensureUndo();
-      markDirty('all');
-      mutate(() => session.set_content_control_value(embedId, JSON.stringify(value)));
-    },
-    setContentControlValueAt: (at, value) => {
-      ensureUndo(at.story);
-      if (typeof value === 'string') markDirty('all');
-      mutate(() =>
-        session.set_content_control_value_at(at.story, at.paraId, at.offset, JSON.stringify(value))
-      );
-    },
-    clearContentControlValue: (embedId) => {
-      ensureUndo();
-      markDirty('all');
-      mutate(() => session.clear_content_control_value(embedId));
-    },
-    setImageGeometry: (embedId, geometry) => {
-      ensureUndo();
-      markDirty('all');
-      mutate(() => session.set_image_geometry(embedId, JSON.stringify(geometry)));
-    },
-    setImageGeometryAt: (at, geometry) => {
-      ensureUndo(at.story);
-      mutate(() =>
-        session.set_image_geometry_at(at.story, at.paraId, at.offset, JSON.stringify(geometry))
-      );
-    },
-    insertPageBreak: (at) => {
-      ensureUndo(at.story);
-      mutate(() => session.insert_page_break(at.story, at.paraId, at.offset));
-    },
-    insertSectionBreak: (at, type) => {
-      ensureUndo(at.story);
-      mutate(() => session.insert_section_break(at.story, at.paraId, at.offset, type));
-    },
-    insertWatermark: (at, watermark) => {
-      ensureUndo(at.story);
-      mutate(() =>
-        session.insert_watermark(at.story, at.paraId, at.offset, JSON.stringify(watermark))
-      );
-    },
-    applyRawOps: (story, ops) => {
-      const rekeys = ops.some(
-        (op) =>
-          (op.op === 'insertEmbed' && op.kind === 'pilcrow') ||
-          (op.op === 'setEmbedAttr' && op.key === 'paraId')
-      );
-      markDirty(rekeys ? 'all' : story);
-      mutate(() => session.apply_raw_ops(story, JSON.stringify(ops)));
-    },
-    applySeedRawOps: (story, ops) => {
-      markDirty(story);
-      mutate(() => session.apply_seed_raw_ops(story, JSON.stringify(ops)));
-    },
-    setParagraphAttr: (paraId, key, value) => {
-      markDirty('all');
-      mutate(() => session.set_paragraph_attr(paraId, key, JSON.stringify(value ?? null)));
-    },
-    addComment: (ranges, commentAuthor, date, body) => {
-      markDirty(ranges.map((range) => range.story));
-      return mutate(
-        () =>
-          JSON.parse(
-            session.add_comment(
-              wireRanges(ranges),
-              commentAuthor,
-              date,
-              JSON.stringify(body ?? null)
-            )
-          ) as YrsCommentReceipt
-      );
-    },
-    setCommentRanges: (commentId, ranges) => {
-      ensureUndo();
-      mutate(() => {
-        session.set_comment_ranges(commentId, wireRanges(ranges));
-        markDirty('all');
-      });
-    },
-    acceptChange: (target) => {
-      markDirty('all');
-      return mutate(
-        () => JSON.parse(session.accept_change(wireChangeTarget(target))) as YrsResolveReceipt
-      );
-    },
-    rejectChange: (target) => {
-      markDirty('all');
-      return mutate(
-        () => JSON.parse(session.reject_change(wireChangeTarget(target))) as YrsResolveReceipt
-      );
-    },
-
-    selectionContext: (range) => {
-      const key = JSON.stringify(range);
-      if (cachedSelectionContext?.key === key) {
-        return JSON.parse(cachedSelectionContext.json) as YrsSelectionContext;
-      }
-      const json = session.selection_context(
-        range.story,
-        range.start.paraId,
-        range.start.offset,
-        range.end.paraId,
-        range.end.offset
-      );
-      const context = JSON.parse(json) as YrsSelectionContext;
-      cachedSelectionContext = { key, json };
-      return context;
-    },
-    listRevisions: () => JSON.parse(session.list_revisions()) as YrsRevisionInfo[],
-    resolveComment: (commentId) =>
-      JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
-    listComments: () => JSON.parse(session.list_comments()) as YrsCommentInfo[],
-    storyIds: () => session.story_ids(),
-    storyLength: (story) => session.story_len(story),
-    storyChecksum: (story) => BigInt(session.story_checksum(story)),
-    yrsBlocksForStory: (story, env = {}) => {
-      const json = session.yrs_blocks_for_story(story, JSON.stringify(env));
-      const blocks = JSON.parse(json) as unknown[];
-      residentRenderInputs.set(story, structuredClone(env));
-      return blocks;
-    },
-    paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
-    searchText: (query, options = {}) => {
-      if (!query) return [];
-      const limit = options.limit ?? Number.POSITIVE_INFINITY;
-      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
-        throw new RangeError('search limit must be a non-negative safe integer');
-      }
-      return JSON.parse(
-        session.search_text(
-          query,
-          options.caseSensitive ?? false,
-          Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined
-        )
-      ) as YrsTextMatch[];
-    },
-    paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
-    storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
-    locateParagraph: (story, paraId) =>
-      JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
-
-    paragraphIdentities: () =>
-      JSON.parse(session.paragraph_identities()) as DocxParagraphIdentitySnapshot,
-    persistParagraphIds: () => {
-      markDirty('all');
-      return mutate(
-        () => JSON.parse(session.persist_paragraph_ids()) as DocxParagraphIdentityReceipt
-      );
-    },
-    resolveParagraphAnchor: (anchor) =>
-      JSON.parse(
-        session.resolve_paragraph_anchor(JSON.stringify(anchor))
-      ) as DocxParagraphAnchorResult,
-    storyParagraphIds: (story) =>
-      JSON.parse(session.story_paragraph_ids(story)) as Array<string | null>,
-    paragraphSavePlan: () => JSON.parse(session.paragraph_save_plan()) as DocxParagraphSavePlan,
-    recordSavedParagraphIds: (saved) =>
-      mutate(
-        () =>
-          JSON.parse(session.record_saved_paragraph_ids(JSON.stringify(saved))) as Array<
-            [string, string]
-          >
-      ),
-    writtenParagraphIds: (bytes) =>
-      JSON.parse(session.written_paragraph_ids(bytes)) as Record<string, string[]>,
-    exportStructured: (options) =>
-      JSON.parse(
-        session.export_structured_json(JSON.stringify(options))
-      ) as DocxExportResult<DocxStructuredContent>,
-    exportMarkdown: (options) =>
-      JSON.parse(
-        session.export_markdown_json(JSON.stringify(options))
-      ) as DocxExportResult<DocxMarkdownContent>,
-    exportStructuredWithPages: (options) =>
-      JSON.parse(
-        session.export_structured_with_pages_json(JSON.stringify(options), undefined)
-      ) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>,
-    exportStructuredWithPagesFor: (options, currentRequest) =>
-      JSON.parse(
-        session.export_structured_with_pages_json(JSON.stringify(options), currentRequest)
-      ) as DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>,
-    exportSnapshotWithPrivateFonts: (fonts, fontLengths, request, options) =>
-      JSON.parse(
-        session.export_snapshot_with_private_fonts_json(
-          fonts,
-          fontLengths,
-          request,
-          JSON.stringify(options)
-        )
-      ) as
-        | { ok: true; content: DocxPagedStructuredContent<DocxSnapshotLayoutMap> }
-        | { ok: false; failure: DocxExportFailure },
-    headings: (story) => JSON.parse(session.headings_json(story)) as DocxParagraphHeading[],
-    listContentControls: (options = {}) =>
-      JSON.parse(
-        session.list_content_controls_json(JSON.stringify(options))
-      ) as DocxContentControlsResult,
-    findContentControls: (query, options = {}) =>
-      JSON.parse(
-        session.find_content_controls_json(JSON.stringify(query), JSON.stringify(options))
-      ) as DocxContentControlsResult,
-
-    version: () => session.version(),
-    readParagraphs: (request) =>
-      JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
-    findText: (request) =>
-      JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
-    validateEdits: (request) =>
-      JSON.parse(session.validate_edits_json(JSON.stringify(request))) as DocxValidationResult,
-    applyEdits: (request) =>
-      mutate(() => {
-        const result = JSON.parse(
-          session.apply_edits_json(JSON.stringify(request))
-        ) as DocxEditResult;
-        if (result.ok && result.applied) markDirty(result.changedStories);
-        return result;
-      }),
-    formatTextTarget: (target, delta) => {
-      ensureUndo(targetStory(target));
-      return mutate(
-        () =>
-          JSON.parse(
-            session.format_text_target_json(JSON.stringify(target), JSON.stringify(delta))
-          ) as YrsTargetEditResult
-      );
-    },
-    commentTextTarget: (target, comment) => {
-      markDirty(targetStory(target));
-      return mutate(
-        () =>
-          JSON.parse(
-            session.comment_text_target_json(
-              JSON.stringify(target),
-              JSON.stringify({ ...comment, body: comment.body ?? null })
-            )
-          ) as YrsTargetEditResult
-      );
-    },
-    selectionText: (range) =>
-      JSON.parse(
-        session.selection_text_json(
-          range.story,
-          range.start.paraId,
-          range.start.offset,
-          range.end.paraId,
-          range.end.offset
-        )
-      ) as YrsSelectionText,
-
-    destroy: () => {
-      if (destroyed) return;
-      destroyed = true;
-      listeners.clear();
-      pendingUpdates.length = 0;
-      if (observing) session.clear_update_observer();
-      session.free();
-    },
-  };
-
-  registerSessionInternals(facade, {
-    compareDocx: (original, revised, options) => {
-      markDirty('all');
-      const json = mutate(() => session.compare_docx_json(original, revised, options));
-      docxSource = original.slice();
-      return json;
-    },
-    finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),
-    failComparedDocx: (message) => session.fail_compared_docx_json(message),
-  });
-
-  return facade;
 }
 
 /**

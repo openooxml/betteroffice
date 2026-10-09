@@ -26,10 +26,25 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::FloatingTablePosition;
+
 /// A text segment beside a float narrower than this (px) is not worth
 /// wrapping into. Measurement applies the threshold; this registry reports raw
 /// spans and leaves the decision to its caller.
 pub const MIN_WRAP_SEGMENT_WIDTH: f64 = 24.0;
+
+pub(crate) fn table_wrap_gaps(
+    floating: &FloatingTablePosition,
+    table_width: f64,
+    content_width: f64,
+    x: f64,
+) -> (f64, f64) {
+    let distance = |value: Option<f64>| value.filter(|v| v.is_finite()).unwrap_or(12.0);
+    (
+        x - distance(floating.left_from_text),
+        content_width - x - table_width - distance(floating.right_from_text),
+    )
+}
 
 /// NaN-propagating minimum that preserves negative zero.
 fn js_min(a: f64, b: f64) -> f64 {

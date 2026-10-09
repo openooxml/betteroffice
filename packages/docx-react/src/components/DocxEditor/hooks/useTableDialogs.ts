@@ -59,7 +59,9 @@ export function useTableDialogs({
     return true;
   }, [pagedEditorRef]);
 
+  // Read only while the dialog shows them: this runs on every editor render.
   const currentTableProperties = (() => {
+    if (!tablePropsOpen) return undefined;
     const session = pagedEditorRef.current?.getYrsSession();
     try {
       return session ? currentYrsTableProperties(session) : undefined;

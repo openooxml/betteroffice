@@ -1,4 +1,4 @@
-import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
+import type { DisplayList, DisplayPage, DisplayPrimitive, NoteRegionNote } from './displayList';
 
 export const FRAME_DELTA_VERSION = 1;
 export const FRAME_DELTA_HEADER_BYTES = 80;
@@ -10,6 +10,8 @@ const PAGE_OP_REMOVE = 2;
 const PAGE_OP_MOVE = 3;
 const PAGE_OP_PATCH_POSITIONS = 4;
 const PAGE_OP_SHIFT_POSITIONS = 5;
+const PAGE_OP_SHIFT_RANGE = 6;
+const SHIFT_SPAN_PRESENT = 1;
 const POSITION_DOC_START = 1 << 0;
 const POSITION_DOC_END = 1 << 1;
 const POSITION_FRAGMENT_START = 1 << 2;
@@ -21,6 +23,10 @@ const POSITION_MASK =
   POSITION_FRAGMENT_START |
   POSITION_FRAGMENT_END |
   POSITION_INLINE_WIDGET;
+/** Run flag: shift only the masked fields each primitive has. */
+const POSITION_PRESENT_ONLY = 1 << 7;
+/** Note anchor value meaning the field is absent. */
+const ABSENT_ANCHOR = -(2n ** 63n);
 const MAX_VALUE_DEPTH = 64;
 const MAX_CONTAINER_ITEMS = 10_000_000;
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
@@ -102,12 +108,39 @@ export interface FramePositionShiftRun {
   readonly delta: number;
 }
 
+/** A note region note's new backlink anchor; null clears the field. */
+export interface FrameNoteAnchor {
+  readonly area: number;
+  readonly note: number;
+  readonly start: number | null;
+  readonly end: number | null;
+}
+
 export interface FramePagePositionShift {
   readonly kind: 'shift-positions';
   readonly pageIndex: number;
   readonly pageId: bigint;
   readonly fingerprint: bigint;
   readonly runs: readonly FramePositionShiftRun[];
+  readonly anchors: readonly FrameNoteAnchor[];
+  readonly spanDelta?: number;
+}
+
+/** Shift the body positions and fingerprints of consecutive retained pages. */
+export interface FramePageShiftRange {
+  readonly kind: 'shift-range';
+  readonly pageIndex: number;
+  readonly pageId: bigint;
+  readonly count: number;
+  readonly delta: number;
+  readonly salt: bigint;
+}
+
+/** One applied position shift: its runs, then its note anchors. */
+export interface DisplayPageShift {
+  readonly runs: readonly FramePositionShiftRun[];
+  readonly anchors: readonly FrameNoteAnchor[];
+  readonly spanDelta?: number;
 }
 
 export type FramePageOperation =
@@ -115,7 +148,8 @@ export type FramePageOperation =
   | FramePageRemove
   | FramePageMove
   | FramePagePositionPatch
-  | FramePagePositionShift;
+  | FramePagePositionShift
+  | FramePageShiftRange;
 
 export interface DecodedFrameDelta {
   readonly protocolVersion: typeof FRAME_DELTA_VERSION;
@@ -153,6 +187,31 @@ export interface RetainedFrame {
   readonly displayList: DisplayList;
 }
 
+/** Page ordering shared by successive index-stable frames. */
+const retainedFramePageIndexes = new WeakMap<RetainedFrame, Map<bigint, number>>();
+
+/** Lazily index retained page identities. */
+function retainedFramePageIndex(frame: RetainedFrame): Map<bigint, number> {
+  let index = retainedFramePageIndexes.get(frame);
+  if (!index) {
+    index = new Map();
+    for (let pageIndex = 0; pageIndex < frame.pages.length; pageIndex++) {
+      index.set(frame.pages[pageIndex]!.pageId, pageIndex);
+    }
+    retainedFramePageIndexes.set(frame, index);
+  }
+  return index;
+}
+
+/** @internal Find a retained page by its stable identity. */
+export function retainedFramePageById(
+  frame: RetainedFrame,
+  pageId: bigint
+): RetainedFramePage | undefined {
+  const index = retainedFramePageIndex(frame).get(pageId);
+  return index === undefined ? undefined : frame.pages[index];
+}
+
 interface RawPageOp {
   opcode: number;
   pageIndex: number;
@@ -162,6 +221,8 @@ interface RawPageOp {
   primitiveIdsOffset: number;
   payloadOffset: number;
   payloadLength: number;
+  anchorCount: number;
+  rangeDelta: number;
 }
 
 /**
@@ -169,6 +230,16 @@ interface RawPageOp {
  * browser state. Page payloads are typed values, not embedded JSON strings.
  */
 export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameDelta {
+  const steps = decodeFrameDeltaSteps(input);
+  let step = steps.next();
+  while (!step.done) step = steps.next();
+  return step.value;
+}
+
+/** @internal Decode in resumable slices without publishing partial state. */
+export function* decodeFrameDeltaSteps(
+  input: Uint8Array | ArrayBuffer
+): Generator<void, DecodedFrameDelta> {
   let bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
   // Primitive ids are intentionally 8-byte aligned relative to frame start.
   // wasm-bindgen returns offset-zero Uint8Arrays; normalize unusual subarrays
@@ -224,7 +295,7 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
   }
   if (dataOffset % 8 !== 0) invalid('data section is not 8-byte aligned');
 
-  const strings = decodeStringTable(reader, stringsOffset, stringsEnd);
+  const strings = yield* decodeStringTable(reader, stringsOffset, stringsEnd);
   const rawOperations: RawPageOp[] = [];
   const pageIds = new Set<bigint>();
   for (let index = 0; index < operationCount; index++) {
@@ -235,16 +306,20 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       opcode !== PAGE_OP_REMOVE &&
       opcode !== PAGE_OP_MOVE &&
       opcode !== PAGE_OP_PATCH_POSITIONS &&
-      opcode !== PAGE_OP_SHIFT_POSITIONS
+      opcode !== PAGE_OP_SHIFT_POSITIONS &&
+      opcode !== PAGE_OP_SHIFT_RANGE
     ) {
       invalid(`unknown page opcode ${opcode}`);
     }
     for (let reserved = 1; reserved < 4; reserved++) {
       if (reader.u8(offset + reserved) !== 0) invalid('page operation reserved bytes are nonzero');
     }
-    for (let reserved = 40; reserved < FRAME_DELTA_PAGE_OP_BYTES; reserved++) {
+    // A shift's note anchor count is the only field the tail carries.
+    const tailStart = opcode === PAGE_OP_SHIFT_POSITIONS ? 44 : 40;
+    for (let reserved = tailStart; reserved < FRAME_DELTA_PAGE_OP_BYTES; reserved++) {
       if (reader.u8(offset + reserved) !== 0) invalid('page operation tail is nonzero');
     }
+    const anchorCount = opcode === PAGE_OP_SHIFT_POSITIONS ? reader.u32(offset + 40) : 0;
     const pageIndex = reader.u32(offset + 4);
     const pageId = reader.u64(offset + 8);
     const fingerprint = reader.u64(offset + 16);
@@ -252,6 +327,7 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
     const primitiveIdsOffset = reader.u32(offset + 28);
     const payloadOffset = reader.u32(offset + 32);
     const payloadLength = reader.u32(offset + 36);
+    let rangeDelta = 0;
     if (pageId === 0n) invalid('page id zero is reserved');
     if (pageIds.has(pageId)) invalid(`duplicate page operation for id ${pageId}`);
     pageIds.add(pageId);
@@ -259,6 +335,14 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       if (primitiveCount || primitiveIdsOffset || payloadOffset || payloadLength) {
         invalid('remove/move operation carries an unexpected payload');
       }
+    } else if (opcode === PAGE_OP_SHIFT_RANGE) {
+      if (primitiveIdsOffset !== 0) invalid('page shift range reserved word is nonzero');
+      if (primitiveCount === 0 || pageIndex + primitiveCount > pageCount) {
+        invalid('page shift range exceeds final page count');
+      }
+      if (fingerprint === 0n) invalid('page shift range salt is zero');
+      rangeDelta = reader.safeI64(offset + 32, 'page shift range delta');
+      if (rangeDelta === 0) invalid('page shift range delta is zero');
     } else if (opcode === PAGE_OP_UPSERT) {
       if (pageIndex >= pageCount) invalid('upsert page index exceeds final page count');
       if (primitiveIdsOffset < dataOffset || primitiveIdsOffset % 8 !== 0) {
@@ -301,14 +385,17 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       primitiveIdsOffset,
       payloadOffset,
       payloadLength,
+      anchorCount,
+      rangeDelta,
     });
+    if (index % 32 === 31) yield;
   }
   if (full && rawOperations.some((operation) => operation.opcode !== PAGE_OP_UPSERT)) {
     invalid('full frame may contain only page upserts');
   }
   validateDataRegions(reader, rawOperations, stringsEnd, dataOffset);
 
-  const operations = rawOperations.map((operation): FramePageOperation => {
+  const decodeOperation = (operation: RawPageOp): FramePageOperation => {
     if (operation.opcode === PAGE_OP_REMOVE) {
       return { kind: 'remove', pageIndex: operation.pageIndex, pageId: operation.pageId };
     }
@@ -336,7 +423,17 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
         pageIndex: operation.pageIndex,
         pageId: operation.pageId,
         fingerprint: operation.fingerprint,
-        runs: decodePositionShiftRuns(reader, operation),
+        ...decodePositionShift(reader, operation),
+      };
+    }
+    if (operation.opcode === PAGE_OP_SHIFT_RANGE) {
+      return {
+        kind: 'shift-range',
+        pageIndex: operation.pageIndex,
+        pageId: operation.pageId,
+        count: operation.primitiveCount,
+        delta: operation.rangeDelta,
+        salt: operation.fingerprint,
       };
     }
     const payloadEnd = operation.payloadOffset + operation.payloadLength;
@@ -366,8 +463,14 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
       primitiveIds,
       page,
     };
-  });
+  };
+  const operations: FramePageOperation[] = [];
+  for (const operation of rawOperations) {
+    operations.push(decodeOperation(operation));
+    yield;
+  }
   if (full && operations.length !== pageCount) invalid('full frame does not define every page');
+  validateShiftRanges(operations, pageCount);
 
   return {
     protocolVersion: FRAME_DELTA_VERSION,
@@ -381,6 +484,46 @@ export function decodeFrameDelta(input: Uint8Array | ArrayBuffer): DecodedFrameD
     operations,
     bytes,
   };
+}
+
+/** Reject overlapping page ranges or individually named pages within them. */
+function validateShiftRanges(operations: readonly FramePageOperation[], pageCount: number): void {
+  const ranges = operations.filter((operation) => operation.kind === 'shift-range');
+  if (ranges.length === 0) return;
+  if (ranges.length > 1) ranges.sort((left, right) => left.pageIndex - right.pageIndex);
+  let previousEnd = 0;
+  for (const range of ranges) {
+    if (
+      !Number.isSafeInteger(range.pageIndex) ||
+      range.pageIndex < 0 ||
+      !Number.isSafeInteger(range.count) ||
+      range.count < 1 ||
+      range.pageIndex + range.count > pageCount
+    ) {
+      invalid('page shift range exceeds final page count');
+    }
+    if (!Number.isSafeInteger(range.delta) || range.delta === 0) {
+      invalid('page shift range delta is zero or unsafe');
+    }
+    if (range.salt === 0n) invalid('page shift range salt is zero');
+    if (range.pageId === 0n) invalid('page id zero is reserved');
+    if (range.pageIndex < previousEnd) invalid('page shift ranges overlap');
+    previousEnd = range.pageIndex + range.count;
+  }
+  for (const operation of operations) {
+    if (operation.kind === 'shift-range') continue;
+    let start = 0;
+    let end = ranges.length;
+    while (start < end) {
+      const middle = (start + end) >>> 1;
+      if (ranges[middle]!.pageIndex <= operation.pageIndex) start = middle + 1;
+      else end = middle;
+    }
+    const range = ranges[start - 1];
+    if (range && operation.pageIndex < range.pageIndex + range.count) {
+      invalid('page shift range overlaps another page operation');
+    }
+  }
 }
 
 /** Apply one already-validated frame atomically, rejecting stale generations. */
@@ -404,10 +547,12 @@ export function applyFrameDeltaOwned(
   return applyFrameDeltaInternal(previous, delta, true);
 }
 
-function applyFrameDeltaInternal(
+/** @internal Apply with optional general storage for equivalence checks. */
+export function applyFrameDeltaInternal(
   previous: RetainedFrame | null,
   delta: DecodedFrameDelta,
-  reusePositionPages: boolean
+  reusePositionPages: boolean,
+  usePageIndex = true
 ): RetainedFrame {
   if (previous && delta.frameEpoch <= previous.frameEpoch) {
     throw new FrameDeltaError(
@@ -419,7 +564,9 @@ function applyFrameDeltaInternal(
     if (!previous || delta.baseFrameEpoch !== previous.frameEpoch) {
       throw new FrameDeltaError(
         'base-mismatch',
-        `delta base ${delta.baseFrameEpoch} does not match applied frame ${previous?.frameEpoch ?? 0}`
+        `delta base ${delta.baseFrameEpoch} does not match applied frame ${
+          previous?.frameEpoch ?? 0
+        }`
       );
     }
   }
@@ -430,95 +577,88 @@ function applyFrameDeltaInternal(
     throw new FrameDeltaError('stale-frame', 'layout epoch moved backwards');
   }
 
-  const pages = new Map<bigint, RetainedFramePage>();
-  if (!delta.full && previous) {
-    for (const page of previous.pages) pages.set(page.pageId, page);
+  const indexByPageId =
+    !delta.full &&
+    previous &&
+    delta.pageCount === previous.pages.length &&
+    delta.operations.every((operation) => operation.kind !== 'remove' && operation.kind !== 'move')
+      ? retainedFramePageIndex(previous)
+      : undefined;
+  const indexStable =
+    indexByPageId !== undefined &&
+    delta.operations.every(
+      (operation) => indexByPageId.get(operation.pageId) === operation.pageIndex
+    );
+  if (!indexStable && delta.operations.some((operation) => operation.kind === 'shift-range')) {
+    invalid('page shift range requires an index-stable frame');
+  }
+  validateShiftRanges(delta.operations, delta.pageCount);
+
+  let ordered: RetainedFramePage[];
+  let listPages: DisplayPage[];
+  let pages: Map<bigint, RetainedFramePage> | undefined;
+  if (indexStable && usePageIndex) {
+    ordered = previous!.pages.slice();
+    listPages = previous!.displayList.pages.slice();
+  } else {
+    pages = new Map();
+    if (!delta.full && previous) {
+      for (const page of previous.pages) pages.set(page.pageId, page);
+    }
+    ordered = [];
+    listPages = [];
   }
   const damagedPageIds = new Set<bigint>();
   const removedPageIds = new Set<bigint>();
   for (const operation of delta.operations) {
-    if (operation.kind === 'remove') {
-      if (!pages.delete(operation.pageId))
-        invalid(`remove references unknown page ${operation.pageId}`);
-      removedPageIds.add(operation.pageId);
-      continue;
-    }
-    if (operation.kind === 'move') {
-      const current = pages.get(operation.pageId);
-      if (!current) invalid(`move references unknown page ${operation.pageId}`);
-      if (current.fingerprint !== operation.fingerprint) {
-        invalid(`move fingerprint differs for page ${operation.pageId}`);
+    const count = operation.kind === 'shift-range' ? operation.count : 1;
+    for (let offset = 0; offset < count; offset++) {
+      const pageIndex = operation.pageIndex + offset;
+      const pageId =
+        operation.kind === 'shift-range' ? previous!.pages[pageIndex]!.pageId : operation.pageId;
+      const current = pages ? pages.get(pageId) : ordered[pageIndex];
+      const applied = applyFramePageOperation(
+        previous,
+        current,
+        operation,
+        reusePositionPages,
+        damagedPageIds,
+        removedPageIds
+      );
+      if (pages) {
+        if (applied) pages.set(pageId, applied);
+        else pages.delete(pageId);
+      } else {
+        ordered[pageIndex] = applied!;
+        listPages[pageIndex] = applied!.page;
       }
-      pages.set(operation.pageId, {
-        ...current,
-        pageIndex: operation.pageIndex,
-        page:
-          current.page.pageIndex === operation.pageIndex
-            ? current.page
-            : { ...current.page, pageIndex: operation.pageIndex },
-      });
-      continue;
-    }
-    if (operation.kind === 'patch-positions') {
-      const current = pages.get(operation.pageId);
-      if (!current) invalid(`position patch references unknown page ${operation.pageId}`);
-      pages.set(operation.pageId, {
-        ...current,
-        pageIndex: operation.pageIndex,
-        fingerprint: operation.fingerprint,
-        page: patchDisplayPagePositions(
-          current.page,
-          current.primitiveIds,
-          operation.patches,
-          operation.pageIndex
-        ),
-      });
-      continue;
-    }
-    if (operation.kind === 'shift-positions') {
-      const current = pages.get(operation.pageId);
-      if (!current) invalid(`position shift references unknown page ${operation.pageId}`);
-      pages.set(operation.pageId, {
-        ...current,
-        pageIndex: operation.pageIndex,
-        fingerprint: operation.fingerprint,
-        page: reusePositionPages
-          ? shiftDisplayPagePositionsOwned(current.page, operation.runs, operation.pageIndex)
-          : shiftDisplayPagePositions(current.page, operation.runs, operation.pageIndex),
-      });
-      continue;
-    }
-    pages.set(operation.pageId, {
-      pageIndex: operation.pageIndex,
-      pageId: operation.pageId,
-      fingerprint: operation.fingerprint,
-      primitiveIds: operation.primitiveIds,
-      page: operation.page,
-    });
-    damagedPageIds.add(operation.pageId);
-  }
-  if (delta.full && previous) {
-    for (const previousPage of previous.pages) {
-      if (!pages.has(previousPage.pageId)) removedPageIds.add(previousPage.pageId);
     }
   }
-  if (pages.size !== delta.pageCount) invalid('applied page count does not match frame header');
-  const ordered = [...pages.values()].sort((left, right) => left.pageIndex - right.pageIndex);
-  const orderedIds = new Set<bigint>();
-  for (let index = 0; index < ordered.length; index++) {
-    const page = ordered[index];
-    if (page.pageIndex !== index || page.page.pageIndex !== index) {
-      invalid('applied pages are not a contiguous zero-based sequence');
+  if (pages) {
+    if (delta.full && previous) {
+      for (const previousPage of previous.pages) {
+        if (!pages.has(previousPage.pageId)) removedPageIds.add(previousPage.pageId);
+      }
     }
-    if (orderedIds.has(page.pageId)) invalid(`duplicate retained page id ${page.pageId}`);
-    orderedIds.add(page.pageId);
+    if (pages.size !== delta.pageCount) invalid('applied page count does not match frame header');
+    ordered = [...pages.values()].sort((left, right) => left.pageIndex - right.pageIndex);
+    const orderedIds = new Set<bigint>();
+    for (let index = 0; index < ordered.length; index++) {
+      const page = ordered[index];
+      if (page.pageIndex !== index || page.page.pageIndex !== index) {
+        invalid('applied pages are not a contiguous zero-based sequence');
+      }
+      if (orderedIds.has(page.pageId)) invalid(`duplicate retained page id ${page.pageId}`);
+      orderedIds.add(page.pageId);
+    }
+    listPages = ordered.map((page) => page.page);
   }
   const displayList: DisplayList = {
     ...(delta.contractVersion === undefined ? {} : { contractVersion: delta.contractVersion }),
-    pages: ordered.map((page) => page.page),
+    pages: listPages,
   };
 
-  return {
+  const frame: RetainedFrame = {
     protocolVersion: FRAME_DELTA_VERSION,
     docEpoch: delta.docEpoch,
     layoutEpoch: delta.layoutEpoch,
@@ -528,6 +668,101 @@ function applyFrameDeltaInternal(
     damagedPageIds,
     removedPageIds,
     displayList,
+  };
+  if (indexStable) retainedFramePageIndexes.set(frame, indexByPageId!);
+  return frame;
+}
+
+/** Apply one page operation using the same logic for either storage path. */
+function applyFramePageOperation(
+  previous: RetainedFrame | null,
+  current: RetainedFramePage | undefined,
+  operation: FramePageOperation,
+  reusePositionPages: boolean,
+  damagedPageIds: Set<bigint>,
+  removedPageIds: Set<bigint>
+): RetainedFramePage | undefined {
+  if (operation.kind === 'remove') {
+    if (!current) invalid(`remove references unknown page ${operation.pageId}`);
+    removedPageIds.add(operation.pageId);
+    return undefined;
+  }
+  if (operation.kind === 'move') {
+    if (!current) invalid(`move references unknown page ${operation.pageId}`);
+    if (current.fingerprint !== operation.fingerprint) {
+      invalid(`move fingerprint differs for page ${operation.pageId}`);
+    }
+    return {
+      ...current,
+      pageIndex: operation.pageIndex,
+      page:
+        current.page.pageIndex === operation.pageIndex
+          ? current.page
+          : { ...current.page, pageIndex: operation.pageIndex },
+    };
+  }
+  if (operation.kind === 'patch-positions') {
+    if (!current) invalid(`position patch references unknown page ${operation.pageId}`);
+    return {
+      ...current,
+      pageIndex: operation.pageIndex,
+      fingerprint: operation.fingerprint,
+      page: patchDisplayPagePositions(
+        current.page,
+        current.primitiveIds,
+        operation.patches,
+        operation.pageIndex
+      ),
+    };
+  }
+  if (operation.kind === 'shift-positions' || operation.kind === 'shift-range') {
+    if (!current) invalid(`position shift references unknown page ${operation.pageId}`);
+    const range = operation.kind === 'shift-range';
+    const pageIndex = range ? current.pageIndex : operation.pageIndex;
+    const shift: DisplayPageShift = range
+      ? {
+          runs:
+            current.page.primitives.length === 0
+              ? []
+              : [
+                  {
+                    start: 0,
+                    count: current.page.primitives.length,
+                    changedMask: POSITION_MASK | POSITION_PRESENT_ONLY,
+                    delta: operation.delta,
+                  },
+                ],
+          anchors: [],
+          ...(current.page.positionSpan === undefined ? {} : { spanDelta: operation.delta }),
+        }
+      : operation;
+    return {
+      ...current,
+      pageIndex,
+      fingerprint: range
+        ? BigInt.asUintN(64, current.fingerprint ^ operation.salt)
+        : operation.fingerprint,
+      page: reusePositionPages
+        ? shiftDisplayPagePositionsOwned(current.page, shift, pageIndex)
+        : shiftDisplayPagePositions(current.page, shift, pageIndex),
+    };
+  }
+  const retained = previous?.pages[operation.pageIndex];
+  if (
+    retained?.pageId === operation.pageId &&
+    retained.fingerprint === operation.fingerprint &&
+    retained.primitiveIds.length === operation.primitiveIds.length &&
+    retained.primitiveIds.every((id, index) => id === operation.primitiveIds[index])
+  ) {
+    return retained;
+  }
+  damagedPageIds.add(operation.pageId);
+  return {
+    pageIndex: operation.pageIndex,
+    pageId: operation.pageId,
+    fingerprint: operation.fingerprint,
+    primitiveIds: operation.primitiveIds.slice(),
+    page: operation.page,
   };
 }
 
@@ -556,15 +791,28 @@ function bumpDisplayPageRevision(page: DisplayPage): void {
   });
 }
 
+const DISPLAY_PAGE_NOTE_ANCHOR_REVISION = '__betterofficeNoteAnchorRevision';
+
+/**
+ * Counts the owned shifts that moved this page's note anchors in place, for
+ * consumers that render the anchors (the accessibility mirror) and otherwise
+ * key on page identity.
+ */
+export function displayPageNoteAnchorRevision(page: DisplayPage): number {
+  return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_NOTE_ANCHOR_REVISION] as
+    | number
+    | undefined) ?? 0;
+}
+
 const DISPLAY_PAGE_SHIFT_LOG = '__betterofficePageShiftLog';
 // Deep enough that a long typing burst between two query-store primes (one
 // recorded shift per applied frame) still replays as compact ops.
 const SHIFT_LOG_LIMIT = 64;
 
 interface DisplayPageShiftLogEntry {
-  /** Revision the page reached when these runs were applied. */
+  /** Revision the page reached when this shift was applied. */
   readonly revision: number;
-  readonly runs: readonly FramePositionShiftRun[];
+  readonly shift: DisplayPageShift;
 }
 
 function displayPageShiftLog(page: DisplayPage): DisplayPageShiftLogEntry[] {
@@ -573,9 +821,16 @@ function displayPageShiftLog(page: DisplayPage): DisplayPageShiftLogEntry[] {
     | undefined) ?? [];
 }
 
-function recordDisplayPageShift(page: DisplayPage, runs: readonly FramePositionShiftRun[]): void {
+function recordDisplayPageShift(page: DisplayPage, shift: DisplayPageShift): void {
   const log = displayPageShiftLog(page);
-  log.push({ revision: displayPageRevision(page), runs });
+  log.push({
+    revision: displayPageRevision(page),
+    shift: {
+      runs: shift.runs,
+      anchors: shift.anchors,
+      ...(shift.spanDelta !== undefined ? { spanDelta: shift.spanDelta } : {}),
+    },
+  });
   if (log.length > SHIFT_LOG_LIMIT) log.splice(0, log.length - SHIFT_LOG_LIMIT);
   Object.defineProperty(page, DISPLAY_PAGE_SHIFT_LOG, {
     value: log,
@@ -586,26 +841,62 @@ function recordDisplayPageShift(page: DisplayPage, runs: readonly FramePositionS
 }
 
 /**
- * Ordered shift-run lists advancing the page from `sinceRevision` to its
- * current revision, or null when the bounded log no longer covers that span.
+ * Ordered shifts advancing the page from `sinceRevision` to its current
+ * revision, or null when the bounded log no longer covers that span.
  */
 export function displayPageShiftsSince(
   page: DisplayPage,
   sinceRevision: number
-): ReadonlyArray<readonly FramePositionShiftRun[]> | null {
+): ReadonlyArray<DisplayPageShift> | null {
   const current = displayPageRevision(page);
   if (current === sinceRevision) return [];
   if (current < sinceRevision) return null;
   const entries = displayPageShiftLog(page).filter((entry) => entry.revision > sinceRevision);
   if (entries.length !== current - sinceRevision) return null;
-  return entries.map((entry) => entry.runs);
+  return entries.map((entry) => entry.shift);
+}
+
+function noteAnchorTarget(page: DisplayPage, anchor: FrameNoteAnchor): NoteRegionNote {
+  const note = page.noteAreas?.[anchor.area]?.notes?.[anchor.note];
+  if (!note) invalid('note anchor shift references an unknown note');
+  return note;
+}
+
+function setNoteAnchor(note: NoteRegionNote, anchor: FrameNoteAnchor): void {
+  if (anchor.start === null) delete note.anchorDocStart;
+  else note.anchorDocStart = anchor.start;
+  if (anchor.end === null) delete note.anchorDocEnd;
+  else note.anchorDocEnd = anchor.end;
+}
+
+function shiftedPositionSpan(
+  page: DisplayPage,
+  delta: number | undefined
+): [number, number] | undefined {
+  if (delta === undefined) return undefined;
+  if (!Number.isSafeInteger(delta)) invalid('position span delta is unsafe');
+  const span = page.positionSpan;
+  if (!span) invalid('position span shift requires retained positionSpan');
+  const [start, end] = span;
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    !Number.isSafeInteger(start + delta) ||
+    !Number.isSafeInteger(end + delta)
+  ) {
+    invalid('position span shift overflows positionSpan');
+  }
+  return [start + delta, end + delta];
 }
 
 function shiftDisplayPagePositionsOwned(
   page: DisplayPage,
-  runs: readonly FramePositionShiftRun[],
+  shift: DisplayPageShift,
   pageIndex: number
 ): DisplayPage {
+  const { runs } = shift;
+  const positionSpan = shiftedPositionSpan(page, shift.spanDelta);
+  const notes = shift.anchors.map((anchor) => noteAnchorTarget(page, anchor));
   // primitives are mutated through this object below, whether or not a new
   // page wrapper is returned
   let primitiveIndex = 0;
@@ -635,8 +926,18 @@ function shiftDisplayPagePositionsOwned(
   if (runs.some((run) => run.start + run.count > primitiveIndex)) {
     invalid('position shift range exceeds retained primitive count');
   }
+  shift.anchors.forEach((anchor, index) => setNoteAnchor(notes[index]!, anchor));
+  if (positionSpan) page.positionSpan = positionSpan;
+  if (shift.anchors.length > 0) {
+    Object.defineProperty(page, DISPLAY_PAGE_NOTE_ANCHOR_REVISION, {
+      value: displayPageNoteAnchorRevision(page) + 1,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
   bumpDisplayPageRevision(page);
-  recordDisplayPageShift(page, runs);
+  recordDisplayPageShift(page, shift);
   return page.pageIndex === pageIndex ? page : { ...page, pageIndex };
 }
 
@@ -645,12 +946,14 @@ function shiftPrimitivePositionsOwned(
   changedMask: number,
   delta: number
 ): void {
+  const presentOnly = (changedMask & POSITION_PRESENT_ONLY) !== 0;
   const shift = (
     mask: number,
     field: 'docStart' | 'docEnd' | 'fragmentDocStart' | 'fragmentDocEnd'
   ): void => {
     if ((changedMask & mask) === 0) return;
     const current = primitive[field];
+    if (presentOnly && current === undefined) return;
     if (typeof current !== 'number') invalid(`position shift requires retained ${field}`);
     const value = current + delta;
     if (!Number.isSafeInteger(value)) invalid(`position shift overflows ${field}`);
@@ -660,7 +963,10 @@ function shiftPrimitivePositionsOwned(
   shift(POSITION_DOC_END, 'docEnd');
   shift(POSITION_FRAGMENT_START, 'fragmentDocStart');
   shift(POSITION_FRAGMENT_END, 'fragmentDocEnd');
-  if ((changedMask & POSITION_INLINE_WIDGET) !== 0) {
+  if (
+    (changedMask & POSITION_INLINE_WIDGET) !== 0 &&
+    !(presentOnly && primitive.inlineSdtWidget === undefined)
+  ) {
     if (
       !primitive.inlineSdtWidget ||
       !Number.isSafeInteger(primitive.inlineSdtWidget.pos + delta)
@@ -671,7 +977,11 @@ function shiftPrimitivePositionsOwned(
   }
 }
 
-function decodeStringTable(reader: BinaryReader, start: number, end: number): string[] {
+function* decodeStringTable(
+  reader: BinaryReader,
+  start: number,
+  end: number
+): Generator<void, string[]> {
   let offset = start;
   if (offset + 4 > end) invalid('truncated string table count');
   const count = reader.u32(offset);
@@ -691,6 +1001,7 @@ function decodeStringTable(reader: BinaryReader, start: number, end: number): st
       invalid('string table contains invalid UTF-8');
     }
     offset = next;
+    if (index % 64 === 63) yield;
   }
   if (offset !== end) invalid('string table length/count mismatch');
   return strings;
@@ -737,10 +1048,7 @@ function validateDataRegions(
   if (cursor !== reader.bytes.byteLength) invalid('data section has trailing bytes');
 }
 
-function decodePositionShiftRuns(
-  reader: BinaryReader,
-  operation: RawPageOp
-): FramePositionShiftRun[] {
+function decodePositionShift(reader: BinaryReader, operation: RawPageOp): DisplayPageShift {
   let offset = operation.payloadOffset;
   const end = operation.payloadOffset + operation.payloadLength;
   const require = (length: number, label: string): number => {
@@ -751,12 +1059,20 @@ function decodePositionShiftRuns(
     return current;
   };
   const count = reader.u32(require(4, 'position shift run count'));
-  if (count !== operation.primitiveCount || count === 0 || count > MAX_CONTAINER_ITEMS) {
+  const flags = reader.u32(require(4, 'position shift flags'));
+  if (
+    count !== operation.primitiveCount ||
+    (count + operation.anchorCount === 0 && (flags & SHIFT_SPAN_PRESENT) === 0) ||
+    count > MAX_CONTAINER_ITEMS
+  ) {
     invalid('position shift run count mismatch');
   }
-  if (reader.u32(require(4, 'position shift reserved word')) !== 0) {
-    invalid('position shift reserved word is nonzero');
-  }
+  if ((flags & ~SHIFT_SPAN_PRESENT) !== 0) invalid('position shift flags are invalid');
+  const spanDelta =
+    flags & SHIFT_SPAN_PRESENT
+      ? reader.safeI64(require(8, 'position span delta'), 'position span delta')
+      : undefined;
+  if (spanDelta === 0) invalid('position span delta is zero');
   const runs: FramePositionShiftRun[] = [];
   let previousEnd = 0;
   for (let index = 0; index < count; index++) {
@@ -772,8 +1088,8 @@ function decodePositionShiftRuns(
     if (
       runCount === 0 ||
       start < previousEnd ||
-      changedMask === 0 ||
-      (changedMask & ~POSITION_MASK) !== 0 ||
+      (changedMask & POSITION_MASK) === 0 ||
+      (changedMask & ~(POSITION_MASK | POSITION_PRESENT_ONLY)) !== 0 ||
       delta === 0
     ) {
       invalid('position shift run is invalid');
@@ -781,8 +1097,33 @@ function decodePositionShiftRuns(
     previousEnd = runEnd;
     runs.push({ start, count: runCount, changedMask, delta });
   }
+  const anchors: FrameNoteAnchor[] = [];
+  if (operation.anchorCount > 0) {
+    const anchorCount = reader.u32(require(4, 'note anchor count'));
+    if (anchorCount !== operation.anchorCount || anchorCount > MAX_CONTAINER_ITEMS) {
+      invalid('note anchor count mismatch');
+    }
+    if (reader.u32(require(4, 'note anchor reserved word')) !== 0) {
+      invalid('note anchor reserved word is nonzero');
+    }
+    const anchorValue = (label: string): number | null => {
+      const at = require(8, label);
+      return reader.i64(at) === ABSENT_ANCHOR ? null : reader.safeI64(at, label);
+    };
+    for (let index = 0; index < anchorCount; index++) {
+      const area = reader.u32(require(4, 'note anchor area'));
+      const note = reader.u32(require(4, 'note anchor note'));
+      const start = anchorValue('note anchor start');
+      const end = anchorValue('note anchor end');
+      const previous = anchors.at(-1);
+      if (previous && (area < previous.area || (area === previous.area && note <= previous.note))) {
+        invalid('note anchors are not in strictly increasing order');
+      }
+      anchors.push({ area, note, start, end });
+    }
+  }
   if (offset !== end) invalid('position shift byte length/count mismatch');
-  return runs;
+  return { runs, anchors, ...(spanDelta !== undefined ? { spanDelta } : {}) };
 }
 
 function assertZeroPadding(reader: BinaryReader, start: number, end: number): void {
@@ -916,9 +1257,11 @@ function patchDisplayPagePositions(
 
 function shiftDisplayPagePositions(
   page: DisplayPage,
-  runs: readonly FramePositionShiftRun[],
+  shift: DisplayPageShift,
   pageIndex: number
 ): DisplayPage {
+  const { runs } = shift;
+  const positionSpan = shiftedPositionSpan(page, shift.spanDelta);
   let primitiveIndex = 0;
   let runIndex = 0;
   const shiftPrimitives = (primitives: readonly DisplayPrimitive[]): DisplayPrimitive[] =>
@@ -955,9 +1298,20 @@ function shiftDisplayPagePositions(
   if (runs.some((run) => run.start + run.count > primitiveIndex)) {
     invalid('position shift range exceeds retained primitive count');
   }
+  const notes = shift.anchors.map((anchor) => noteAnchorTarget(page, anchor));
+  const copiedAreas = new Set<number>();
+  shift.anchors.forEach((anchor, index) => {
+    const area = noteAreas![anchor.area]!;
+    if (!copiedAreas.has(anchor.area)) area.notes = area.notes!.slice();
+    copiedAreas.add(anchor.area);
+    const note = { ...notes[index]! };
+    setNoteAnchor(note, anchor);
+    area.notes![anchor.note] = note;
+  });
   return {
     ...page,
     pageIndex,
+    ...(positionSpan ? { positionSpan } : {}),
     primitives,
     ...(noteAreas ? { noteAreas } : {}),
     ...(header ? { header } : {}),
@@ -971,12 +1325,14 @@ function shiftPrimitivePositions(
   delta: number
 ): DisplayPrimitive {
   const next: DisplayPrimitive = { ...primitive };
+  const presentOnly = (changedMask & POSITION_PRESENT_ONLY) !== 0;
   const shift = (
     mask: number,
     field: 'docStart' | 'docEnd' | 'fragmentDocStart' | 'fragmentDocEnd'
   ): void => {
     if ((changedMask & mask) === 0) return;
     const current = next[field];
+    if (presentOnly && current === undefined) return;
     if (typeof current !== 'number') invalid(`position shift requires retained ${field}`);
     const value = current + delta;
     if (!Number.isSafeInteger(value)) invalid(`position shift overflows ${field}`);
@@ -986,7 +1342,10 @@ function shiftPrimitivePositions(
   shift(POSITION_DOC_END, 'docEnd');
   shift(POSITION_FRAGMENT_START, 'fragmentDocStart');
   shift(POSITION_FRAGMENT_END, 'fragmentDocEnd');
-  if ((changedMask & POSITION_INLINE_WIDGET) !== 0) {
+  if (
+    (changedMask & POSITION_INLINE_WIDGET) !== 0 &&
+    !(presentOnly && next.inlineSdtWidget === undefined)
+  ) {
     if (!next.inlineSdtWidget || !Number.isSafeInteger(next.inlineSdtWidget.pos + delta)) {
       invalid('position shift requires retained inline widget metadata');
     }
@@ -1077,12 +1436,16 @@ class ValueCursor {
           const key = this.string(this.readU32('object key id'));
           if (Object.prototype.hasOwnProperty.call(value, key))
             invalid(`duplicate object key ${key}`);
-          Object.defineProperty(value, key, {
-            value: this.value(depth + 1),
-            enumerable: true,
-            configurable: true,
-            writable: true,
-          });
+          if (key in Object.prototype) {
+            Object.defineProperty(value, key, {
+              value: this.value(depth + 1),
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            });
+          } else {
+            value[key] = this.value(depth + 1);
+          }
         }
         if (this.offset !== containerEnd) invalid('object byte length/count mismatch');
         return value;
@@ -1245,6 +1608,14 @@ function validateDisplayPage(page: DisplayPage, pageIndex: number, primitiveCoun
     invalid('page dimensions are invalid');
   }
   if (!Array.isArray(page.primitives)) invalid('page primitives are not an array');
+  const watermarkPrimitiveCount = page.watermarkPrimitiveCount ?? 0;
+  if (
+    !Number.isSafeInteger(watermarkPrimitiveCount) ||
+    watermarkPrimitiveCount < 0 ||
+    watermarkPrimitiveCount > page.primitives.length
+  ) {
+    invalid('watermark primitive count is invalid');
+  }
   let actual = page.primitives.length;
   for (const area of page.noteAreas ?? []) {
     if (!Array.isArray(area.separatorPrimitives ?? []) || !Array.isArray(area.primitives ?? [])) {

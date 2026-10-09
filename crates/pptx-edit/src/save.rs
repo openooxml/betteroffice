@@ -30,6 +30,12 @@ impl DeckSession {
                     .to_owned(),
             ));
         }
+        if let Some(attribute) = crate::source_run_properties::unrecovered_attribute(&self.doc) {
+            return Err(EditError::Write(format!(
+                "run {attribute} could not be recovered from the source file for some \
+                 restored text, and saving now would drop it"
+            )));
+        }
         let current = self.snapshot()?;
         let baseline = baseline_snapshot(&self.package)?;
         if current == baseline {

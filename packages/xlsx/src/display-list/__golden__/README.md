@@ -3,8 +3,7 @@
 The safety net for the display-list + viewport seam. It pins the current output
 of the viewport math and the synthetic display-list factories across refactors.
 
-The goldens capture **current** behavior verbatim. They are not a statement that
-the output is _correct_ — only that it must not change unintentionally.
+The goldens pin current behavior so changes receive deliberate review.
 
 ## What's here
 
@@ -31,7 +30,7 @@ the output is _correct_ — only that it must not change unintentionally.
 ## Regenerating
 
 A normal test run never writes files. To (re)write the goldens, gate on the env
-var (from `packages/core`):
+var (from `packages/xlsx`):
 
 ```bash
 GOLDEN_UPDATE=1 bun test src/display-list/__golden__

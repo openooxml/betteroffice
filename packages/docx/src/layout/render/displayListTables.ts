@@ -121,6 +121,8 @@ export interface DisplayListTableInsertHoverInput {
   cellPmPosOf: (tableKey: string, row: number, col: number) => number | null;
   region?: DisplayListTableRegion;
   edgeProximity?: number;
+  /** Client px per CSS px of the button, which scales its offsets from the table. Default 1. */
+  buttonZoom?: number;
 }
 
 export interface DisplayListTableInsertHoverHit {
@@ -397,6 +399,33 @@ export function deriveDisplayListTableFragments(
   return out;
 }
 
+/**
+ * [`deriveDisplayListTableFragments`] for the pages `start..=end` only. Each of
+ * their tables still takes its identity from every page it covers.
+ */
+export function deriveDisplayListTableFragmentsOnPages(
+  list: DisplayList,
+  tableKeyOf: TableKeyResolver,
+  start: number,
+  end: number
+): DisplayListTableFragment[] {
+  const pages = list.pages.slice(start, end + 1);
+  const tableIds = new Set<string>();
+  let cells = false;
+  for (const page of pages) {
+    for (const primitive of page.primitives) {
+      if (primitive.kind !== 'line' && primitive.cell) cells = true;
+      if (primitive.table?.tableId) tableIds.add(primitive.table.tableId);
+    }
+  }
+  // Only cell content opens a fragment; a cell without a table id still resolves by position.
+  if (!cells) return [];
+  const identities = buildTableIdentityMap(list, tableKeyOf, { kind: 'body' }, tableIds);
+  return pages.flatMap((page) =>
+    fragmentsForPage(page.pageIndex, page.primitives, tableKeyOf, identities)
+  );
+}
+
 interface RegionPrimitives {
   kind: 'body' | 'header' | 'footer';
   rId?: string;
@@ -418,7 +447,8 @@ function primitivesForRegion(
 function buildTableIdentityMap(
   list: DisplayList,
   tableKeyOf: TableKeyResolver,
-  region: DisplayListTableRegion
+  region: DisplayListTableRegion,
+  onlyTables?: ReadonlySet<string>
 ): TableIdentityMap {
   const identities: TableIdentityMap = new Map();
   for (const page of list.pages) {
@@ -426,6 +456,7 @@ function buildTableIdentityMap(
     if (!regionPrimitives) continue;
     for (const primitive of regionPrimitives.primitives) {
       if (!primitive.cell || !primitive.table?.tableId || primitive.docStart == null) continue;
+      if (onlyTables && !onlyTables.has(primitive.table.tableId)) continue;
       const tableKey = tableKeyOf(primitive.docStart);
       if (tableKey == null) continue;
       const current = identities.get(primitive.table.tableId);
@@ -752,6 +783,7 @@ export function detectDisplayListTableInsertHover(
     cellPmPosOf,
     region = { kind: 'body' },
     edgeProximity = TABLE_INSERT_EDGE_PROXIMITY_PX,
+    buttonZoom = 1,
   } = input;
 
   const page = list.pages[pageIndex];
@@ -804,8 +836,8 @@ export function detectDisplayListTableInsertHover(
         const anchor = toClient(left, rowTop + (rowBottom - rowTop) / 2);
         return {
           type: 'row',
-          clientX: anchor.clientX - ROW_BUTTON_OFFSET_X,
-          clientY: anchor.clientY - ROW_BUTTON_OFFSET_Y,
+          clientX: anchor.clientX - ROW_BUTTON_OFFSET_X * buttonZoom,
+          clientY: anchor.clientY - ROW_BUTTON_OFFSET_Y * buttonZoom,
           cellPmPos: pmPos,
         };
       }
@@ -833,8 +865,8 @@ export function detectDisplayListTableInsertHover(
         const anchor = toClient(cellLeft + (cellRight - cellLeft) / 2, top);
         return {
           type: 'column',
-          clientX: anchor.clientX - COL_BUTTON_OFFSET_X,
-          clientY: anchor.clientY - COL_BUTTON_OFFSET_Y,
+          clientX: anchor.clientX - COL_BUTTON_OFFSET_X * buttonZoom,
+          clientY: anchor.clientY - COL_BUTTON_OFFSET_Y * buttonZoom,
           cellPmPos: pmPos,
         };
       }

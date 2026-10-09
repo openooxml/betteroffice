@@ -450,6 +450,22 @@ fn apply_range_formats(
 /// apply a sequence of ops, returning the combined inverse (per-op inverses
 /// concatenated in reverse order).
 pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
+    if let [op @ Op::SetCell { .. }] = ops {
+        #[cfg(test)]
+        if FORCE_CLONE_ROLLBACK.get() {
+            return apply_ops_cloned(wb, ops);
+        }
+        return apply_in_place(wb, op).map(|inverse| inverse.0);
+    }
+    apply_ops_cloned(wb, ops)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLONE_ROLLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut next = wb.clone();
     let inverse = apply_ops_in_place(&mut next, ops)?;
     *wb = next;
@@ -1039,6 +1055,76 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
         wb
+    }
+
+    #[test]
+    fn singleton_set_cell_matches_clone_rollback() {
+        let states = [
+            CellState::default(),
+            num(123.0),
+            CellState {
+                value: CellValue::Text {
+                    value: "rich text".into(),
+                },
+                style: Some(7),
+                ..Default::default()
+            },
+            CellState {
+                value: CellValue::Number { value: 42.0 },
+                formula: Some("A1+1".into()),
+                style: Some(0),
+            },
+            CellState {
+                style: Some(u32::MAX),
+                ..Default::default()
+            },
+        ];
+        for before in &states {
+            for after in &states {
+                for at in [r("B2"), CellRef::new(MAX_ROWS, MAX_COLS)] {
+                    let mut initial = wb_one_sheet();
+                    initial.sheets.push(Sheet::new("Second"));
+                    initial.sheets[1].set_cell(at, before.clone().into());
+                    initial.sheets[1].set_array_formula(at, CellRange::new(at, at));
+                    let op = Op::SetCell {
+                        sheet: SheetId(1),
+                        at,
+                        cell: after.clone(),
+                    };
+                    let mut fast = initial.clone();
+                    let mut oracle = initial.clone();
+                    let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(true);
+                    let expected = apply_ops(&mut oracle, std::slice::from_ref(&op));
+                    FORCE_CLONE_ROLLBACK.set(false);
+                    assert_eq!(result, expected);
+                    assert_eq!(fast, oracle);
+                    apply_ops(&mut fast, &result.unwrap()).unwrap();
+                    assert_eq!(fast, initial);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failing_singleton_set_cell_leaves_model_unchanged() {
+        for initial in [Workbook::default(), wb_one_sheet()] {
+            for sheet in [SheetId(initial.sheets.len() as u32), SheetId(u32::MAX)] {
+                let op = Op::SetCell {
+                    sheet,
+                    at: r("B2"),
+                    cell: num(123.0),
+                };
+                let mut fast = initial.clone();
+                let mut oracle = initial.clone();
+                let result = apply_ops(&mut fast, std::slice::from_ref(&op));
+                let expected = apply_ops_cloned(&mut oracle, std::slice::from_ref(&op));
+                assert_eq!(result, Err(OpError::SheetNotFound(sheet)));
+                assert_eq!(result, expected);
+                assert_eq!(fast, initial);
+                assert_eq!(oracle, initial);
+            }
+        }
     }
 
     #[test]

@@ -29,6 +29,7 @@ import {
   type DocxPluginEditorAccess,
 } from './createPluginClients';
 import { definitionProblem, pluginDefinition } from './defineDocxPlugin';
+import { observeProposals, proposalSnapshot, type DocxProposalSnapshot } from './proposalPreview';
 import type {
   DocxPlugin,
   DocxPluginCommand,
@@ -65,6 +66,7 @@ export interface DocxPluginHost {
   close(reason: 'document-replaced' | 'unmounted'): void;
   generation(): string | null;
   version(): string;
+  previewVersion(): number;
   selectionChanged(selection: DocxPluginSelection): void;
   modeChanged(mode: EditorMode, readOnly: boolean): void;
   layoutChanged(layout: DocxPluginLayout | null): void;
@@ -75,6 +77,10 @@ export interface DocxPluginHost {
   layoutId(): string | null;
   /** Geometry moved without a new layout, as on resize or scroll-container changes. */
   geometryChanged(): void;
+  /** The pages now show `layout`'s pixels; repeats its `layout-change` if it is still current. */
+  layoutPresented(layout: DocxPluginLayout): void;
+  /** Geometry for the shown `layout` exists now; repeats its `layout-change` if none carried it. */
+  geometryPresented(layout: DocxPluginLayout): void;
   activations(): readonly DocxPluginActivation[];
   subscribe(listener: () => void): () => void;
   /** The restricted command store an activation's React contributions see. */
@@ -122,22 +128,33 @@ function checkedResult(value: unknown): DocxPluginCommandResult {
 }
 
 function sameLayout(a: DocxPluginLayout | null, b: DocxPluginLayout | null): boolean {
-  return a === b || (!!a && !!b && a.id === b.id && a.version === b.version && a.zoom === b.zoom);
+  return (
+    a === b ||
+    (!!a &&
+      !!b &&
+      a.id === b.id &&
+      a.version === b.version &&
+      a.previewVersion === b.previewVersion &&
+      a.zoom === b.zoom)
+  );
 }
 
 export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHost {
   let reporter: ((error: DocxPluginError) => void) | undefined;
   let session: YrsSession | null = null;
   let detachUpdates: (() => void) | null = null;
+  let detachProposals: (() => void) | null = null;
   let installed = false;
   let generations = 0;
   let commandSignature: string | null = null;
   const state = {
     version: '',
+    previewVersion: 0,
     mode: 'editing' as EditorMode,
     readOnly: false,
     selection: EMPTY_SELECTION,
     layout: null as DocxPluginLayout | null,
+    geometryLayout: null as DocxPluginLayout | null,
   };
   const activationScopes = new WeakMap<object, DocxCommandScope>();
   const identities = new WeakMap<object, number>();
@@ -201,7 +218,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       read: clients.read,
       commands: clients.commands,
       edits: clients.edits,
-      geometry: geometry && invocation.snapshot.layout?.id === geometry.layout.id ? geometry : null,
+      geometry:
+        geometry && sameLayout(invocation.snapshot.layout, geometry.layout) ? geometry : null,
       navigation: clients.navigation,
       setState: (next, atVersion) => invocation.setState(next, atVersion),
       onCleanup: (cleanup) => invocation.onCleanup(cleanup),
@@ -249,6 +267,14 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   });
 
   const notify = (event: DocxPluginEvent): void => runtime.notify(event);
+  const hasGeometry = (): boolean => {
+    const geometry = access.geometry();
+    return !!geometry && sameLayout(geometry.layout, state.layout);
+  };
+  const notifyLayout = (generation: string): void => {
+    if (hasGeometry()) state.geometryLayout = state.layout;
+    notify({ type: 'layout-change', generation, layout: state.layout });
+  };
 
   const documentChanged = (): void => {
     const generation = runtime.generation();
@@ -262,17 +288,38 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     }
   };
 
-  /** Observes document changes only while plugins are installed. */
+  const proposalsChanged = (snapshot: DocxProposalSnapshot): void => {
+    documentChanged();
+    state.previewVersion = snapshot.previewVersion;
+    const generation = runtime.generation();
+    const invalidated = state.layout && state.layout.previewVersion !== snapshot.previewVersion;
+    if (invalidated) state.layout = null;
+    if (!generation) return;
+    notify({
+      type: 'proposal-change',
+      generation,
+      version: snapshot.version,
+      previewVersion: snapshot.previewVersion,
+    });
+    if (invalidated) notify({ type: 'layout-change', generation, layout: null });
+  };
+
+  /** Observes document and proposal changes while plugins are installed. */
   const observe = (): void => {
     if (!installed || !session) {
       detachUpdates?.();
       detachUpdates = null;
+      detachProposals?.();
+      detachProposals = null;
       return;
     }
     if (detachUpdates) return;
     state.version = readSessionVersion(session) ?? state.version;
+    state.previewVersion = proposalSnapshot(session)?.previewVersion ?? 0;
+    if (state.layout?.previewVersion !== state.previewVersion) state.layout = null;
     try {
       detachUpdates = session.onUpdate(documentChanged);
+      detachProposals = observeProposals(session, proposalsChanged);
     } catch (error) {
       console.error('[DocxEditor] observing document changes for plugins failed', error);
     }
@@ -281,6 +328,8 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
   const closeSession = (): void => {
     detachUpdates?.();
     detachUpdates = null;
+    detachProposals?.();
+    detachProposals = null;
     session = null;
   };
 
@@ -342,6 +391,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
       closeSession();
       session = next;
       state.version = readSessionVersion(next) ?? '';
+      state.previewVersion = proposalSnapshot(next)?.previewVersion ?? 0;
       state.layout = null;
       state.selection = EMPTY_SELECTION;
       observe();
@@ -356,6 +406,7 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
 
     generation: () => runtime.generation(),
     version: () => state.version,
+    previewVersion: () => state.previewVersion,
 
     selectionChanged(selection) {
       if (JSON.stringify(selection) === JSON.stringify(state.selection)) return;
@@ -375,16 +426,37 @@ export function createDocxPluginHost(access: DocxPluginHostAccess): DocxPluginHo
     },
 
     layoutChanged(next) {
-      const layout = next && next.version === state.version ? next : null;
+      const layout =
+        next && next.version === state.version && next.previewVersion === state.previewVersion
+          ? next
+          : null;
       if (sameLayout(layout, state.layout)) return;
       state.layout = layout;
+      state.geometryLayout = null;
       const generation = runtime.generation();
-      if (generation) notify({ type: 'layout-change', generation, layout });
+      if (generation) notifyLayout(generation);
     },
 
     layoutId: () => (runtime.generation() === null ? null : state.layout?.id ?? null),
 
     geometryChanged: () => runtime.touch(),
+
+    layoutPresented(layout) {
+      const generation = runtime.generation();
+      if (!generation || !state.layout || !sameLayout(layout, state.layout)) return;
+      notifyLayout(generation);
+    },
+
+    geometryPresented(layout) {
+      const generation = runtime.generation();
+      if (
+        !generation ||
+        !sameLayout(layout, state.layout) ||
+        !hasGeometry() ||
+        sameLayout(state.geometryLayout, state.layout)
+      ) return;
+      notifyLayout(generation);
+    },
 
     activations: () => runtime.activations(),
     subscribe: (listener) => runtime.subscribe(listener),

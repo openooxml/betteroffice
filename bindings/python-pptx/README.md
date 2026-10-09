@@ -105,7 +105,6 @@ proposal = deck.propose("editor-agent", [{
 }], note="Clarify the opening")
 
 preview = deck.preview_proposal(proposal.id)
-layout = deck.render_proposal(proposal.id, 0)
 deck.accept_proposal(proposal.id)
 deck.undo()
 ```
@@ -184,7 +183,7 @@ for slide in read["content"]["slides"]:
             for paragraph in story["paragraphs"]:
                 print(slide["index"], paragraph["list"], paragraph["anchor"])
 
-markdown = bo.export_pptx_markdown(data)["markdown"]
+markdown = deck.export_markdown()["content"]["markdown"]
 ```
 
 The dictionaries are the
@@ -206,8 +205,7 @@ bytes with the camelCase wire options and return the content alone,
 
 ## Lay a slide out
 
-**No font is compiled into the wheel**, so laying out a slide that has text
-needs at least one registered face. Before that, `render_slide` raises:
+Register a face before laying out slide text; until then, `render_slide` raises:
 
 ```python
 deck.render_slide(0)
@@ -229,11 +227,9 @@ layout.write("slide-0.json")
 scene = layout.to_dict()
 ```
 
-Once at least one face exists nothing raises again: a family the deck names but
-you never registered resolves to the same family at regular weight, and failing
-that to the first face you registered at all. One registration therefore renders
-every slide — in that one typeface, at its metrics. Register the real faces when
-line breaking has to match what PowerPoint would do.
+Font selection tries the requested family's style, then that family without
+italic, without bold and plain, then the closest style in the first registered
+family. Known requested families supply their measured metrics.
 
 `render_slide` returns the display list — the same drawing contract the browser
 editor paints, as JSON — for hosts that paint it themselves. `render_png`
@@ -256,14 +252,13 @@ or a `#rrggbb` color.
 order to converge:
 
 ```python
+data = deck.save()
 left = Presentation.open_collaborative(data)
 right = Presentation.open_collaborative(data)
-
 left.add_text_box(0, x=INCH, y=INCH, width=4 * INCH, height=INCH, text="Q3")
-right.apply_update(left.diff(right.state_vector()))   # right now agrees
-
+right.apply_update(left.diff(right.state_vector()))
 joiner = Presentation.open_collaborative(data)
-joiner.apply_update(left.state_as_update())           # catch up from nothing
+joiner.apply_update(left.state_as_update())
 ```
 
 A deck from `open` or `open_path` is *not* a replica: it has no client ID of its
@@ -334,9 +329,7 @@ the flag untouched.
 | Undo/redo | no | yes |
 | Engine | pure Python | Rust, compiled |
 
-`python-pptx` is a far broader library and covers plenty this does not —
-charts, tables, and templating in particular. If you need slides laid out, or
-edits that merge across replicas, that is the gap this fills.
+Use `betteroffice-pptx` for slide layout and collaborative editing.
 
 ## API
 
@@ -380,7 +373,7 @@ raises `ValueError`.
 Parser bounds can be tightened for untrusted input:
 
 ```python
-Presentation.open(untrusted, limits={"max_shapes": 5_000, "max_runs": 50_000})
+Presentation.open_path("untrusted.pptx", limits={"max_shapes": 5_000, "max_runs": 50_000})
 ```
 
 An unknown limit name raises `ValueError` rather than being ignored.
@@ -404,8 +397,9 @@ The leak is easy to hit by accident, because the release does not have to be an
 explicit `del`:
 
 ```python
+from concurrent.futures import ThreadPoolExecutor
 with ThreadPoolExecutor() as pool:
-    decks = [f.result() for f in [pool.submit(load, p) for p in paths]]
+    decks = list(pool.map(Presentation.open_path, ["deck.pptx", "quarterly.pptx"]))
 # every deck was opened on a worker and is now dropped on the main thread
 ```
 
@@ -424,9 +418,8 @@ The heavy operations release the GIL while they run — `open`, `open_path`,
 
 ## Status
 
-`0.1.x`: the API may change before `1.0`. `save` writes edits back at the
-XML level and copies untouched parts through byte for byte; the container is
-rebuilt, so output is not byte-identical to the source — see *Writing*.
+Pre-1.0: the API may change between minor versions. Saving patches edited XML,
+preserves untouched parts and rebuilds the ZIP container.
 
 Wheels are built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows
 (x86_64) against the stable ABI for CPython 3.9 and up.

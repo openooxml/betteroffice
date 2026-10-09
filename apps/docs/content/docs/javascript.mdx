@@ -33,8 +33,8 @@ The spreadsheet and presentation editors take a `Uint8Array`:
 import { XlsxEditor } from "@betteroffice/xlsx-react";
 import { PptxEditor } from "@betteroffice/pptx-react";
 
-<XlsxEditor file={bytes} fileName="report.xlsx" />
-<PptxEditor file={bytes} fonts={[{ family: "Inter", bytes: fontBytes }]} />
+<XlsxEditor file={bytes} fileName="report.xlsx" />;
+<PptxEditor file={bytes} fonts={[{ family: "Inter", bytes: fontBytes }]} />;
 ```
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
@@ -79,8 +79,8 @@ parts outside the editor inside `<DocxCommandProvider commands={commands}>`, wit
 Controls keep their active and `'mixed'` states, shortcuts, and read-only,
 viewing and suggesting restrictions. A disabled command always states why
 (`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
-availability again after preceding input, resolving to `executed`, `noop`,
-`opened`, `requested` or a typed failure. Dialogs a command opens apply to the
+availability again after preceding input, resolving to `{ ok: true, status }`
+or `{ ok: false, failure }`. Dialogs a command opens apply to the
 document and selection they opened with. At narrow widths, groups move into an
 accessible More menu that keeps every built-in choice; wrap other host content
 in `ToolbarOverflow` to give it an entry there.
@@ -144,7 +144,9 @@ aborts it and delivers `load` again, and after ten such runs the plugin is
 stopped and reported. `document-change` carries only the committed version, for
 typing, remote edits, undo, commands and batches (a plugin's own included), and
 never for a refusal or no-op; `selection-change`, `mode-change` (with the
-effective `readOnly`), `layout-change` and `grants-change` follow. Notifications
+effective `readOnly`), `layout-change`, `proposal-change` (host proposals or
+their preview decisions changed, with `previewVersion`) and `grants-change`
+follow. Notifications
 describe current state, so several changes can arrive as one, and a newer one
 aborts the hook still handling the last (`context.signal`), unless that hook's
 own edit batch made it. Replacing the document,
@@ -184,13 +186,23 @@ shows toolbar contributions with
 `useDocxCommand` and `useDocxCommandState` accept contributed ids.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
-the current version. `geometry.dom` (a `RenderedDomContext`) answers in
+the current version. An overlay may render during a pending layout with that and
+`context.snapshot.layout` null, its `geometry` prop then being the previous
+layout's. `geometry.dom` (a `RenderedDomContext`) answers in
 pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
 converts such a rectangle into pixels of the unscaled overlay layer, or returns
 `null` once that layout is no longer rendered. `geometry.getPositionAtPoint`
 hit-tests client coordinates like the caret and returns the layout's `version` and
 `layoutId` with a collapsed accepted-view `target` for edit batch steps, or `null`
 likewise, while input is pending, and until the pages show that layout.
+`geometry.getAnchorGeometry(target)` resolves a proposal, revision, paragraph,
+search match or text range to overlay-layer pixels: every visible fragment with
+its zero-based `pageIndex`, an `anchor` collapsed at the end of the last one (at
+the boundary of a target the preview hides, else at its paragraph) and the
+anchor's `pageRect`. It refuses with a typed failure rather than answer from a
+stale or unpainted layout, and `layout-change` repeats once the pages have painted
+a layout that arrived before its pixels; `layout.previewVersion` is the proposal
+preview the pixels show.
 `geometry.dom` is experimental
 and may be replaced by a data-only facade. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
@@ -257,8 +269,8 @@ Omit `toolbar` for the default controls or pass `null` for none;
 `onReady` (it may be `null` until then). A disabled command always states why
 (`disabledReason.code` and a localized `message`); mixed selections report
 `'mixed'`. `execute(id, args)` runs after input accepted before it, such as a
-picture still decoding, checks availability again, and resolves to `executed`,
-`noop`, `opened`, `requested` or a typed failure. Commands enforce read-only
+picture still decoding, checks availability again, and resolves to
+`{ ok: true, status }` or `{ ok: false, failure }`. Commands enforce read-only
 mode for the UI; `api.handle` stays direct host access. The prop-based
 `EditorToolbar` and `Toolbar` remain supported but deprecated: without `mode`
 they bind to their props, and `useEditorToolbar()` inside a command-mode toolbar
@@ -356,7 +368,7 @@ painted frame of the current version, and not during proposal review.
 converts `slide-emu` (9,525 EMU per pixel) or `slide-px` rectangles into pixels
 of the unscaled overlay layer on the slide, `getShapeRect(shapeId)` returns a
 shape's rendered bounds including group descendants, and `getPositionAtPoint`
-hit-tests client coordinates with the layout's `version` and `id`. The layer
+hit-tests client coordinates with `version` and `layoutId`. The layer
 sits below selection handles and proposal controls and ignores the pointer
 unless an element sets `pointer-events: auto`. Panels dock left, right or bottom
 of the slide beside the thumbnail rail, and become drawers in a narrow editor.
@@ -408,8 +420,8 @@ none, or set `showToolbar={false}`. Outside the editor, render the same parts
 inside `<XlsxCommandProvider commands={commands}>`, with `commands` captured from
 `onReady` (`null` until then). `execute(id, args)` runs in order with pastes
 and cell entries accepted before it, writes the cell or formula text typed so
-far, checks availability again, and resolves to `executed`, `noop`, `opened`,
-`requested` or a typed failure such as `target-changed`; a disabled command
+far, checks availability again, and resolves to `{ ok: true, status }` or
+`{ ok: false, failure }`; a disabled command
 states why in `disabledReason`. The synchronous `api.save()` throws
 `XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
 bytes without accepted input; `execute("save", null)` waits for it and saves.
@@ -598,7 +610,14 @@ and `applyEdits` on its ref, flushing pending input first. Paragraph and style
 steps need a session opened from DOCX bytes, inline atoms cannot be replaced, and
 list numbering is a v1 limitation: numbered paragraphs and styles that define or
 inherit numbering refuse with `unsupported` until a follow-up retains numbering
-definitions.
+definitions. Steps also refuse content-locked controls, existing tracked changes
+they would touch (tracked run formatting included) and pending paragraph-mark
+revisions; paragraph and style steps cannot be suggested, and an inserted
+paragraph takes only its style's defaults, so it is never numbered. Deleting a
+span that holds tables, controls, section breaks, opaque XML, fields' cached
+results, or comments and bookmarks crossing it refuses, as does a step after
+which saving would move an opaque XML block; a batch holds at most 128 steps,
+1,048,576 inserted UTF-16 units and 1,024 new paragraphs.
 
 ## Edit PPTX in version-checked batches
 
@@ -637,7 +656,13 @@ outline. Fields and soft line breaks are never replaced or deleted. Ids and
 versions belong to one open session. `PptxEditor` exposes the same
 `readContent`, `findText`, `validateEdits` and `applyEdits` on its editor API,
 flushing pending input first. The Rust `Presentation` and the Python binding
-take the same requests.
+take the same requests. A batch refuses when saving could turn a field into
+plain text, which it rules out only while every field is non-empty and sits in
+its paragraph's unchanged leading or trailing text; a paragraph's alignment and
+text cannot change in one batch, and slides, shapes and paragraphs are neither
+created nor removed. A batch holds at most 128 steps and 1,048,576 inserted
+UTF-16 units, requests at most 16 MiB of JSON, and reads and searches return at
+most 64 MiB, searches marking the cut with `truncated`.
 
 ### PPTX structured export
 
@@ -682,9 +707,10 @@ const read = workbook.readCells({
 });
 if (!read.ok) throw new Error(read.failure.message);
 
+const now = new Date();
 const result = workbook.applyEdits({
   expectVersion: read.version,
-  calculation: { nowSerial: Date.now() / 86_400_000 + 25_569 },
+  calculation: { nowSerial: (now.getTime() - now.getTimezoneOffset() * 60_000) / 86_400_000 + 25_569 },
   steps: [
     {
       op: "setCellInputs",
@@ -737,6 +763,8 @@ const { markdown, anchors } = await exportDocxMarkdown(bytes, {
 selects headers, footers, footnotes, endnotes or comments; omitted stories,
 formatting and revision content are listed in `diagnostics`. Ranges use the edit
 batch offsets (UTF-16, one U+FFFC per inline atom) in the view they name.
+A list number its format cannot write, such as a Roman numeral past 3,999, is
+drawn and exported without a marker, with an `unsupported-numbering` diagnostic.
 Fields export their cached result and are never evaluated; images export alt
 text and relationship metadata, not image data. On a live session,
 `session.exportStructured(options)` and `session.exportMarkdown(options)` return
@@ -816,7 +844,7 @@ painted.
 - The map carries its own `schemaVersion` (1): additive fields keep it, and a
   change existing readers would misread bumps it.
 
-Native Rust and Python structured exports do not yet generate page maps.
+Rust `EngineSession` also exports page maps; Python exports do not.
 
 ## Export XLSX content with anchors
 
@@ -850,7 +878,10 @@ the number format and merge membership; formula results are stored values
 marked `unverified`, `missing` (the file stored none and nothing has calculated
 since), `uncertain`, `cycle` or `limited`. Sheets also list merges,
 tables, hyperlinks, hidden row and column spans, and drawing objects as
-placeholders; defined names are listed read-only. Anchors are sheet index, sheet
+placeholders; defined names are listed read-only. Comments, rich-text formatting
+runs (the text is exported), sheet features such as conditional formatting, data
+validation and pivot tables, and unreadable charts, which stay placeholders, are
+diagnosed rather than exported. Anchors are sheet index, sheet
 name and A1 in that version or snapshot, not identities that survive structural
 edits. `maxCells` and `maxBytes` stop at a complete record with `truncated`.
 Markdown renders one labelled grid per sheet (200 rows, 50 columns and 10,000
@@ -881,10 +912,10 @@ if (!result.ok) console.warn(result.failure.code, result.failure.reason);
 ```
 
 The text replaces the control's content and clears its placeholder: CRLF becomes
-LF, LF is a line break in an inline control and a new paragraph in a block
-control, and a plain-text control accepts it only with `w:multiLine`. The new
-text takes the formatting of the control's first text run, or the control's own
-run properties while it shows its placeholder. Every step commits or none does;
+LF, LF is a line break (a new paragraph in a rich-text block control), and a
+plain-text control accepts it only with `w:multiLine`. The new text takes the
+formatting of the control's first text run, or the control's own run properties
+while it shows its placeholder. Every step commits or none does;
 missing or duplicate tags and `ooxmlId`s, locked, data-bound and nested controls,
 and content other than text, tabs and line breaks are refused as data with a
 `reason`. `findContentControls(query)` returns every exact match of an id, tag,
@@ -895,7 +926,9 @@ tags are the template author's names. Checkbox, dropdown and date controls keep
 `setContentControlValue`; passing a string to it fills a text control the same
 way. The React editor exposes `listContentControls` and `findContentControls` on
 its ref. Filling needs a session opened from DOCX bytes; rich-text run input is
-not supported yet.
+not supported yet. Controls the session does not hold as controls, such as those
+in text boxes, are left out as a coverage gap (`complete: false`), and while one
+exists, tag and `ooxmlId` fills refuse with `provenance-unavailable`.
 
 ## Compare DOCX files into tracked changes
 
@@ -947,7 +980,7 @@ interaction separately when investigating input-to-paint latency.
 
 A DOCX `YrsSession` addresses paragraphs by session keys, which are never saved as Word
 paragraph IDs (`w14:paraId`); a session anchor resolves on every replica of one
-collaborative session, and each seeding open (`openDocx`, `seedFromDocx`) starts a new
+collaborative session, and seeding opens without a `generation` start a new
 session. `saveYrsDocx(session)` from `@betteroffice/docx/yrs` returns the
 saved bytes and a persisted anchor for each saved paragraph that has a Word paragraph ID,
 qualified by its package part. Resolve it after reopening:
@@ -966,6 +999,9 @@ keep none until the host calls `session.persistParagraphIds()`, which covers eve
 part, comments and note separators included, and refuses rather than guess at an
 ambiguous comment reference. Results are `found`, `missing`, `ambiguous`, or
 `unsupported`; table, cell, and content-control identities are not persisted.
+The React editor's ref offers `getParagraphIdentities()` and
+`resolveParagraphAnchors(anchors)`, which returns the results in input order with
+the version they were resolved at.
 
 ## Package reference
 

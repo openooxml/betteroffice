@@ -22,11 +22,30 @@ for API details and supported operations.
 | `betteroffice-vsdx-edit` | Transactional editing and collaboration |
 | `betteroffice-vsdx-formula` | Bounded formula parsing |
 
+`betteroffice-vsdx-validate` skips the overlapping-shape and connector-crossing
+rules on pages where more than `MAX_PAIRWISE_SHAPES` (2,000) shapes have scene
+bounds.
+
 ## JavaScript and React
 
 `@betteroffice/vsdx` provides the Wasm engine and Canvas display-list painter. Initialize the Wasm module before opening a diagram.
 
 `@betteroffice/vsdx-react` provides the React editor. Its strings are supplied by `@betteroffice/vsdx-i18n`. Pass font bytes to the editor so layout and painting use the same faces.
+
+## Rendering
+
+Linear fill gradients render; non-linear `FillGradientDir` values, an
+unresolvable stop and gradients with fewer than two stops fall back to the solid
+fill with a fidelity diagnostic, and a stop with `GradientStopColorTrans` is
+painted opaque and reported. Connectors route without Visio's obstacle
+avoidance. Line jumps draw in the arc and gap styles; other jump styles and
+last-routed (3) crossings stay unbridged, and a page past the crossing-detection
+budget renders with no line jumps at all. The native PNG backend,
+`betteroffice-vsdx-raster`, sets each run in the face registered for its family,
+else a registered Arial or `sans-serif` face, else Carlito Regular, without
+small caps, superscripts or subscripts,
+and draws images other than JPEG and PNG as dashed placeholders counted in
+`skipped_images`.
 
 ## Python
 

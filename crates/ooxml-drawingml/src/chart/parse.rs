@@ -17,6 +17,9 @@ const MAX_PLOT_GROUPS: usize = 64;
 const MAX_AXES: usize = 128;
 /// Chart-wide, so per-vector limits cannot multiply into an unbounded parse.
 const MAX_CHART_SERIES: usize = 1_024;
+/// Charged per cache point read. A scatter's X cache also labels its
+/// categories, and the legacy flat series clone every plot group's categories
+/// and values, so a chart retains at most three times this many slots.
 const MAX_CHART_POINTS: usize = 200_000;
 const MAX_AXIS_IDS: usize = 16;
 /// Per-series `c:dLbl` overrides, charged against the chart-wide point budget.
@@ -316,16 +319,32 @@ fn parse_index(raw: Option<&str>) -> Option<f64> {
     value.parse::<u32>().ok().map(f64::from)
 }
 
-/// Reads at most the remaining point budget from `elements`, charging every
-/// child it examines so malformed ones cost as much as parsed ones.
 /// Places cache points at their `c:pt/@idx`. A cache is sparse — the sheet's
 /// empty cells simply have no `c:pt` — so reading them in document order slid
-/// every later category up against the wrong value.
-fn place_points<T: Clone>(entries: Vec<(usize, T)>, blank: &T) -> Vec<T> {
-    let Some(last) = entries.iter().map(|(index, _)| *index).max() else {
+/// every later category up against the wrong value. The cache spans no more
+/// than its `c:ptCount`, and every gap slot is charged like a point, so an
+/// outlying index cannot allocate past the chart's budget.
+fn place_points<E: ChartXml, T: Clone>(
+    cache: &E,
+    entries: Vec<(usize, T)>,
+    blank: &T,
+    budget: &mut Budget,
+) -> Vec<T> {
+    let declared = parse_index(val_attr(child(cache, "ptCount"))).map(|count| count as usize);
+    let Some(last) = entries
+        .iter()
+        .map(|(index, _)| *index)
+        .filter(|index| declared.is_none_or(|count| *index < count))
+        .max()
+    else {
         return Vec::new();
     };
-    let mut placed = vec![blank.clone(); last.saturating_add(1).min(MAX_POINTS)];
+    let length = last
+        .saturating_add(1)
+        .min(entries.len() + budget.point_cap(MAX_POINTS))
+        .min(MAX_POINTS);
+    budget.spend_points(length.saturating_sub(entries.len()));
+    let mut placed = vec![blank.clone(); length];
     for (index, value) in entries {
         if let Some(slot) = placed.get_mut(index) {
             *slot = value;
@@ -342,6 +361,8 @@ fn point_index_attr<E: ChartXml>(point: &E, position: usize) -> usize {
         .unwrap_or(position)
 }
 
+/// Reads at most the remaining point budget from `elements`, charging every
+/// child it examines so malformed ones cost as much as parsed ones.
 fn take_points<'a, E: ChartXml + 'a, T>(
     elements: impl Iterator<Item = &'a E>,
     budget: &mut Budget,
@@ -382,7 +403,7 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
         next = index.saturating_add(1);
         Some((index, text))
     });
-    place_points(entries, &String::new())
+    place_points(cache, entries, &String::new(), budget)
 }
 
 fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<f64> {
@@ -401,7 +422,7 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
         next = index.saturating_add(1);
         Some((index, value))
     });
-    place_points(entries, &f64::NAN)
+    place_points(cache, entries, &f64::NAN, budget)
 }
 
 fn parse_num_cache_with_strings<E: ChartXml>(
@@ -427,7 +448,7 @@ fn parse_num_cache_with_strings<E: ChartXml>(
         next = index.saturating_add(1);
         Some((index, (text, number)))
     });
-    let placed = place_points(entries, &(String::new(), f64::NAN));
+    let placed = place_points(cache, entries, &(String::new(), f64::NAN), budget);
     let mut strings = Vec::with_capacity(placed.len());
     let mut numbers = Vec::with_capacity(placed.len());
     for (string, number) in placed {
@@ -1584,13 +1605,17 @@ mod tests {
 
     #[test]
     fn varied_points_are_charged_to_the_point_budget() {
-        let space = varied_pie(4, &[MAX_POINTS - 1], None);
-        let generated: usize = space.plot_groups[0]
-            .series
+        let space = varied_pie(4, &[MAX_POINTS / 4 - 1], None);
+        let series = &space.plot_groups[0].series;
+        let generated: usize = series
             .iter()
             .map(|series| series.points.as_ref().map_or(0, Vec::len))
             .sum();
-        assert!(generated <= MAX_CHART_POINTS, "{generated}");
+        let placed: usize = series.iter().map(|series| series.values.len()).sum();
+        assert!(
+            placed + generated <= MAX_CHART_POINTS,
+            "{placed} + {generated}"
+        );
         assert!(generated > 0);
     }
 
@@ -1789,6 +1814,176 @@ mod tests {
             [MAX_POINTS; 3]
         );
         assert_eq!((numbers[1], strings[1].as_str()), (7.0, "7"));
+    }
+
+    #[test]
+    fn a_cache_spans_no_more_than_its_declared_count_and_charges_its_gaps() {
+        let cache = |count: &str| {
+            Node::el(
+                "c:numCache",
+                vec![
+                    Node::val("c:ptCount", count),
+                    Node::el("c:pt", vec![Node::text("c:v", "7")]).attr("idx", "1"),
+                    Node::el("c:pt", vec![Node::text("c:v", "9")]).attr("idx", "4"),
+                ],
+            )
+        };
+        let mut budget = Budget::new();
+        let values = parse_num_cache(Some(&cache("3")), &mut budget);
+        assert_eq!(values.len(), 2);
+        assert!(values[0].is_nan() && values[1] == 7.0);
+        assert_eq!(budget.point_cap(MAX_CHART_POINTS), MAX_CHART_POINTS - 2);
+
+        let mut budget = Budget::new();
+        assert_eq!(parse_num_cache(Some(&cache("5")), &mut budget).len(), 5);
+        assert_eq!(budget.point_cap(MAX_CHART_POINTS), MAX_CHART_POINTS - 5);
+
+        let mut budget = Budget::new();
+        budget.spend_points(MAX_CHART_POINTS - 3);
+        let values = parse_num_cache(Some(&cache("5")), &mut budget);
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[1], 7.0);
+        assert_eq!(budget.point_cap(MAX_CHART_POINTS), 0);
+    }
+
+    /// A column chart of `series` series, each caching a single point at
+    /// `index` under a `c:ptCount` of `count`.
+    fn outlying_points(series: usize, count: &str, index: &str) -> ChartSpace {
+        let cache = |name: &str, value: &str| {
+            Node::el(
+                name,
+                vec![
+                    Node::val("c:ptCount", count),
+                    Node::el("c:pt", vec![Node::text("c:v", value)]).attr("idx", index),
+                ],
+            )
+        };
+        let one = || {
+            Node::el(
+                "c:ser",
+                vec![
+                    Node::el("c:cat", vec![cache("c:strCache", "x")]),
+                    Node::el("c:val", vec![cache("c:numCache", "1")]),
+                ],
+            )
+        };
+        let mut group = vec![Node::val("c:varyColors", "0")];
+        group.extend((0..series).map(|_| one()));
+        parse_chart_space(&plot_area(Node::el("c:barChart", group))).expect("chart space parses")
+    }
+
+    #[test]
+    fn an_outlying_point_index_allocates_within_the_chart_budget() {
+        for (count, index) in [("100000", "99999"), ("4294967295", "4294967294")] {
+            let space = outlying_points(16, count, index);
+            let slots: usize = space
+                .plot_groups
+                .iter()
+                .flat_map(|group| &group.series)
+                .map(|series| series.categories.capacity() + series.values.capacity())
+                .sum();
+            assert!(slots <= MAX_CHART_POINTS, "{count}/{index}: {slots} slots");
+            let ops = plot_chart(
+                &PlotChart::from(&space),
+                PlotRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 400.0,
+                    h: 300.0,
+                },
+            );
+            assert!(!ops.is_empty(), "{count}/{index}");
+        }
+    }
+
+    #[test]
+    fn a_full_scatter_x_cache_labels_its_categories_within_three_times_the_budget() {
+        let cache = |name: &str| {
+            Node::el(
+                name,
+                vec![Node::el(
+                    "c:numCache",
+                    vec![
+                        Node::val("c:ptCount", "100000"),
+                        Node::el("c:pt", vec![Node::text("c:v", "1")]).attr("idx", "99999"),
+                    ],
+                )],
+            )
+        };
+        let series = (0..16).map(|_| Node::el("c:ser", vec![cache("c:xVal"), cache("c:yVal")]));
+        let space = parse_chart_space(&plot_area(Node::el("c:scatterChart", series.collect())))
+            .expect("chart space parses");
+        let series = &space.plot_groups[0].series;
+        let slots: usize = series
+            .iter()
+            .chain(&space.series)
+            .map(|series| {
+                series.categories.capacity()
+                    + series.values.capacity()
+                    + series.x_values.as_ref().map_or(0, Vec::capacity)
+            })
+            .sum();
+        assert_eq!(series[0].values.len(), MAX_POINTS);
+        assert_eq!(series[0].categories.len(), MAX_POINTS);
+        assert!(slots <= 3 * MAX_CHART_POINTS, "{slots} slots");
+    }
+
+    #[test]
+    fn a_sparse_series_draws_its_missing_point_as_an_empty_category() {
+        let cache = |name: &str, points: &[(&str, &str)]| {
+            let mut children = vec![Node::val("c:ptCount", "3")];
+            children.extend(points.iter().map(|(index, value)| {
+                Node::el("c:pt", vec![Node::text("c:v", value)]).attr("idx", index)
+            }));
+            Node::el(name, children)
+        };
+        let space = parse_chart_space(&plot_area(Node::el(
+            "c:barChart",
+            vec![
+                Node::val("c:varyColors", "0"),
+                Node::el(
+                    "c:ser",
+                    vec![
+                        Node::el(
+                            "c:cat",
+                            vec![cache(
+                                "c:strCache",
+                                &[("0", "North"), ("1", "South"), ("2", "East")],
+                            )],
+                        ),
+                        Node::el(
+                            "c:val",
+                            vec![cache("c:numCache", &[("0", "3"), ("2", "2")])],
+                        ),
+                    ],
+                ),
+            ],
+        )))
+        .expect("chart space parses");
+        let ops = plot_chart(
+            &PlotChart::from(&space),
+            PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 400.0,
+                h: 300.0,
+            },
+        );
+        let bars = ops
+            .iter()
+            .filter(|op| match op {
+                PlotOp::Rect { fill, h, .. } => fill == DEFAULT_SERIES_COLORS[0] && *h > 10.0,
+                _ => false,
+            })
+            .count();
+        assert_eq!(bars, 2);
+        for label in ["North", "South", "East"] {
+            assert!(
+                ops.iter()
+                    .any(|op| matches!(op, PlotOp::Text { text, .. } if text == label)),
+                "{label}"
+            );
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import JSZip from 'jszip';
 import { StrictMode, createRef } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -28,8 +29,13 @@ import {
   type DocxPluginError,
   type DocxPluginEvent,
   type DocxPluginGeometry,
+  type DocxAnchorGeometryResult,
+  type DocxAnchorRect,
+  type DocxGeometryTarget,
 } from '../index';
 import { isMacPlatform } from '../commands/descriptors';
+import * as canvasReplay from '../components/DocxEditor/canvasReplay';
+import { setupWorkerEngine } from '../components/DocxEditor/__fixtures__/workerEngine';
 
 const MOD = isMacPlatform() ? { metaKey: true } : { ctrlKey: true };
 
@@ -72,6 +78,35 @@ afterAll(async () => {
 function documentBytes(): ArrayBuffer {
   const bytes = readFileSync(FIXTURE);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+const DRAWING =
+  '<w:r><w:drawing><wp:inline><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="picture"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+
+async function inlineImageDocument(
+  body = `<w:p w14:paraId="00000001"><w:r><w:t xml:space="preserve">Before </w:t></w:r>${DRAWING}<w:r><w:t xml:space="preserve"> and the text after it</w:t></w:r></w:p>`
+): Promise<ArrayBuffer> {
+  const zip = new JSZip();
+  const office = 'application/vnd.openxmlformats-officedocument';
+  const rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  zip.file(
+    '[Content_Types].xml',
+    `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="${office}.wordprocessingml.document.main+xml"/></Types>`
+  );
+  zip.file(
+    '_rels/.rels',
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${rel}/officeDocument" Target="word/document.xml"/></Relationships>`
+  );
+  zip.file(
+    'word/_rels/document.xml.rels',
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="${rel}/image" Target="media/image1.png"/></Relationships>`
+  );
+  zip.file('word/media/image1.png', new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]));
+  zip.file(
+    'word/document.xml',
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="${rel}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`
+  );
+  return zip.generateAsync({ type: 'arraybuffer' });
 }
 
 async function settle(ms = 20) {
@@ -125,9 +160,12 @@ function recorder(id = 'acme.review', extra: Partial<DocxPluginDefinition<State>
   return { plugin, log, contexts };
 }
 
-async function mount(props: Partial<DocxEditorProps> = {}, strict = false) {
+async function mount(
+  props: Partial<DocxEditorProps> = {},
+  strict = false,
+  buffer: ArrayBuffer = documentBytes()
+) {
   const ref = createRef<DocxEditorRef>();
-  const buffer = documentBytes();
   const element = (next: Partial<DocxEditorProps>) => {
     const editor = <DocxEditor ref={ref} documentBuffer={buffer} {...next} />;
     return strict ? <StrictMode>{editor}</StrictMode> : editor;
@@ -765,6 +803,7 @@ describe('DocxEditor plugins', () => {
             data-testid="layout-marker"
             data-version={geometry.layout.version}
             data-snapshot={context.snapshot.version}
+            data-drawn={geometry.toOverlayRect({ x: 0, y: 0, width: 1, height: 1 }) !== null}
           />
         );
       },
@@ -778,17 +817,56 @@ describe('DocxEditor plugins', () => {
     const retained = geometries.at(-1)!;
     expect(retained.toOverlayRect(unit)).not.toBeNull();
 
-    let next = '';
-    await act(async () => {
-      const applied = await ref.current!.applyEdits(appendRequest(version, paragraph.paraId));
-      if (applied.ok) next = applied.version;
-    });
-    await until(() => marker()?.dataset.version === next);
+    const mounted = marker();
+    const heldEdit = async (
+      from: string,
+      superseded: readonly DocxPluginGeometry[]
+    ): Promise<string> => {
+      let applied = '';
+      const frames: FrameRequestCallback[] = [];
+      const frame = spyOn(globalThis, 'requestAnimationFrame').mockImplementation((callback) => {
+        frames.push(callback);
+        return frames.length;
+      });
+      try {
+        await act(async () => {
+          const result = await ref.current!.applyEdits(appendRequest(from, paragraph.paraId));
+          if (result.ok) applied = result.version;
+        });
+        expect(applied).not.toBe('');
+        expect(marker()).toBe(mounted);
+        expect(marker()!.dataset).toMatchObject({
+          version: from,
+          snapshot: applied,
+          drawn: 'true',
+        });
+        expect(geometries.at(-1)!.layout.version).toBe(from);
+        expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
+        expect(contexts.at(-1)!.geometry).toBeNull();
+        for (const old of superseded) expect(old.toOverlayRect(unit)).toBeNull();
+      } finally {
+        frame.mockRestore();
+      }
+      await act(async () => {
+        for (const callback of frames.splice(0)) callback(performance.now());
+      });
+      await until(() => marker()?.dataset.version === applied);
+      expect(marker()).toBe(mounted);
+      return applied;
+    };
+    const next = await heldEdit(version, []);
     const afterEdit = layouts.slice(layouts.lastIndexOf(version) + 1);
     expect(afterEdit[0]).toBeNull();
     expect(afterEdit.at(-1)).toBe(next);
     expect(retained.toOverlayRect(unit)).toBeNull();
-    expect(geometries.at(-1)!.toOverlayRect(unit)).not.toBeNull();
+    const shown = geometries.at(-1)!;
+    expect(shown.toOverlayRect(unit)).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(new Event('resize'));
+    });
+    await until(() => geometries.at(-1) !== shown);
+    const last = await heldEdit(next, [retained, shown]);
 
     // happy-dom lays out no pixels, so the pages have no client geometry to scroll to.
     expect(
@@ -796,9 +874,459 @@ describe('DocxEditor plugins', () => {
         .at(-1)!
         .navigation.scrollToParagraph(
           { story: 'body', paraId: paragraph.paraId },
-          { expectVersion: next }
+          { expectVersion: last }
         )
     ).toMatchObject({ ok: false, failure: { code: 'layout-unavailable' } });
+  });
+
+  test('removing the plugins releases the layout their overlays held', async () => {
+    const geometries: DocxPluginGeometry[] = [];
+    const plugin = defineDocxPlugin<null>({
+      id: 'acme.held',
+      createState: () => null,
+      overlay: ({ geometry }) => {
+        geometries.push(geometry);
+        return null;
+      },
+    });
+    const unit = { x: 0, y: 0, width: 1, height: 1 };
+    const { rerender } = await mount({ plugins: [plugin] });
+    await until(() => geometries.at(-1)?.toOverlayRect(unit) != null);
+    const held = geometries.at(-1)!;
+    rerender({ plugins: [] });
+    await settle();
+    expect(held.toOverlayRect(unit)).toBeNull();
+  });
+
+  test('an overlay resolves paragraph and search anchors at the rendered version', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.anchors',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return <div data-testid="anchor-overlay" />;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin] });
+    await until(() => geometry !== null);
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    await act(async () => {
+      expect(session.persistParagraphIds().status).toBe('applied');
+      ref.current!.getEditorRef()!.syncYrsInputState(true);
+    });
+    const { version, paragraph } = await firstParagraph(ref);
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === version);
+    const entry = session
+      .paragraphIdentities()
+      .paragraphs.find(
+        (candidate) =>
+          candidate.session?.story === paragraph.story &&
+          candidate.session.paraId === paragraph.paraId
+      )!;
+    const identity = entry.session!;
+    expect(entry.persisted).not.toBeNull();
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const targets = [
+      { kind: 'paragraph' as const, paragraph: identity },
+      { kind: 'paragraph' as const, paragraph: entry.persisted! },
+      { kind: 'search' as const, paragraph: entry.persisted!, text: paragraph.text.slice(0, 3) },
+    ];
+    for (const target of targets) {
+      const result = current.getAnchorGeometry(target);
+      expect(result).toMatchObject({
+        ok: true,
+        version,
+        previewVersion: 0,
+        layoutId: current.layout.id,
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      expect(result.rects.length).toBeGreaterThan(0);
+      expect(result.anchor.width).toBe(0);
+    }
+    expect(
+      current.getAnchorGeometry({
+        kind: 'range',
+        version: `${version}-stale`,
+        range: {
+          story: paragraph.story,
+          start: { paraId: paragraph.paraId, offset: 0 },
+          end: { paraId: paragraph.paraId, offset: 3 },
+          view: 'accepted',
+        },
+      })
+    ).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+  });
+
+  test('host proposals anchor through the editor ref in a read-only viewer', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const events: DocxPluginEvent[] = [];
+    const plugin = defineDocxPlugin({
+      id: 'acme.proposals',
+      createState: () => null,
+      onEvent(_context, event) {
+        if (event.type === 'proposal-change') events.push(event);
+      },
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin], readOnly: true, allowHostProposals: true });
+    await until(() => geometry !== null);
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    const { paragraph } = await firstParagraph(ref);
+    const word = paragraph.text.slice(0, 3);
+    const proposed = await act(() =>
+      ref.current!.proposeChanges({
+        expectVersion: session.version(),
+        proposals: [
+          {
+            id: 'p1',
+            paragraph: {
+              kind: 'session',
+              sessionId: session.paragraphIdentities().sessionId,
+              story: paragraph.story,
+              paraId: paragraph.paraId,
+            },
+            suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
+            op: 'replaceText',
+            search: word,
+            replaceWith: 'XYZ',
+          },
+        ],
+      })
+    );
+    if (!proposed.ok) throw new Error(proposed.failure.message);
+    const { version } = proposed.snapshot;
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === version);
+    const anchorAt = (previewVersion: number) => {
+      const current = geometry! as DocxPluginGeometry;
+      current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+      for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+        canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+      }
+      const result = current.getAnchorGeometry({ kind: 'proposal', id: 'p1' });
+      expect(result).toMatchObject({ ok: true, version, previewVersion, layoutId: current.layout.id });
+      if (result.ok) expect(result.rects.length).toBeGreaterThan(0);
+      expect(current.getAnchorGeometry({ kind: 'proposal', id: 'missing' })).toMatchObject({
+        ok: false,
+        failure: { code: 'unknown-proposal' },
+      });
+    };
+    anchorAt(0);
+
+    const decided = await act(() =>
+      ref.current!.setProposalStates({
+        expectVersion: version,
+        expectPreviewVersion: 0,
+        changes: [{ id: 'p1', state: 'rejected' }],
+      })
+    );
+    expect(decided).toMatchObject({ ok: true, snapshot: { version, previewVersion: 1 } });
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.previewVersion === 1);
+    anchorAt(1);
+    expect(events.at(-1)).toMatchObject({ type: 'proposal-change', version, previewVersion: 1 });
+  });
+
+  test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
+    const results: DocxAnchorGeometryResult[] = [];
+    const events: (DocxAnchorGeometryResult | null)[] = [];
+    let target: DocxGeometryTarget | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.zoom-anchor',
+      createState: () => null,
+      onEvent(context, event) {
+        if (event.type === 'layout-change' && event.layout?.zoom === 1.5 && target) {
+          events.push(context.geometry?.getAnchorGeometry(target) ?? null);
+        }
+      },
+      overlay: ({ geometry }) => {
+        if (target) results.push(geometry.getAnchorGeometry(target));
+        return null;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin] });
+    const { paragraph } = await firstParagraph(ref);
+    const anchor = ref
+      .current!.getEditorRef()!
+      .getYrsSession()!
+      .paragraphIdentities()
+      .paragraphs.find((entry) => entry.session?.paraId === paragraph.paraId)!.session!;
+    target = { kind: 'paragraph', paragraph: anchor };
+    const rect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 800, 1000)
+    );
+    const present = canvasReplay.presentCanvasReplay;
+    const paints: (() => void)[] = [];
+    const held = spyOn(canvasReplay, 'presentCanvasReplay').mockImplementation(
+      async (preparations, isCurrent) => {
+        await new Promise<void>((resolve) => paints.push(resolve));
+        return present(preparations, isCurrent);
+      }
+    );
+    try {
+      await act(async () => ref.current!.setZoom(1.5));
+      await until(() => events.length > 0 && paints.length > 0);
+      expect(events).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+      expect(results.at(-1)).toMatchObject({ ok: false });
+      await act(async () => {
+        for (const paint of paints.splice(0)) paint();
+      });
+      held.mockRestore();
+      await until(() => {
+        const last = results.at(-1);
+        return !!last?.ok && last.rects.length > 0;
+      });
+      await until(() => events.at(-1)?.ok === true);
+    } finally {
+      held.mockRestore();
+      rect.mockRestore();
+    }
+  });
+
+  test('an anchor ends at the last unit of its range, not at an inline image drawn after it', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.image-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument());
+    await until(() => geometry !== null);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    const paragraph = read.paragraphs.find((candidate) => candidate.text.includes('\uFFFC'))!;
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === read.version);
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const result = current.getAnchorGeometry({
+      kind: 'range',
+      version: read.version,
+      range: {
+        story: paragraph.story,
+        start: { paraId: paragraph.paraId, offset: paragraph.text.indexOf('\uFFFC') },
+        end: { paraId: paragraph.paraId, offset: paragraph.text.length },
+        view: 'accepted',
+      },
+    });
+    if (!result.ok) throw new Error(result.failure.message);
+    const ends = result.rects.map((rect) => rect.x + rect.width);
+    expect(result.rects.length).toBeGreaterThan(1);
+    expect(ends.at(-1)).toBeLessThan(Math.max(...ends));
+    expect(result.anchor.x).toBeCloseTo(Math.max(...ends));
+    const atom = paragraph.text.indexOf('\uFFFC');
+    const image = current.getAnchorGeometry({
+      kind: 'range',
+      version: read.version,
+      range: {
+        story: paragraph.story,
+        start: { paraId: paragraph.paraId, offset: atom },
+        end: { paraId: paragraph.paraId, offset: atom + 1 },
+        view: 'accepted',
+      },
+    });
+    if (!image.ok) throw new Error(image.failure.message);
+    expect(image.rects).toHaveLength(1);
+    expect(image.anchor.x).toBeCloseTo(image.rects[0]!.x + image.rects[0]!.width);
+  });
+
+  test('an anchor stays inside its range across a line break and after an image', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.break-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const body = [
+      '<w:p w14:paraId="00000001"><w:r><w:t>Alpha</w:t><w:br/><w:t>Beta</w:t></w:r></w:p>',
+      `<w:p w14:paraId="00000002">${DRAWING}</w:p>`,
+    ].join('');
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
+    await until(() => geometry !== null);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === read.version);
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const anchor = (paraId: string, start: number, end: number) => {
+      const result = current.getAnchorGeometry({
+        kind: 'range',
+        version: read.version,
+        range: {
+          story: 'body',
+          start: { paraId, offset: start },
+          end: { paraId, offset: end },
+          view: 'accepted',
+        },
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return result;
+    };
+    const [broken, picture] = read.paragraphs;
+    const alpha = anchor(broken!.paraId, 0, 6);
+    const line = alpha.rects.at(-1)!;
+    expect(alpha.anchor.y).toBeCloseTo(line.y);
+    expect(alpha.anchor.x).toBeCloseTo(line.x + line.width);
+    const image = anchor(picture!.paraId, 0, 1).rects.reduce((wide, rect) =>
+      rect.width > wide.width ? rect : wide
+    );
+    expect(anchor(picture!.paraId, 0, 1).anchor.x).toBeCloseTo(image.x + image.width);
+    expect(anchor(picture!.paraId, 1, 1).anchor.x).toBeCloseTo(image.x + image.width);
+    expect(anchor(picture!.paraId, 0, 0).anchor.x).toBeCloseTo(image.x);
+  });
+
+  test('anchors a table cell, an empty paragraph and a paragraph across two pages', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.page-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const body = [
+      '<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>',
+      '<w:p w14:paraId="00000011"><w:r><w:t>In the cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+      '<w:p w14:paraId="00000012"/>',
+      `<w:p w14:paraId="00000013"><w:r>${'<w:t>line</w:t><w:br/>'.repeat(80)}<w:t>end</w:t></w:r></w:p>`,
+    ].join('');
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
+    await until(() => geometry !== null);
+    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    const version = session.version();
+    await until(() => {
+      const layout = (geometry as DocxPluginGeometry | null)?.layout;
+      return layout?.version === version && layout.pageCount > 1;
+    });
+    const current = geometry! as DocxPluginGeometry;
+    const PAGE_GAP = 1200;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 900, 4000);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll<HTMLCanvasElement>(
+      'canvas[data-page-index]'
+    )) {
+      const page = Number(canvas.dataset.pageIndex);
+      canvas.getBoundingClientRect = () => new DOMRect(0, page * PAGE_GAP, 816, 1056);
+    }
+    const byWordId = (ooxmlParaId: string) =>
+      session
+        .paragraphIdentities()
+        .paragraphs.find((entry) => entry.ooxmlParaId === ooxmlParaId)!.session!;
+    const at = (ooxmlParaId: string) => {
+      const result = current.getAnchorGeometry({
+        kind: 'paragraph',
+        paragraph: byWordId(ooxmlParaId),
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return result;
+    };
+    const inside = (anchor: DocxAnchorRect, page: { x: number; y: number; height: number }) =>
+      anchor.y >= page.y && anchor.y + anchor.height <= page.y + page.height;
+
+    const cell = at('00000011');
+    expect(byWordId('00000011').story).toStartWith('body:');
+    expect(cell.rects.length).toBeGreaterThan(0);
+    expect(cell.rects.every((rect) => rect.pageIndex === 0)).toBe(true);
+    const cellEnd = cell.rects.at(-1)!;
+    expect(cell.anchor).toMatchObject({ pageIndex: 0, width: 0 });
+    expect(cell.anchor.x).toBeCloseTo(cellEnd.x + cellEnd.width);
+    expect(inside(cell.anchor, cell.pageRect)).toBe(true);
+
+    const empty = at('00000012');
+    expect(empty.rects).toEqual([]);
+    expect(empty.anchor.width).toBe(0);
+    expect(empty.anchor.y).toBeGreaterThan(cell.anchor.y);
+
+    const spanning = at('00000013');
+    const pages = new Set(spanning.rects.map((rect) => rect.pageIndex));
+    expect(pages.size).toBeGreaterThan(1);
+    const last = spanning.rects.at(-1)!;
+    expect(spanning.anchor.pageIndex).toBe(Math.max(...pages));
+    expect(spanning.anchor.pageIndex).toBe(last.pageIndex);
+    expect(spanning.pageRect.y).toBeCloseTo(spanning.anchor.pageIndex * PAGE_GAP);
+    expect(inside(spanning.anchor, spanning.pageRect)).toBe(true);
+    for (const rect of spanning.rects) {
+      expect(rect.y).toBeGreaterThanOrEqual(rect.pageIndex * PAGE_GAP);
+      expect(rect.y).toBeLessThan(rect.pageIndex * PAGE_GAP + 1056);
+    }
+  });
+
+  test('an anchor ends where the text of its last unit ends, left in right-to-left runs', async () => {
+    let geometry: DocxPluginGeometry | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'acme.bidi-anchor',
+      createState: () => null,
+      overlay: (props) => {
+        geometry = props.geometry;
+        return null;
+      },
+    });
+    const rtl = (text: string) => `<w:r><w:rPr><w:rtl/></w:rPr><w:t>${text}</w:t></w:r>`;
+    const ltr = (text: string) => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const body = [
+      `<w:p w14:paraId="00000001"><w:pPr><w:bidi/></w:pPr>${rtl('\u05D0\u05D1\u05D2')}</w:p>`,
+      `<w:p w14:paraId="00000002">${ltr('abc ')}${rtl('\u05D0\u05D1\u05D2')}${ltr(' def')}</w:p>`,
+      `<w:p w14:paraId="00000003"><w:pPr><w:bidi/></w:pPr>${rtl('\u05D0\u05D1\u05D2')}<w:r><w:rPr><w:vanish/></w:rPr><w:t>${'x'.repeat(70)}</w:t></w:r></w:p>`,
+    ].join('');
+    const { ref } = await mount({ plugins: [plugin] }, false, await inlineImageDocument(body));
+    await until(() => geometry !== null);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    await until(() => (geometry as DocxPluginGeometry | null)?.layout.version === read.version);
+    const current = geometry! as DocxPluginGeometry;
+    current.dom.pagesContainer.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1200);
+    for (const canvas of current.dom.pagesContainer.querySelectorAll('canvas[data-page-index]')) {
+      canvas.getBoundingClientRect = () => new DOMRect(0, 0, 800, 1000);
+    }
+    const anchor = (paraId: string, start: number, end: number) => {
+      const result = current.getAnchorGeometry({
+        kind: 'range',
+        version: read.version,
+        range: {
+          story: 'body',
+          start: { paraId, offset: start },
+          end: { paraId, offset: end },
+          view: 'accepted',
+        },
+      });
+      if (!result.ok) throw new Error(result.failure.message);
+      return result;
+    };
+    const [hebrew, mixed, suffixed] = read.paragraphs;
+    for (const [paragraph, start] of [
+      [hebrew!, 0],
+      [mixed!, 4],
+    ] as const) {
+      const last = anchor(paragraph.paraId, start + 2, start + 3);
+      expect(last.rects).toHaveLength(1);
+      expect(last.anchor.x).toBeCloseTo(last.rects[0]!.x);
+      const word = anchor(paragraph.paraId, start, start + 3);
+      expect(word.anchor.x).toBeCloseTo(Math.min(...word.rects.map((rect) => rect.x)));
+    }
+    const english = anchor(mixed!.paraId, 0, 3);
+    expect(english.anchor.x).toBeCloseTo(english.rects[0]!.x + english.rects[0]!.width);
+    const word = anchor(hebrew!.paraId, 0, 3).rects[0]!;
+    expect(anchor(hebrew!.paraId, 0, 0).anchor.x).toBeCloseTo(word.x + word.width);
+    expect(anchor(hebrew!.paraId, 3, 3).anchor.x).toBeCloseTo(word.x);
+    const hidden = anchor(suffixed!.paraId, 0, suffixed!.text.length);
+    expect(hidden.anchor.x).toBeCloseTo(Math.min(...hidden.rects.map((rect) => rect.x)));
   });
 
   test('public presenters and hooks bind contributed commands', async () => {
@@ -922,5 +1450,100 @@ describe('DocxEditor plugins', () => {
     });
     await settle();
     expect(errors.map((error) => [error.pluginId, error.phase])).toEqual([['raw', 'definition']]);
+  });
+});
+
+describe('DocxEditor plugins (worker engine)', () => {
+  let attachGate: Promise<void> | null = null;
+  let attachRequested = false;
+  const workers = setupWorkerEngine((worker) => {
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (request, transfer) => {
+      if (request.type === 'attachCanvases' && request.zoom === 1.5 && attachGate) {
+        attachRequested = true;
+        void attachGate.then(() => post(request, transfer));
+        return;
+      }
+      post(request, transfer);
+    };
+  });
+
+  async function mountWorker(props: Partial<DocxEditorProps> = {}) {
+    const opens = workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    );
+    const editor = await mount({ ...props, experimentalWorkerOpen: true });
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.some(
+      (worker) => worker.sessions.length > 0 && worker.requests.includes('open')
+    )).toBe(true);
+    expect(workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    )).toBeGreaterThan(opens);
+    await act(async () => {
+      await editor.ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    });
+    return editor;
+  }
+
+  test('overlays and layout events re-anchor once the pages show a new zoom', async () => {
+    const results: DocxAnchorGeometryResult[] = [];
+    const events: (DocxAnchorGeometryResult | null)[] = [];
+    const availableZooms: { layout: number; dom: number }[] = [];
+    let target: DocxGeometryTarget | null = null;
+    const plugin = defineDocxPlugin({
+      id: 'host.zoom-anchor',
+      createState: () => null,
+      onEvent(context, event) {
+        if (event.type === 'layout-change' && event.layout?.zoom === 1.5 && target) {
+          events.push(context.geometry?.getAnchorGeometry(target) ?? null);
+        }
+      },
+      overlay: ({ geometry }) => {
+        if (target) {
+          const result = geometry.getAnchorGeometry(target);
+          results.push(result);
+          if (result.ok) availableZooms.push({ layout: geometry.layout.zoom, dom: geometry.dom.zoom });
+        }
+        return null;
+      },
+    });
+    let painted = false;
+    const { ref } = await mountWorker({
+      plugins: [plugin],
+      onFirstPagePainted: () => (painted = true),
+    });
+    await until(() => painted);
+    const { paragraph } = await firstParagraph(ref);
+    const identities = await ref.current!.getParagraphIdentities();
+    const anchor = identities
+      .paragraphs.find((entry) => entry.session?.paraId === paragraph.paraId)!.session!;
+    target = { kind: 'paragraph', paragraph: anchor };
+    const rect = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 800, 1000)
+    );
+    let releaseAttach = () => {};
+    attachRequested = false;
+    attachGate = new Promise<void>((done) => (releaseAttach = done));
+    try {
+      availableZooms.length = 0;
+      await act(async () => ref.current!.setZoom(1.5));
+      await until(() => events.length > 0 && attachRequested);
+      expect(events).toMatchObject([{ ok: false, failure: { code: 'layout-unavailable' } }]);
+      expect(results.at(-1)).toMatchObject({ ok: false });
+      expect(availableZooms).toEqual([]);
+      await act(async () => releaseAttach());
+      await until(() => {
+        const last = results.at(-1);
+        return !!last?.ok && last.rects.length > 0;
+      });
+      await until(() => events.at(-1)?.ok === true);
+      expect(availableZooms.length).toBeGreaterThan(0);
+      expect(availableZooms.every(({ layout, dom }) => layout === 1.5 && dom === 1.5)).toBe(true);
+    } finally {
+      releaseAttach();
+      attachGate = null;
+      rect.mockRestore();
+    }
   });
 });

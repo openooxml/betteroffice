@@ -48,6 +48,11 @@ function hasFontSource(): boolean {
   return options.fonts !== undefined || options.load !== undefined;
 }
 
+/** Whether {@link configureDefaultFonts} was given a font source. */
+export function hasDefaultFontSource(): boolean {
+  return hasFontSource();
+}
+
 /** Configure the default provider and reset its memoized resolution. @public */
 export function configureDefaultFonts(next: DefaultFontOptions): void {
   options = { ...next, baseUrl: configuredBaseUrl(next.baseUrl) };

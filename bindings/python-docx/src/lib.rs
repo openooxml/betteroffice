@@ -69,7 +69,9 @@ fn map_error(error: CoreError) -> PyErr {
     match error {
         CoreError::Parse(_) => ParseError::new_err(message),
         CoreError::Edit(_) | CoreError::Operation(_) => EditError::new_err(message),
-        CoreError::ParagraphNotFound(_) => PyKeyError::new_err(message),
+        CoreError::ParagraphNotFound(_) | CoreError::AmbiguousParagraph(_) => {
+            PyKeyError::new_err(message)
+        }
         CoreError::UnsupportedParagraphEdit(_) => UnsupportedEditError::new_err(message),
         CoreError::Layout(_) | CoreError::DisplayList(_) => LayoutError::new_err(message),
         CoreError::Font(_) | CoreError::Image(_) => PyValueError::new_err(message),
@@ -962,14 +964,14 @@ impl PyDocument {
                 "paragraph must be an ID (str) or an index (int), not bool",
             ));
         }
-        let paragraphs = self.inner.paragraphs();
         if let Ok(id) = key.extract::<String>() {
-            return paragraphs
-                .into_iter()
-                .find(|paragraph| paragraph.para_id.as_deref() == Some(id.as_str()))
+            return self
+                .inner
+                .paragraph(&id)
                 .map(PyParagraph::from_core)
                 .ok_or_else(|| PyKeyError::new_err(format!("no paragraph with ID {id:?}")));
         }
+        let paragraphs = self.inner.paragraphs();
         if key.is_instance_of::<PyInt>() {
             return key
                 .extract::<usize>()
@@ -1064,8 +1066,10 @@ impl PyDocument {
         self.timestamp = timestamp;
     }
 
-    /// Body paragraph IDs in document order. A paragraph Word never stamped
-    /// with a `w14:paraId` reads as `None` and cannot be edited by ID.
+    /// Body paragraph IDs in document order, each addressing one paragraph. A
+    /// paragraph that repeats an earlier paragraph's ID reads as a fresh one,
+    /// which a save writes once the paragraph is edited. A paragraph Word never
+    /// stamped with a `w14:paraId` reads as `None` and cannot be edited by ID.
     #[getter]
     fn paragraph_ids(&self) -> Vec<Option<String>> {
         self.inner

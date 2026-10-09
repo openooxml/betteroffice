@@ -49,8 +49,11 @@ export interface RenderedDomContext {
    */
   getCoordinatesForPosition(position: number): PositionCoordinates | null;
 
-  /** Client coordinates to a region-local caret; null outside text or without ready canvas queries. */
-  getPositionAtPoint(clientX: number, clientY: number): PointPosition | null;
+  /**
+   * Client coordinates to a region-local caret; null outside text or without ready canvas queries.
+   * Optional so contexts written before it keep compiling; a context without it answers null.
+   */
+  getPositionAtPoint?(clientX: number, clientY: number): PointPosition | null;
 
   /**
    * Find DOM elements that overlap with a display-position range.

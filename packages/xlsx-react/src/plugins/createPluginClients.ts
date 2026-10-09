@@ -72,6 +72,9 @@ export interface XlsxPluginEditorAccess {
     authorize: () => Refusal | null,
     commit: <T>(write: () => T) => T
   ): XlsxEditResult | Refusal;
+  admitEdits?<Refusal>(handle: WorkbookHandle, request: XlsxEditRequest,
+    authorize: (recovering: boolean) => Refusal | null,
+    commit: <T>(write: () => T) => T): Promise<XlsxAdmission<XlsxEditResult | Refusal>>;
   commands(): XlsxCommandController | null;
   navigator: XlsxPluginNavigator;
 }
@@ -227,6 +230,17 @@ export function createPluginClients(
         async applyEdits(request) {
           const denied = batchDenial(request?.history);
           if (denied) return denied;
+          if (access.admitEdits) {
+            const handle = access.handle();
+            if (!handle) return pluginRefusal('plugin-unavailable');
+            const input = structuredClone(request);
+            const admitted = await access.admitEdits(handle, input,
+              (recovering) => recovering
+                ? grantsEditBatch(grant(), input.history) ? null : pluginRefusal('permission-denied')
+                : batchDenial(input.history),
+              (write) => invocation.commit(write));
+            return admitted.ok ? admitted.value : pluginRefusal(admitted.code);
+          }
           return whenAdmitted((handle) =>
             access.applyEdits(
               handle,
