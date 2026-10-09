@@ -356,16 +356,18 @@ pub(super) fn explicit_rows(
                     let Some(index) = row_index(element, None)? else {
                         return Ok(None);
                     };
-                    let index = (index + 1).to_string();
                     out.get_mut().extend_from_slice(&source[cursor..before]);
-                    let mut element = element.clone();
-                    element.push_attribute(("r", index.as_str()));
-                    out.write_event(if matches!(event, Event::Empty(_)) {
-                        Event::Empty(element)
-                    } else {
-                        Event::Start(element)
-                    })
-                    .map_err(xml_err)?;
+                    if !matches!(event, Event::Empty(_)) || axes.rows.current(index).is_some() {
+                        let index = (index + 1).to_string();
+                        let mut element = element.clone();
+                        element.push_attribute(("r", index.as_str()));
+                        out.write_event(if matches!(event, Event::Empty(_)) {
+                            Event::Empty(element)
+                        } else {
+                            Event::Start(element)
+                        })
+                        .map_err(xml_err)?;
+                    }
                     cursor = reader.buffer_position() as usize;
                     changed = true;
                 }
@@ -783,6 +785,18 @@ mod tests {
         let mut axes = SheetAxes::default();
         axes.cols.insert(3, 1);
         assert!(!unchanged(source, &axes));
+    }
+
+    #[test]
+    fn explicit_rows_drop_deleted_implicit_empty_rows() {
+        let source = br#"<sheetData><row r="5"/> <row outlineLevel="1"/></sheetData>"#;
+        let mut axes = SheetAxes::default();
+        axes.rows.delete(0, 1);
+        axes.rows.insert(0, 1);
+
+        let explicit = explicit_rows(source, &axes).unwrap().unwrap();
+
+        assert_eq!(explicit, br#"<sheetData><row r="5"/> </sheetData>"#);
     }
 
     #[test]
