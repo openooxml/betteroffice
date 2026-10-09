@@ -304,11 +304,22 @@ export function createPluginGeometry(
     ) =>
       !!unbuilt &&
       !!positionSpan &&
-      spans.some(({ from, to }) => from <= positionSpan[1] && to >= positionSpan[0]);
+      spans.some(({ from, to }) =>
+        from < to
+          ? from < positionSpan[1] && to > positionSpan[0]
+          : from >= positionSpan[0] && from <= positionSpan[1]
+      );
+    const unbuiltAt = (unit: number): number | undefined => {
+      const index = pages.findIndex(
+        ({ unbuilt, positionSpan }) =>
+          unbuilt && positionSpan && unit >= positionSpan[0] && unit < positionSpan[1]
+      );
+      return index < 0 ? undefined : index;
+    };
     const shownRanges = subtract(ranges, hidden);
-    const reached = shownRanges.length > 0 ? shownRanges : ranges;
+    const drawable = shownRanges.filter(({ from, to }) => from < to);
     const unbuiltPages = deferUnbuilt
-      ? pages.flatMap((page, pageIndex) => (reaches(page, reached) ? [pageIndex] : []))
+      ? pages.flatMap((page, pageIndex) => (reaches(page, drawable) ? [pageIndex] : []))
       : [];
     if (!deferUnbuilt && window && pages.slice(window[0], window[1]).some((page) => reaches(page))) return unavailable();
     const union: Interval[] = [];
@@ -344,20 +355,28 @@ export function createPluginGeometry(
     } else {
       const last = ranges.at(-1);
       const gap = last && widen(last, hidden);
+      const caret = tail === null && gap ? (caretAt(gap.from, true) ?? caretAt(gap.to)) : null;
+      const caretPage =
+        deferUnbuilt && tail === null && gap && !caret
+          ? [gap.from - 1, gap.from, gap.to, gap.to - 1].map(unbuiltAt).find((index) => index !== undefined)
+          : undefined;
       const end =
         tail !== null
           ? (endOf(tail) ?? lastInReadingOrder(drawn))
-          : ((gap && (caretAt(gap.from, true) ?? caretAt(gap.to))) ??
-            (paragraph === null ? null : caretAt(paragraph)));
-      const fallback = end || paragraph === null ? null : queries.anchorRect(paragraph);
-      const pending = [end, fallback].find((rect) => rect && pendingPage(rect.pageIndex));
-      if (pending && !deferUnbuilt) return unavailable();
-      if (pending && !unbuiltPages.includes(pending.pageIndex)) {
-        unbuiltPages.push(pending.pageIndex);
+          : caretPage !== undefined
+            ? null
+            : (caret ?? (paragraph === null ? null : caretAt(paragraph)));
+      const fallback =
+        end || paragraph === null || caretPage !== undefined ? null : queries.anchorRect(paragraph);
+      const pending =
+        caretPage ?? [end, fallback].find((rect) => rect && pendingPage(rect.pageIndex))?.pageIndex;
+      if (pending !== undefined && !deferUnbuilt) return unavailable();
+      if (pending !== undefined && !unbuiltPages.includes(pending)) {
+        unbuiltPages.push(pending);
         unbuiltPages.sort((a, b) => a - b);
       }
-      anchor = pending
-        ? pageAnchor(pending.pageIndex)
+      anchor = pending !== undefined
+        ? pageAnchor(pending)
         : end
           ? project(end)
           : fallback

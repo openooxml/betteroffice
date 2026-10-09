@@ -36,6 +36,7 @@ function viewerGeometry(options: {
   workerVersion?: string | null;
   anchorPage?: number;
   presented?: boolean;
+  paragraph?: { from: number; length: number };
 }) {
   const pages = document.createElement('div');
   const pageList = options.pages ?? [{}];
@@ -67,8 +68,11 @@ function viewerGeometry(options: {
   const session = {
     version: () => 'v1',
     getProposals: () => null,
-    resolveParagraphAnchor: () => ({ status: 'missing' }),
+    resolveParagraphAnchor: (anchor: unknown) =>
+      options.paragraph ? { status: 'found', anchor } : { status: 'missing' },
+    paragraphSpans: () => [{ paraId: 'p', length: options.paragraph?.length ?? 0 }],
   } as unknown as YrsSession;
+  const base = options.paragraph?.from ?? 2;
   return createPluginGeometry(
     { id: 'layout', version: 'v1', previewVersion: 0, zoom: 1, pageCount: pageList.length },
     createRenderedDomContext(pages, 1),
@@ -77,12 +81,15 @@ function viewerGeometry(options: {
     () => null,
     queries,
     () =>
-      options.read
+      options.read && !options.paragraph
         ? null
         : {
             session,
             presented: true,
-            editor: { hasPendingInput: () => false, yrsLocToDisplayPosition: () => 2 },
+            editor: {
+              hasPendingInput: () => false,
+              yrsLocToDisplayPosition: ({ offset }: { offset: number }) => base + offset,
+            },
           },
     () => false,
     undefined,
@@ -190,6 +197,76 @@ test('an unbuilt page reached only by hidden text is not listed and does not tak
     unbuiltPages: [],
     anchor: { pageIndex: 0 },
   });
+});
+
+const PARAGRAPH = {
+  kind: 'paragraph',
+  paragraph: { kind: 'session', sessionId: 's', story: 'body', paraId: 'p' },
+} as const;
+const NEXT_UNBUILT = [{}, { unbuilt: true, positionSpan: [10, 20] as [number, number] }];
+
+async function withoutUnbuilt(geometry: ReturnType<typeof viewerGeometry>) {
+  const result = await geometry.readAnchorGeometry(PARAGRAPH);
+  expect(result).toMatchObject({ ok: true, unbuiltPages: [] });
+  const { unbuiltPages: _, ...rest } = result as Extract<typeof result, { ok: true }>;
+  return rest;
+}
+
+test('a range ending where an unbuilt page starts answers like the sync geometry', async () => {
+  const geometry = viewerGeometry({
+    pages: NEXT_UNBUILT,
+    paragraph: { from: 2, length: 8 },
+    read: reply({ ok: true, ranges: [{ from: 2, to: 10 }], paragraph: 2, hidden: [] }),
+  });
+  const sync = geometry.getAnchorGeometry(PARAGRAPH);
+  expect(sync).toMatchObject({ ok: true, rects: [{ pageIndex: 0, x: 2, width: 8 }], anchor: { pageIndex: 0 } });
+  expect(await withoutUnbuilt(geometry)).toEqual(sync as Extract<typeof sync, { ok: true }>);
+});
+
+test('a hidden suffix starting where an unbuilt page starts answers like its shown prefix', async () => {
+  const prefix = viewerGeometry({ pages: NEXT_UNBUILT, paragraph: { from: 2, length: 8 } });
+  const geometry = viewerGeometry({
+    pages: NEXT_UNBUILT,
+    read: reply({ ok: true, ranges: [{ from: 2, to: 15 }], paragraph: 2, hidden: [{ from: 10, to: 15 }] }),
+  });
+  const sync = prefix.getAnchorGeometry(PARAGRAPH);
+  expect(sync).toMatchObject({ ok: true, anchor: { pageIndex: 0 } });
+  expect(await withoutUnbuilt(geometry)).toEqual(sync as Extract<typeof sync, { ok: true }>);
+});
+
+test('a caret at the start of an unbuilt page stays where the sync geometry puts it', async () => {
+  const geometry = viewerGeometry({
+    pages: NEXT_UNBUILT,
+    paragraph: { from: 10, length: 0 },
+    read: reply({ ok: true, ranges: [{ from: 10, to: 10 }], paragraph: 10, hidden: [] }),
+  });
+  const sync = geometry.getAnchorGeometry(PARAGRAPH);
+  expect(sync).toMatchObject({ ok: true, rects: [], anchor: { pageIndex: 0, x: 10 } });
+  expect(await withoutUnbuilt(geometry)).toEqual(sync as Extract<typeof sync, { ok: true }>);
+});
+
+test('a caret inside an unbuilt page anchors on that page', async () => {
+  const geometry = viewerGeometry({
+    pages: NEXT_UNBUILT,
+    read: reply({ ok: true, ranges: [{ from: 12, to: 12 }], paragraph: 2, hidden: [] }),
+  });
+  expect(await geometry.readAnchorGeometry(PARAGRAPH)).toMatchObject({
+    ok: true,
+    rects: [],
+    unbuiltPages: [1],
+    anchor: { pageIndex: 1 },
+  });
+});
+
+test('fully built pages answer like the sync geometry', async () => {
+  const geometry = viewerGeometry({
+    pages: [{}, {}],
+    paragraph: { from: 2, length: 8 },
+    read: reply({ ok: true, ranges: [{ from: 2, to: 10 }], paragraph: 2, hidden: [] }),
+  });
+  const sync = geometry.getAnchorGeometry(PARAGRAPH);
+  expect(sync).toMatchObject({ ok: true });
+  expect(await withoutUnbuilt(geometry)).toEqual(sync as Extract<typeof sync, { ok: true }>);
 });
 
 test('hidden ranges are subtracted from the worker ranges', async () => {
