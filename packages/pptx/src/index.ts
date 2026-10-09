@@ -203,6 +203,7 @@ export type {
   StrokeEnd,
   TextBoxPrimitive,
   TextReceipt,
+  TextParagraphDraft,
   TextRunSnapshot,
   TextStyle,
   TextStylePatch,

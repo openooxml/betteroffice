@@ -68,6 +68,26 @@ fn deck_write(
                 part_path: source_part_path(slide)?,
                 shapes: shape_writes(&slide.shapes, &base.shapes, source_shapes(package, slide))?,
             },
+            None if slide.source_part_path.is_some() => {
+                let mut base = baseline
+                    .slides
+                    .iter()
+                    .find(|base| base.source_part_path == slide.source_part_path)
+                    .ok_or_else(|| EditError::Write("duplicate source slide is missing".into()))?
+                    .clone();
+                let old_id = base.id.clone();
+                for shape in &mut base.shapes {
+                    rename_duplicate_shape(shape, &old_id, &slide.id);
+                }
+                SlideWrite::Clone {
+                    part_path: source_part_path(slide)?,
+                    shapes: shape_writes(
+                        &slide.shapes,
+                        &base.shapes,
+                        source_shapes(package, slide),
+                    )?,
+                }
+            }
             None => SlideWrite::Add {
                 name: slide.name.clone(),
                 layout_part_path: slide.layout_part_path.clone(),
@@ -87,6 +107,16 @@ fn deck_write(
     })
 }
 
+fn rename_duplicate_shape(shape: &mut ShapeSnapshot, old_slide: &str, new_slide: &str) {
+    shape.id = shape.id.replacen(old_slide, new_slide, 1);
+    for story in &mut shape.text_stories {
+        story.id = story.id.replacen(old_slide, new_slide, 1);
+    }
+    for child in &mut shape.children {
+        rename_duplicate_shape(child, old_slide, new_slide);
+    }
+}
+
 fn notes_write(current: &DeckSnapshot, baseline: &DeckSnapshot) -> Option<NotesWrite> {
     let baseline_notes: HashMap<&str, &str> = baseline
         .slides
@@ -101,7 +131,11 @@ fn notes_write(current: &DeckSnapshot, baseline: &DeckSnapshot) -> Option<NotesW
         if !changed {
             continue;
         }
-        let target = match slide.source_part_path.clone() {
+        let target = match slide
+            .source_part_path
+            .clone()
+            .filter(|_| baseline.slides.iter().any(|base| base.id == slide.id))
+        {
             Some(part_path) => CommentSlide::Existing(part_path),
             None => CommentSlide::Added(index),
         };
@@ -176,7 +210,11 @@ fn comments_write(
         .iter()
         .enumerate()
         .map(|(index, slide)| {
-            let target = match slide.source_part_path.clone() {
+            let target = match slide
+                .source_part_path
+                .clone()
+                .filter(|_| baseline.slides.iter().any(|base| base.id == slide.id))
+            {
                 Some(part_path) => CommentSlide::Existing(part_path),
                 None => CommentSlide::Added(index),
             };

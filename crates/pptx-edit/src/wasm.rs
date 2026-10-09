@@ -189,6 +189,13 @@ struct MoveSlideArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetStoryParagraphsArgs {
+    story_id: String,
+    paragraphs: Vec<crate::TextParagraphDraft>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AddTextBoxArgs {
     slide_id: String,
@@ -802,9 +809,29 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = setStoryParagraphsJson)]
+    pub fn set_story_paragraphs_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetStoryParagraphsArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_story_paragraphs(&local_context(), &args.story_id, &args.paragraphs)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = insertSlideJson)]
     pub fn insert_slide_json(&self, args: &str) -> Result<String, JsValue> {
         json(self.insert_slide(parse_args(args)?)?)
+    }
+
+    #[wasm_bindgen(js_name = duplicateSlideJson)]
+    pub fn duplicate_slide_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: MoveSlideArgs = parse_args(args)?;
+        json(
+            self.session
+                .duplicate_slide(&local_context(), &args.slide_id, args.to_index)
+                .map_err(js_error)?,
+        )
     }
 
     #[wasm_bindgen(js_name = insertSlideProfiledJson)]

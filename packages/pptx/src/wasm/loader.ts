@@ -64,6 +64,7 @@ import type {
   SlideReceipt,
   StorySnapshot,
   TextReceipt,
+  TextParagraphDraft,
   TextStyle,
   TextStylePatch,
   TransformReceipt,
@@ -101,6 +102,8 @@ export interface PresentationHandle extends CollaborationReplica {
   acceptProposal(id: string, options?: { force?: boolean }): ProposalAcceptance;
   rejectProposal(id: string): boolean;
   readonly clientId: number;
+  fork(): PresentationHandle;
+  layouts(): Array<{ id: string; name: string | null; type: string | null }>;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
   /** Anchors the UTF-16 caret `index` of a story so later edits move it along. */
@@ -154,6 +157,7 @@ export interface PresentationHandle extends CollaborationReplica {
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   deleteTextProfiled(storyId: string, start: number, end: number): Profiled<TextReceipt>;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
+  setStoryParagraphs(storyId: string, paragraphs: readonly TextParagraphDraft[]): StorySnapshot;
   insertParagraphBreak(storyId: string, index: number): TextReceipt;
   /** Sets the alignment of every paragraph the range touches; `null` restores
    *  the inherited value. */
@@ -165,6 +169,7 @@ export interface PresentationHandle extends CollaborationReplica {
   ): TextReceipt;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   insertSlideProfiled(index: number, layoutPartPath?: string): Profiled<SlideReceipt>;
+  duplicateSlide(slideId: string, toIndex: number): SlideReceipt;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
   /** Sets a slide's speaker notes; empty text clears them. */
@@ -257,8 +262,8 @@ export class PresentationPeerError extends Error {
 }
 
 const replayMethods = [
-  'insertText', 'deleteText', 'formatText', 'insertParagraphBreak', 'setParagraphAlignment',
-  'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
+  'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
+  'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
   'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
   'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
   'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment',
@@ -639,7 +644,19 @@ function openPresentationInternal(
     observerInstalled = false;
   };
 
+  const sourceBytes = new Uint8Array(bytes);
   const handle: PresentationHandle = {
+    fork() {
+      assertAlive();
+      return openPresentation(sourceBytes, { initialUpdate: handle.encodeStateAsUpdate() });
+    },
+    layouts() {
+      assertAlive();
+      const parsed = inspectPresentation(sourceBytes, { includeMedia: false }) as {
+        layouts: Array<{ partPath: string; name: string | null; layoutType: string | null }>;
+      };
+      return parsed.layouts.map(layout => ({ id: layout.partPath, name: layout.name, type: layout.layoutType }));
+    },
     isProposalsAvailable,
     propose(agentId, note, edits) {
       return jsonWasmCall(() => doc.proposeJson(JSON.stringify({ agentId, note, edits })));
@@ -792,6 +809,12 @@ function openPresentationInternal(
           doc.insertSlideJson(JSON.stringify({ index, layoutPartPath: layoutPartPath ?? null })),
         true
       );
+    },
+    setStoryParagraphs(storyId, paragraphs): StorySnapshot {
+      return jsonWasmCall(() => doc.setStoryParagraphsJson(JSON.stringify({ storyId, paragraphs })), true);
+    },
+    duplicateSlide(slideId, toIndex): SlideReceipt {
+      return jsonWasmCall(() => doc.duplicateSlideJson(JSON.stringify({ slideId, toIndex })), true);
     },
     insertSlideProfiled(index, layoutPartPath): Profiled<SlideReceipt> {
       return jsonWasmCall(

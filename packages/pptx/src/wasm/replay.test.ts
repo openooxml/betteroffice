@@ -176,6 +176,8 @@ test('all_supported_ops_match_across_handles', async () => {
     expectVersion: peer.version(), history: 'separate',
     steps: [{ op: 'setSlideNotes', target: { slideId: slide }, text: 'Batch notes' }],
   }] });
+  apply({ method: 'setStoryParagraphs', args: [story, [{ alignment: 'ctr', runs: [{ text: 'Replaced story', style: { bold: true } }] }]] });
+  apply({ method: 'duplicateSlide', args: [slide, 1] });
   apply({ method: 'removeShape', args: [slide, shape] });
   apply({ method: 'deleteSlide', args: [slide] });
   apply({ method: 'addUndoBoundary', args: [] });
@@ -195,8 +197,8 @@ test('all_supported_ops_match_across_handles', async () => {
   expect(peer.snapshot()).toEqual(finalSnapshot);
   expect(peer.save()).toEqual(finalBytes);
   expect([...seen].sort()).toEqual([
-    'insertText', 'deleteText', 'formatText', 'insertParagraphBreak', 'setParagraphAlignment',
-    'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
+    'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
+    'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
     'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
     'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
     'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment',
@@ -412,8 +414,8 @@ test('ordinary_mutations_are_refused_on_retained_handles_at_every_stage', async 
   const { worker, identity } = await baseline(fonts());
   const peer = keep(openPresentationPeerDeck(source, identity, fonts()));
   const methods = [
-    'insertText', 'deleteText', 'formatText', 'insertParagraphBreak', 'setParagraphAlignment',
-    'insertSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
+    'insertText', 'deleteText', 'formatText', 'setStoryParagraphs', 'insertParagraphBreak', 'setParagraphAlignment',
+    'insertSlide', 'duplicateSlide', 'deleteSlide', 'moveSlide', 'setSlideNotes', 'addTextBox', 'addShape', 'addPicture',
     'removeShape', 'moveShape', 'resizeShape', 'setShapeRect', 'setShapeFill', 'setShapeStroke',
     'setShapeAdjust', 'bringShapeToFront', 'sendShapeToBack', 'bringShapeForward', 'sendShapeBackward',
     'addComment', 'replyToComment', 'setCommentStatus', 'setCommentPosition', 'removeComment',

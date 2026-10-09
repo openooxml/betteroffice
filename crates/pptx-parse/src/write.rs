@@ -54,6 +54,10 @@ pub enum SlideWrite {
         part_path: String,
         shapes: Vec<ShapeWrite>,
     },
+    Clone {
+        part_path: String,
+        shapes: Vec<ShapeWrite>,
+    },
     /// Mint a new slide part.
     Add {
         name: Option<String>,
@@ -170,7 +174,7 @@ pub fn write_pptx_with_edits(
             SlideWrite::Keep { part_path } | SlideWrite::Patch { part_path, .. } => {
                 Some(part_path.as_str())
             }
-            SlideWrite::Add { .. } => None,
+            SlideWrite::Add { .. } | SlideWrite::Clone { .. } => None,
         })
         .collect();
     let removed: Vec<&SlideReference> = package
@@ -231,11 +235,7 @@ pub fn write_pptx_with_edits(
                         .ok_or_else(|| write_error(part_path, "not a slide of this deck"))?;
                     final_order.push(FinalSlide::Existing(reference));
                 }
-                SlideWrite::Add {
-                    name,
-                    layout_part_path,
-                    shapes,
-                } => {
+                SlideWrite::Add { .. } | SlideWrite::Clone { .. } => {
                     structural = true;
                     let part_path = format!("ppt/slides/slide{next_slide_number}.xml");
                     next_slide_number += 1;
@@ -254,29 +254,82 @@ pub fn write_pptx_with_edits(
                             })?,
                     };
                     minted_slide_id = Some(slide_id);
-                    let layout = layout_part_path
-                        .clone()
-                        .filter(|path| {
-                            package
-                                .layouts
-                                .iter()
-                                .any(|layout| &layout.part_path == path)
-                        })
-                        .or_else(|| {
-                            package
-                                .layouts
-                                .first()
-                                .map(|layout| layout.part_path.clone())
-                        });
-                    if let Some(layout) = &layout {
-                        sink.store(
-                            &slide_relationships_path(&part_path),
-                            slide_relationships_xml(&part_path, layout),
-                        );
+                    match slide {
+                        SlideWrite::Clone {
+                            part_path: source,
+                            shapes,
+                        } => {
+                            let bytes = package
+                                .part_bytes(source)
+                                .ok_or_else(|| PptxError::MissingPart(source.clone()))?;
+                            let mut root = parse_xml(bytes, source, &mut budget)?;
+                            let source_rels = slide_relationships_path(source);
+                            if let Some(bytes) = package.part_bytes(&source_rels) {
+                                let mut rels = parse_xml(bytes, &source_rels, &mut budget)?;
+                                rels.children.retain(|child| match child {
+                                    XmlNode::Element(element) => {
+                                        element.attribute("Type").is_none_or(|kind| {
+                                            !kind.ends_with("/notesSlide")
+                                                && !kind.ends_with("/comments")
+                                                && !kind.ends_with("/comment")
+                                        })
+                                    }
+                                    _ => true,
+                                });
+                                sink.store(
+                                    &slide_relationships_path(&part_path),
+                                    serialize_xml(&rels),
+                                );
+                            }
+                            let theme = crate::slide_theme(package, Some(source), None);
+                            patch_slide(
+                                &mut root,
+                                shapes,
+                                Some(&theme),
+                                &part_path,
+                                package.shape_elements,
+                                &mut sink,
+                                &mut budget,
+                            )?;
+                            sink.store(&part_path, serialize_xml(&root));
+                        }
+                        SlideWrite::Add {
+                            name,
+                            layout_part_path,
+                            shapes,
+                        } => {
+                            let layout = layout_part_path
+                                .clone()
+                                .filter(|path| {
+                                    package
+                                        .layouts
+                                        .iter()
+                                        .any(|layout| &layout.part_path == path)
+                                })
+                                .or_else(|| {
+                                    package
+                                        .layouts
+                                        .first()
+                                        .map(|layout| layout.part_path.clone())
+                                });
+                            if let Some(layout) = &layout {
+                                sink.store(
+                                    &slide_relationships_path(&part_path),
+                                    slide_relationships_xml(&part_path, layout),
+                                );
+                            }
+                            let xml = slide_xml(
+                                name.as_deref(),
+                                shapes,
+                                &part_path,
+                                &mut sink,
+                                &mut budget,
+                            )?;
+                            sink.store(&part_path, xml);
+                        }
+                        _ => unreachable!(),
                     }
-                    let xml =
-                        slide_xml(name.as_deref(), shapes, &part_path, &mut sink, &mut budget)?;
-                    sink.store(&part_path, xml);
+
                     minted.push(MintedSlide {
                         part_path,
                         relationship_id,
