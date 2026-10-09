@@ -190,8 +190,9 @@ shows toolbar contributions with
 `other`), the story a cell or block control sits in, and a header's or footer's
 relationship id and the sections using it. `read.readStories({ stories, view })`
 reads `'all'` stories, those of the listed kinds, or listed story ids in one
-call, also in viewers opened with `experimentalWorkerOpen`; a story that cannot
-be read reports its failure, and `expectVersion` refuses a changed document with
+call. Worker viewers, the default for read-only editors without
+`collaboration`, answer both with one worker read. A story that cannot be read
+reports its failure, and `expectVersion` refuses a changed document with
 `stale-version`.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
