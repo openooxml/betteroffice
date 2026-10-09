@@ -1816,7 +1816,7 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
     const worker = FakeWorker.last!;
     expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
     worker.reply({
-      id: worker.posted[0].id, ok: true, frame: prefixFrame.slice().buffer,
+      id: worker.requestAt(0).id, ok: true, frame: prefixFrame.slice().buffer,
       caret: { frameEpoch: prefixEpoch, caretRect: null }, selection: null,
       layoutRevision: 1, layoutJson: prefixJson, layoutProvisional: true,
     });
@@ -1828,7 +1828,7 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
     const visibleFrame = native.build_display_pages_frame(Uint32Array.of(3), prefixEpoch);
     const visibleEpoch = decodeFrameDelta(visibleFrame).frameEpoch;
     await act(async () => worker.reply({
-      id: worker.posted[1].id, ok: true, frame: visibleFrame.slice().buffer,
+      id: worker.requestAt(1).id, ok: true, frame: visibleFrame.slice().buffer,
       caret: { frameEpoch: visibleEpoch, caretRect: null }, selection: null, layoutRevision: 1,
     }));
     expect(hook.result.current.frame!.frameEpoch).toBe(visibleEpoch);
@@ -1836,7 +1836,7 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.posted[2].id, ok: true });
+      worker.reply({ id: worker.requestAt(2).id, ok: true });
       expect(await attaching).toBe(true);
     });
     await waitFor(() => expect(worker.posted[3]).toMatchObject({
@@ -1850,7 +1850,7 @@ test.each([false, true])('a bootstrap completion uses the page-build base with w
     const fullFrame = native.build_display_list_frame('{}', 0);
     const fullPages = applyFrameDelta(null, decodeFrameDelta(fullFrame)).displayList.pages;
     worker.reply({
-      id: worker.posted[3].id, ok: true, frame: completedFrame.slice().buffer,
+      id: worker.requestAt(3).id, ok: true, frame: completedFrame.slice().buffer,
       caret: { frameEpoch: completedDelta.frameEpoch, caretRect: null }, selection: null,
       layoutRevision: 1, layoutJson: completeJson,
     });
@@ -1880,7 +1880,7 @@ test.each(['delta', 'full'])('a completion %s handles a host base adopted while 
     const pending = hook.result.current.layoutInWorker(engine, REQUEST)!;
     const worker = FakeWorker.last!;
     worker.reply({
-      id: worker.posted[0].id, ok: true, frame: frame.slice().buffer,
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
       caret: { frameEpoch: 1, caretRect: null }, selection: null,
       layoutRevision: 1, layoutJson, layoutProvisional: true,
     });
@@ -1890,14 +1890,14 @@ test.each(['delta', 'full'])('a completion %s handles a host base adopted while 
       const attaching = hook.result.current.attachOffscreenCanvases(
         [], [], 1, 1, { color: '#000', width: 2 }
       );
-      worker.reply({ id: worker.posted[1].id, ok: true });
+      worker.reply({ id: worker.requestAt(1).id, ok: true });
       expect(await attaching).toBe(true);
     });
-    const completionRequest = worker.posted[2]!;
+    const completionRequest = worker.requestAt(2);
     expect(completionRequest).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 1 });
     const completedFrame = kind === 'delta' ? native.build_display_list_frame('{}', 1) : null;
     await act(async () => hook.rerender({ layout: prefix.layout, source: engine, resolved: new Set([7]) }));
-    const interveningRequest = worker.posted[3]!;
+    const interveningRequest = worker.requestAt(3);
     expect(interveningRequest).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
     const interveningFrame = native.build_display_list_frame('{}', 1);
     const interveningEpoch = decodeFrameDelta(interveningFrame).frameEpoch;
@@ -1917,7 +1917,7 @@ test.each(['delta', 'full'])('a completion %s handles a host base adopted while 
     const completed = (await prefix.complete)!;
     await act(async () => hook.rerender({ layout: completed.layout, source: engine, resolved: undefined }));
     if (kind === 'delta') {
-      const fallbackRequest = worker.posted[4]!;
+      const fallbackRequest = worker.requestAt(4);
       expect(fallbackRequest).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: interveningEpoch });
       const freshFrame = native.build_display_list_frame('{}', interveningEpoch);
       await act(async () => worker.reply({
