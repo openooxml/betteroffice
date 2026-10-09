@@ -251,3 +251,4 @@ export const wasm_heap_counted: () => number;
 export const wasm_live_bytes: () => number;
 export const wasm_peak_bytes: () => number;
 export const write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];

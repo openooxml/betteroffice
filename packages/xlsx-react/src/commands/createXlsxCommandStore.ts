@@ -59,6 +59,7 @@ export interface XlsxPendingCommand<K extends XlsxCommandId> {
 
 /** Editor-owned implementation behind a command store. */
 export interface XlsxCommandBinding {
+  requestSave?(save: () => Promise<XlsxPluginCommandResult>): Promise<XlsxPluginCommandResult>;
   /** Gate inputs; `executing` reads them live, after preceding input was written. */
   environment(executing: boolean): XlsxCommandEnvironment;
   /** Whether `id` must wait behind accepted input. */
@@ -349,7 +350,12 @@ export function createXlsxCommandController(): XlsxCommandController {
       return perform(id, args, env!);
     };
     try {
-      const result = await (ordered || prepared !== undefined ? current.admit(attempt, builtIn ?? undefined) : attempt());
+      const execute = () => Promise.resolve(
+        ordered || prepared !== undefined ? current.admit(attempt, builtIn ?? undefined) : attempt()
+      );
+      const denied = builtIn === 'save' ? scope?.deny(id) : null;
+      if (denied) return failure(denied, environment(false));
+      const result = await (builtIn === 'save' && current.requestSave ? current.requestSave(execute) : execute());
       if (!result.ok) current.refuse?.(result.failure);
       return result;
     } catch (error) {

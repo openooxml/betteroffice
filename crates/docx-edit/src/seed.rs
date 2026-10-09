@@ -758,6 +758,37 @@ fn utf16_len(value: &str) -> u32 {
     value.encode_utf16().count() as u32
 }
 
+/// Aggregate xml-byte cap for opaque drawing payloads seeded into yrs state.
+pub const OPAQUE_SEED_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
+
+pub fn opaque_seed_budget_exceeded(total: u64) -> String {
+    format!(
+        "opaque drawing seed budget exceeded ({} bytes of opaque xml, budget {} bytes)",
+        total, OPAQUE_SEED_BUDGET_BYTES
+    )
+}
+
+pub fn is_opaque_seed_budget_error(message: &str) -> bool {
+    message.starts_with("opaque drawing seed budget exceeded")
+}
+
+fn opaque_xml_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Array(items) => items.iter().map(opaque_xml_bytes).sum(),
+        Value::Object(map) => {
+            let own = match map.get("type").and_then(Value::as_str) {
+                Some("opaqueDrawing") => map
+                    .get("xml")
+                    .and_then(Value::as_str)
+                    .map_or(0, |xml| xml.len() as u64),
+                _ => 0,
+            };
+            own + map.values().map(opaque_xml_bytes).sum::<u64>()
+        }
+        _ => 0,
+    }
+}
+
 fn ordered_object(
     entries: impl IntoIterator<Item = (impl Into<String>, Value)>,
 ) -> Vec<(String, Value)> {
@@ -2075,7 +2106,12 @@ fn note_ref_unit(id: &Value, note_type: &str, marks: &[Mark]) -> InlineUnit {
 fn drawing_marks(marks: &[Mark]) -> Vec<Mark> {
     marks
         .iter()
-        .filter(|mark| matches!(mark.name.as_str(), "hidden" | "insertion" | "deletion"))
+        .filter(|mark| {
+            matches!(
+                mark.name.as_str(),
+                "hidden" | "insertion" | "deletion" | "hyperlink"
+            )
+        })
         .cloned()
         .collect()
 }
@@ -2105,7 +2141,7 @@ fn run_content_unit_count(content: &Value) -> usize {
         "symbol" => usize::from(run_content_symbol_char(content).is_some()),
         "footnoteRef" | "endnoteRef" => usize::from(field(Some(content), "id").is_some()),
         "tab" | "softHyphen" | "noBreakHyphen" | "commentReference" | "drawing"
-        | "horizontalRule" | "shape" | "chart" => 1,
+        | "horizontalRule" | "shape" | "chart" | "opaqueDrawing" => 1,
         _ => 0,
     }
 }
@@ -2209,6 +2245,15 @@ fn run_content_to_units(
                 field(Some(content), "chart").unwrap_or(&Value::Null),
                 source,
             ),
+            &drawing_marks(marks),
+            1,
+        )],
+        "opaqueDrawing" => vec![embed_unit(
+            "opaqueDrawing",
+            map_from_value(json!({
+                "kind": field(Some(content), "kind").cloned().unwrap_or(Value::Null),
+                "xml": field(Some(content), "xml").cloned().unwrap_or(Value::Null),
+            })),
             &drawing_marks(marks),
             1,
         )],
@@ -3426,23 +3471,11 @@ fn content_breaks(
     }
 }
 
-fn drawing_element(kind: &str) -> String {
-    match kind {
-        "alternateContent" => "mc:AlternateContent".to_owned(),
-        kind => format!("w:{kind}"),
-    }
-}
-
 /// The unmodelled source nodes inside one paragraph content node, in source order.
 fn unmodelled_nodes(content: &Value, output: &mut Vec<String>) {
     let children = |key: &str| array(field(Some(content), key));
     match string(field(Some(content), "type")).unwrap_or_default() {
-        "run" => output.extend(
-            children("content")
-                .iter()
-                .filter(|item| string(field(Some(item), "type")) == Some("opaqueDrawing"))
-                .map(|item| drawing_element(string(field(Some(item), "kind")).unwrap_or_default())),
-        ),
+        "run" => {}
         "hyperlink" => {
             let nodes = field(Some(content), "structuredChildren")
                 .or_else(|| field(Some(content), "children"));
@@ -3626,7 +3659,6 @@ fn paragraph_units(
 fn run_prefix_units(run: &Value) -> usize {
     array(field(Some(run), "content"))
         .iter()
-        .take_while(|item| string(field(Some(item), "type")) != Some("opaqueDrawing"))
         .map(run_content_unit_count)
         .sum()
 }
@@ -3905,6 +3937,23 @@ fn cell_borders(
     }
 }
 
+pub(crate) fn synthesized_cell_width(
+    widths: &[Option<f64>],
+    total_width: f64,
+    start_column: usize,
+    colspan: usize,
+) -> Option<f64> {
+    (!widths.is_empty() && total_width > 0.0).then(|| {
+        let cell_width: f64 = widths
+            .iter()
+            .skip(start_column)
+            .take(colspan)
+            .flatten()
+            .sum();
+        (cell_width / total_width * 100.0).round()
+    })
+}
+
 struct CellOptions<'a> {
     is_header: bool,
     rowspan: usize,
@@ -4181,8 +4230,11 @@ fn project_row<'a>(
             field(Some(row), "propertyChanges").unwrap().clone(),
         );
     }
-    let widths = array(field(Some(table), "columnWidths"));
-    let total_width: f64 = widths.iter().filter_map(Value::as_f64).sum();
+    let widths: Vec<Option<f64>> = array(field(Some(table), "columnWidths"))
+        .iter()
+        .map(Value::as_f64)
+        .collect();
+    let total_width: f64 = widths.iter().flatten().sum();
     let rows = array(field(Some(table), "rows"));
     let total_columns = if !widths.is_empty() {
         widths.len()
@@ -4208,15 +4260,7 @@ fn project_row<'a>(
             number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
         let start_column = column;
         let span = row_spans.get(&(row_index, start_column));
-        let grid_width = (!widths.is_empty() && total_width > 0.0).then(|| {
-            let cell_width: f64 = widths
-                .iter()
-                .skip(start_column)
-                .take(colspan)
-                .filter_map(Value::as_f64)
-                .sum();
-            (cell_width / total_width * 100.0).round()
-        });
+        let grid_width = synthesized_cell_width(&widths, total_width, start_column, colspan);
         column += colspan;
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
@@ -5526,6 +5570,10 @@ fn lower_docx_with(
     let mut script_fonts = ScriptFontUse::default();
     script_fonts.font_table(&envelope.document.package.font_table.fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let opaque_total = opaque_xml_bytes(&parsed);
+    if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
+        return Err(opaque_seed_budget_exceeded(opaque_total));
+    }
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if payloads && needs_source_json(&parsed) {
         let serialized =
@@ -6325,7 +6373,7 @@ mod tests {
                     original = original.replace(" xml:space=\"preserve\"", "");
                 }
                 let content = format!(
-                    r#"{}<m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
+                    r#"{}<x:mark xmlns:x="urn:example:unmodeled"/><m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath><w:r><w:br w:type="page"/><w:br w:type="column"/></w:r>{}"#,
                     fixture::run("a😀b"),
                     fixture::run(text)
                 );
@@ -6774,6 +6822,176 @@ mod tests {
         document
     }
 
+    fn measured_table_column_widths(table: &docx_layout::types::TableBlock) -> Vec<f64> {
+        let mut block = docx_layout::types::LayoutBlock::Table(table.clone());
+        let config = docx_layout::measure_blocks::MeasurementConfig {
+            defaults: json!({"fontFamily": "Arial", "fontSize": 12}),
+            ..Default::default()
+        };
+        let docx_layout::types::BlockExtent::Table(extent) =
+            docx_layout::measure_blocks::measure_block(&mut block, 600.0, &config).unwrap()
+        else {
+            panic!()
+        };
+        extent.column_widths
+    }
+
+    #[test]
+    fn seeded_grid_percentages_do_not_become_cell_width_preferences() {
+        for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
+            let table = json!({
+                "type": "table", "columnWidths": [1500, 4500],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": formatting, "content": []},
+                    {"type": "tableCell", "formatting": formatting, "content": []}
+                ]}]
+            });
+            let projected = project_table(&table, &StyleResolver::new(None), None, 12);
+            for (cell, width) in projected.rows[0].cells.iter().zip([25.0, 75.0]) {
+                assert_eq!(cell.attrs.get("width").and_then(Value::as_f64), Some(width));
+                assert_eq!(
+                    cell.attrs.get("widthType").and_then(Value::as_str),
+                    Some("pct")
+                );
+            }
+            let document = seed_body(&[table]);
+            let env = crate::bridge::RenderEnv::default();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for cell in &table.rows[0].cells {
+                assert_eq!(cell.width, None);
+                assert_eq!(cell.width_value, None);
+                assert_eq!(cell.preferred_width, None);
+            }
+            assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
+            document
+                .set_column_width(
+                    &EditCtx::local("", ""),
+                    &crate::CellLoc::new("body", 0, 0, 0),
+                    3000.0,
+                )
+                .unwrap();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(&document, "body", &env).unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            assert_eq!(measured_table_column_widths(table), vec![250.0, 350.0]);
+        }
+    }
+
+    #[test]
+    fn edited_cell_percentages_without_authored_widths_remain_preferences() {
+        for formatting in [Value::Null, json!({}), json!({"verticalAlign": "center"})] {
+            let document = seed_body(&[json!({
+                "type": "table", "columnWidths": [3000, 6000],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": formatting, "content": []},
+                    {"type": "tableCell", "formatting": formatting, "content": []}
+                ]}]
+            })]);
+            for (column, width) in [(0, 1250.0), (1, 3750.0)] {
+                document
+                    .set_cell_text_format(
+                        &EditCtx::local("", ""),
+                        &crate::TableRange::cell(crate::CellLoc::new("body", 0, 0, column)),
+                        &HashMap::from([
+                            ("width".to_owned(), Any::Number(width)),
+                            ("widthType".to_owned(), Any::from("pct")),
+                        ]),
+                    )
+                    .unwrap();
+            }
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for (cell, width) in table.rows[0].cells.iter().zip([1250.0, 3750.0]) {
+                assert_eq!(cell.width_value, Some(width));
+                assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(width));
+            }
+            assert_eq!(measured_table_column_widths(table), vec![150.0, 450.0]);
+        }
+    }
+
+    #[test]
+    fn seeded_grid_percentages_follow_horizontal_and_vertical_spans() {
+        let document = seed_body(&[json!({
+            "type": "table", "columnWidths": [1500, 3000, 4500],
+            "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+            "rows": [
+                {"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": {"vMerge": "restart"}, "content": []},
+                    {"type": "tableCell", "formatting": {"gridSpan": 2}, "content": []}
+                ]},
+                {"type": "tableRow", "cells": [
+                    {"type": "tableCell", "formatting": {"vMerge": "continue"}, "content": []},
+                    {"type": "tableCell", "formatting": {"gridSpan": 2}, "content": []}
+                ]}
+            ]
+        })]);
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+            &document,
+            "body",
+            &crate::bridge::RenderEnv::default(),
+        )
+        .unwrap();
+        let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+            panic!()
+        };
+        assert_eq!(table.rows[0].cells[0].row_span, Some(2.0));
+        assert_eq!(table.rows[1].cells.len(), 1);
+        for cell in table.rows.iter().flat_map(|row| &row.cells) {
+            assert_eq!(cell.width_value, None);
+            assert_eq!(cell.preferred_width, None);
+        }
+        assert_eq!(
+            measured_table_column_widths(table),
+            vec![100.0, 200.0, 300.0]
+        );
+    }
+
+    #[test]
+    fn seeded_cell_percentages_preserve_authored_units() {
+        for (values, expected) in [
+            ([1250.0, 3750.0], vec![150.0, 450.0]),
+            ([25.0, 75.0], vec![297.0, 303.0]),
+        ] {
+            let document = seed_body(&[json!({
+                "type": "table", "columnWidths": [1500, 4500],
+                "formatting": {"layout": "fixed", "width": {"value": 9000, "type": "dxa"}},
+                "rows": [{"type": "tableRow", "cells": [
+                    {"type": "tableCell", "content": [],
+                     "formatting": {"width": {"value": values[0], "type": "pct"}}},
+                    {"type": "tableCell", "content": [],
+                     "formatting": {"width": {"value": values[1], "type": "pct"}}}
+                ]}]
+            })]);
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            let docx_layout::types::LayoutBlock::Table(table) = &blocks[0] else {
+                panic!()
+            };
+            for (cell, value) in table.rows[0].cells.iter().zip(values) {
+                assert_eq!(cell.width_value, Some(value));
+                assert_eq!(cell.preferred_width.as_ref().unwrap().value, Some(value));
+            }
+            assert_eq!(measured_table_column_widths(table), expected);
+        }
+    }
+
     fn rendered(document: &EditingDoc) -> (usize, String) {
         let blocks = crate::bridge::yrs_doc_to_layout_blocks(
             document,
@@ -6980,6 +7198,104 @@ mod tests {
                 .unwrap()
                 .contains("structuredResult")
         );
+    }
+
+    #[test]
+    fn tracked_embeds_keep_revision_marks_and_comment_ids() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let run = |content: Value| json!({"type": "run", "content": [content]});
+        let tracked = |node_type: &str, child: Value| json!({"type": node_type, "info": info, "content": [child]});
+        let opaque = || json!({"type": "opaqueDrawing", "kind": "object", "xml": "<w:object/>"});
+        let paragraph = json!({"content": [
+            tracked("insertion", run(json!({"type": "drawing", "image": {"wrap": {"type": "inline"}}}))),
+            tracked("insertion", run(json!({"type": "shape", "shape": {"shapeType": "rect"}}))),
+            tracked("insertion", run(json!({"type": "chart", "chart": {"chartType": "bar"}}))),
+            tracked("insertion", run(opaque())),
+            tracked("deletion", run(opaque())),
+            {"type": "commentRangeStart", "id": 3},
+            run(opaque()),
+            {"type": "commentRangeEnd", "id": 3},
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits {
+            units,
+            comment_marks,
+            ..
+        } = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 6);
+        for (unit, kind) in
+            units[..5]
+                .iter()
+                .zip(["image", "shape", "chart", "opaqueDrawing", "opaqueDrawing"])
+        {
+            let UnitContent::Embed { kind: actual, .. } = &unit.content else {
+                panic!("expected embed unit");
+            };
+            assert_eq!(actual, kind);
+        }
+        for unit in &units[..4] {
+            assert_eq!(unit.attrs["ins"]["author"], json!("Ada"));
+        }
+        assert_eq!(units[4].attrs["del"]["author"], json!("Ada"));
+        assert_eq!(
+            comment_marks,
+            [
+                CommentMark {
+                    unit: 5,
+                    start: true,
+                    id: "3".to_owned()
+                },
+                CommentMark {
+                    unit: 6,
+                    start: false,
+                    id: "3".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn hyperlinks_keep_embeds_and_comment_ids() {
+        let run = |content: Value| json!({"type": "run", "content": [content]});
+        let link = |child: Value| json!({"type": "hyperlink", "href": "https://example.com", "children": [child]});
+        let paragraph = json!({"content": [
+            {"type": "commentRangeStart", "id": 5},
+            link(run(json!({"type": "drawing", "image": {"wrap": {"type": "inline"}}}))),
+            link(run(json!({"type": "opaqueDrawing", "kind": "object", "xml": "<w:object/>"}))),
+            {"type": "commentRangeEnd", "id": 5},
+        ]});
+        let styles = StyleResolver::new(None);
+        let ParagraphUnits {
+            units,
+            comment_marks,
+            ..
+        } = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 2);
+        assert_eq!(
+            comment_marks,
+            [
+                CommentMark {
+                    unit: 0,
+                    start: true,
+                    id: "5".to_owned()
+                },
+                CommentMark {
+                    unit: 2,
+                    start: false,
+                    id: "5".to_owned()
+                }
+            ]
+        );
+        for unit in &units {
+            let UnitContent::Embed { kind, .. } = &unit.content else {
+                panic!("expected embed unit");
+            };
+            assert!(kind == "image" || kind == "opaqueDrawing");
+            assert_eq!(
+                unit.attrs["hyperlink"]["href"],
+                json!("https://example.com")
+            );
+        }
     }
 
     #[test]
@@ -7267,8 +7583,12 @@ mod tests {
                 .root()
                 .unwrap()
                 .clone();
-            serde_json::to_value(docx_parse::parse_paragraph_properties(Some(&root), None).unwrap())
-                .unwrap()
+            serde_json::to_string(
+                &docx_parse::parse_paragraph_properties(Some(&root), None).unwrap(),
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .unwrap()
         }
         let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
         assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));
@@ -8667,6 +8987,32 @@ mod tests {
         assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
         assert_eq!(boundaries[0]["marksKey"], "bold:{}");
         assert_eq!(boundaries[1]["text"], "12");
+    }
+
+    #[test]
+    fn opaque_drawings_seed_one_opaque_unit_and_lower_without_a_run() {
+        let paragraph = json!({"type":"paragraph","paraId":"opaque","content": [{
+            "type": "run",
+            "content": [{"type": "opaqueDrawing", "kind": "object", "xml": "<w:object><o:OLEObject/></w:object>"}],
+        }]});
+        let ParagraphUnits { units, .. } = paragraph_units(
+            &paragraph,
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 1);
+        let UnitContent::Embed { kind, payload } = &units[0].content else {
+            panic!("opaque drawing must seed an embed unit");
+        };
+        assert_eq!(kind, "opaqueDrawing");
+        assert_eq!(payload["kind"], json!("object"));
+        assert_eq!(payload["xml"], paragraph["content"][0]["content"][0]["xml"]);
+        assert_eq!(units[0].pm_size, 1);
+        let document = seed_body(&[paragraph]);
+        let (count, blocks) = rendered(&document);
+        assert_eq!(count, 1);
+        assert!(!blocks.contains("OLEObject"));
     }
 
     #[test]

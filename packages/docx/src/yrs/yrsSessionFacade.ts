@@ -1,3 +1,4 @@
+import { normalizeSeedError } from './documentToYrs';
 import { readRetainedLayoutMeta } from './layoutMeta';
 import type {
   YrsChangeTarget,
@@ -348,12 +349,17 @@ export function wrapSession(
     resetMedia();
     const json = mutate(() => {
       session.set_media_tokens(options.mediaTokens === true);
-      const opened = session.open_docx(
-        source,
-        seedStories,
-        options.generation,
-        preparedDigests.get(bytes)
-      );
+      let opened: string;
+      try {
+        opened = session.open_docx(
+          source,
+          seedStories,
+          options.generation,
+          preparedDigests.get(bytes)
+        );
+      } catch (error) {
+        throw normalizeSeedError(error);
+      }
       proposals.reset();
       return opened;
     });

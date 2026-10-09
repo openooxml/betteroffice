@@ -1,35 +1,36 @@
 import { DurableObject } from "cloudflare:workers";
-import { MAX_COLLABORATION_FRAME_BYTES } from "../../../shared/collaboration-limits";
+import { MAX_AWARENESS_PAYLOAD_BYTES, MAX_COLLABORATION_FRAME_BYTES } from "../../../shared/collaboration-limits";
 import {
   classifyFrame,
   RetainedUpdateLog,
-  type LogMutation,
-  type RetainedEntry,
+  RoomCapacityError,
 } from "./retention";
+import { persistMutation, readRoom } from "./persistence";
 
 interface Env {
   ROOMS: DurableObjectNamespace<CollaborationRoom>;
 }
 
 const MAX_RETAINED_COUNT = 512;
-const UPDATE_PREFIX = "update:";
-const SEQ_DIGITS = 16;
-const LEGACY_LOG_KEY = "updates";
+const AWARENESS_RATE_CAPACITY = 30;
+const AWARENESS_REFILL_PER_SECOND = 30;
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
 const TTL_REFRESH_SLACK_MS = 60 * 60 * 1000;
 
 type PeerMessage = { type: "peers"; count: number };
 
-/** Zero-padded so storage's lexicographic key order is replay order. */
-function updateKey(seq: number): string {
-  return UPDATE_PREFIX + String(seq).padStart(SEQ_DIGITS, "0");
+interface AwarenessBucket {
+  tokens: number;
+  updatedAt: number;
 }
 
-function parseSeq(key: string): number | null {
-  const digits = key.slice(UPDATE_PREFIX.length);
-  if (digits.length !== SEQ_DIGITS || !/^\d+$/.test(digits)) return null;
-  const seq = Number(digits);
-  return Number.isSafeInteger(seq) ? seq : null;
+function sendIfOpen(socket: WebSocket, data: Uint8Array | string): void {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  try { socket.send(data); } catch { closeSocket(socket, 1011, "Connection unavailable"); }
+}
+
+function closeSocket(socket: WebSocket, code = 1000, reason = ""): void {
+  try { socket.close(code, reason); } catch {}
 }
 
 function isWebSocketRequest(request: Request): boolean {
@@ -50,32 +51,29 @@ export class CollaborationRoom extends DurableObject<Env> {
   );
   private persist = Promise.resolve();
   private expiresAt: number | null = null;
+  private failed = false;
+  private pendingBytes = 0;
+  private pendingCount = 0;
+  private awarenessBuckets = new Map<WebSocket, AwarenessBucket>();
 
   constructor(state: DurableObjectState, env: Env) {
     super(state, env);
-    state.blockConcurrencyWhile(async () => {
-      this.expiresAt = await state.storage.getAlarm();
-      const stored = await state.storage.list<Uint8Array>({
-        prefix: UPDATE_PREFIX,
-      });
-      const entries: RetainedEntry[] = [];
-      const unusable: string[] = [];
-      for (const [key, bytes] of stored) {
-        const seq = parseSeq(key);
-        if (seq === null || !(bytes instanceof Uint8Array)) {
-          unusable.push(key);
-          continue;
-        }
-        entries.push({ seq, bytes });
-      }
-      if ((await state.storage.get(LEGACY_LOG_KEY)) !== undefined) {
-        unusable.push(LEGACY_LOG_KEY);
-      }
+    state.blockConcurrencyWhile(() => this.rehydrate());
+  }
 
-      const repair = this.updates.restore(entries);
-      if (unusable.length > 0) await state.storage.delete(unusable);
-      if (repair) await this.writeMutation(repair);
-    });
+  private async rehydrate(): Promise<void> {
+    const expiresAt = await this.ctx.storage.getAlarm();
+    const stored = await readRoom(this.ctx.storage);
+    const restored = new RetainedUpdateLog(MAX_RETAINED_COUNT, MAX_COLLABORATION_FRAME_BYTES);
+    const repair = restored.restore(stored.entries, stored.checkpoint);
+    const compacted = stored.legacy ? restored.checkpoint() : null;
+    const mutation = compacted ? { ...compacted, deletes: [...(repair?.deletes ?? []), ...compacted.deletes] } : repair;
+    if (mutation || stored.legacy || stored.unusable.length) {
+      await persistMutation(this.ctx.storage, mutation ?? { puts: [], deletes: [] }, stored.legacy, stored.unusable);
+    }
+    this.updates = restored;
+    this.expiresAt = expiresAt;
+    this.failed = false;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -83,14 +81,19 @@ export class CollaborationRoom extends DurableObject<Env> {
       return new Response("WebSocket upgrade required", { status: 426 });
     }
 
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    this.ctx.acceptWebSocket(server);
-    this.refreshExpiry();
-    this.updates.replay((update) => server.send(update));
-    this.broadcastPeerCount();
-    return new Response(null, { status: 101, webSocket: client });
+    let response: Response | undefined;
+    await this.enqueue(async () => {
+      await this.refreshExpiry();
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.ctx.acceptWebSocket(server);
+      this.updates.replay((update) => sendIfOpen(server, update));
+      sendIfOpen(server, this.updates.syncRequest());
+      this.broadcastPeerCount();
+      response = new Response(null, { status: 101, webSocket: client });
+    });
+    return response ?? new Response("Room storage unavailable", { status: 503 });
   }
 
   webSocketMessage(
@@ -108,24 +111,46 @@ export class CollaborationRoom extends DurableObject<Env> {
       return;
     }
 
-    const kind = classifyFrame(bytes);
+    const { kind, hasAwareness } = classifyFrame(bytes);
     if (kind === "invalid") {
       socket.close(1002, "Malformed collaboration frame");
+      return;
+    }
+    if (kind === "oversize-awareness") {
+      socket.close(1009, `Awareness exceeds ${MAX_AWARENESS_PAYLOAD_BYTES} bytes`);
       return;
     }
     if (kind === "auth") {
       socket.close(1008, "Auth messages are server-only");
       return;
     }
+    if (hasAwareness && !this.consumeAwarenessToken(socket)) {
+      socket.close(1008, "Awareness frame rate exceeded");
+      return;
+    }
 
-    this.refreshExpiry();
-    if (kind === "document") {
-      const mutation = this.updates.retain(bytes);
-      if (mutation) this.persistUpdates(mutation);
+    if (this.pendingCount >= 1024 || this.pendingBytes + bytes.length > MAX_COLLABORATION_FRAME_BYTES) {
+      socket.close(1013, "Room is busy; reconnect to synchronize");
+      return;
     }
-    for (const peer of this.ctx.getWebSockets()) {
-      if (peer !== socket) peer.send(bytes.slice());
-    }
+    this.pendingBytes += bytes.length;
+    this.pendingCount++;
+    this.enqueue(async () => {
+      let responses: Uint8Array[];
+      let mutation;
+      try {
+        responses = this.updates.responses(bytes);
+        mutation = kind === "document" ? this.updates.retain(bytes) : null;
+      } catch (error) {
+        closeSocket(socket, error instanceof RoomCapacityError ? 1009 : 1002,
+          error instanceof RoomCapacityError ? "Room checkpoint limit reached" : "Invalid document update");
+        return;
+      }
+      if (mutation) await persistMutation(this.ctx.storage, mutation);
+      await this.refreshExpiry();
+      for (const response of responses) sendIfOpen(socket, response);
+      for (const peer of this.ctx.getWebSockets()) if (peer !== socket) sendIfOpen(peer, bytes.slice());
+    }).finally(() => { this.pendingBytes -= bytes.length; this.pendingCount--; });
   }
 
   webSocketClose(
@@ -134,67 +159,89 @@ export class CollaborationRoom extends DurableObject<Env> {
     reason: string,
     _wasClean: boolean,
   ): void {
-    socket.close(code, reason);
+    this.awarenessBuckets.delete(socket);
+    closeSocket(socket);
     this.broadcastPeerCount();
   }
 
   webSocketError(socket: WebSocket, _error: unknown): void {
+    this.awarenessBuckets.delete(socket);
     socket.close(1011, "WebSocket error");
     this.broadcastPeerCount();
   }
 
   /** Wipes the room once it has been idle for a full TTL. */
   async alarm(): Promise<void> {
-    await this.persist;
-    if (this.ctx.getWebSockets().length > 0) {
-      this.expiresAt = Date.now() + ROOM_TTL_MS;
-      await this.ctx.storage.setAlarm(this.expiresAt);
-      return;
-    }
-
-    this.updates.clear();
-    this.expiresAt = null;
-    await this.ctx.storage.deleteAll();
+    const committed = await this.enqueue(async () => {
+      if (this.ctx.getWebSockets().some(socket => socket.readyState === WebSocket.OPEN)) {
+        this.expiresAt = Date.now() + ROOM_TTL_MS;
+        await this.ctx.storage.setAlarm(this.expiresAt);
+        return;
+      }
+      await this.ctx.storage.deleteAll();
+      this.updates.clear();
+      this.expiresAt = null;
+    });
+    if (!committed) throw new Error("Room storage unavailable");
   }
 
-  /** setAlarm is a storage write, so only rewrite a materially stale deadline. */
-  private refreshExpiry(): void {
+  async checkpoint(): Promise<void> {
+    const committed = await this.enqueue(async () => {
+      const mutation = this.updates.checkpoint();
+      if (mutation) await persistMutation(this.ctx.storage, mutation);
+    });
+    if (!committed) throw new Error("Room storage unavailable");
+  }
+
+  private async refreshExpiry(): Promise<void> {
     const deadline = Date.now() + ROOM_TTL_MS;
-    if (
-      this.expiresAt !== null &&
-      deadline - this.expiresAt < TTL_REFRESH_SLACK_MS
-    ) {
-      return;
-    }
+    if (this.expiresAt !== null && deadline - this.expiresAt < TTL_REFRESH_SLACK_MS) return;
+    await this.ctx.storage.setAlarm(deadline);
     this.expiresAt = deadline;
-    this.persist = this.persist.then(() => this.ctx.storage.setAlarm(deadline));
-    this.ctx.waitUntil(this.persist);
   }
 
-  private persistUpdates(mutation: LogMutation): void {
-    this.persist = this.persist.then(() => this.writeMutation(mutation));
-    this.ctx.waitUntil(this.persist);
+  private consumeAwarenessToken(socket: WebSocket): boolean {
+    const now = Date.now();
+    let bucket = this.awarenessBuckets.get(socket);
+    if (!bucket) {
+      bucket = { tokens: AWARENESS_RATE_CAPACITY, updatedAt: now };
+      this.awarenessBuckets.set(socket, bucket);
+    } else {
+      const elapsed = (now - bucket.updatedAt) / 1000;
+      if (elapsed > 0) {
+        bucket.tokens = Math.min(
+          AWARENESS_RATE_CAPACITY,
+          bucket.tokens + elapsed * AWARENESS_REFILL_PER_SECOND,
+        );
+        bucket.updatedAt = now;
+      }
+    }
+    if (bucket.tokens < 1) return false;
+    bucket.tokens -= 1;
+    return true;
   }
 
-  private async writeMutation(mutation: LogMutation): Promise<void> {
-    if (mutation.puts.length === 1) {
-      const [entry] = mutation.puts;
-      await this.ctx.storage.put(updateKey(entry.seq), entry.bytes);
-    } else if (mutation.puts.length > 1) {
-      const batch: Record<string, Uint8Array> = {};
-      for (const entry of mutation.puts) batch[updateKey(entry.seq)] = entry.bytes;
-      await this.ctx.storage.put(batch);
-    }
-    if (mutation.deletes.length > 0) {
-      await this.ctx.storage.delete(mutation.deletes.map(updateKey));
-    }
+  private enqueue(action: () => Promise<void>): Promise<boolean> {
+    const result = this.persist.then(async () => {
+      if (this.failed) await this.rehydrate();
+      await action();
+      return true;
+    }).catch(error => {
+      this.failed = true;
+      for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1011, "Room storage unavailable; reconnect");
+      console.error("Relay persistence failed", error);
+      return false;
+    });
+    this.persist = result.then(() => {});
+    this.ctx.waitUntil(this.persist);
+    return result;
   }
 
   private broadcastPeerCount(): void {
-    const peers = this.ctx.getWebSockets();
+    const peers = this.ctx.getWebSockets().filter(socket => socket.readyState === WebSocket.OPEN);
     const message: PeerMessage = { type: "peers", count: peers.length };
     const payload = JSON.stringify(message);
-    for (const peer of peers) peer.send(payload);
+    for (const peer of peers) sendIfOpen(peer, payload);
   }
 }
 

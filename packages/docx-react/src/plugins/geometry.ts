@@ -7,7 +7,9 @@ import type { PointPosition, RenderedDomContext } from '@betteroffice/docx/plugi
 import { createCanvasHostProjector } from '@betteroffice/docx/plugin-api/RenderedDomContext';
 import {
   proposalSetIdentity,
+  type AnchorGeometryTarget,
   type ProposalGeometryMirror,
+  type ProposalGeometryTarget,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import { sourceVersionOf } from '../components/DocxEditor/internals/layoutProvenance';
@@ -106,6 +108,10 @@ export interface AnchorGeometryAccess {
   session: YrsSession;
   /** @internal */
   proposalGeometry?: ProposalGeometryMirror;
+  /** @internal Display geometry of other targets at `proposalGeometry`; undefined until known. */
+  anchorTarget?(
+    target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>
+  ): ProposalGeometryTarget | undefined;
   editor: Pick<PagedEditorRef, 'yrsLocToDisplayPosition' | 'hasPendingInput'>;
   /** Whether the pages show this layout's pixels. */
   presented: boolean;
@@ -284,19 +290,20 @@ export function createPluginGeometry(
       const mirror = live.proposalGeometry;
       if (
         mirror &&
-        (target.kind !== 'proposal' ||
-          mirror.version !== layout.version ||
+        (mirror.version !== layout.version ||
           mirror.previewVersion !== layout.previewVersion ||
           !snapshot ||
           mirror.proposals !== proposalSetIdentity(snapshot))
       )
         return unavailable();
-      const mirrored =
-        mirror && target.kind === 'proposal'
+      const mirrored = !mirror
+        ? null
+        : target.kind === 'proposal'
           ? Object.hasOwn(mirror.targets, target.id)
             ? mirror.targets[target.id]
             : anchorFailure('unknown-proposal', 'The proposal is not registered in this document')
-          : null;
+          : live.anchorTarget?.(target);
+      if (mirror && !mirrored) return unavailable();
       if (mirrored && !mirrored.ok) return mirrored;
       const resolved = mirror ? null : resolveAnchorTarget(session, target, layout.version);
       if (resolved && !resolved.ok) return resolved;

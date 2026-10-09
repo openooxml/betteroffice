@@ -187,7 +187,7 @@ fn detect_package_kind_with_budget(
         .map(|(path, _)| normalize_part_name(path).into_owned())
         .collect();
     let main_document = main_document_part(parts, &part_names, xml_budget)?;
-    let content_types = parse_content_types(parts, xml_budget)?;
+    let content_types = parse_content_types_with_budget(parts, xml_budget)?;
     let content_type = content_types
         .content_type_for(&main_document.part_name)
         .ok_or(DocumentKindError::MissingMainDocumentKind)?;
@@ -202,7 +202,7 @@ fn detect_package_kind_with_budget(
     }
 }
 
-struct ContentTypes {
+pub struct ContentTypes {
     overrides: BTreeMap<String, String>,
     defaults: BTreeMap<String, String>,
     /// Parts named by any `Override` (any depth, any namespace prefix) whose
@@ -211,7 +211,7 @@ struct ContentTypes {
 }
 
 impl ContentTypes {
-    fn content_type_for(&self, part_name: &str) -> Option<&str> {
+    pub fn content_type_for(&self, part_name: &str) -> Option<&str> {
         let part_name = normalize_part_name(part_name);
         if let Some(content_type) = self.overrides.get(part_name.as_ref()) {
             return Some(content_type);
@@ -223,7 +223,11 @@ impl ContentTypes {
     }
 }
 
-fn parse_content_types(
+pub fn parse_content_types(parts: &[(String, Vec<u8>)]) -> Result<ContentTypes, DocumentKindError> {
+    parse_content_types_with_budget(parts, &mut XmlBudget::default())
+}
+
+fn parse_content_types_with_budget(
     parts: &[(String, Vec<u8>)],
     xml_budget: &mut XmlBudget,
 ) -> Result<ContentTypes, DocumentKindError> {
@@ -664,7 +668,7 @@ fn detect_format_with_budget(
     } else {
         return Err("could not detect DOCX, XLSX, PPTX, or VSDX package".to_owned());
     };
-    let content_types = match parse_content_types(parts, xml_budget) {
+    let content_types = match parse_content_types_with_budget(parts, xml_budget) {
         Ok(content_types) => Some(content_types),
         Err(DocumentKindError::MissingContentTypes) => None,
         Err(error) => return Err(error.to_string()),

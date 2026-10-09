@@ -38,7 +38,12 @@ import type {
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
 import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
-import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import type {
+  AnchorGeometryTarget,
+  ProposalGeometryMirror,
+  ProposalGeometryTarget,
+  resolveNavigationTarget,
+} from './proposalGeometry';
 import type { DocxPageExportOptions } from './pagedExport';
 import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
 
@@ -82,6 +87,7 @@ export type ResidentDocumentRead =
   | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
   | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'anchorTargets'; targets: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>[] }
   | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
   | {
       kind: 'selectionUnit';
@@ -110,6 +116,7 @@ export interface ResidentDocumentReadValues {
   findText: DocxFindTextResult;
   findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
+  anchorTargets: ProposalGeometryTarget[];
   searchText: ResidentSearchResult;
   findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;

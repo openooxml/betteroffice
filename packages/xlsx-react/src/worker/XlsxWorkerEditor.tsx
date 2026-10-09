@@ -17,6 +17,7 @@ import { commandForEvent } from '../commands/descriptors';
 import type { InputDraft, InputSeal } from '../commands/inputCoordinator';
 import { inPluginChrome, pluginEventStore } from '../commands/pluginEvents';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import { useSaveRequest } from '../commands/useSaveRequest';
 import { useWorkerXlsxCommands } from '../commands/useWorkerXlsxCommands';
 import {
   createWorkerInputCoordinator, inputRefusal, WorkerInputRefusal, type WorkerInputCoordinatorHooks, type WorkerInputLease,
@@ -33,7 +34,7 @@ import { PluginOverlays } from '../plugins/PluginOverlays';
 import { PluginDock, useDockArea, type DockPlacement } from '../plugins/PluginPanels';
 import { useXlsxPluginHost } from '../plugins/useXlsxPluginHost';
 import { ProposalsPanel } from '../proposals/ProposalsPanel';
-import { deriveLimits, expandRangeToMergedCells, scaledRect } from '../viewer/sessionGeometry';
+import { deriveLimits, expandRangeToMergedCells, positionAtPoint, scaledRect } from '../viewer/sessionGeometry';
 import type { WorkerEditorApiBridge } from './createWorkerEditorApi';
 import {
   useEditableSessionWorkbook, type EditableSessionWorkbookProps, type EditableWorkbookSession,
@@ -159,6 +160,7 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
 
   const apiBridgeRef = useRef<WorkerEditorApiBridge | null>(null);
   const [apiBridge] = useState<WorkerEditorApiBridge>(() => ({
+    getPositionAtPoint: (x, y) => apiBridgeRef.current?.getPositionAtPoint?.(x, y) ?? null,
     coordinator: () => coordinatorRef.current,
     readOnly: () => propsRef.current.readOnly ?? false,
     clearSelection: () => apiBridgeRef.current?.clearSelection(),
@@ -621,6 +623,11 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
   }, [coordinator]);
 
   apiBridgeRef.current = {
+    getPositionAtPoint: (x, y) => {
+      const painted = sourceRef.current?.painted;
+      if (!painted || painted.request.generation !== runRef.current?.generation) return null;
+      return positionAtPoint(painted.displayList, painted.request.sheet, canvasRef.current, x, y);
+    },
     coordinator: () => coordinator, readOnly: () => propsRef.current.readOnly ?? false, focus,
     clearSelection: () => {
       coordinator.settle(); setEditing(null); setFormulaDraft(null); setSelection(null); setSelectedChart(null);
@@ -1338,7 +1345,13 @@ export function XlsxWorkerEditor(props: EditableSessionWorkbookProps) {
     },
   };
 
+  const requestSave = useSaveRequest({
+    document: () => runRef.current?.current && !runRef.current.retiring && !runRef.current.failure ? runRef.current : null,
+    onSaveRequest: props.onSaveRequest,
+    fail: reportInputError,
+  });
   useWorkerXlsxCommands(commands, {
+    requestSave,
     peer: () => run?.peer ?? null, editPeer: () => run?.editPeer ?? null,
     status: () => run?.ready ? 'ready' : run && !run.failure || loading ? 'loading' : 'empty',
     readOnly: () => propsRef.current.readOnly ?? false, collaborative: () => false,

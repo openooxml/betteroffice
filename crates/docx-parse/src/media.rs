@@ -792,8 +792,14 @@ mod tests {
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}"/></Relationships>"#,
             path.strip_prefix("word/").unwrap()
         ).into_bytes();
-        let total = (image.len() + document.len() + relationships.len()) as u64;
+        let content_types = format!(
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/{path}" ContentType="{}"/></Types>"#,
+            media_mime_type(path)
+        ).into_bytes();
+        let total =
+            (image.len() + document.len() + relationships.len() + content_types.len()) as u64;
         let mut bytes = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), content_types),
             ("word/document.xml".to_owned(), document),
             ("word/_rels/document.xml.rels".to_owned(), relationships),
             (path.to_owned(), image),
@@ -861,7 +867,7 @@ mod tests {
                         .is_err()
                 );
                 let (parts, bounded) = media_table_parts_within(&bytes, total).unwrap();
-                assert_eq!(parts.len(), 2);
+                assert_eq!(parts.len(), 3);
                 assert_eq!(bounded.warnings(), table.warnings());
                 assert!(media_table_parts_within(&bytes, total - 1).is_err());
                 let (wire, _, parsed) = parse_docx_s9_wire_with_media_table(

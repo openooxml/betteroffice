@@ -7,8 +7,10 @@ import { createRenderedDomContext } from '@betteroffice/docx/plugin-api/Rendered
 import {
   proposalRevisionPreview,
   proposalSetIdentity,
+  type AnchorGeometryTarget,
   type DocxProposalSnapshot,
   type ProposalGeometryMirror,
+  type ProposalGeometryTarget,
   type ResidentProposalReply,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
@@ -60,10 +62,13 @@ function stubSession() {
 
 function fakeAuthority(session: YrsSession) {
   const listeners = new Set<() => void>();
+  const targets = new Map<string, ProposalGeometryTarget>();
   let mirror: ProposalGeometryMirror | null = null;
   const authority = {
     initialized: true,
     geometry: () => mirror,
+    anchorTarget: (target: Exclude<AnchorGeometryTarget, { kind: 'proposal' }>) =>
+      targets.get(JSON.stringify(target)),
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => {
@@ -74,7 +79,12 @@ function fakeAuthority(session: YrsSession) {
   return {
     authority,
     listeners,
+    resolveTargets(values: readonly [Exclude<AnchorGeometryTarget, { kind: 'proposal' }>, ProposalGeometryTarget][]) {
+      for (const [target, value] of values) targets.set(JSON.stringify(target), value);
+      for (const listener of listeners) listener();
+    },
     publish(paragraph: number) {
+      targets.clear();
       mirror = {
         version: 'v1',
         previewVersion: 0,
@@ -141,6 +151,13 @@ test('worker geometry arriving after a frame re-notifies plugins and subscriptio
     }) as unknown as PagedEditorRef;
   const pagedEditorRef = { current: editor(first) };
   const events: (DocxAnchorGeometryResult | null)[] = [];
+  const targetEvents: (DocxAnchorGeometryResult | null)[] = [];
+  const paragraphTarget = {
+    kind: 'paragraph',
+    paragraph: {
+      kind: 'persisted', story: { kind: 'body', partUri: '/word/document.xml' }, paraId: '00000001',
+    },
+  } as const;
   const plugin = defineDocxPlugin({
     id: 'test.worker-proposal',
     createState: () => null,
@@ -152,6 +169,7 @@ test('worker geometry arriving after a frame re-notifies plugins and subscriptio
         events.push(
           context.geometry?.getAnchorGeometry({ kind: 'proposal', id: 'proposal' }) ?? null
         );
+        targetEvents.push(context.geometry?.getAnchorGeometry(paragraphTarget) ?? null);
       }
     },
   });
@@ -195,9 +213,21 @@ test('worker geometry arriving after a frame re-notifies plugins and subscriptio
     ok: true,
     anchor: { x: 3 },
   });
-  expect(geometry.getAnchorGeometry({ kind: 'revision', revisionId: 'revision' })).toMatchObject({
+  expect(geometry.getAnchorGeometry(paragraphTarget)).toMatchObject({
     ok: false,
     failure: { code: 'layout-unavailable' },
+  });
+  const beforeTargets = targetEvents.length;
+  await act(async () => firstWorker.resolveTargets([
+    [paragraphTarget, { ok: true, ranges: [], paragraph: 11 }],
+  ]));
+  await waitFor(() => {
+    expect(targetEvents.length).toBeGreaterThan(beforeTargets);
+    expect(targetEvents.at(-1)).toMatchObject({ ok: true, anchor: { x: 11 } });
+  });
+  expect(geometry.getAnchorGeometry(paragraphTarget)).toMatchObject({
+    ok: true,
+    anchor: { x: 11 },
   });
   const before = events.length;
   await act(async () => firstWorker.publish(7));

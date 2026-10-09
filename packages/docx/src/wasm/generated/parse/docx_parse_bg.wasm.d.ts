@@ -22,3 +22,4 @@ export const serialize_docx_s10: (a: number, b: number) => [number, number, numb
 export const serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
 export const write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { LayoutSelectionGate, type ResidentMeasurementConfig } from '@betteroffice/docx/layout';
-import { decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
+import { applyFrameDelta, decodeFrameDelta, loadRustDisplayListQueryEngine } from '@betteroffice/docx/layout/render';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import {
@@ -1778,6 +1778,166 @@ test('a provisional layout paints first and settles only once the full layout fo
     expect(worker.posted).toHaveLength(3);
     unmount();
   } finally {
+    native.free();
+  }
+});
+
+test.each([false, true])('a bootstrap completion uses the page-build base with worker-open=%s', async (workerOpen) => {
+  let request = JSON.stringify({
+    ...JSON.parse(REQUEST),
+    regions: { sections: [{ sectionId: 'main', properties: {
+      pageWidth: 4320, pageHeight: 2880,
+      marginTop: 300, marginRight: 300, marginBottom: 300, marginLeft: 300,
+    } }] },
+  });
+  const { native, engine } = setup(9399, 'Bootstrap pages. '.repeat(600), request);
+  const fontId = native.register_measure_font(new Uint8Array(readFileSync(resolve(
+    import.meta.dir, '../../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+  ))));
+  request = JSON.stringify({ ...JSON.parse(request), measurement: {
+    ...JSON.parse(request).measurement,
+    fontChains: { 'calibri|0|0': [fontId] }, authoritativeShaping: true,
+  } });
+  const prefixJson = native.layout_document_with_regions_prefix_retained_json(request, 5);
+  native.set_display_window(0, 1);
+  native.set_windowed_incremental_builds(true);
+  native.reset_frame_base();
+  const prefixFrame = native.build_display_list_frame('{}', 0);
+  const prefixEpoch = decodeFrameDelta(prefixFrame).frameEpoch;
+  const hook = renderHook(
+    ({ layout, source }) => useRustDisplayList(
+      layout, undefined, undefined, undefined, source, undefined, undefined, undefined, workerOpen
+    ),
+    { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+  );
+  try {
+    act(() => hook.result.current.setDisplayWindow(0, 1));
+    const pending = hook.result.current.layoutInWorker(engine, request)!;
+    const worker = FakeWorker.last!;
+    expect(worker.posted[0]).toMatchObject({ type: 'bootstrap', provisionalPages: 3 });
+    worker.reply({
+      id: worker.requestAt(0).id, ok: true, frame: prefixFrame.slice().buffer,
+      caret: { frameEpoch: prefixEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: prefixJson, layoutProvisional: true,
+    });
+    const prefix = (await act(() => pending))!;
+    await act(async () => hook.rerender({ layout: prefix.layout, source: engine }));
+    expect(hook.result.current.frame!.pages.length).toBeGreaterThan(3);
+    act(() => hook.result.current.setDisplayWindow(3, 4));
+    await waitFor(() => expect(worker.posted[1]).toMatchObject({ type: 'buildPages', pages: [3] }));
+    const visibleFrame = native.build_display_pages_frame(Uint32Array.of(3), prefixEpoch);
+    const visibleEpoch = decodeFrameDelta(visibleFrame).frameEpoch;
+    await act(async () => worker.reply({
+      id: worker.requestAt(1).id, ok: true, frame: visibleFrame.slice().buffer,
+      caret: { frameEpoch: visibleEpoch, caretRect: null }, selection: null, layoutRevision: 1,
+    }));
+    expect(hook.result.current.frame!.frameEpoch).toBe(visibleEpoch);
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.requestAt(2).id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    await waitFor(() => expect(worker.posted[3]).toMatchObject({
+      type: 'completeLayout', expectedFrameEpoch: visibleEpoch,
+    }));
+    const completeJson = native.layout_document_with_regions_retained_json(request);
+    native.set_windowed_incremental_builds(false);
+    const completedFrame = native.build_display_list_frame('{}', visibleEpoch);
+    const completedDelta = decodeFrameDelta(completedFrame);
+    expect(completedDelta).toMatchObject({ full: false, baseFrameEpoch: visibleEpoch });
+    const fullFrame = native.build_display_list_frame('{}', 0);
+    const fullPages = applyFrameDelta(null, decodeFrameDelta(fullFrame)).displayList.pages;
+    worker.reply({
+      id: worker.requestAt(3).id, ok: true, frame: completedFrame.slice().buffer,
+      caret: { frameEpoch: completedDelta.frameEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson: completeJson,
+    });
+    const completed = (await prefix.complete)!;
+    await act(async () => hook.rerender({ layout: completed.layout, source: engine }));
+    expect(hook.result.current.frame!.frameEpoch).toBe(completedDelta.frameEpoch);
+    expect(hook.result.current.displayList!.pages).toEqual(fullPages);
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.posted.filter((entry) => entry.type === 'buildFrame')).toEqual([]);
+  } finally {
+    hook.unmount();
+    native.free();
+  }
+});
+
+test.each(['delta', 'full'])('a completion %s handles a host base adopted while its request is pending', async (kind) => {
+  const { native, layoutJson, frame, engine } = setup();
+  const hook = renderHook(
+    ({ layout, source, resolved }) => useRustDisplayList(layout, undefined, undefined, resolved, source),
+    { initialProps: {
+      layout: null as Layout | null,
+      source: null as YrsSession | null,
+      resolved: undefined as ReadonlySet<number> | undefined,
+    } }
+  );
+  try {
+    const pending = hook.result.current.layoutInWorker(engine, REQUEST)!;
+    const worker = FakeWorker.last!;
+    worker.reply({
+      id: worker.requestAt(0).id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 1, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson, layoutProvisional: true,
+    });
+    const prefix = (await act(() => pending))!;
+    await act(async () => hook.rerender({ layout: prefix.layout, source: engine, resolved: undefined }));
+    await act(async () => {
+      const attaching = hook.result.current.attachOffscreenCanvases(
+        [], [], 1, 1, { color: '#000', width: 2 }
+      );
+      worker.reply({ id: worker.requestAt(1).id, ok: true });
+      expect(await attaching).toBe(true);
+    });
+    const completionRequest = worker.requestAt(2);
+    expect(completionRequest).toMatchObject({ type: 'completeLayout', expectedFrameEpoch: 1 });
+    const completedFrame = kind === 'delta' ? native.build_display_list_frame('{}', 1) : null;
+    await act(async () => hook.rerender({ layout: prefix.layout, source: engine, resolved: new Set([7]) }));
+    const interveningRequest = worker.requestAt(3);
+    expect(interveningRequest).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: 1 });
+    const interveningFrame = native.build_display_list_frame('{}', 1);
+    const interveningEpoch = decodeFrameDelta(interveningFrame).frameEpoch;
+    await act(async () => worker.reply({
+      id: interveningRequest.id, ok: true, frame: interveningFrame.slice().buffer,
+      caret: { frameEpoch: interveningEpoch, caretRect: null }, selection: null, layoutRevision: 1,
+    }));
+    expect(hook.result.current.frame!.frameEpoch).toBe(interveningEpoch);
+    const replyFrame = completedFrame ?? native.build_display_list_frame('{}', 1);
+    const replyDelta = decodeFrameDelta(replyFrame);
+    expect(replyDelta.full).toBe(kind === 'full');
+    worker.reply({
+      id: completionRequest.id, ok: true, frame: replyFrame.slice().buffer,
+      caret: { frameEpoch: replyDelta.frameEpoch, caretRect: null }, selection: null,
+      layoutRevision: 1, layoutJson,
+    });
+    const completed = (await prefix.complete)!;
+    await act(async () => hook.rerender({ layout: completed.layout, source: engine, resolved: undefined }));
+    if (kind === 'delta') {
+      const fallbackRequest = worker.requestAt(4);
+      expect(fallbackRequest).toMatchObject({ type: 'buildFrame', expectedFrameEpoch: interveningEpoch });
+      const freshFrame = native.build_display_list_frame('{}', interveningEpoch);
+      await act(async () => worker.reply({
+        id: fallbackRequest.id, ok: true, frame: freshFrame.slice().buffer,
+        caret: { frameEpoch: decodeFrameDelta(freshFrame).frameEpoch, caretRect: null },
+        selection: null, layoutRevision: 1,
+      }));
+      expect(hook.result.current.frame!.frameEpoch).toBe(decodeFrameDelta(freshFrame).frameEpoch);
+    } else {
+      expect(worker.posted).toHaveLength(4);
+      expect(hook.result.current.frame!.frameEpoch).toBe(replyDelta.frameEpoch);
+    }
+    const fullFrame = native.build_display_list_frame('{}', 0);
+    expect(hook.result.current.displayList!.pages).toEqual(
+      applyFrameDelta(null, decodeFrameDelta(fullFrame)).displayList.pages
+    );
+    expect(hook.result.current.error).toBeNull();
+    expect(worker.terminated).toBe(false);
+  } finally {
+    hook.unmount();
     native.free();
   }
 });
