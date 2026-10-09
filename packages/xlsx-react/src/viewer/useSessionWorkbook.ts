@@ -3,7 +3,8 @@ import type {
   Selection, Viewport, WorkbookFrame, WorkbookSession, WorkbookSheetView,
 } from '@betteroffice/xlsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { XlsxEditorProps, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
+import type { XlsxEditorProps, XlsxPointPosition, XlsxWorkerViewerApi, XlsxWorkerViewerProps } from '../XlsxEditor';
+import { XlsxCommandAdmissionError } from '../commands/createXlsxCommandStore';
 import type { XlsxCommandStore } from '../commands/types';
 import { expandRangeToMergedCells } from './sessionGeometry';
 
@@ -20,6 +21,7 @@ export interface FrameRequest {
 }
 
 export interface ViewerSurface {
+  getPositionAtPoint?(clientX: number, clientY: number): XlsxPointPosition | null;
   capture(): FrameRequest | null;
   paint(frame: WorkbookFrame, request: FrameRequest): void;
 }
@@ -75,6 +77,10 @@ export class ViewerSession {
   }
 
   get current(): boolean { return this.alive && !this.failed && this.isCurrent(); }
+
+  getPositionAtPoint(clientX: number, clientY: number): XlsxPointPosition | null {
+    return this.current ? this.surface?.getPositionAtPoint?.(clientX, clientY) ?? null : null;
+  }
 
   connect(surface: ViewerSurface): () => void {
     this.surface = surface;
@@ -359,6 +365,10 @@ export function useSessionWorkbook(
         }));
         const api: XlsxWorkerViewerApi = {
           handle: null, commands, save: () => null, selectCells: () => false,
+          flushPendingInput: async () => {
+            if (!viewer.current) throw new XlsxCommandAdmissionError('document-replaced');
+          },
+          getPositionAtPoint: (x, y) => viewer.getPositionAtPoint(x, y),
           refreshProposals: () => {},
           clearSelection: () => viewer.setSelection(null),
           focus: () => { if (viewer.current) latest.current.focus(); },

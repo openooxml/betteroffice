@@ -61,7 +61,8 @@ host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
 
 ## Host editing controls
 
-`onSaveRequest` runs for toolbar and Ctrl/Cmd+S saves before serialization.
+`onSaveRequest` runs for toolbar, `commands.execute('save', null)` and
+Ctrl/Cmd+S saves before serialization.
 Return `true` to continue built-in saving; `false` or `void` handles or cancels
 it. Promises are awaited and concurrent requests are coalesced. `onSave` still
 receives the resulting bytes when built-in saving continues. A request waiting
@@ -71,6 +72,8 @@ The API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
 Await it before inspecting or mutating the core from a host workflow, then call
 `api.save()` for explicit serialization without re-entering `onSaveRequest`.
 `save()` remains synchronous and rejects while asynchronous input is pending.
+On the editable worker path (`experimentalWorkerOpen`), `save()` is asynchronous and
+`flushPendingInput()` also flushes edits to the worker; `flush()` is an alias.
 Flush rejects stale document handles, failed input, and unfinished pointer
 gestures. Finish or cancel the gesture before retrying.
 

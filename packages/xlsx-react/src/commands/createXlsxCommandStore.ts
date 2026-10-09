@@ -59,7 +59,7 @@ export interface XlsxPendingCommand<K extends XlsxCommandId> {
 
 /** Editor-owned implementation behind a command store. */
 export interface XlsxCommandBinding {
-  requestSave?(save: () => Promise<XlsxCommandResult>): Promise<XlsxCommandResult>;
+  requestSave?(save: () => Promise<XlsxPluginCommandResult>): Promise<XlsxPluginCommandResult>;
   /** Gate inputs; `executing` reads them live, after preceding input was written. */
   environment(executing: boolean): XlsxCommandEnvironment;
   /** Whether `id` must wait behind accepted input. */

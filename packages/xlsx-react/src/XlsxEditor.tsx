@@ -95,7 +95,7 @@ import {
   RemoteSelections,
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
-import { deriveLimits, scaledRect } from './viewer/sessionGeometry';
+import { deriveLimits, positionAtPoint, scaledRect } from './viewer/sessionGeometry';
 import { XlsxSessionViewer } from './viewer/XlsxSessionViewer';
 import { XlsxWorkerEditor } from './worker/XlsxWorkerEditor';
 import type { XlsxWorkerEditorApi } from './worker/createWorkerEditorApi';
@@ -1110,7 +1110,12 @@ function XlsxEditorContent({
             handle,
             refreshProposals,
             focus: () => scrollRef.current?.focus(),
-            flushPendingInput: () => afterInput(opened, () => {}),
+            flushPendingInput: async () => {
+              if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
+              if (draggingRef.current) throw new XlsxCommandAdmissionError('gesture-active');
+              await afterInput(opened, () => {});
+              if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
+            },
             getPositionAtPoint: (x, y) => handleRef.current === opened ? hostPointRef.current(x, y) : null,
             save: () => {
               if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
@@ -1164,6 +1169,8 @@ function XlsxEditorContent({
     );
     return () => {
       disposed = true;
+      compositionRef.current?.settle(false);
+      compositionRef.current = null;
       runReadyCleanup();
       unsubscribeUpdates();
       handle?.dispose();
@@ -1866,17 +1873,9 @@ function XlsxEditorContent({
     [onSave, fileName]
   );
   hostPointRef.current = (clientX, clientY) => {
-    const canvas = canvasRef.current;
     const painted = paintedRef.current;
-    if (!canvas || !painted?.frame.grid || !painted.handle || painted.handle !== handleRef.current) return null;
-    const rect = canvas.getBoundingClientRect();
-    if (!Number.isFinite(clientX) || !Number.isFinite(clientY) || rect.width <= 0 || rect.height <= 0 ||
-        clientX < rect.left || clientY < rect.top || clientX >= rect.right || clientY >= rect.bottom) return null;
-    const x = (clientX - rect.left) * painted.frame.width / rect.width;
-    const y = (clientY - rect.top) * painted.frame.height / rect.height;
-    if (chartRegionAtPoint(painted.frame.charts, x, y)) return null;
-    const cell = cellAtPoint(painted.frame.grid, x, y);
-    return cell ? { ...cell, sheet: painted.sheet } : null;
+    if (!painted?.handle || painted.handle !== handleRef.current) return null;
+    return positionAtPoint(painted.frame, painted.sheet, canvasRef.current, clientX, clientY);
   };
 
   // render the current scroll window to png via the raster backend and download

@@ -14,12 +14,13 @@ import { DEFAULT_FONT_FAMILIES, DEFAULT_FONT_SIZES } from '../commands/evaluate'
 import type { XlsxCommandEnvironment } from '../commands/evaluate';
 import type { XlsxCommandArgs, XlsxCommandResult } from '../commands/types';
 import { useCommandShortcuts } from '../commands/useCommandShortcuts';
+import { useSaveRequest } from '../commands/useSaveRequest';
 import { XlsxCommandContext } from '../commands/XlsxCommandProvider';
 import { EditorChromeContext } from '../components/EditorToolbarContext';
 import { FormulaBarContext } from '../components/toolbar/FormulaBar';
 import type { FormulaBarBinding } from '../components/toolbar/FormulaBar';
 import { useTranslation } from '../i18n';
-import { deriveLimits, expandRangeToMergedCells, scaledRect } from './sessionGeometry';
+import { deriveLimits, expandRangeToMergedCells, positionAtPoint, scaledRect } from './sessionGeometry';
 import { useSessionWorkbook } from './useSessionWorkbook';
 import type { ViewerSession, ViewerSurface } from './useSessionWorkbook';
 
@@ -72,8 +73,17 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
   const latest = useRef({ run, props, zoom, selectedChart, loading, t, reportError });
   latest.current = { run, props, zoom, selectedChart, loading, t, reportError };
   const pendingSave = useRef<{ run: ViewerSession; promise: Promise<XlsxCommandResult> } | null>(null);
+  const requestSave = useSaveRequest({
+    document: () => latest.current.run?.current ? latest.current.run : null,
+    onSaveRequest: props.onSaveRequest,
+    fail: reportError,
+  });
 
   const surface = useMemo<ViewerSurface>(() => ({
+    getPositionAtPoint(clientX, clientY) {
+      const painted = latest.current.run?.painted;
+      return painted ? positionAtPoint(painted.frame.displayList, painted.frame.sheet, canvasRef.current, clientX, clientY) : null;
+    },
     capture() {
       const run = latest.current.run;
       const scroll = scrollRef.current;
@@ -148,6 +158,7 @@ export function XlsxSessionViewer(props: XlsxWorkerViewerProps) {
   }, []);
 
   const binding = useMemo<XlsxCommandBinding>(() => ({
+    requestSave,
     environment(): XlsxCommandEnvironment {
       const { run, selectedChart, loading, t } = latest.current;
       const selection = run?.selection;

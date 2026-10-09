@@ -2741,6 +2741,47 @@ describe('XlsxEditor edit batches', () => {
 });
 
 describe('XlsxEditor host controls', () => {
+  it('lets a host flush and serialize inside the save callback without re-entering it', async () => {
+    let api!: XlsxEditorApi;
+    let requests = 0;
+    let saved!: Uint8Array;
+    const builtIn: Uint8Array[] = [];
+    const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
+      onSave={(bytes) => builtIn.push(bytes)} onSaveRequest={async () => {
+        requests++;
+        await api.flushPendingInput();
+        saved = api.save();
+      }} />);
+    await waitFor(() => expect(api).toBeDefined());
+    fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Host-owned save' } });
+    let result!: XlsxCommandResult;
+    await act(async () => { result = await api.commands.execute('save', null); });
+    expect(result).toEqual({ ok: true, status: 'noop' });
+    expect(requests).toBe(1);
+    expect(builtIn).toHaveLength(0);
+    const reopened = openWorkbook(saved);
+    try { expect(reopened.cell(0, 0, 0).input).toBe('Host-owned save'); } finally { reopened.dispose(); }
+  });
+
+  it('allows another save after the host callback rejects', async () => {
+    let api!: XlsxEditorApi;
+    let requests = 0;
+    const saved: Uint8Array[] = [];
+    render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }}
+      onSave={(bytes) => saved.push(bytes)} onSaveRequest={async () => {
+        if (++requests === 1) throw new Error('Host save failed');
+        return true;
+      }} />);
+    await waitFor(() => expect(api).toBeDefined());
+    await act(async () => {
+      const failed = await api.commands.execute('save', null);
+      expect(failed).toMatchObject({ ok: false, failure: { code: 'command-failed' } });
+      expect(await api.commands.execute('save', null)).toEqual({ ok: true, status: 'executed' });
+    });
+    expect(saved).toHaveLength(1);
+    expect(requests).toBe(2);
+  });
+
   for (const decision of [true, false, undefined] as const) {
     it(`awaits one save request returning ${String(decision)} before exporting`, async () => {
       let api: XlsxEditorApi | undefined;

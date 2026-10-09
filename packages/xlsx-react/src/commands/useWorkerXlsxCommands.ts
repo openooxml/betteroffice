@@ -384,6 +384,7 @@ export function createWorkerXlsxCommandBinding(
   };
 
   const binding: XlsxCommandBinding = {
+    requestSave: (save) => bridge().requestSave?.(save) ?? save(),
     environment,
     ordered: (id) => {
       const current = bridge();
