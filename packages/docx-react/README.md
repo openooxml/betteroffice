@@ -470,11 +470,14 @@ const review = defineDocxPlugin<State>({
   whether or not a page shows it (anchor geometry tells where it is painted).
   `read.readStories({ stories, byRoot, view, expectVersion })` reads `'all'`
   stories, or listed kinds and story ids in their order without repeats, in one
-  call; kinds match each story's own kind unless `byRoot` matches its root's, so
-  `['header']` with `byRoot` includes header table cells. Worker viewers, the
+  call. An entry naming a kind is a kind, matching each story's own kind unless
+  `byRoot` matches its root's: `['header']` with `byRoot` includes header table
+  cells, and `['body']` with `byRoot` selects everything under the body. Worker viewers, the
   default for read-only editors without `collaboration`, answer each with one
   worker read. A story that cannot be read reports its own failure, the read
-  limits stop the read with `truncated`, and `expectVersion` refuses a changed
+  limits stop the read with `truncated`, a story larger than the limits on its
+  own reports `limit-exceeded` (page it with `readParagraphs` and `paraIds`),
+  and `expectVersion` refuses a changed
   document with `stale-version`.
 - **Geometry.** `context.geometry` is null until a rendered layout shows the
   current version, and whenever it falls behind. `geometry.dom` answers in

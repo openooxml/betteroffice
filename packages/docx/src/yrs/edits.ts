@@ -248,7 +248,7 @@ export type DocxReadParagraphsResult =
 export interface DocxReadStoriesRequest {
   /**
    * `'all'` (the default) reads every story in id order. Listed entries are read in their order
-   * without repeats; a story kind stands for its stories in id order.
+   * without repeats; an entry naming a kind stands for its stories in id order.
    */
   stories?: 'all' | ReadonlyArray<DocxStoryInfoKind | (string & {})>;
   /** Matches listed kinds against each story's root, so `header` also selects header cells. */
@@ -269,7 +269,10 @@ export type DocxReadStoriesResult =
       version: string;
       view: DocxTextView;
       stories: DocxStoryText[];
-      /** The read limits stopped the read before the next selected story. */
+      /**
+   * The read limits stopped the read before the next selected story. A story larger than the
+   * limits on its own reports `limit-exceeded` instead; page it with `readParagraphs` `paraIds`.
+   */
       truncated: boolean;
     }
   | DocxEditRefusal;

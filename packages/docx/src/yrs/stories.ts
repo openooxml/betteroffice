@@ -29,7 +29,8 @@ export interface DocxStoryInfo {
   part?: string;
   /**
    * A header's or footer's sections whose properties reference the part, inheritance applied,
-   * whether or not a page shows it; plugin anchor geometry tells where it is painted.
+   * whether or not a page shows it; plugin anchor geometry tells where it is painted. A
+   * first-page preview reads only the sections it holds, so its uses may be incomplete.
    */
   uses?: DocxStoryUse[];
 }

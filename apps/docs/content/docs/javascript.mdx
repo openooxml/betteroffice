@@ -192,10 +192,13 @@ story a cell or block control sits in, and a header's or footer's `part` and
 `uses`: the sections whose properties reference the part, inheritance applied,
 whether or not a page shows it. `read.readStories({ stories, byRoot, view })`
 reads `'all'` stories, or listed kinds and story ids in their order without
-repeats, in one call; kinds match each story's own kind unless `byRoot` matches
-its root's. Worker viewers, the default for read-only editors without
+repeats, in one call. An entry naming a kind is a kind, matching each story's
+own kind unless `byRoot` matches its root's, so `['body']` with `byRoot` selects
+everything under the body. Worker viewers, the default for read-only editors without
 `collaboration`, answer each with one worker read. A story that cannot be read
-reports its own failure, the read limits stop the read with `truncated`, and
+reports its own failure, the read limits stop the read with `truncated`, a story
+larger than the limits on its own reports `limit-exceeded` (page it with
+`readParagraphs` and `paraIds`), and
 `expectVersion` refuses a changed document with `stale-version`.
 
 **Coordinates.** `context.geometry` exists only while a rendered layout shows
