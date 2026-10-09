@@ -627,7 +627,7 @@ describe('closing an open part with Escape', () => {
   test('lets an open menu consume Escape without closing the part', () => {
     let closed = 0;
     const view = render(createElement(EscapeMenuHarness, { onEscape: () => (closed += 1) }));
-    const trigger = view.getByRole('button', { name: 'File' });
+    const trigger = view.getByRole('menuitem', { name: 'File' });
     act(() => trigger.click());
 
     expect(view.getByText('Open')).toBeTruthy();
