@@ -14,6 +14,10 @@ categories = ["parser-implementations", "encoding"]
 [lib]
 name = "xlsx_parse"
 
+[features]
+test-counters = []
+test-oracle = []
+
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 quick-xml = "0.41"

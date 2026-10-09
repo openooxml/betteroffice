@@ -328,11 +328,14 @@ impl DeckSession {
         if text.is_empty() {
             return Err(EditError::InvalidComment("comment text is empty".into()));
         }
+        let comments = {
+            let txn = self.doc.transact();
+            crate::deck::slide_ref(&txn, slide_id)?;
+            required_map(&txn, COMMENTS)?
+        };
         self.automatic_undo_barrier();
         let comment_id = self.next_id("comment");
         let mut txn = self.transact_for(context);
-        crate::deck::slide_ref(&txn, slide_id)?;
-        let comments = required_map(&txn, COMMENTS)?;
         let entry = comments.insert(&mut txn, comment_id.as_str(), MapPrelim::default());
         entry.insert(&mut txn, "id", comment_id.as_str());
         entry.insert(&mut txn, "slideId", slide_id);
@@ -366,18 +369,22 @@ impl DeckSession {
         if text.is_empty() {
             return Err(EditError::InvalidComment("reply text is empty".into()));
         }
+        let (comments, slide_id) = {
+            let txn = self.doc.transact();
+            require_modern(&txn)?;
+            let comments = required_map(&txn, COMMENTS)?;
+            let parent = comment_ref(&comments, &txn, comment_id)?;
+            if live_parent(&comments, &parent, &txn).is_some() {
+                return Err(EditError::InvalidComment(
+                    "replies cannot be nested below a reply".into(),
+                ));
+            }
+            let slide_id = map_string(&parent, &txn, "slideId").unwrap_or_default();
+            (comments, slide_id)
+        };
         self.automatic_undo_barrier();
         let reply_id = self.next_id("comment");
         let mut txn = self.transact_for(context);
-        require_modern(&txn)?;
-        let comments = required_map(&txn, COMMENTS)?;
-        let parent = comment_ref(&comments, &txn, comment_id)?;
-        if live_parent(&comments, &parent, &txn).is_some() {
-            return Err(EditError::InvalidComment(
-                "replies cannot be nested below a reply".into(),
-            ));
-        }
-        let slide_id = map_string(&parent, &txn, "slideId").unwrap_or_default();
         let entry = comments.insert(&mut txn, reply_id.as_str(), MapPrelim::default());
         entry.insert(&mut txn, "id", reply_id.as_str());
         entry.insert(&mut txn, "slideId", slide_id.as_str());
@@ -412,7 +419,7 @@ impl DeckSession {
                 "coordinates exceed safe integer range".into(),
             ));
         }
-        {
+        let (entry, slide_id, resolved) = {
             let txn = self.doc.transact();
             let comments = required_map(&txn, COMMENTS)?;
             let entry = comment_ref(&comments, &txn, comment_id)?;
@@ -421,13 +428,12 @@ impl DeckSession {
                     "replies share their root comment position".into(),
                 ));
             }
-        }
+            let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
+            let resolved = map_bool(&entry, &txn, "resolved").unwrap_or(false);
+            (entry, slide_id, resolved)
+        };
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        let comments = required_map(&txn, COMMENTS)?;
-        let entry = comment_ref(&comments, &txn, comment_id)?;
-        let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
-        let resolved = map_bool(&entry, &txn, "resolved").unwrap_or(false);
         entry.insert(&mut txn, "x", x_emu as f64);
         entry.insert(&mut txn, "y", y_emu as f64);
         drop(txn);
@@ -446,13 +452,17 @@ impl DeckSession {
         comment_id: &str,
         resolved: bool,
     ) -> EditResult<CommentReceipt> {
+        let (entry, slide_id, parent_id) = {
+            let txn = self.doc.transact();
+            require_modern(&txn)?;
+            let comments = required_map(&txn, COMMENTS)?;
+            let entry = comment_ref(&comments, &txn, comment_id)?;
+            let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
+            let parent_id = live_parent(&comments, &entry, &txn);
+            (entry, slide_id, parent_id)
+        };
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        require_modern(&txn)?;
-        let comments = required_map(&txn, COMMENTS)?;
-        let entry = comment_ref(&comments, &txn, comment_id)?;
-        let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
-        let parent_id = live_parent(&comments, &entry, &txn);
         entry.insert(&mut txn, "resolved", resolved);
         drop(txn);
         self.automatic_undo_barrier();
@@ -469,14 +479,13 @@ impl DeckSession {
         context: &EditCtx,
         comment_id: &str,
     ) -> EditResult<CommentReceipt> {
-        self.automatic_undo_barrier();
-        let mut txn = self.transact_for(context);
+        let txn = self.doc.transact();
         let comments = required_map(&txn, COMMENTS)?;
         let entry = comment_ref(&comments, &txn, comment_id)?;
         let slide_id = map_string(&entry, &txn, "slideId").unwrap_or_default();
         let parent_id = live_parent(&comments, &entry, &txn);
         let resolved = map_bool(&entry, &txn, "resolved").unwrap_or(false);
-        let replies: Vec<String> = comments
+        let mut replies: Vec<String> = comments
             .iter(&txn)
             .filter_map(|(id, value)| {
                 let entry = value.cast::<MapRef>().ok()?;
@@ -484,6 +493,10 @@ impl DeckSession {
                     .then(|| id.to_owned())
             })
             .collect();
+        replies.sort();
+        drop(txn);
+        self.automatic_undo_barrier();
+        let mut txn = self.transact_for(context);
         for reply in replies {
             comments.remove(&mut txn, &reply);
         }
@@ -503,15 +516,18 @@ impl DeckSession {
         context: &EditCtx,
         flavor: CommentFlavor,
     ) -> EditResult<CommentFlavor> {
+        let meta = {
+            let txn = self.doc.transact();
+            let comments = required_map(&txn, COMMENTS)?;
+            if comments.len(&txn) > 0 {
+                return Err(EditError::InvalidComment(
+                    "the comment flavour is fixed once a deck has comments".into(),
+                ));
+            }
+            required_map(&txn, META)?
+        };
         self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
-        let comments = required_map(&txn, COMMENTS)?;
-        if comments.len(&txn) > 0 {
-            return Err(EditError::InvalidComment(
-                "the comment flavour is fixed once a deck has comments".into(),
-            ));
-        }
-        let meta = required_map(&txn, META)?;
         meta.insert(&mut txn, "commentFlavor", flavor_key(flavor));
         drop(txn);
         self.automatic_undo_barrier();

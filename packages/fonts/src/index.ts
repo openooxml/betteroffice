@@ -1,6 +1,6 @@
 export * from './manifest';
 export type { BundledFontSource } from './provider';
-import { BUNDLED_FONTS, type BundledFontFace } from './manifest';
+import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
 
@@ -153,28 +153,48 @@ export interface FontAssetOptions {
 
 let cjkAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
+class MissingCjkAddonError extends Error {}
+
+const UNRESOLVED_CJK_ADDON =
+  /^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice\/fonts-cjk["'”]/;
+
 async function importCjkAssetUrls(): Promise<
   Record<string, () => URL> | undefined
 > {
+  let addon: typeof import('@betteroffice/fonts-cjk');
   // Keep the SYNTACTIC try/catch with the await as its direct body. Rewriting
   // this as `import(…).catch()` or a two-argument `.then()` makes webpack (and
   // so `next build`) fail hard on the absent optional peer, and esbuild starts
   // resolving the specifier eagerly the moment it stops being that direct body.
   try {
-    return (await import('@betteroffice/fonts-cjk')).CJK_FONT_ASSET_URLS;
-  } catch {
+    addon = await import('@betteroffice/fonts-cjk');
+  } catch (error) {
+    const message = (error as { message?: unknown } | null)?.message;
+    if (typeof message !== 'string' || !UNRESOLVED_CJK_ADDON.test(message)) {
+      throw error;
+    }
     return undefined;
   }
+  const urls = addon.CJK_FONT_ASSET_URLS;
+  if (urls === null || typeof urls !== 'object') {
+    throw new TypeError('Invalid CJK_FONT_ASSET_URLS export from @betteroffice/fonts-cjk');
+  }
+  return urls;
 }
 
 /** Shares in-flight or successful CJK imports while leaving misses retryable. */
 function loadCjkAssetUrls(): Promise<Record<string, () => URL> | undefined> {
   if (cjkAssetUrls === undefined) {
     const promise = importCjkAssetUrls();
-    promise.then((urls) => {
-      if (urls === undefined && cjkAssetUrls === promise)
-        cjkAssetUrls = undefined;
-    });
+    promise.then(
+      (urls) => {
+        if (urls === undefined && cjkAssetUrls === promise)
+          cjkAssetUrls = undefined;
+      },
+      () => {
+        if (cjkAssetUrls === promise) cjkAssetUrls = undefined;
+      },
+    );
     cjkAssetUrls = promise;
   }
   return cjkAssetUrls;
@@ -214,7 +234,7 @@ async function assetUrl(
     const resolveCjk = cjk?.[file];
     if (resolveCjk) return resolveCjk();
     if (!cjk) {
-      throw new Error(
+      throw new MissingCjkAddonError(
         `Bundled font ${file} needs the optional CJK add-on — install @betteroffice/fonts-cjk`,
       );
     }
@@ -231,7 +251,18 @@ export function loadBundledFontBytes(
     options?.baseUrl === undefined
       ? undefined
       : resolvedAssetBase(options.baseUrl);
-  return assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+  const bytes = assetUrl(face, baseUrl).then((url) => loadFontBytes(face, url));
+  if (baseUrl !== undefined || !CJK_FILES.has(face.file)) return bytes;
+  return bytes.catch((error) => {
+    if (!(error instanceof MissingCjkAddonError)) throw error;
+    return loadBundledFontBytes(
+      resolveMetricCompatFace(
+        face.family.includes('Serif') ? 'Times New Roman' : 'Arial',
+        face.weight === 700,
+        face.style === 'italic',
+      )!,
+    );
+  });
 }
 
 const registeredFaces = new Map<string, Promise<void>>();

@@ -12,6 +12,7 @@ import type {
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { DocxEditor } from '../../DocxEditor';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 import { useDocxEnginePrewarm, useDocxEnginePrewarmOnBytes } from './useDocxEnginePrewarm';
 import { useYrsCoreSession } from './useYrsCoreSession';
 
@@ -25,6 +26,7 @@ const editModule = new WebAssembly.Module(
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
 
 beforeEach(() => {
+  setMissingWorkerCapabilitiesForTests([]);
   compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(editModule);
 });
 
@@ -76,6 +78,7 @@ beforeAll(async () => {
 
 afterEach(() => {
   cleanup();
+  resetEngineChoiceForTests();
   yrs.takePreloadedResidentEngineWorker()?.destroy();
   compileModule.mockRestore();
   globalThis.Worker = originalWorker;

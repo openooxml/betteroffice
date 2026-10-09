@@ -2,7 +2,9 @@ import type { YrsLoc, YrsSession, YrsStickyPosition } from './index';
 import { createYrsInputPositionMap, type YrsInputPositionMap } from './inputPositionMap';
 import {
   createYrsPositionProjection,
+  createYrsLocProjectionFromOutline,
   yrsLocToProjectedDisplayPosition,
+  type YrsPositionOutline,
 } from './yrsPositionProjection';
 
 /** @internal */
@@ -27,7 +29,29 @@ type SearchReader = Pick<
   | 'paragraphSpans'
   | 'searchText'
   | 'resolveStickyPosition'
->;
+> & { positionOutline?(root: string): YrsPositionOutline | null };
+
+/** @internal */
+export function residentBodyPositions(
+  reader: Pick<SearchReader, 'hasStory' | 'storySegments' | 'paragraphSpans' | 'positionOutline'>
+): (loc: YrsLoc) => number | null {
+  const outline = reader.hasStory('body') ? reader.positionOutline?.('body') : null;
+  const projection = outline ? createYrsLocProjectionFromOutline(outline) :
+    createYrsPositionProjection(reader, 'body');
+  const maps = new Map<string, YrsInputPositionMap | null>();
+  const inputMap = (story: string): YrsInputPositionMap | null => {
+    if (!maps.has(story)) {
+      maps.set(story, reader.hasStory(story)
+        ? createYrsInputPositionMap(story, reader.paragraphSpans(story))
+        : null);
+    }
+    return maps.get(story)!;
+  };
+  return (loc: YrsLoc): number | null =>
+    loc.story === 'body' || loc.story.startsWith('body:')
+      ? yrsLocToProjectedDisplayPosition(reader, () => projection, loc, 'body', inputMap)
+      : null;
+}
 
 /** @internal */
 export function readResidentSearch(
@@ -41,20 +65,7 @@ export function readResidentSearch(
     hit.story === 'body' || hit.story.startsWith('body:')
   );
   if (hits.length === 0) return { matches: [], carried: -1 };
-  const projection = createYrsPositionProjection(reader, 'body');
-  const maps = new Map<string, YrsInputPositionMap | null>();
-  const inputMap = (story: string): YrsInputPositionMap | null => {
-    if (!maps.has(story)) {
-      maps.set(story, reader.hasStory(story)
-        ? createYrsInputPositionMap(story, reader.paragraphSpans(story))
-        : null);
-    }
-    return maps.get(story)!;
-  };
-  const positionFor = (loc: YrsLoc): number | null =>
-    loc.story === 'body' || loc.story.startsWith('body:')
-      ? yrsLocToProjectedDisplayPosition(reader, () => projection, loc, 'body', inputMap)
-      : null;
+  const positionFor = residentBodyPositions(reader);
   const matches: ResidentSearchMatch[] = [];
   for (const hit of hits) {
     const loc = { story: hit.story, paraId: hit.paraId, offset: hit.start };

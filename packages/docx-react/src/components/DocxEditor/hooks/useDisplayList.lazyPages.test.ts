@@ -2,8 +2,10 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { useRef } from 'react';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { decodeFrameDelta } from '@betteroffice/docx/layout/render';
+import type { DisplayListQueries } from '@betteroffice/docx/layout/render';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { ResidentWorkerOutOfMemoryError } from '@betteroffice/docx/yrs';
 import {
@@ -13,7 +15,9 @@ import {
   stampRevisionPreviewKey,
   stampSourceVersion,
 } from '../internals/layoutProvenance';
+import { displayWindowOf } from '../internals/displayWindow';
 import { useRustDisplayList } from './useDisplayList';
+import { usePagedScrollApi } from './usePagedScrollApi';
 import { EngineWorker, lazyFixture, PREVIEW } from './__fixtures__/lazyPages';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -123,6 +127,120 @@ test('a worker frame builds only the pages near the viewport', async () => {
   }
 });
 
+test('navigation builds a distant page immediately and publishes its queries', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  try {
+    const overrides = { getInputs: () => inputs };
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, host)
+    );
+    await waitFor(() => expect(result.current.frame).not.toBeNull());
+    await waitFor(() => expect(result.current.queries?.isReady()).toBe(true));
+    const before = result.current.frame!;
+    const last = before.displayList.pages.length - 1;
+    const [start, end] = before.displayList.pages[last]!.positionSpan!;
+    const position = Math.floor((start + end) / 2);
+    const navigation = result.current.pageNavigation;
+    const frames: DisplayListQueries[] = [];
+    const unsubscribe = navigation.subscribeFrames((queries) => {
+      frames.push(queries);
+    });
+
+    act(() => {
+      navigation.buildPages([last]);
+      expect(EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')).toEqual([
+        expect.objectContaining({ pages: [last] }),
+      ]);
+    });
+    await waitFor(() => {
+      expect(result.current.displayList!.pages[last]!.unbuilt).toBeFalsy();
+      expect(frames).toHaveLength(1);
+    });
+    expect(result.current.pageNavigation).toBe(navigation);
+    expect(displayWindowOf(result.current.queries)!.read()).toEqual([0, 5]);
+    expect(result.current.displayList!.pages.slice(5, last).every((page) => page.unbuilt)).toBe(true);
+    expect(frames[0]!.displayList.pages[last]!.unbuilt).toBeFalsy();
+    expect(frames[0]!.anchorRect(position)?.pageIndex).toBe(last);
+    unsubscribe();
+    unmount();
+  } finally {
+    engine.free();
+  }
+});
+
+test('navigation refines to a distant line from a published frame with frozen queries', async () => {
+  const { engine, inputs, host } = lazyFixture();
+  const scroller = document.createElement('div');
+  const canvasHost = document.createElement('div');
+  const containerRef = { current: canvasHost };
+  const getScrollContainer = () => scroller;
+  const scrolls: number[] = [];
+  scroller.append(canvasHost);
+  document.body.append(scroller);
+  Object.defineProperty(scroller, 'clientHeight', { value: 400 });
+  scroller.getBoundingClientRect = () => new DOMRect(0, 0, 800, 400);
+  scroller.scrollTo = ((options: ScrollToOptions) => {
+    scrolls.push(options.top ?? 0);
+    scroller.scrollTop = options.top ?? 0;
+  }) as typeof scroller.scrollTo;
+  const overrides = { getInputs: () => inputs };
+  const { result, unmount } = renderHook(() => {
+    const display = useRustDisplayList(
+      inputs.layout as Layout, overrides, undefined, undefined, host,
+      undefined, undefined, undefined, true
+    );
+    const frozenQueries = useRef<DisplayListQueries | null>(null);
+    if (!frozenQueries.current && display.queries?.isReady()) frozenQueries.current = display.queries;
+    const api = usePagedScrollApi({
+      pagesContainerRef: containerRef, canvasHostRef: containerRef,
+      yrsInputRef: { current: null }, yrsSession: null, yrsLocToDisplayPosition: () => null,
+      getScrollContainer, displayListQueries: frozenQueries.current,
+      pageNavigation: display.pageNavigation,
+    });
+    return { display, api, displayListQueries: frozenQueries.current };
+  });
+  try {
+    await waitFor(() => expect(result.current.displayListQueries).not.toBeNull());
+    const frozen = result.current.displayListQueries;
+    const pages = result.current.display.displayList!.pages;
+    const last = pages.length - 1;
+    const pageTop = (index: number) => pages.slice(0, index).reduce((top, page) => top + page.height + 24, 0);
+    pages.forEach((page, index) => {
+      const element = document.createElement('div');
+      element.className = 'canvas-page';
+      element.dataset.pageIndex = String(index);
+      element.getBoundingClientRect = () =>
+        new DOMRect(0, pageTop(index) - scroller.scrollTop, page.width, page.height);
+      canvasHost.append(element);
+    });
+    const [start, end] = pages[last]!.positionSpan!;
+    const position = Math.floor((start + end) / 2);
+    expect(pages[last]!.unbuilt).toBe(true);
+    act(() => {
+      result.current.api.scrollToPositionImpl(position);
+      expect(scrolls).toHaveLength(1);
+      expect(EngineWorker.last!.posted.filter((request) => request.type === 'buildPages')).toEqual([
+        expect.objectContaining({ pages: [last] }),
+      ]);
+    });
+    await waitFor(() => expect(scrolls).toHaveLength(2));
+    const display = result.current.display;
+    const rect = display.queries!.anchorRect(position)!;
+    expect(rect.pageIndex).toBe(last);
+    expect(display.displayList!.pages[last]!.unbuilt).toBeFalsy();
+    const lineCenter = (top: number) => pageTop(last) - top + rect.y + rect.height / 2;
+    expect(rect.height).toBeGreaterThan(0);
+    expect(lineCenter(scroller.scrollTop)).toBeCloseTo(200, 0);
+    expect(lineCenter(scrolls[0]!)).not.toBeCloseTo(200, 0);
+    expect(result.current.displayListQueries).toBe(frozen);
+    expect(displayWindowOf(display.queries)!.read()).toEqual([0, 5]);
+  } finally {
+    unmount();
+    engine.free();
+    scroller.remove();
+  }
+});
+
 test('a page build keeps the version of the layout it fills, not the session version', async () => {
   const { engine, inputs, host } = lazyFixture();
   try {
@@ -171,6 +289,113 @@ test('pages away from the viewport build in batches while the main thread idles'
     }
     unmount();
   } finally {
+    engine.free();
+  }
+});
+
+test('default-mode idle page builds attach immediately without background work', async () => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const before = hook.result.current.frame!;
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+    const builds = worker.posted.filter((request) => request.type === 'buildPages');
+    expect(builds).toHaveLength(1);
+    expect(builds[0]!.background).toBeUndefined();
+    expect(builds[0]!.pages).toHaveLength(16);
+    expect(hook.result.current.frame!.frameEpoch).toBe(before.frameEpoch + 1);
+    expect(builds[0]!.pages.every(
+      (index) => !hook.result.current.displayList!.pages[index]!.unbuilt
+    )).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
+    engine.free();
+  }
+});
+
+test.each([
+  ['advances the default-mode frame', false],
+  ['leaves the worker-open frame unchanged', true],
+] as const)('a page-build reply after a keystroke %s', async (_, workerOpen) => {
+  const { engine, inputs, host } = lazyFixture(100);
+  const updateListeners = new Set<(update: Uint8Array) => void>();
+  Object.assign(host, {
+    onUpdate: (listener: (update: Uint8Array) => void) => {
+      updateListeners.add(listener);
+      return () => updateListeners.delete(listener);
+    },
+  });
+  const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() => useRustDisplayList(
+    inputs.layout as Layout, overrides, undefined, undefined, host,
+    undefined, undefined, undefined, workerOpen
+  ));
+  try {
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    const worker = EngineWorker.last!;
+    const before = hook.result.current.frame!;
+    worker.holdPageBuilds = true;
+    await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
+    await act(async () => runIdleCallbacks());
+    expect(worker.heldPageBuilds).toHaveLength(1);
+    const build = worker.posted.find((request) => request.type === 'buildPages')!;
+    expect(build.background).toBe(workerOpen ? true : undefined);
+    const replyEpoch = JSON.parse(engine.resident_caret_snapshot_json()).frameEpoch as number;
+    expect(replyEpoch).toBeGreaterThan(before.frameEpoch);
+    expect(build.pages.every((index) => before.displayList.pages[index]!.unbuilt)).toBe(true);
+    expect(updateListeners.size).toBeGreaterThan(0);
+    await act(async () => {
+      for (const listener of updateListeners) listener(new Uint8Array());
+      worker.releasePageBuilds();
+    });
+    const adoptedEpoch = workerOpen ? before.frameEpoch : replyEpoch;
+    expect(hook.result.current.frame!.frameEpoch).toBe(adoptedEpoch);
+    expect(build.pages.every(
+      (index) => Boolean(hook.result.current.displayList!.pages[index]!.unbuilt) === workerOpen
+    )).toBe(true);
+    if (workerOpen) expect(hook.result.current.frame).toBe(before);
+    else expect(hook.result.current.queries).toBeNull();
+
+    // Answer sync through the fake's existing frame builder.
+    const postMessage = worker.postMessage.bind(worker);
+    worker.postMessage = (request) => {
+      postMessage(request.type === 'sync' ? { ...request, type: 'buildFrame' } : request);
+      worker.posted[worker.posted.length - 1] = request;
+    };
+    Object.assign(host, { residentWorkerProbe: () => ({ layoutRevision: 2 }) });
+    const requestsBeforeRelayout = worker.posted.length;
+    await act(async () => {
+      inputs.layout = { ...inputs.layout };
+      hook.rerender();
+    });
+    await waitFor(() => {
+      expect(hook.result.current.frame!.frameEpoch).toBeGreaterThan(adoptedEpoch);
+      expect(hook.result.current.queries).not.toBeNull();
+    });
+    expect(worker.posted.slice(requestsBeforeRelayout).find(
+      (request) => 'expectedFrameEpoch' in request
+    )).toMatchObject({ type: 'sync', expectedFrameEpoch: adoptedEpoch });
+
+    const { paraId } = JSON.parse(engine.paragraphs('body'))[0] as { paraId: string };
+    engine.set_selection('body', paraId, 1, paraId, 1);
+    const requestsBeforeInput = worker.posted.length;
+    const typingEpoch = hook.result.current.frame!.frameEpoch;
+    await act(async () => {
+      expect(await hook.result.current.applyInput('Next ')).not.toBeNull();
+    });
+    expect(worker.posted.slice(requestsBeforeInput).filter(
+      (request) => request.type === 'applyInput'
+    )).toEqual([expect.objectContaining({ expectedFrameEpoch: typingEpoch })]);
+    expect(hook.result.current.error).toBeNull();
+  } finally {
+    hook.unmount();
     engine.free();
   }
 });
@@ -237,7 +462,7 @@ test('worker-open idle builds stop after the viewport margin', async () => {
   }
 });
 
-test('a visible request attaches a background reply awaiting idle attachment before building', async () => {
+test('a visible request waits for a default-mode idle reply before building', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
@@ -247,6 +472,7 @@ test('a visible request attaches a background reply awaiting idle attachment bef
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
     const worker = EngineWorker.last!;
     const builds = () => worker.posted.filter((entry) => entry.type === 'buildPages');
+    worker.holdPageBuilds = true;
     await waitFor(() => expect(idleCallbacks.size).toBeGreaterThan(0));
     const before = hook.result.current.frame!;
     await act(async () => runIdleCallbacks());
@@ -256,7 +482,13 @@ test('a visible request attaches a background reply awaiting idle attachment bef
     const target = before.pages.find((page) =>
       page.page.unbuilt && !builds()[0]!.pages.includes(page.pageIndex)
     )!.pageIndex;
-    act(() => hook.result.current.setDisplayWindow(target, target + 1));
+    await act(async () => {
+      hook.result.current.setDisplayWindow(target, target + 1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(builds()).toHaveLength(1);
+    worker.holdPageBuilds = false;
+    await act(async () => worker.releasePageBuilds());
     await waitFor(() => expect(hook.result.current.displayList!.pages[target]!.unbuilt).toBeFalsy());
     expect(builds()).toHaveLength(2);
     expect(builds()[1]!.pages).toEqual([target]);
@@ -270,11 +502,12 @@ test('a visible request attaches a background reply awaiting idle attachment bef
   }
 });
 
-test('a settle wait promotes a background reply awaiting idle attachment', async () => {
+test('a settle wait promotes a worker-open background reply awaiting idle attachment', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
-    inputs.layout as Layout, overrides, undefined, undefined, host
+    inputs.layout as Layout, overrides, undefined, undefined, host,
+    undefined, undefined, undefined, true
   ));
   try {
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
@@ -332,11 +565,12 @@ test('worker-open window settling leaves far pages unbuilt while document settli
   }
 });
 
-test('sliced background frames publish atomically from idle without replacing visible pages', async () => {
+test('worker-open background frames publish atomically from idle without replacing visible pages', async () => {
   const { engine, inputs, host } = lazyFixture(100);
   const overrides = { getInputs: () => inputs };
   const hook = renderHook(() => useRustDisplayList(
-    inputs.layout as Layout, overrides, undefined, undefined, host
+    inputs.layout as Layout, overrides, undefined, undefined, host,
+    undefined, undefined, undefined, true
   ));
   try {
     await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
@@ -354,8 +588,8 @@ test('sliced background frames publish atomically from idle without replacing vi
       await act(async () => runIdleCallbacks());
     }
     const after = hook.result.current.frame!;
-    expect(after.frameEpoch).toBe(before.frameEpoch + 4);
-    expect(after.damagedPageIds.size).toBe(16);
+    expect(after.frameEpoch).toBe(before.frameEpoch + 1);
+    expect(after.damagedPageIds.size).toBe(2);
     for (let index = 0; index < 5; index += 1) {
       expect(after.displayList.pages[index]).toBe(before.displayList.pages[index]);
     }

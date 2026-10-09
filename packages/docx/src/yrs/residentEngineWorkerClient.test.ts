@@ -5,6 +5,7 @@ import {
   RESIDENT_WORKER_SILENCE_MS,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
+  ResidentWorkerSaveUnavailableError,
   preloadResidentEngineWorker,
   retainPreloadedResidentEngineWorker,
   takePreloadedResidentEngineWorker,
@@ -142,21 +143,276 @@ function setup() {
   return { worker, client };
 }
 
-test('pending proposal and navigation reads keep background page builds waiting', async () => {
+async function peerResponse<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = realSetTimeout(() => reject(new Error('No peer snapshot response')), 1000);
+      }),
+    ]);
+  } finally {
+    realClearTimeout(timer);
+  }
+}
+
+test.each(['snapshot', 'handover'] as const)('the client carries peer metadata in a single %s request', async (kind) => {
+  const { worker, client } = setup();
+  const pending = kind === 'snapshot' ? client.encodeVersionedState(true) : client.handOver(true);
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'encodeState', peerMetadata: true });
+  const state = new Uint8Array([7]).buffer;
+  const metadata = new Uint8Array([8]).buffer;
+  const proposals = { previewVersion: 0, entries: [] };
+  worker.reply({ id: worker.lastId(), ok: true, state, peerMetadata: metadata, version: 'v7', proposals });
+  expect(await peerResponse(pending)).toEqual({
+    state: new Uint8Array(state), metadata: new Uint8Array(metadata), metadataReason: undefined,
+    version: 'v7', ...(kind === 'handover' ? { proposals } : {}),
+  });
+  expect(client.hasFailed()).toBe(false);
+});
+
+test.each([undefined, 'unopened: No peer source'])('a legacy or rejecting worker returns state with metadata absent (%s)', async (reason) => {
+  const { worker, client } = setup();
+  const pending = client.encodeVersionedState(true);
+  worker.reply({
+    id: worker.lastId(), ok: true, state: new Uint8Array([7]).buffer,
+    version: 'v7', peerMetadataReason: reason,
+  });
+  expect(await peerResponse(pending)).toEqual({
+    state: new Uint8Array([7]), version: 'v7', metadata: undefined,
+    metadataReason: reason ?? 'missing-capability: Worker omitted peer metadata',
+  });
+  expect(client.hasFailed()).toBe(false);
+});
+
+test.each(['state', 'versioned', 'handover'] as const)('state-only %s callers retain their request and return shape', async (kind) => {
+  const { worker, client } = setup();
+  const pending = kind === 'state' ? client.encodeState()
+    : kind === 'versioned' ? client.encodeVersionedState() : client.handOver();
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'encodeState' });
+  const state = new Uint8Array([7]).buffer;
+  const proposals = { previewVersion: 0, entries: [] };
+  worker.reply({ id: worker.lastId(), ok: true, state, version: 'v7', proposals });
+  expect(await peerResponse<unknown>(pending)).toEqual(kind === 'state' ? new Uint8Array(state) : {
+    state: new Uint8Array(state), version: 'v7', ...(kind === 'handover' ? { proposals } : {}),
+  });
+});
+
+test('save posts comments and optional host metadata and returns the saved buffer and its updates', async () => {
+  const { worker, client } = setup();
+  const host = { package: { document: { content: [] } } };
+  const pending = client.save({ comments: [], host });
+  expect(worker.requestAt(0)).toEqual({ id: worker.lastId(), type: 'save', comments: [], host });
+  expect(worker.transfers[0]).toEqual([]);
+  const saved = new ArrayBuffer(4);
+  const stateVector = new Uint8Array([3, 1]).buffer;
+  worker.reply({
+    id: worker.lastId(), ok: true, saved, updates: [new Uint8Array([9]).buffer], stateVector,
+    version: 'saved',
+  });
+  const result = await pending;
+  expect(result.bytes).toBe(saved);
+  expect(result.updates.map((update) => [...update])).toEqual([[9]]);
+  expect(result.version).toBe('saved');
+  expect([...client.remoteStateVector()!]).toEqual([3, 1]);
+  const withoutHost = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutHost;
+  client.destroy();
+});
+
+test('save copies peer stories and state vector and omits them when absent', async () => {
+  const { worker, client } = setup();
+  const stateVector = new Uint8Array([1, 2, 3]);
+  const stories = ['hf:rIdH1'];
+  const pending = client.save({ comments: [], stateVector, stories });
+  const request = worker.requestAt(0);
+  expect(request).toEqual({ id: worker.lastId(), type: 'save', comments: [], stateVector, stories });
+  if (request.type !== 'save') throw new Error('Expected a save request');
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(request.stateVector!.buffer).not.toBe(stateVector.buffer);
+  expect(request.stories).not.toBe(stories);
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await pending;
+  const withoutVector = client.save({ comments: [] });
+  expect(worker.requestAt(1)).toEqual({ id: worker.lastId(), type: 'save', comments: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await withoutVector;
+  const empty = client.save({ comments: [], stories: [] });
+  expect(worker.requestAt(2)).toEqual({ id: worker.lastId(), type: 'save', comments: [], stories: [] });
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'saved' });
+  await empty;
+  client.destroy();
+});
+
+test('syncUpdate copies and acknowledges the peer diff, vector and worker repairs', async () => {
+  const { worker, client } = setup();
+  const update = new Uint8Array([7, 8]);
+  const stateVector = new Uint8Array([1, 2]);
+  client.invalidate(new Uint8Array([6]), null);
+  const pending = client.syncUpdate(update, stateVector);
+  client.invalidate(new Uint8Array([9]), null);
+  const request = worker.requestAt(1);
+  expect(worker.posted.map((message) => message.type)).toEqual(['applyUpdate', 'syncUpdate', 'applyUpdate']);
+  expect(request).toMatchObject({ type: 'syncUpdate', update, stateVector });
+  if (request.type !== 'syncUpdate') throw new Error('Expected syncUpdate');
+  expect(request.update).not.toBe(update);
+  expect(request.stateVector).not.toBe(stateVector);
+  expect(worker.transfers[1]).toEqual([request.update.buffer, request.stateVector.buffer]);
+  worker.reply({ id: request.id, ok: true, version: 'worker-v', stateVector: new Uint8Array([3]).buffer, repair: new Uint8Array([4]).buffer });
+  expect(await pending).toEqual({ version: 'worker-v', stateVector: new Uint8Array([3]), repair: new Uint8Array([4]) });
+  expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+  client.destroy();
+});
+
+test('syncUpdate sends an empty update even when the peer state vector is unchanged', async () => {
+  const { worker, client } = setup();
+  const vector = new Uint8Array([1, 2]);
+  for (let i = 0; i < 2; i += 1) {
+    const pending = client.syncUpdate(new Uint8Array(), vector);
+    expect(worker.requestAt(i)).toMatchObject({ type: 'syncUpdate', update: new Uint8Array(), stateVector: vector });
+    worker.reply({ id: worker.lastId(), ok: true, version: `v${i}`, stateVector: vector.slice().buffer, repair: null });
+    expect((await pending).repair).toBeNull();
+  }
+  client.destroy();
+});
+
+test('syncUpdate rejects incomplete acknowledgments', async () => {
+  const { worker, client } = setup();
+  for (const fields of [
+    { stateVector: new ArrayBuffer(0), repair: null },
+    { version: 'v', repair: null },
+    { version: 'v', stateVector: new ArrayBuffer(0) },
+  ]) {
+    const pending = client.syncUpdate(new Uint8Array(), new Uint8Array());
+    worker.reply({ id: worker.lastId(), ok: true, ...fields });
+    await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  }
+  client.destroy();
+});
+
+test('an empty syncUpdate preserves readiness of the retained worker frame', async () => {
+  const { worker, client } = setup();
+  const bootstrapped = client.bootstrap(snapshot, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrapped;
+  expect(client.isReady()).toBe(true);
+  const acknowledged = client.syncUpdate(new Uint8Array([0, 0]), new Uint8Array([0]));
+  worker.reply({ id: worker.lastId(), ok: true, version: 'v', stateVector: new Uint8Array([0]).buffer, repair: null });
+  await acknowledged;
+  expect(client.isReady()).toBe(true);
+  client.destroy();
+});
+
+test('syncUpdate rejects worker crashes and out-of-memory traps', async () => {
+  const first = setup();
+  const crashed = first.client.syncUpdate(new Uint8Array(), new Uint8Array());
+  first.worker.onerror?.({ message: 'crash' } as ErrorEvent);
+  await expect(crashed).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  expect(first.worker.terminated).toBe(true);
+  const second = setup();
+  const trapped = second.client.syncUpdate(new Uint8Array(), new Uint8Array());
+  second.worker.reply({ id: second.worker.lastId(), ok: false, error: 'out of memory', terminal: true, outOfMemory: true });
+  await expect(trapped).rejects.toBeInstanceOf(ResidentWorkerOutOfMemoryError);
+});
+
+test('save rejects a missing or malformed saved buffer', async () => {
+  const { worker, client } = setup();
+  for (const reply of [
+    { updates: [], version: 'v' },
+    { saved: new Uint8Array(4), updates: [], version: 'v' },
+    { saved: new ArrayBuffer(4), version: 'v' },
+    { saved: new ArrayBuffer(4), updates: [] },
+  ]) {
+    const pending = client.save({ comments: [] });
+    worker.reply({ id: worker.lastId(), ok: true, ...reply } as ResidentEngineWorkerResponse);
+    await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  }
+  client.destroy();
+});
+
+test('an unavailable save is a recoverable save failure', async () => {
+  const { worker, client } = setup();
+  const pending = client.save({ comments: [] });
+  worker.reply({
+    id: worker.lastId(), ok: false,
+    error: 'Resident engine worker is still opening', code: 'save-unavailable',
+  });
+  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerSaveUnavailableError);
+  await expect(pending).rejects.toBeInstanceOf(ResidentWorkerFailureError);
+  expect(client.hasFailed()).toBe(false);
+  const retry = client.save({ comments: [] });
+  const saved = new ArrayBuffer(4);
+  worker.reply({ id: worker.lastId(), ok: true, saved, updates: [], version: 'v' });
+  expect((await retry).bytes).toBe(saved);
+  client.destroy();
+});
+
+test('a font base mismatch forgets optimistic revisions, including queued snapshots', async () => {
+  const { worker, client } = setup();
+  const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '');
+  worker.reply(frameReply(worker.lastId()));
+  await bootstrap;
+  const first = client.sync({ ...snapshot, fontsRevision: 2, fontsBaseRevision: 1 }, '', 0);
+  const firstId = worker.lastId();
+  const queued = client.sync({ ...snapshot, fontsRevision: 3, fontsBaseRevision: 2 }, '', 0);
+  const queuedId = worker.lastId();
+  expect(client.syncedFontsRevision()).toBe(3);
+  worker.reply({ id: firstId, ok: false, error: 'Resident engine worker font base revision mismatch' });
+  await expect(first).rejects.toThrow('font base revision mismatch');
+  expect(client.syncedFontsRevision()).toBeNull();
+  worker.reply(frameReply(queuedId));
+  await queued;
+  expect(client.syncedFontsRevision()).toBeNull();
+  const full = client.sync({ ...snapshot, fontsRevision: 3 }, '', 0);
+  worker.reply(frameReply(worker.lastId()));
+  await full;
+  expect(client.syncedFontsRevision()).toBe(3);
+  client.destroy();
+});
+
+test('frame results preserve the document version and preview provenance', async () => {
+  const { worker, client } = setup();
+  const pending = client.bootstrap(snapshot, '');
+  worker.reply({ ...frameReply(worker.lastId()), documentVersion: 'preview', documentPreview: true });
+  expect(await pending).toMatchObject({ documentVersion: 'preview', documentPreview: true });
+  client.destroy();
+});
+
+test('a pending proposal keeps every page build waiting, a pending read only background builds', async () => {
   const { worker, client } = setup();
   const bootstrap = client.bootstrap(snapshot, '');
   worker.reply(frameReply(worker.lastId()));
   await bootstrap;
   const proposal = client.proposal({ kind: 'snapshot' });
   expect(client.frameRequestPending()).toBe(true);
+  expect(client.frameRequestPending(false)).toBe(true);
   worker.reply({ id: worker.lastId(), ok: false, error: 'proposal failed' });
   await expect(proposal).rejects.toThrow('proposal failed');
   expect(client.frameRequestPending()).toBe(false);
   const read = client.documentRead({ kind: 'navigationTarget', story: 'body', paraId: 'p1' });
   expect(client.frameRequestPending()).toBe(true);
+  expect(client.frameRequestPending(false)).toBe(false);
   worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
   expect(await read).toEqual({ version: 'v1', value: 'missing-target' });
   expect(client.frameRequestPending()).toBe(false);
+  client.destroy();
+});
+
+test('a version-checked read reports a superseded answer apart from a read value', async () => {
+  const { worker, client } = setup();
+  const read = () => client.documentReadAt({ kind: 'navigationTarget', story: 'body', paraId: 'p1' }, 'v1');
+  const current = read();
+  expect(worker.posted.at(-1)).toMatchObject({ type: 'documentRead', expectVersion: 'v1' });
+  worker.reply({ id: worker.lastId(), ok: true, read: { version: 'v1', value: 'missing-target' } });
+  expect(await current).toEqual({ status: 'ok', version: 'v1', value: 'missing-target' });
+  const stale = read();
+  worker.reply({ id: worker.lastId(), ok: true, superseded: true });
+  expect(await stale).toEqual({ status: 'superseded' });
+  expect(client.hasFailed()).toBe(false);
   client.destroy();
 });
 
@@ -723,6 +979,19 @@ describe('worker failure', () => {
     expect(worker.posted).toHaveLength(2);
   });
 
+  test('the failure listener hears an idle crash once and never a destroy', () => {
+    const { worker, client } = setup();
+    const failures: string[] = [];
+    client.onFailure((error) => failures.push(error.message));
+    worker.onerror?.({ message: 'boom' } as ErrorEvent);
+    worker.onerror?.({ message: 'again' } as ErrorEvent);
+    expect(failures).toEqual(['Resident engine worker failed: boom']);
+    const destroyed = setup();
+    destroyed.client.onFailure((error) => failures.push(error.message));
+    destroyed.client.destroy();
+    expect(failures).toHaveLength(1);
+  });
+
   test('a worker crash rejects input with a failure error, not an op error', async () => {
     const { worker, client } = setup();
     const bootstrap = client.bootstrap(snapshot, '');
@@ -794,6 +1063,19 @@ describe('worker failure', () => {
 });
 
 describe('resident worker opening', () => {
+  test.each([undefined, 256])('sends an optional preview paragraph budget %s', async (paragraphBudget) => {
+    const { worker, client } = setup();
+    const opened = client.openPreview(new Uint8Array([1, 2]), 200, { paragraphBudget });
+    const request = worker.requestAt(0);
+    expect(request).toMatchObject({ type: 'open', previewBlocks: 200 });
+    if (request.type !== 'open') throw new Error('open request missing');
+    expect(request.previewParagraphBudget).toBe(paragraphBudget);
+    expect('previewParagraphBudget' in request).toBe(paragraphBudget !== undefined);
+    worker.reply({ id: request.id, ok: true, hostJson: '{}', stateVector: new Uint8Array([1]).buffer });
+    expect(await opened).not.toBeNull();
+    client.destroy();
+  });
+
   test('an opened bootstrap under another heap limit fails before touching its bookkeeping', async () => {
     const { worker, client } = setup();
     void client.open(new Uint8Array([1]), { heapLimitBytes: 1024 });
@@ -818,6 +1100,22 @@ describe('resident worker opening', () => {
     expect(worker.transfers[0]).toEqual([request.bytes]);
     await expect(client.open(new Uint8Array([4]))).rejects.toThrow('already holds a document');
     expect(worker.posted).toHaveLength(1);
+  });
+
+  test.each([undefined, '', 'worker-version'])('versioned state encoding accepts version %s without proposals', async (version) => {
+    const { worker, client } = setup();
+    const state = client.encodeVersionedState();
+    expect(worker.posted).toHaveLength(1);
+    expect(worker.posted[0]).toMatchObject({ type: 'encodeState' });
+    worker.reply({ id: worker.lastId(), ok: true, state: Uint8Array.of(4, 5).buffer, version });
+    expect(await state).toEqual({ state: Uint8Array.of(4, 5), version });
+  });
+
+  test('versioned state encoding requires the worker state', async () => {
+    const { worker, client } = setup();
+    const state = client.encodeVersionedState();
+    worker.reply({ id: worker.lastId(), ok: true, version: 'worker-version' });
+    await expect(state).rejects.toThrow('Resident engine worker omitted its state');
   });
 
   test('open, font requirements, and state handover report memory before an opened bootstrap', async () => {
@@ -1130,6 +1428,32 @@ describe('queued snapshots', () => {
 });
 
 describe('sent snapshot state', () => {
+  test('rebootstrap ignores a pending sync reply and records the new bootstrap', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const sync = client.sync({ ...snapshot, fontsRevision: 2 }, '', 0, false, {
+      stateVector: new Uint8Array([2]),
+    });
+    const oldId = worker.lastId();
+    expect(client.syncedFontsRevision()).toBe(2);
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([2]));
+    client.rebootstrap();
+    expect(client.syncedFontsRevision()).toBeNull();
+    expect(client.remoteStateVector()).toBeNull();
+    worker.reply({ ...frameReply(oldId), stateVector: new Uint8Array([9]).buffer });
+    await sync;
+    expect(client.syncedFontsRevision()).toBeNull();
+    expect(client.remoteStateVector()).toBeNull();
+    const next = client.bootstrap({ ...snapshot, fontsRevision: 3 }, '');
+    worker.reply({ ...frameReply(worker.lastId()), stateVector: new Uint8Array([3]).buffer });
+    await next;
+    expect(client.syncedFontsRevision()).toBe(3);
+    expect(client.remoteStateVector()).toEqual(new Uint8Array([3]));
+    client.destroy();
+  });
+
   test('a reply to an earlier request does not replace a later snapshot hint', async () => {
     const { worker, client } = setup();
     const bootstrap = client.bootstrap({ ...snapshot, fontsRevision: 1 }, '', {

@@ -5,8 +5,10 @@ import { proposalRevisionPreview, type DocxOccurrence, type DocxProposalSnapshot
 import { createYrsSidebarProjection } from '../layout/render/yrsSidebarProjection';
 import {
   createYrsPositionProjection,
+  createYrsLocProjectionFromOutline,
   yrsLocToProjectedDisplayPosition,
-  type YrsPositionProjection,
+  type YrsLocProjection,
+  type YrsPositionOutline,
 } from './yrsPositionProjection';
 import { createYrsInputPositionMap, type YrsInputPositionMap } from './inputPositionMap';
 
@@ -43,6 +45,7 @@ export type ProposalGeometryReader = AnchorReader &
     'storyIds' | 'paragraphs' | 'paragraphIdCount' | 'locateParagraph' | 'version'
   > & {
     proposalRevisions?(ids: readonly string[]): readonly ProposalGeometryRevision[];
+    positionOutline?(root: string): YrsPositionOutline | null;
   };
 
 /** @internal */
@@ -273,6 +276,16 @@ export function hiddenRanges(
   revisions?: readonly ProposalGeometryRevision[]
 ): RawAnchorRange[] {
   const preview = snapshot ? proposalRevisionPreview(snapshot) : undefined;
+  return hiddenRangesForPreview(session, version, preview, revisions);
+}
+
+/** @internal */
+export function hiddenRangesForPreview(
+  session: AnchorReader,
+  version: string,
+  preview: ReturnType<typeof proposalRevisionPreview>,
+  revisions?: readonly ProposalGeometryRevision[]
+): RawAnchorRange[] {
   if (!preview) return [];
   return (revisions ?? revisionsAt(session, version))
     .filter(
@@ -468,14 +481,17 @@ export function computeProposalGeometryMirror(
     }
     revisions = reads.proposalRevisions.revisions;
   }
-  const projections = new Map<string, YrsPositionProjection | null>();
+  const projections = new Map<string, YrsLocProjection | null>();
   const inputMaps = new Map<string, YrsInputPositionMap | null>();
-  const projectionFor = (rootStory: string): YrsPositionProjection | null =>
-    once(projections, rootStory, () =>
-      createYrsPositionProjection(reader, rootStory, {
-        segments: (story) => segmentsAt(reader, version, story) as YrsStorySegment[],
-      })
-    );
+  const projectionFor = (rootStory: string): YrsLocProjection | null =>
+    once(projections, rootStory, () => {
+      if (!reader.hasStory(rootStory)) return null;
+      const outline = reader.positionOutline?.(rootStory);
+      return outline ? createYrsLocProjectionFromOutline(outline) :
+        createYrsPositionProjection(reader, rootStory, {
+          segments: (story) => segmentsAt(reader, version, story) as YrsStorySegment[],
+        });
+    });
   const inputMap = (story: string): YrsInputPositionMap | null =>
     once(inputMaps, story, () =>
       reader.hasStory(story)

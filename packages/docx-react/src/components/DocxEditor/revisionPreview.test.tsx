@@ -26,7 +26,7 @@ const FONT = resolve(
   import.meta.dir,
   '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
-const SUGGEST = { author: 'Atira', date: '2026-09-29T00:00:00Z' };
+const SUGGEST = { author: 'Assistant', date: '2026-09-29T00:00:00Z' };
 
 let fontBytes: ArrayBuffer;
 const sessions: YrsSession[] = [];
@@ -57,7 +57,6 @@ function yrsCore(session: YrsSession): YrsCoreSession {
     sessionGeneration: 0,
     replicaReady: true,
     requestReplica: () => {},
-    hydrateOnDemand: false,
     workerProposalsReady: false,
     storyBlocks: () => null,
     bodyBlocks: () => null,

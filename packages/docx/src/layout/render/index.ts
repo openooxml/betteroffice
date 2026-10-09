@@ -80,6 +80,7 @@ export {
   buildRustDisplayList,
   buildRustDisplayFrame,
   loadRustDisplayListQueryEngine,
+  loadedRustDisplayListQueryEngine,
   type DisplayListBuildInputs,
   type DisplayListHeadersFooters,
   type DisplayListHfVariant,
@@ -163,6 +164,7 @@ export {
 export {
   computeAnchorPositionsFromDisplayList,
   computeAnchorPositionsFromYrs,
+  anchorPositionsFromPoints,
   mergeHfAnchorPositionsFromDisplayList,
   visitAnchorKeys,
   type AnchorEditorView,

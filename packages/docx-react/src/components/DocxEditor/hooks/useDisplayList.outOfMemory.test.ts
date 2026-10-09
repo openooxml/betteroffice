@@ -17,7 +17,13 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
-import { deferWorkerOpenReplica, requestWorkerOpenReplica } from '../internals/workerOpenReplica';
+import {
+  deferWorkerOpenReplica,
+  holdWorkerOpenDocument,
+  requestWorkerOpenReplica,
+  workerOpenReplicaPending,
+} from '../internals/workerOpenReplica';
+import { DocxWorkerError } from '../internals/docxWorkerError';
 import * as workerProposals from '../internals/workerProposalAuthority';
 import { EngineWorker, lazyFixture } from './__fixtures__/lazyPages';
 import { useRustDisplayList } from './useDisplayList';
@@ -140,6 +146,60 @@ function setup() {
   return { native, inputs, frame, engine, mainThreadBuilds, layoutJson };
 }
 
+function viewerFixture(viewer = true) {
+  const source = setup();
+  const mainCopy = mock(() => { throw new Error('unexpected main document copy'); });
+  const mainLayout = mock(() => { throw new Error('unexpected main layout'); });
+  const mainOwnership = mock(() => {});
+  Object.assign(source.engine, {
+    version: () => 'main-1',
+    openDocx: mainCopy,
+    openDocxPreview: mainCopy,
+    loadState: mainCopy,
+    applyUpdate: mainCopy,
+    layoutFontRequirementsJson: mainLayout,
+    layoutDocumentWithRegionsRetainedJson: mainLayout,
+    resetFrameBase: mainOwnership,
+    setDisplayWindow: mainOwnership,
+    setDisplayRetainBuiltPages: mainOwnership,
+    setWindowedIncrementalBuilds: mainOwnership,
+  });
+  const release = mock(() => deferWorkerOpenReplica(
+    source.engine, async () => () => {}, mainCopy, () => {}
+  ));
+  if (viewer) holdWorkerOpenDocument(source.engine, release);
+  return { ...source, mainCopy, mainLayout, mainOwnership, release, viewer: { current: viewer } };
+}
+
+function viewerDisplay(source: ReturnType<typeof viewerFixture>, relayout?: () => void) {
+  const overrides = { getInputs: () => source.inputs };
+  return renderHook(({ layout }) => useRustDisplayList(
+    layout, overrides, undefined, undefined, source.engine,
+    relayout, undefined, undefined, true, source.viewer
+  ), { initialProps: { layout: null as Layout | null } });
+}
+
+function replyOpened(worker: FakeWorker): void {
+  worker.onmessage?.({ data: {
+    id: worker.last().id, ok: true, hostJson: '{}', stateVector: Uint8Array.of(9).buffer,
+  } } as MessageEvent<ResidentEngineWorkerResponse>);
+}
+
+async function openViewer(display: ReturnType<typeof useRustDisplayList>, engine: YrsSession) {
+  const pending = display.openInWorker(engine, Uint8Array.of(1));
+  const worker = FakeWorker.spawned.at(-1)!;
+  await act(async () => { replyOpened(worker); await pending; });
+  return worker;
+}
+
+function expectWorkerOnly(source: ReturnType<typeof viewerFixture>): void {
+  expect(source.mainCopy).not.toHaveBeenCalled();
+  expect(source.mainLayout).not.toHaveBeenCalled();
+  expect(source.mainOwnership).not.toHaveBeenCalled();
+  expect(source.release).not.toHaveBeenCalled();
+  expect(source.mainThreadBuilds).toEqual([]);
+}
+
 test('only the current opened live worker owns its document while worker-open is enabled', async () => {
   const { native, engine } = setup();
   const { result, rerender, unmount } = renderHook(
@@ -170,6 +230,536 @@ test('only the current opened live worker owns its document while worker-open is
   } finally {
     unmount();
     native.free();
+  }
+});
+
+test.each(['editor', 'viewer'])('%s open retries a crash once and keeps the recovered document in its worker', async (kind) => {
+  const source = viewerFixture(kind === 'viewer');
+  const hook = viewerDisplay(source);
+  try {
+    const pending = hook.result.current.openInWorker(source.engine, Uint8Array.of(1));
+    const first = FakeWorker.spawned[0]!;
+    await act(async () => { first.onerror?.({ message: 'open crashed' } as ErrorEvent); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last().type).toBe('open');
+    await act(async () => { replyOpened(second); await pending; });
+    expect(first.terminated).toBe(true);
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.layoutInWorker.ownsDocument!(source.engine)).toBe(true);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['editor', 'viewer'])('%s open rejects the second failure with the renderer error instance', async (kind) => {
+  const source = viewerFixture(kind === 'viewer');
+  const hook = viewerDisplay(source);
+  try {
+    const pending = hook.result.current.openInWorker(source.engine, Uint8Array.of(1))
+      .catch((error: unknown) => error);
+    await act(async () => { FakeWorker.spawned[0]!.trapped(); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    let failure: unknown;
+    await act(async () => { FakeWorker.spawned[1]!.trapped(); failure = await pending; });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('open');
+    expect((failure as Error).cause).toBeInstanceOf(Error);
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(hook.result.current.errorEngine).toBe(source.engine);
+    expect(hook.result.current.loading).toBe(false);
+    await expect(hook.result.current.settledDisplayList(null, null)).rejects.toBe(failure);
+    expect(FakeWorker.spawned.every((worker) => worker.terminated)).toBe(true);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['crash', 'corrupt frame'])('a viewer %s retries once and the next failure never builds a host frame', async (kind) => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  const failFrame = (worker: FakeWorker) => {
+    if (kind === 'crash') worker.trapped();
+    else worker.replyFrame(Uint8Array.of(0), 0);
+  };
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(source.frame(100), 100); });
+    await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(100));
+    await act(async () => { hook.rerender({ layout: { ...source.inputs.layout } }); });
+    await act(async () => { failFrame(first); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last().type).toBe('open');
+    await act(async () => { replyOpened(second); });
+    await waitFor(() => expect(second.last().type).toBe('bootstrap'));
+    await act(async () => { second.replyFrame(source.frame(101), 101); });
+    await waitFor(() => expect(hook.result.current.frame?.frameEpoch).toBe(101));
+    expect(hook.result.current.error).toBeNull();
+    expectWorkerOnly(source);
+
+    await act(async () => { hook.rerender({ layout: { ...source.inputs.layout } }); });
+    await act(async () => { failFrame(second); });
+    await waitFor(() => expect(hook.result.current.error).toBeInstanceOf(DocxWorkerError));
+    const failure = hook.result.current.error as DocxWorkerError;
+    expect(failure.stage).toBe('render');
+    await expect(hook.result.current.settledDisplayList(null, null)).rejects.toBe(failure);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a viewer with committed proposals fails immediately without reopening or hydrating', async () => {
+  const source = viewerFixture();
+  const { authority, hold } = proposalAuthority(source.engine);
+  const hook = viewerDisplay(source);
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    await hold();
+    const pending = hook.result.current.fontRequirementsInWorker(source.engine, REQUEST)!
+      .catch((error: unknown) => error);
+    await waitFor(() => expect(first.last().type).toBe('fontRequirements'));
+    let failure: unknown;
+    await act(async () => { first.trapped(); failure = await pending; });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('layout');
+    expect(hook.result.current.error).toBe(failure as Error);
+    await expect(authority.getProposals(async () => source.engine.getProposals())).rejects.toBe(failure);
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['crash', 'invalid JSON'])('viewer font preflight retries %s and fails without a main preflight', async (failureKind) => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  const failRequirements = (worker: FakeWorker) => {
+    if (failureKind === 'crash') worker.trapped();
+    else worker.onmessage?.({ data: {
+      id: worker.last().id, ok: true, requirementsJson: '{',
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+  };
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    const pending = hook.result.current.fontRequirementsInWorker(source.engine, REQUEST)!
+      .catch((error: unknown) => error);
+    await waitFor(() => expect(first.last().type).toBe('fontRequirements'));
+    await act(async () => { failRequirements(first); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    const second = FakeWorker.spawned[1]!;
+    await act(async () => { replyOpened(second); });
+    await waitFor(() => expect(second.last().type).toBe('fontRequirements'));
+    let failure: unknown;
+    await act(async () => { failRequirements(second); failure = await pending; });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('layout');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a viewer layout crash retries its retained source and a second failure is terminal', async () => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    const pending = hook.result.current.layoutInWorker(source.engine, REQUEST)!
+      .catch((error: unknown) => error);
+    await act(async () => { first.trapped(); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    const second = FakeWorker.spawned[1]!;
+    await act(async () => { replyOpened(second); });
+    await waitFor(() => expect(second.last().type).toBe('bootstrap'));
+    let failure: unknown;
+    await act(async () => { second.trapped(); failure = await pending; });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('layout');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a viewer frame constructor failure consumes its replacement budget without a main build', async () => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  const construction = new Error('replacement constructor failed');
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(source.frame(1), 1); });
+    globalThis.Worker = class { constructor() { throw construction; } } as unknown as typeof Worker;
+    await act(async () => { hook.rerender({ layout: { ...source.inputs.layout } }); });
+    await act(async () => { first.trapped(); });
+    await waitFor(() => expect(hook.result.current.error).toBeInstanceOf(DocxWorkerError));
+    expect((hook.result.current.error as DocxWorkerError).cause).toBe(construction);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('viewer canvas attachment shares the single retry and then reports a render error', async () => {
+  const source = viewerFixture();
+  const relayout = mock(() => {});
+  const hook = viewerDisplay(source, relayout);
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    const attach = () => hook.result.current.attachOffscreenCanvases(
+      [], [], 1, 1, { color: '#000', width: 2 }
+    );
+    let attached = true;
+    await act(async () => { const pending = attach(); first.trapped(); attached = await pending; });
+    expect(attached).toBe(false);
+    expect(relayout).toHaveBeenCalledTimes(1);
+    const layout = hook.result.current.layoutInWorker(source.engine, REQUEST)!;
+    const second = FakeWorker.spawned[1]!;
+    await act(async () => { replyOpened(second); });
+    await waitFor(() => expect(second.last().type).toBe('bootstrap'));
+    await act(async () => { second.replyFrame(source.frame(1), 1, { layoutJson: source.layoutJson }); await layout; });
+    await act(async () => { const pending = attach(); second.trapped(); await pending; });
+    expect(hook.result.current.error).toBeInstanceOf(DocxWorkerError);
+    expect((hook.result.current.error as DocxWorkerError).stage).toBe('render');
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['editor', 'viewer'])('%s open retries an initial constructor failure with a fresh worker', async (kind) => {
+  const source = viewerFixture(kind === 'viewer');
+  let constructors = 0;
+  globalThis.Worker = class extends FakeWorker {
+    constructor() {
+      if (++constructors === 1) throw new Error('worker constructor failed');
+      super();
+    }
+  } as unknown as typeof Worker;
+  const hook = viewerDisplay(source);
+  try {
+    const pending = hook.result.current.openInWorker(source.engine, Uint8Array.of(1));
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(1));
+    await act(async () => { replyOpened(FakeWorker.spawned[0]!); await pending; });
+    expect(constructors).toBe(2);
+    expect(hook.result.current.error).toBeNull();
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['editor', 'viewer'])('%s open leaves unavailable worker handling to its caller', async (kind) => {
+  const source = viewerFixture(kind === 'viewer');
+  globalThis.Worker = undefined as unknown as typeof Worker;
+  const hook = viewerDisplay(source);
+  try {
+    expect(await hook.result.current.openInWorker(source.engine, Uint8Array.of(1))).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    expect(FakeWorker.spawned).toHaveLength(0);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a viewer preview opens in the worker without a main preview or a replica', async () => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  try {
+    const pending = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const worker = FakeWorker.spawned[0]!;
+    expect(worker.last()).toMatchObject({ type: 'open', previewBlocks: 8 });
+    await act(async () => { replyOpened(worker); await pending; });
+    const opened = await pending;
+    expect(opened).not.toBeNull();
+    expect(hook.result.current.layoutInWorker.isViewerSession!(source.engine)).toBe(true);
+    act(() => opened!.release());
+    expect(worker.terminated).toBe(false);
+    expect(workerOpenReplicaPending(source.engine)).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test.each(['refused', 'throw', 'crash'] as const)('a viewer preview %s before it is shown returns null without a main build or terminal error', async (failureKind) => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  try {
+    const pending = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const worker = FakeWorker.spawned[0]!;
+    await act(async () => {
+      if (failureKind === 'crash') worker.onerror?.({ message: 'preview crashed' } as ErrorEvent);
+      else if (failureKind === 'throw') worker.trapped();
+      else worker.onmessage?.({ data: {
+        id: worker.last().id, ok: true, previewRefused: true,
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      await pending;
+    });
+    const opened = await pending;
+    expect(opened).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    expect(workerOpenReplicaPending(source.engine)).toBe(false);
+    expect(FakeWorker.spawned).toHaveLength(1);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a shown viewer preview crash spends the full open retry before the full open is queued', async () => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  try {
+    const preview = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const first = FakeWorker.spawned[0]!;
+    await act(async () => { replyOpened(first); await preview; });
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(source.frame(1), 1); });
+    await waitFor(() => expect(hook.result.current.presentedEngine).toBe(source.engine));
+    const shown = hook.result.current.displayList;
+    await act(async () => {
+      first.onerror?.({ message: 'preview crashed' } as ErrorEvent);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.displayList).toBe(shown);
+    const full = { ...source.engine, isDisplayOnly: () => false } as YrsSession;
+    const pending = hook.result.current.openInWorker(full, Uint8Array.of(2))
+      .catch((error: unknown) => error);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'open', bytes: Uint8Array.of(2).buffer });
+    let failure: unknown;
+    await act(async () => { second.trapped(); failure = await pending; });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('open');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a shown viewer preview crash spends the retry when full open starts before deferred recovery', async () => {
+  const source = viewerFixture(false);
+  source.viewer.current = true;
+  Object.assign(source.engine, { isDisplayOnly: () => true });
+  const hook = viewerDisplay(source);
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const preview = hook.result.current.openPreviewInWorker(source.engine, Uint8Array.of(1), 8);
+    const first = FakeWorker.spawned[0]!;
+    await act(async () => { replyOpened(first); await preview; });
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(source.frame(1), 1); });
+    await waitFor(() => expect(hook.result.current.presentedEngine).toBe(source.engine));
+    const shown = hook.result.current.displayList;
+    const full = { ...source.engine, isDisplayOnly: () => false } as YrsSession;
+    let pending: Promise<unknown> | undefined;
+    act(() => {
+      first.onerror?.({ message: 'preview crashed' } as ErrorEvent);
+      pending = hook.result.current.openInWorker(full, Uint8Array.of(2))
+        .catch((error: unknown) => error);
+    });
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.displayList).toBe(shown);
+    const second = FakeWorker.spawned[1]!;
+    expect(second.last()).toMatchObject({ type: 'open', bytes: Uint8Array.of(2).buffer });
+    await act(async () => {
+      second.trapped();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(hook.result.current.error).toBeInstanceOf(DocxWorkerError);
+    const failure = await pending;
+    expect((failure as DocxWorkerError).stage).toBe('open');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(errors.mock.calls[0]![1]).toBe(failure);
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    errors.mockRestore();
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('a held viewer missing its retained source reports a layout error without a main preflight', async () => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  try {
+    let failure: unknown;
+    await act(async () => {
+      failure = await hook.result.current.fontRequirementsInWorker(source.engine, REQUEST)!
+        .catch((error: unknown) => error);
+    });
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe('layout');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('viewer page failures replace the worker once and never acquire a main page builder', async () => {
+  const source = lazyFixture();
+  FakeWorker.spawned = [];
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const main = mock(() => { throw new Error('unexpected main page construction'); });
+  Object.assign(source.host, {
+    version: () => '1',
+    openDocx: main,
+    loadState: main,
+    applyUpdate: main,
+    buildDisplayListFrame: main,
+    buildDisplayPagesFrame: main,
+    resetFrameBase: main,
+    setDisplayWindow: main,
+  });
+  const release = mock(() => deferWorkerOpenReplica(
+    source.host, () => new Promise(() => {}), main, () => {}
+  ));
+  holdWorkerOpenDocument(source.host, release);
+  const relayout = mock(() => {});
+  const viewer = { current: true };
+  const overrides = { getInputs: () => source.inputs };
+  const hook = renderHook(({ layout }) => useRustDisplayList(
+    layout, overrides, undefined, undefined, source.host,
+    relayout, undefined, undefined, true, viewer
+  ), { initialProps: { layout: null as Layout | null } });
+  const frame = (epoch: number) => {
+    source.engine.set_display_window(0, 1);
+    source.engine.set_windowed_incremental_builds(true);
+    source.engine.reset_frame_base();
+    const bytes = source.engine.build_display_list_frame('{}', 0);
+    new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setBigUint64(32, BigInt(epoch), true);
+    return bytes;
+  };
+  try {
+    const first = await openViewer(hook.result.current, source.host);
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { first.replyFrame(frame(1), 1); });
+    await waitFor(() => expect(hook.result.current.frame).not.toBeNull());
+    expect(hook.result.current.displayList!.pages.some((page) => page.unbuilt)).toBe(true);
+    act(() => hook.result.current.setDisplayWindow(0, source.inputs.layout.pages.length));
+    await waitFor(() => expect(first.last().type).toBe('buildPages'));
+    await act(async () => { first.trapped(); });
+    expect(relayout).toHaveBeenCalledTimes(1);
+    await act(async () => { hook.rerender({ layout: { ...source.inputs.layout } }); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    const second = FakeWorker.spawned[1]!;
+    await act(async () => { replyOpened(second); });
+    await waitFor(() => expect(second.last().type).toBe('bootstrap'));
+    await act(async () => { second.replyFrame(frame(2), 2); });
+    await waitFor(() => expect(second.last().type).toBe('buildPages'));
+    await act(async () => { second.trapped(); });
+    expect(hook.result.current.error).toBeInstanceOf(DocxWorkerError);
+    expect((hook.result.current.error as DocxWorkerError).stage).toBe('render');
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expect(main).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  } finally {
+    hook.unmount();
+    source.engine.free();
+  }
+});
+
+test.each(['worker capability', 'layout adoption', 'snapshot', 'frame probe'])('viewer loss of %s cannot invoke a main fallback', async (kind) => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  try {
+    await openViewer(hook.result.current, source.engine);
+    if (kind === 'worker capability') globalThis.Worker = undefined as unknown as typeof Worker;
+    if (kind === 'layout adoption') Object.assign(source.engine, { adoptResidentWorkerLayout: undefined });
+    if (kind === 'snapshot') Object.assign(source.engine, { residentWorkerSnapshot: () => null });
+    if (kind === 'frame probe') Object.assign(source.engine, { residentWorkerProbe: () => null });
+    let failure: unknown;
+    if (kind === 'frame probe') {
+      await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+      failure = hook.result.current.error;
+    } else {
+      const pending = hook.result.current.layoutInWorker(source.engine, REQUEST)!
+        .catch((error: unknown) => error);
+      if (kind === 'snapshot') {
+        await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+        await act(async () => { replyOpened(FakeWorker.spawned[1]!); });
+      }
+      await act(async () => { failure = await pending; });
+    }
+    expect(failure).toBeInstanceOf(DocxWorkerError);
+    expect((failure as DocxWorkerError).stage).toBe(kind === 'frame probe' ? 'render' : 'layout');
+    expect(hook.result.current.error).toBe(failure as Error);
+    expect(FakeWorker.spawned).toHaveLength(kind === 'snapshot' ? 2 : 1);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
+  }
+});
+
+test('viewer ordinary failures and out-of-memory failures share one fresh-worker budget', async () => {
+  const source = viewerFixture();
+  const hook = viewerDisplay(source);
+  try {
+    const first = await openViewer(hook.result.current, source.engine);
+    const requirements = hook.result.current.fontRequirementsInWorker(source.engine, REQUEST)!;
+    await waitFor(() => expect(first.last().type).toBe('fontRequirements'));
+    await act(async () => { first.trapped(); });
+    await waitFor(() => expect(FakeWorker.spawned).toHaveLength(2));
+    const second = FakeWorker.spawned[1]!;
+    await act(async () => { replyOpened(second); });
+    await waitFor(() => expect(second.last().type).toBe('fontRequirements'));
+    await act(async () => {
+      second.onmessage?.({ data: {
+        id: second.last().id, ok: true, requirementsJson: '[]',
+      } } as MessageEvent<ResidentEngineWorkerResponse>);
+      await requirements;
+    });
+    await act(async () => { hook.rerender({ layout: source.inputs.layout as Layout }); });
+    await act(async () => { second.outOfMemory(); });
+    await waitFor(() => expect(hook.result.current.error).toBeInstanceOf(ResidentWorkerOutOfMemoryError));
+    expect(FakeWorker.spawned).toHaveLength(2);
+    expectWorkerOnly(source);
+  } finally {
+    hook.unmount();
+    source.native.free();
   }
 });
 

@@ -305,7 +305,7 @@ function proposal(session: YrsSession, id = 'p1', replaceWith = 'Head'): DocxPro
       {
         id,
         paragraph: { kind: 'persisted', story: { partUri: '/word/document.xml', kind: 'body' }, paraId: '00000002' },
-        suggest: { author: 'Atira', date: '2026-09-29T00:00:00Z' },
+        suggest: { author: 'Assistant', date: '2026-09-29T00:00:00Z' },
         op: 'replaceText',
         search: 'Tail',
         replaceWith,
