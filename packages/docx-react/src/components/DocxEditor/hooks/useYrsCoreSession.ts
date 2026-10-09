@@ -324,7 +324,7 @@ export function useYrsCoreSession(
 ): YrsCoreSession {
   const workerOpen = options?.workerOpen;
   const collaborationClientId = collaboration?.clientId;
-  const collaborationInitialUpdate = collaboration?.initialUpdate;
+  const collaborationInitialUpdate = workerOpen ? undefined : collaboration?.initialUpdate;
   const sessionRef = useRef<YrsSession | null>(null);
   const facadeRef = useRef<YrsFacadeModule | null>(null);
   const documentRef = useRef(document);
@@ -332,11 +332,12 @@ export function useYrsCoreSession(
   const callbacksRef = useRef(callbacks);
   callbacksRef.current = callbacks;
   const compatibilityBaseRef = useRef<Document | null>(null);
+  const compatibilitySourceBufferRef = useRef<ArrayBuffer | undefined>(undefined);
   const cancelCompatibilityWarmRef = useRef<(() => void) | null>(null);
   const seedBytesRef = useRef(seedBytes);
   seedBytesRef.current = seedBytes;
-  const mediaTokensRef = useRef(options?.mediaTokens);
-  mediaTokensRef.current = options?.mediaTokens;
+  const mediaTokensRef = useRef(workerOpen ? false : options?.mediaTokens);
+  mediaTokensRef.current = workerOpen ? false : options?.mediaTokens;
   const inputPositionMapsRef = useRef(new Map<string, YrsInputPositionMap>());
   const dirtyStoriesRef = useRef(new EditorDirtyStories());
   const markProjectionStories = useCallback((stories: readonly string[]): void => {
@@ -426,6 +427,7 @@ export function useYrsCoreSession(
     inputPositionMapsRef.current.clear();
     dirtyStoriesRef.current.clear();
     compatibilityBaseRef.current = null;
+    compatibilitySourceBufferRef.current = undefined;
 
     let abandoned = false;
     let shown: { session: YrsSession; host: YrsDocxHost } | null = null;
@@ -665,6 +667,8 @@ export function useYrsCoreSession(
             const saveInOrder = serialWorkerSaves(dirtyStoriesRef.current);
             unregisterSave = registerWorkerOpenSave(next, {
               available: () => !stale() && worker.canSave(),
+              sourceReplaced: () => compatibilitySourceBufferRef.current !== undefined &&
+                compatibilityBaseRef.current?.originalBuffer !== compatibilitySourceBufferRef.current,
               save: (comments, peer) => {
                 const task = () => saveInOrder(async (stories) => {
                   if (stale()) throw new Error('The document changed while saving');
@@ -930,6 +934,7 @@ export function useYrsCoreSession(
           inputPositionMapsRef.current.clear();
           dirtyStoriesRef.current.clear();
           compatibilityBaseRef.current = null;
+          compatibilitySourceBufferRef.current = undefined;
           previewingRef.current = false;
           retiringRef.current = opened.session;
           setHandoffFrom(opened.session);
@@ -1283,6 +1288,7 @@ export function useYrsCoreSession(
       if (workerOpenEnabledRef.current && workerOpenReplicaPending(live)) return null;
       const compatibilityBase = compatibilityBaseRef.current ?? live.materializeDocx();
       if (compatibilityBase) {
+        compatibilitySourceBufferRef.current ??= compatibilityBase.originalBuffer;
         base = mergeDocxHostMetadata(compatibilityBase, base);
       }
       const dirtyStories = dirtyStoriesRef.current;

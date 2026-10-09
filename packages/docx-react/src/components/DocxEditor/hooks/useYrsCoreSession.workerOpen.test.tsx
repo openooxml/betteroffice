@@ -67,6 +67,7 @@ import { createPluginClients } from '../../../plugins/createPluginClients';
 import type { DocxPlugin, DocxPluginContext, DocxPluginEvent, DocxPluginSnapshot } from '../../../plugins/types';
 import * as pluginHosts from '../../../plugins/useDocxPluginHost';
 import * as pluginHostFactories from '../../../plugins/createDocxPluginHost';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -126,6 +127,7 @@ const editModule = new WebAssembly.Module(
 let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>>;
 
 beforeEach(() => {
+  setMissingWorkerCapabilitiesForTests([]);
   const fonts = Object.getOwnPropertyDescriptor(document, 'fonts');
   registerRestore(() => {
     if (fonts) Object.defineProperty(document, 'fonts', fonts);
@@ -144,6 +146,7 @@ afterEach(() => {
   try {
     cleanup();
   } finally {
+    resetEngineChoiceForTests();
     compileModule.mockRestore();
     mock.restore();
     for (const restore of [...globalRestores].reverse()) restore();
@@ -4137,15 +4140,63 @@ test('a shared collaboration update keeps the existing join path', async () => {
   const shared = await createYrsSession();
   sessions.push(shared);
   shared.openDocx(bytes, true);
-  const { workers } = installWorker();
+  const { workers, posted } = installWorker();
   const { result } = renderHook(useHarness, {
-    initialProps: { ...initialProps, collaboration: { initialUpdate: shared.encodeState() } },
+    initialProps: { ...initialProps, experimentalWorkerOpen: false, collaboration: { initialUpdate: shared.encodeState() } },
   });
   await waitFor(() => expect(result.current.host).not.toBeNull());
   expect(workers).toHaveLength(0);
   expect(result.current.core.replicaReady).toBe(true);
   expect(texts(result.current.core.session!)).toEqual(texts(shared));
-});
+
+  const source = await longFixture(3);
+  const sharedEditor = await createYrsSession();
+  sessions.push(sharedEditor);
+  sharedEditor.openDocx(source, true);
+  const paragraph = sharedEditor.paragraphs('body')[0]!;
+  sharedEditor.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Joined ');
+  const initialUpdate = sharedEditor.encodeState();
+  const displayList = await import('./useDisplayList');
+  const useRenderer = displayList.useCanvasRenderer;
+  const workerModes: boolean[] = [];
+  const choice = spyOn(displayList, 'useCanvasRenderer').mockImplementation((...args) => {
+    workerModes.push(args[5] === true);
+    return useRenderer(...args);
+  });
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  const ref = createRef<DocxEditorRef>();
+  const errors: Error[] = [];
+  if (!document.fonts) Object.defineProperty(document, 'fonts', {
+    configurable: true,
+    value: { addEventListener() {}, removeEventListener() {}, ready: Promise.resolve() },
+  });
+  try {
+    const view = render(
+      <DocxEditor
+        ref={ref}
+        documentBuffer={source.slice().buffer as ArrayBuffer}
+        collaboration={{ initialUpdate }}
+        onError={(error) => errors.push(error)}
+      />
+    );
+    await waitFor(() => expect(view.container.querySelector('.canvas-page')).not.toBeNull(), {
+      timeout: 20_000,
+    });
+    const joined = await ref.current!.readParagraphs({ view: 'accepted' });
+    expect(joined).toMatchObject({ ok: true });
+    if (!joined.ok) throw new Error('The joined paragraphs are unavailable');
+    expect(joined.paragraphs.map(({ text }) => text)).toEqual(texts(sharedEditor).body);
+    expect(joined.paragraphs[0]!.text).toBe('Joined First paragraph');
+    expect(workerModes.length).toBeGreaterThan(0);
+    expect(workerModes.every((worker) => !worker)).toBe(true);
+    expect(posted.filter((request) => request.type === 'open')).toEqual([]);
+    expect(warn.mock.calls.some(([message]) => String(message).includes('collaboration.initialUpdate requires the in-thread engine'))).toBe(true);
+    expect(errors).toEqual([]);
+  } finally {
+    choice.mockRestore();
+    warn.mockRestore();
+  }
+}, 40_000);
 
 test('main-thread layout fallback opens the pending replica before measuring it', async () => {
   const { result } = renderHook(useHarness, { initialProps });

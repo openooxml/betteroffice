@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -9,8 +9,19 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import { createYrsSession } from '@betteroffice/docx/yrs';
+import type { CollaborationReplica } from '@betteroffice/docx/collaboration';
+import { createYrsSession, takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
+import {
+  residentWorkerFactory,
+  type InProcessResidentWorker,
+} from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import type { DocxEditorProps, DocxEditorRef } from '../../index';
+import {
+  resetEngineChoiceForTests,
+  setMissingWorkerCapabilitiesForTests,
+} from '../DocxEditor/internals/engineChoice';
+import * as yrsToolbar from '../DocxEditor/yrsToolbar';
 import { setupWorkerEngine } from '../DocxEditor/__fixtures__/workerEngine';
 
 const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
@@ -27,6 +38,14 @@ const {
 
 const FIXTURE = resolve(import.meta.dir, '../DocxEditor/hooks/__fixtures__/probe-linked-header.docx');
 const quiet = { error: console.error, warn: console.warn };
+const originalWorker = globalThis.Worker;
+const workers: InProcessResidentWorker[] = [];
+let startWorker: Awaited<ReturnType<typeof residentWorkerFactory>>;
+let compileModule: ReturnType<typeof spyOn<typeof wasm, 'editWasmModule'>> | null = null;
+const editorEngines: Array<[string, false | undefined]> = [
+  ['in-thread', false],
+  ['default worker', undefined],
+];
 
 beforeAll(async () => {
   if (!window.document.fonts) {
@@ -42,10 +61,20 @@ beforeAll(async () => {
       )
     )
   );
+  startWorker = await residentWorkerFactory();
   console.error = () => {};
   console.warn = () => {};
 });
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  takePreloadedResidentEngineWorker()?.destroy();
+  await act(async () => {});
+  compileModule?.mockRestore();
+  compileModule = null;
+  for (const worker of workers.splice(0)) worker.terminate();
+  resetEngineChoiceForTests();
+  globalThis.Worker = originalWorker;
+});
 afterAll(async () => {
   console.error = quiet.error;
   console.warn = quiet.warn;
@@ -77,9 +106,16 @@ function CompactToolbar({ onShare }: { onShare(): void }) {
 
 const COMPACT: ReactNode = <CompactToolbar onShare={() => {}} />;
 
-async function mount(props: Partial<DocxEditorProps> = {}) {
+async function mountEditor(props: Partial<DocxEditorProps>, experimentalWorkerOpen: false | undefined) {
   const ref = createRef<DocxEditorRef>();
-  const view = render(<DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />);
+  const opens = workers.reduce(
+    (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+  );
+  const view = render(
+    experimentalWorkerOpen === false
+      ? <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={documentBytes()} {...props} />
+      : <DocxEditor ref={ref} documentBuffer={documentBytes()} {...props} />
+  );
   for (let attempt = 0; attempt < 200; attempt += 1) {
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -88,10 +124,22 @@ async function mount(props: Partial<DocxEditorProps> = {}) {
     if (save?.enabled) break;
   }
   expect(ref.current?.commands.getState('save').enabled).toBe(true);
+  if (experimentalWorkerOpen === undefined) {
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.some(
+      (worker) => worker.sessions.length > 0 && worker.requests.includes('open')
+    )).toBe(true);
+    expect(workers.reduce(
+      (count, worker) => count + worker.requests.filter((type) => type === 'open').length, 0
+    )).toBeGreaterThan(opens);
+    await act(async () => {
+      await ref.current!.whenLayoutComplete({ timeoutMs: 3000 });
+    });
+  }
   return { ref, view };
 }
 
-async function selectFirstWord(ref: React.RefObject<DocxEditorRef | null>) {
+async function selectInThreadFirstWord(ref: React.RefObject<DocxEditorRef | null>) {
   const editor = ref.current!.getEditorRef()!;
   const session = editor.getYrsSession()!;
   const paragraph = session.paragraphs('body').find((candidate) => candidate.text.length >= 3)!;
@@ -114,7 +162,40 @@ async function settle() {
   });
 }
 
-describe('DocxEditor toolbar prop', () => {
+describe.each(editorEngines)('DocxEditor toolbar prop (%s engine)', (_engine, experimentalWorkerOpen) => {
+  beforeEach(() => {
+    if (experimentalWorkerOpen === false) return;
+    compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+      new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+    ));
+    setMissingWorkerCapabilitiesForTests([]);
+    globalThis.Worker = class {
+      constructor() {
+        const worker = startWorker();
+        workers.push(worker);
+        return worker;
+      }
+    } as unknown as typeof Worker;
+  });
+
+  const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, experimentalWorkerOpen);
+  const selectFirstWord = async (ref: React.RefObject<DocxEditorRef | null>) => {
+    if (experimentalWorkerOpen === false) return selectInThreadFirstWord(ref);
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    const paragraph = read.paragraphs.find(
+      (candidate) => candidate.story === 'body' && candidate.text.length >= 3
+    )!;
+    await act(async () => {
+      ref.current!.highlightRange(1, 4);
+      await ref.current!.flushPendingInput();
+    });
+    expect(await ref.current!.readSelectionInfo()).toMatchObject({
+      paraId: paragraph.paraId,
+      selectedText: paragraph.text.slice(0, 3),
+    });
+  };
+
   test('replaces the default chrome and drives the editor through its commands', async () => {
     const { ref, view } = await mount({ toolbar: COMPACT });
     const body = within(view.container);
@@ -137,8 +218,12 @@ describe('DocxEditor toolbar prop', () => {
 
   test('the compact host toolbar keeps its order and each control acts on the editor', async () => {
     let shares = 0;
+    let live: CollaborationReplica | null = null;
     const { ref, view } = await mount({
       toolbar: <CompactToolbar onShare={() => (shares += 1)} />,
+      ...(experimentalWorkerOpen === undefined ? {
+        collaboration: { onReplica: (replica: CollaborationReplica | null) => { live = replica; } },
+      } : {}),
     });
     const toolbar = within(view.container).getByRole('toolbar');
     const style = within(toolbar).getByLabelText('Select paragraph style');
@@ -169,19 +254,30 @@ describe('DocxEditor toolbar prop', () => {
     expect(ref.current!.commands.getState('paragraphStyle').value).toBe('Heading1');
     expect(style.textContent).toContain('Heading 1');
 
-    const session = ref.current!.getEditorRef()!.getYrsSession()!;
-    const original = session.paragraphs('body').at(-1)!;
+    const session = experimentalWorkerOpen === false
+      ? ref.current!.getEditorRef()!.getYrsSession()!
+      : null;
+    if (!session) {
+      for (let attempt = 0; attempt < 200 && live === null; attempt += 1) await settle();
+      expect(live).not.toBeNull();
+    }
+    const transport: CollaborationReplica = session ?? live!;
+    const read = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!read.ok) throw new Error(read.failure.message);
+    const original = session
+      ? session.paragraphs('body').at(-1)!
+      : read.paragraphs.filter((paragraph) => paragraph.story === 'body').at(-1)!;
     const replica = await createYrsSession({ clientId: 4343 });
     try {
-      replica.applyUpdate(session.encodeStateAsUpdate());
+      replica.applyUpdate(transport.encodeStateAsUpdate());
       replica.insertText(
         { story: 'body', paraId: original.paraId, offset: original.text.length },
         ' suggested',
         { name: 'Reviewer', date: '2026-01-01T00:00:00Z' }
       );
-      const update = replica.encodeStateAsUpdate(session.encodeStateVector());
+      const update = replica.encodeStateAsUpdate(transport.encodeStateVector());
       await act(async () => {
-        session.applyUpdate(update);
+        transport.applyUpdate(update);
       });
     } finally {
       replica.destroy();
@@ -195,7 +291,12 @@ describe('DocxEditor toolbar prop', () => {
     expect(reject.hasAttribute('aria-disabled')).toBe(false);
     fireEvent.click(reject);
     await settle();
-    expect(session.paragraphs('body').at(-1)!.text).toBe(original.text);
+    const after = await ref.current!.readParagraphs({ view: 'accepted' });
+    if (!after.ok) throw new Error(after.failure.message);
+    expect(session
+      ? session.paragraphs('body').at(-1)!.text
+      : after.paragraphs.filter((paragraph) => paragraph.story === 'body').at(-1)!.text
+    ).toBe(original.text);
     expect(next.getAttribute('aria-disabled')).toBe('true');
   });
 
@@ -227,43 +328,6 @@ describe('DocxEditor toolbar prop', () => {
     await choose('Heading 2', true);
     expect(ref.current!.commands.getState('paragraphStyle').value).toBe('Heading2');
     expect(document.activeElement === input).toBe(true);
-  });
-
-  test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
-    const { ref } = await mount({ toolbar: COMPACT });
-    const editor = ref.current!.getEditorRef()!;
-    const session = editor.getYrsSession()!;
-    const [from, to] = session.paragraphs('body').filter((paragraph) => paragraph.text.length > 0);
-    await act(async () => {
-      session.setParagraphAttr(to.paraId, 'alignment', 'right');
-      editor.syncYrsInputState(true);
-      await ref.current!.flushPendingInput();
-    });
-    const fromBefore = session.paragraphs('body').find((paragraph) => paragraph.paraId === from.paraId)!;
-    const caretIn = async (paraId: string) => {
-      await act(async () => {
-        session.setSelection({ story: 'body', paraId, offset: 0 });
-        editor.syncYrsInputState(false);
-      });
-    };
-    await caretIn(from.paraId);
-    const before = ref.current!.commands.getState('alignment').value;
-    expect(before).not.toBe('right');
-    expect(before).not.toBe('center');
-    let moved = false;
-    await act(async () => {
-      moved = ref.current!.scrollToParaId(to.paraId);
-      expect(ref.current!.commands.getState('alignment').value).toBe('right');
-      const result = await ref.current!.commands.execute('alignment', { value: 'center' });
-      expect(result.ok).toBe(true);
-    });
-    expect(moved).toBe(true);
-    expect(ref.current!.commands.getState('alignment').value).toBe('center');
-    const after = session.paragraphs('body');
-    expect(after.find((paragraph) => paragraph.paraId === to.paraId)!.properties.alignment).toBe('center');
-    expect(after.find((paragraph) => paragraph.paraId === from.paraId)).toEqual(fromBefore);
-    await caretIn(from.paraId);
-    expect(ref.current!.commands.getState('alignment').value).toBe(before);
   });
 
   test('keeps supplied chrome in read-only mode and applies the restriction', async () => {
@@ -308,7 +372,13 @@ describe('DocxEditor toolbar prop', () => {
         </EditorToolbar.Toolbar>
       </EditorToolbar>
     );
-    const { ref, view } = await mount({ toolbar });
+    let live: CollaborationReplica | null = null;
+    const { ref, view } = await mount({
+      toolbar,
+      ...(experimentalWorkerOpen === undefined ? {
+        collaboration: { onReplica: (replica: CollaborationReplica | null) => { live = replica; } },
+      } : {}),
+    });
     const body = within(view.container);
     const bold = body.getByRole('button', { name: 'Bold' });
     const reviewNext = body.getByTestId('review-next');
@@ -316,11 +386,23 @@ describe('DocxEditor toolbar prop', () => {
     expect(bold.getAttribute('aria-pressed')).toBe('false');
     expect(reviewNext.textContent).toBe('no-revisions');
 
-    const session = ref.current!.getEditorRef()!.getYrsSession()!;
+    const session = experimentalWorkerOpen === false
+      ? ref.current!.getEditorRef()!.getYrsSession()!
+      : null;
+    if (!session) {
+      for (let attempt = 0; attempt < 200 && live === null; attempt += 1) await settle();
+      expect(live).not.toBeNull();
+    }
+    const transport: CollaborationReplica = session ?? live!;
+    const selected = await ref.current!.readSelectionInfo();
+    expect(selected).not.toBeNull();
     const replica = await createYrsSession({ clientId: 4242 });
     try {
-      replica.applyUpdate(session.encodeStateAsUpdate());
-      const selection = session.selection()!;
+      replica.applyUpdate(transport.encodeStateAsUpdate());
+      const selection = session ? session.selection()! : {
+        anchor: { story: 'body', paraId: selected!.paraId!, offset: 0 },
+        head: { story: 'body', paraId: selected!.paraId!, offset: 3 },
+      };
       replica.toggleMark(
         {
           story: 'body',
@@ -335,9 +417,9 @@ describe('DocxEditor toolbar prop', () => {
         ' remote',
         { name: 'Remote', date: '2026-01-01T00:00:00Z' }
       );
-      const update = replica.encodeStateAsUpdate(session.encodeStateVector());
+      const update = replica.encodeStateAsUpdate(transport.encodeStateVector());
       await act(async () => {
-        session.applyUpdate(update);
+        transport.applyUpdate(update);
       });
       await settle();
       expect(bold.getAttribute('aria-pressed')).toBe('true');
@@ -351,20 +433,72 @@ describe('DocxEditor toolbar prop', () => {
     const { ref } = await mount({ toolbar: COMPACT });
     await selectFirstWord(ref);
     const editor = ref.current!.getEditorRef()!;
-    const session = editor.getYrsSession()!;
-    session.toggleMark = () => {
-      throw new Error('refused');
-    };
+    const refusal = experimentalWorkerOpen === undefined
+      ? spyOn(yrsToolbar, 'applyYrsToolbarFormatting').mockImplementation(() => {
+          throw new Error('refused');
+        })
+      : null;
+    if (experimentalWorkerOpen === false) {
+      const session = editor.getYrsSession()!;
+      session.toggleMark = () => {
+        throw new Error('refused');
+      };
+    }
     let failed = null as string | null;
     let legacy = true as boolean;
+    try {
+      await act(async () => {
+        const result = await ref.current!.commands.execute('bold', null);
+        failed = result.ok ? null : result.failure.code;
+        legacy = editor.applyYrsFormatting('bold');
+      });
+      await settle();
+      expect(failed).toBe('command-failed');
+      expect(legacy).toBe(false);
+    } finally {
+      refusal?.mockRestore();
+    }
+  });
+});
+
+const mount = (props: Partial<DocxEditorProps> = {}) => mountEditor(props, false);
+
+describe('DocxEditor toolbar prop (in-thread engine)', () => {
+  test('a command right after scrollToParaId acts on the paragraph it moved to', async () => {
+    const { ref } = await mount({ toolbar: COMPACT });
+    const editor = ref.current!.getEditorRef()!;
+    const session = editor.getYrsSession()!;
+    const [from, to] = session.paragraphs('body').filter((paragraph) => paragraph.text.length > 0);
     await act(async () => {
-      const result = await ref.current!.commands.execute('bold', null);
-      failed = result.ok ? null : result.failure.code;
-      legacy = editor.applyYrsFormatting('bold');
+      session.setParagraphAttr(to.paraId, 'alignment', 'right');
+      editor.syncYrsInputState(true);
+      await ref.current!.flushPendingInput();
     });
-    await settle();
-    expect(failed).toBe('command-failed');
-    expect(legacy).toBe(false);
+    const fromBefore = session.paragraphs('body').find((paragraph) => paragraph.paraId === from.paraId)!;
+    const caretIn = async (paraId: string) => {
+      await act(async () => {
+        session.setSelection({ story: 'body', paraId, offset: 0 });
+        editor.syncYrsInputState(false);
+      });
+    };
+    await caretIn(from.paraId);
+    const before = ref.current!.commands.getState('alignment').value;
+    expect(before).not.toBe('right');
+    expect(before).not.toBe('center');
+    let moved = false;
+    await act(async () => {
+      moved = ref.current!.scrollToParaId(to.paraId);
+      expect(ref.current!.commands.getState('alignment').value).toBe('right');
+      const result = await ref.current!.commands.execute('alignment', { value: 'center' });
+      expect(result.ok).toBe(true);
+    });
+    expect(moved).toBe(true);
+    expect(ref.current!.commands.getState('alignment').value).toBe('center');
+    const after = session.paragraphs('body');
+    expect(after.find((paragraph) => paragraph.paraId === to.paraId)!.properties.alignment).toBe('center');
+    expect(after.find((paragraph) => paragraph.paraId === from.paraId)).toEqual(fromBefore);
+    await caretIn(from.paraId);
+    expect(ref.current!.commands.getState('alignment').value).toBe(before);
   });
 });
 

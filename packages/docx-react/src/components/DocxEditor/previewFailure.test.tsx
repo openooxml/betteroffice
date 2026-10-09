@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -7,6 +7,7 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import type { PagedEditorRef } from './PagedEditor';
 import { DocxWorkerError } from './internals/docxWorkerError';
 import { workerOpenDocumentHeld } from './internals/workerOpenReplica';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
 import * as replicaHelpers from './internals/workerOpenReplica';
 import * as wasm from '@betteroffice/docx/yrs/wasm/index';
 import { residentWorkerFactory } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
@@ -179,6 +180,7 @@ const PAGES = resolve(
 const quiet = { error: console.error, warn: console.warn };
 const originalWorker = globalThis.Worker;
 
+beforeEach(() => setMissingWorkerCapabilitiesForTests([]));
 beforeAll(async () => {
   // Frames build on this thread, where the tests hold them; a resident worker's would not wait.
   globalThis.Worker = undefined as unknown as typeof Worker;
@@ -198,6 +200,7 @@ beforeAll(async () => {
 });
 afterEach(() => {
   cleanup();
+  resetEngineChoiceForTests();
   workerOpen = null;
   workerFailure = null;
   holdCanvasReplay = null;
@@ -262,6 +265,7 @@ test('a load whose full open fails after its preview painted keeps none of its p
     <DocxEditor
       ref={ref}
       previewFirstPage
+      experimentalWorkerOpen={false}
       documentBuffer={
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
       }
@@ -606,6 +610,7 @@ test('a load whose full session fails to render fails, and leaves no session beh
     <DocxEditor
       ref={ref}
       previewFirstPage
+      experimentalWorkerOpen={false}
       documentBuffer={
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
       }
@@ -771,6 +776,7 @@ test('an ordinary editor logs a canvas replay rejection without failing the load
       <DocxEditor
         ref={ref}
         previewFirstPage={false}
+        experimentalWorkerOpen={false}
         documentBuffer={documentBuffer()}
         onError={(error) => errors.push(error)}
       />
@@ -819,6 +825,7 @@ test.each(['renderer first', 'replica first'])('renderer and replica notify once
   const element = () => (
     <DocxEditor
       ref={ref} previewFirstPage={false} documentBuffer={buffer} onError={onError}
+      experimentalWorkerOpen={false}
       onFirstPagePainted={presented}
     />
   );

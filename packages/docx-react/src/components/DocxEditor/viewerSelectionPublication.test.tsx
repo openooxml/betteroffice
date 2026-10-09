@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -27,6 +27,7 @@ import * as viewerReads from './internals/viewerRefReads';
 import * as replicaHelpers from './internals/workerOpenReplica';
 import { markPresented, stampWorkerFrameVersion } from './internals/layoutProvenance';
 import type { YrsInputRef } from './YrsInput';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from './internals/engineChoice';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -38,6 +39,7 @@ const font = readFileSync(resolve(
   import.meta.dir, '../../../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 ));
 
+beforeEach(() => setMissingWorkerCapabilitiesForTests([]));
 beforeAll(async () => {
   if (!document.fonts) {
     Object.defineProperty(document, 'fonts', {
@@ -52,6 +54,7 @@ beforeAll(async () => {
 });
 afterEach(() => {
   cleanup();
+  resetEngineChoiceForTests();
   mock.restore();
   globalThis.Worker = originalWorker;
   workers.length = 0;

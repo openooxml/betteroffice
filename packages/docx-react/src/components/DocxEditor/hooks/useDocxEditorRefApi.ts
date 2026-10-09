@@ -427,7 +427,7 @@ function storyOffset(session: YrsSession, loc: YrsLoc): number {
 async function exportWithPages(
   pagedEditorRef: React.RefObject<PagedEditorRef | null>,
   options: DocxPageExportOptions,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen: boolean
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
   const { session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
   const editor = (): PagedEditorRef => {
@@ -485,7 +485,7 @@ async function exportWithPagesInWorker(
   authority: Pick<WorkerProposalAuthority, 'exportStructuredWithPages'>,
   options: DocxPageExportOptions,
   settledDisplayList: ((relayout: null, timeoutMs: number | null, scope?: 'document' | 'window') => Promise<DisplayList>) | undefined,
-  experimentalWorkerOpen = false
+  experimentalWorkerOpen: boolean
 ): Promise<DocxExportResult<DocxPagedStructuredContent<DocxLayoutMap>>> {
   const editor = (): PagedEditorRef => {
     const current = pagedEditorRef.current;
@@ -726,7 +726,7 @@ export function useDocxEditorRefApi({
       flush: async () => {
         validate();
         if (session && !workerOpenDocumentHeld(session) && workerOpenReplicaReady(session)) {
-          const flushed = await flushEditorInput(pagedEditorRef);
+          const flushed = await flushEditorInput(pagedEditorRef, experimentalWorkerOpen);
           if (!flushed.ok) throw flushed.error;
         }
         validate();
