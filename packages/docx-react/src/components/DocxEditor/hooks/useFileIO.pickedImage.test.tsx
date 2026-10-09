@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
@@ -7,13 +7,19 @@ import { parseDocx } from '@betteroffice/docx/docx';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { unzipContainer } from '@betteroffice/docx/docx/wasm';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
+import * as wasm from '@betteroffice/docx/yrs/wasm/index';
+import { takePreloadedResidentEngineWorker } from '@betteroffice/docx/yrs';
+import { residentWorkerFactory, type InProcessResidentWorker } from '@betteroffice/docx/yrs/__fixtures__/residentWorker';
+import { resetEngineChoiceForTests, setMissingWorkerCapabilitiesForTests } from '../internals/engineChoice';
 import { DocxEditor, type DocxEditorRef } from '../../DocxEditor';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 const { act, cleanup, fireEvent, render } = await import('@testing-library/react');
 const originalImage = globalThis.Image;
+const originalWarn = console.warn;
 const originalFonts = Object.getOwnPropertyDescriptor(window.document, 'fonts');
+let warn: ReturnType<typeof spyOn<typeof console, 'warn'>>;
 let addedFonts = false;
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -40,12 +46,17 @@ beforeAll(async () => {
       )
     )
   );
+  warn = spyOn(console, 'warn').mockImplementation((message, ...args) => {
+    if (typeof message === 'string' && message.startsWith('[DocxEditor] experimentalWorkerOpen={false} selects')) return;
+    originalWarn(message, ...args);
+  });
 });
 afterEach(() => {
   cleanup();
   globalThis.Image = originalImage;
 });
 afterAll(async () => {
+  warn.mockRestore();
   if (addedFonts) {
     if (originalFonts) Object.defineProperty(window.document, 'fonts', originalFonts);
     else Reflect.deleteProperty(window.document, 'fonts');
@@ -154,7 +165,7 @@ test('an image inserted through the picker keeps its media after two saves and r
   const ref = createRef<DocxEditorRef>();
   const errors: Error[] = [];
   const view = render(
-    <DocxEditor ref={ref} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
+    <DocxEditor ref={ref} experimentalWorkerOpen={false} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
   );
   await until(() => ref.current?.commands.getState('save').enabled === true);
   const editor = ref.current!.getEditorRef()!;
@@ -203,4 +214,98 @@ test('an image inserted through the picker keeps its media after two saves and r
     await assertSavedImage(buffer!);
   }
   expect(errors).toEqual([]);
+}, 20_000);
+
+test('an image inserted through the picker keeps its media after two saves and reopen on the default worker', async () => {
+  const originalWorker = globalThis.Worker;
+  const startWorker = await residentWorkerFactory();
+  const workers: InProcessResidentWorker[] = [];
+  const compileModule = spyOn(wasm, 'editWasmModule').mockResolvedValue(new WebAssembly.Module(
+    new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00])
+  ));
+  setMissingWorkerCapabilitiesForTests([]);
+  globalThis.Worker = class {
+    constructor() {
+      const worker = startWorker();
+      workers.push(worker);
+      return worker;
+    }
+  } as unknown as typeof Worker;
+  class LoadedImage {
+    naturalWidth = 1;
+    naturalHeight = 1;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  globalThis.Image = LoadedImage as never;
+  try {
+    const ref = createRef<DocxEditorRef>();
+    const errors: Error[] = [];
+    const view = render(
+      <DocxEditor ref={ref} documentBuffer={fixture()} onError={(error) => errors.push(error)} />
+    );
+    await until(() => ref.current?.commands.getState('save').enabled === true);
+    await act(async () => {
+      await ref.current!.flushPendingInput();
+      await ref.current!.whenLayoutComplete({ timeoutMs: 3_000 });
+      const read = await ref.current!.readParagraphs({ view: 'accepted' });
+      expect(read.ok).toBe(true);
+      if (!read.ok) throw new Error(read.failure.message);
+      expect(await ref.current!.scrollToParagraph(read.paragraphs[0]!.paraId)).toBe(true);
+    });
+    expect(workers.length).toBeGreaterThan(0);
+    expect(workers.some((worker) => worker.requests.includes('open') && worker.sessions.length > 0)).toBe(true);
+    await until(() => ref.current?.commands.getState('insertImage').enabled === true);
+    await act(async () => {
+      expect(await ref.current!.commands.execute('insertImage', null)).toEqual({
+        ok: true,
+        status: 'opened',
+      });
+    });
+    const input = view.container.querySelector<HTMLInputElement>(
+      'input[type="file"][accept="image/*"]'
+    );
+    expect(input).not.toBeNull();
+    act(() => {
+      fireEvent.change(input!, {
+        target: { files: [new File([PNG], 'pixel.png', { type: 'image/png' })] },
+      });
+    });
+    const images = () => ref.current!.getDocument()?.package.document.content.flatMap((block) =>
+      block.type === 'paragraph'
+        ? block.content.flatMap((inline) => inline.type === 'run'
+          ? inline.content.flatMap((content) => content.type === 'drawing' ? [content.image] : [])
+          : [])
+        : []
+    ) ?? [];
+    await until(() => images().length === 1);
+    const [image] = images();
+    expect(image).toBeDefined();
+    expect(image!.rId ?? '').toBe('');
+    expect(image!.src).toBe(`data:image/png;base64,${PNG_BASE64}`);
+    expect(input!.value).toBe('');
+
+    for (let save = 0; save < 2; save += 1) {
+      let buffer: ArrayBuffer | null = null;
+      await act(async () => {
+        await ref.current!.flushPendingInput();
+        buffer = await ref.current!.save();
+      });
+      expect(buffer).not.toBeNull();
+      await assertSavedImage(buffer!);
+    }
+    expect(errors).toEqual([]);
+  } finally {
+    cleanup();
+    takePreloadedResidentEngineWorker()?.destroy();
+    await act(async () => {});
+    for (const worker of workers) worker.terminate();
+    compileModule.mockRestore();
+    resetEngineChoiceForTests();
+    globalThis.Worker = originalWorker;
+    globalThis.Image = originalImage;
+  }
 }, 20_000);

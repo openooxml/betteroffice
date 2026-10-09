@@ -1,5 +1,13 @@
 {
   "_lang": "id",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "Menyiapkan editor. Pengeditan akan segera tersedia.",
+    "failed": "Pengeditan tidak tersedia. Unduh presentasi yang dipulihkan.",
+    "disabled": "Fitur ini tidak tersedia dalam mode pengeditan ini.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "Simpan",

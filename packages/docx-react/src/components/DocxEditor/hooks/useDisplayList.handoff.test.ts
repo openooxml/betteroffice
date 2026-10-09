@@ -672,6 +672,93 @@ test("a worker handed to another session builds no pages of the old session's fr
   }
 });
 
+test.each([false, true])(
+  'a provisional preview handoff builds every full-document page with worker-open=%s',
+  async (experimentalWorkerOpen) => {
+    FakeWorker.created = [];
+    globalThis.Worker = FakeWorker as unknown as typeof Worker;
+    const preview = hostWithLazyPages(9532, 'Preview');
+    const full = hostWithLazyPages(9533, 'Full document');
+    const handoffFrom = { current: null as YrsSession | null };
+    try {
+      const { result, rerender, unmount } = renderHook(
+        ({ layout, source }) =>
+          useRustDisplayList(
+            layout,
+            undefined,
+            undefined,
+            undefined,
+            source,
+            undefined,
+            undefined,
+            handoffFrom,
+            experimentalWorkerOpen
+          ),
+        { initialProps: { layout: null as Layout | null, source: null as YrsSession | null } }
+      );
+      const first = result.current.layoutInWorker(preview.engine, preview.request)!;
+      const worker = FakeWorker.created[0]!;
+      let host = preview;
+      const reply = (request: ResidentEngineWorkerRequest, frame: Uint8Array) =>
+        worker.reply({
+          id: request.id,
+          ok: true,
+          frame: frame.slice().buffer,
+          caret: JSON.parse(host.native.resident_caret_snapshot_json()),
+          selection: null,
+          layoutRevision: 1,
+          layoutJson: host.layoutJson,
+          ...(host === preview ? { layoutProvisional: true } : {}),
+        });
+      worker.postMessage = (request) => {
+        worker.posted.push(request);
+        if (request.type === 'buildPages') {
+          const pages = host === preview ? request.pages.filter((index) => index < 1) : request.pages;
+          const frame = host.native.build_display_pages_frame(
+            Uint32Array.from(pages),
+            request.expectedFrameEpoch
+          );
+          queueMicrotask(() => reply(request, frame));
+        }
+      };
+      reply(worker.posted[0]!, preview.frame);
+      const previewLayout = await first;
+      await act(async () => {
+        rerender({ layout: previewLayout!.layout, source: preview.engine });
+        result.current.setRetainBuiltPages!(true);
+      });
+      const previewFrame = result.current.frame!;
+      await act(async () => {
+        result.current.setDisplayWindow(1, previewFrame.displayList.pages.length);
+      });
+      await waitFor(() => expect(result.current.frame).not.toBe(previewFrame));
+
+      handoffFrom.current = preview.engine;
+      host = full;
+      const second = result.current.layoutInWorker(full.engine, full.request)!;
+      full.native.reset_frame_base();
+      reply(
+        worker.posted.at(-1)!,
+        full.native.build_display_pages_frame(new Uint32Array(), result.current.frame!.frameEpoch)
+      );
+      const fullLayout = await second;
+      await act(async () => {
+        rerender({ layout: fullLayout!.layout, source: full.engine });
+      });
+      await waitFor(() => expect(result.current.presentedEngine).toBe(full.engine));
+      await act(async () => {
+        const settled = result.current.settledDisplayList(null, 1_000);
+        await expect(settled).resolves.toBeDefined();
+        expect((await settled).pages.every((page) => !page.unbuilt)).toBe(true);
+      });
+      unmount();
+    } finally {
+      preview.native.free();
+      full.native.free();
+    }
+  }
+);
+
 test("a display-only preview's failed build fails no wait for the document", async () => {
   const failure = new Error('preview build failed');
   const overrides = {

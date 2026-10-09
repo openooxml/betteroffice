@@ -1,5 +1,13 @@
 {
   "_lang": "hi",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "संपादक तैयार किया जा रहा है। संपादन जल्द ही उपलब्ध होगा।",
+    "failed": "संपादन उपलब्ध नहीं है। पुनर्प्राप्त प्रस्तुति डाउनलोड करें।",
+    "disabled": "यह सुविधा इस संपादन मोड में उपलब्ध नहीं है।",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "सहेजें",

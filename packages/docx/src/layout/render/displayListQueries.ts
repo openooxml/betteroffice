@@ -50,7 +50,11 @@ import {
   type DisplayListImageRegion,
   type LocatedImagePrimitive,
 } from './displayListImages';
-import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from './rustDisplayList';
+import {
+  loadedRustDisplayListQueryEngine,
+  loadRustDisplayListQueryEngine,
+  type RustDisplayListQueryEngine,
+} from './rustDisplayList';
 
 /**
  * Query surface of an editing engine that already holds the display list.
@@ -65,6 +69,13 @@ export interface ResidentDisplayListQueryEngine {
     goalX: number
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
+  /** @internal */
+  displayRangeRectsOnPagesJson?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): string;
   displayRangeRectsRegionJson(
     region: DisplayListHitRegion,
     partId: string,
@@ -204,6 +215,13 @@ export interface DisplayListQueries {
   ): DisplayListVerticalMove | null;
   /** body document range → highlight rects */
   rangeRects(from: number, to: number): DisplayListRect[];
+  /** @internal */
+  rangeRectsOnPages?(
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): DisplayListRect[];
   /**
    * Header/footer document range → highlight rects for the region's band. `region` is
    * `'header' | 'footer'`; `rId` identifies the HF doc, and
@@ -577,19 +595,22 @@ function pagesTouchingPositions(
   list: DisplayList,
   from: number,
   to: number,
-  spread = 0
+  spread = 0,
+  firstPage = 0,
+  lastPage = list.pages.length - 1
 ): number[] {
   const lower = Math.min(from, to) - 1;
   const upper = Math.max(from, to) + 1;
   const pages = new Set<number>();
-  list.pages.forEach((page, index) => {
+  for (let index = firstPage; index <= lastPage; index += 1) {
+    const page = list.pages[index];
     const span = pagePositionSpan(page);
-    if (span.min > upper || span.max < lower) return;
+    if (span.min > upper || span.max < lower) continue;
     for (let offset = -spread; offset <= spread; offset += 1) {
       const neighbour = index + offset;
       if (neighbour >= 0 && neighbour < list.pages.length) pages.add(neighbour);
     }
-  });
+  }
   return [...pages];
 }
 
@@ -824,6 +845,7 @@ export function createDisplayListQueries(
 
   const allPages = (): number[] => list.pages.map((_, index) => index);
 
+  cell.eng ??= resident ? null : loadedRustDisplayListQueryEngine();
   if (resident || cell.eng) {
     resolveReady();
   } else {
@@ -969,6 +991,49 @@ export function createDisplayListQueries(
       () => pagesTouchingPositions(list, from, to)
     );
     return parseQuery(raw, [], 'range_rects');
+  };
+
+  const rangeRectsOnPages = (
+    from: number,
+    to: number,
+    firstPage: number,
+    lastPage: number
+  ): DisplayListRect[] => {
+    const first = Math.max(0, Math.ceil(firstPage));
+    let last = Math.min(0xffffffff, Math.floor(lastPage));
+    if (Number.isNaN(first) || Number.isNaN(last) || first > last || from === to) return [];
+    const filter = (rects: DisplayListRect[]): DisplayListRect[] =>
+      rects.filter((rect) => rect.pageIndex >= first && rect.pageIndex <= last);
+    const live = handedOff();
+    if (live !== undefined) {
+      return live
+        ? (live.rangeRectsOnPages?.(from, to, first, last) ?? filter(live.rangeRects(from, to)))
+        : [];
+    }
+    if (resident) {
+      if (!resident.displayRangeRectsOnPagesJson) return filter(rangeRects(from, to));
+      return parseQuery(
+        residentQuery(
+          () => resident.displayRangeRectsOnPagesJson!(from, to, first, last),
+          'range_rects_on_pages'
+        ),
+        [],
+        'range_rects_on_pages'
+      );
+    }
+    last = Math.min(list.pages.length - 1, last);
+    if (first > last) return [];
+    if (!cell.eng?.rangeRectsOnPagesJson || cell.eng.hasRangeRectsOnPages?.() === false) {
+      return filter(rangeRects(from, to));
+    }
+    const raw = runQuery(
+      cell.eng.rangeRectsOnPagesByHandle &&
+        ((h: number) => cell.eng!.rangeRectsOnPagesByHandle!(h, from, to, first, last)),
+      () => cell.eng!.rangeRectsOnPagesJson!(getJson(), from, to, first, last),
+      'range_rects_on_pages',
+      () => pagesTouchingPositions(list, from, to, 0, first, last)
+    );
+    return parseQuery(raw, [], 'range_rects_on_pages');
   };
 
   const verticalMove = (
@@ -1451,6 +1516,7 @@ export function createDisplayListQueries(
     hitTestRegions,
     verticalMove,
     rangeRects,
+    rangeRectsOnPages,
     hfRangeRects,
     noteRangeRects,
     hfCaretRects,

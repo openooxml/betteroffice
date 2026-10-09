@@ -1,3 +1,4 @@
+import type { LayoutMetaV1 } from './layoutMeta';
 import type {
   YrsEngineApplyProfile,
   YrsLoc,
@@ -6,9 +7,24 @@ import type {
   YrsSelection,
   YrsStickyPosition,
 } from './index';
+import type { PointPosition } from '../plugin-api';
+import type { DocxResolvedPointPosition } from './pointPosition';
+import type {
+  DocxDisplayRange,
+  DocxDisplaySelectionInfo,
+  DocxDisplaySelectionText,
+  DocxSelectionUnit,
+} from './viewerSelection';
+import type { FindOptions } from '../utils/findReplace';
+import type { DocxFindDisplayMatch } from './findMatches';
+import type { CollaborationCursor } from '../collaboration/types';
+import type { DocxSidebarRead, DocxOutlineHeading } from './sidebarReads';
 import type { ResidentSearchResult } from './residentSearch';
+import type { DocxFindParagraphsOptions, DocxParagraphMatch } from './findParagraphs';
 import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { WasmModuleMemory } from '../wasm/loadWasmAsset';
+import type { Comment } from '../types/content';
+import type { Document } from '../types/document';
 import type {
   DocxProposalRegistryState,
   DocxProposalRequest,
@@ -21,14 +37,22 @@ import type {
   DocxParagraphAnchorResult,
   DocxParagraphIdentitySnapshot,
 } from './paragraphIdentity';
-import type { DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
+import type { DocxFindTextRequest, DocxFindTextResult, DocxReadParagraphsRequest, DocxReadParagraphsResult } from './edits';
 import type { ProposalGeometryMirror, resolveNavigationTarget } from './proposalGeometry';
+import type { DocxPageExportOptions } from './pagedExport';
+import type { DocxContentControlQuery, DocxContentControlsOptions, DocxContentControlsResult } from './contentControls';
+
+/** @internal */
+export interface ResidentEngineWorkerFontSync {
+  fontsBaseRevision?: number;
+}
 
 /** @internal */
 export type ResidentProposalOperation =
-  | { kind: 'propose'; request: DocxProposalRequest }
-  | { kind: 'setStates'; request: DocxProposalStateRequest }
-  | { kind: 'withdraw'; request: DocxProposalWithdrawRequest }
+  | { kind: 'propose'; request: DocxProposalRequest; peerStateVector?: Uint8Array }
+  | { kind: 'setStates'; request: DocxProposalStateRequest; peerStateVector?: Uint8Array }
+  | { kind: 'withdraw'; request: DocxProposalWithdrawRequest; peerStateVector?: Uint8Array }
+  | { kind: 'removeComment'; id: string }
   | { kind: 'snapshot' };
 
 /** @internal */
@@ -36,7 +60,9 @@ export interface ResidentProposalResponse {
   result?: DocxProposalResult;
   mirror: { version: string; proposals: DocxProposalRegistryState };
   changedStories: string[];
+  projectionStories?: string[];
   updates: ArrayBuffer[];
+  peerDiff?: ArrayBuffer;
   stateVector: ArrayBuffer;
   geometry: ProposalGeometryMirror;
   fontRequirements?: { layoutInput: string; requirementsJson: string };
@@ -44,25 +70,72 @@ export interface ResidentProposalResponse {
 
 /** @internal */
 export type ResidentDocumentRead =
+  | { kind: 'exportStructuredWithPages'; options: DocxPageExportOptions; currentRequest: string }
+  | { kind: 'listContentControls'; options: DocxContentControlsOptions }
+  | { kind: 'findContentControls'; query: DocxContentControlQuery; options: DocxContentControlsOptions }
   | { kind: 'paragraphIdentities' }
   | { kind: 'resolveParagraphAnchors'; anchors: DocxParagraphAnchor[] }
   | { kind: 'readParagraphs'; request: DocxReadParagraphsRequest }
+  | { kind: 'findText'; request: DocxFindTextRequest }
+  | { kind: 'findMatches'; searchText: string; options: FindOptions; expectVersion: string }
   | { kind: 'searchText'; query: string; caseSensitive: boolean; carry?: YrsStickyPosition | null }
+  | ({ kind: 'findParagraphs'; query: string } & DocxFindParagraphsOptions)
   | { kind: 'stickyAnchors'; locs: YrsLoc[]; version: string }
-  | { kind: 'navigationTarget'; story: string; paraId: string };
+  | { kind: 'navigationTarget'; story: string; paraId: string }
+  | { kind: 'pointPosition'; hit: PointPosition; expectVersion: string }
+  | {
+      kind: 'selectionUnit';
+      story: string;
+      position: number;
+      unit: DocxSelectionUnit;
+      expectVersion: string;
+    }
+  | { kind: 'selectionText'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'selectionInfo'; story: string; anchor: number; head: number; expectVersion: string }
+  | { kind: 'paragraphTarget'; story: string; paraId: string; expectVersion: string }
+  | { kind: 'commentTarget'; story: string; commentId: string; expectVersion: string }
+  | { kind: 'revisionTarget'; story: string; revisionId: string; expectVersion: string }
+  | { kind: 'bookmarkPosition'; story: string; name: string; expectVersion: string }
+  | { kind: 'sidebar'; commentIds: string[]; expectVersion: string }
+  | { kind: 'headings'; expectVersion: string };
 
 /** @internal */
 export interface ResidentDocumentReadValues {
+  exportStructuredWithPages: string;
+  listContentControls: DocxContentControlsResult;
+  findContentControls: DocxContentControlsResult;
   paragraphIdentities: DocxParagraphIdentitySnapshot;
   resolveParagraphAnchors: { results: DocxParagraphAnchorResult[] };
   readParagraphs: DocxReadParagraphsResult;
+  findText: DocxFindTextResult;
+  findMatches: DocxFindDisplayMatch[] | null;
   navigationTarget: ReturnType<typeof resolveNavigationTarget>;
   searchText: ResidentSearchResult;
+  findParagraphs: DocxParagraphMatch[];
   stickyAnchors: Array<YrsStickyPosition | null>;
+  pointPosition: DocxResolvedPointPosition | null;
+  selectionUnit: DocxDisplayRange | null;
+  selectionText: DocxDisplaySelectionText | null;
+  selectionInfo: DocxDisplaySelectionInfo | null;
+  paragraphTarget: DocxDisplayRange | null;
+  commentTarget: DocxDisplayRange | null;
+  revisionTarget: DocxDisplayRange | null;
+  bookmarkPosition: number | null;
+  sidebar: DocxSidebarRead | null;
+  headings: DocxOutlineHeading[] | null;
 }
 
+/** How long a warm waits for the host's compiled module before loading the engine itself. */
+export const RESIDENT_HOST_MODULE_WAIT_MS = 10_000;
+
+/** @internal */
+export type ResidentEngineWorkerHostModule = {
+  type: 'editModule';
+  module: WebAssembly.Module | null;
+};
+
 export type ResidentEngineWorkerRequest =
-  | { id: number; type: 'warm' }
+  | { id: number; type: 'warm'; hostModule?: true }
   | {
       id: number;
       type: 'bootstrap';
@@ -70,6 +143,8 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       layoutExtras?: string;
+      layoutReply?: 'meta';
+      headersFootersEpoch?: number;
       /** Pages `[start, end)` a full build compiles; the rest stay unbuilt. */
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
@@ -103,12 +178,31 @@ export type ResidentEngineWorkerRequest =
        * `open` of the whole document replaces it.
        */
       previewBlocks?: number;
+      /** Optional paragraph weight budget for the display-only body cut. */
+      previewParagraphBudget?: number;
     }
   | { id: number; type: 'fontRequirements'; layoutInput: string }
-  | { id: number; type: 'encodeState' }
+  | { id: number; type: 'layoutJson'; layoutRevision: number }
+  | { id: number; type: 'encodeState'; peerMetadata?: true }
+  | {
+      id: number;
+      type: 'save';
+      comments: Comment[];
+      host?: Document;
+      stateVector?: Uint8Array;
+      /** The editor peer's marked stories. @internal */
+      stories?: readonly string[];
+    }
+  | { id: number; type: 'syncUpdate'; update: Uint8Array; stateVector: Uint8Array }
   | { id: number; type: 'revisionCount' }
   | { id: number; type: 'proposal'; operation: ResidentProposalOperation }
-  | { id: number; type: 'documentRead'; read: ResidentDocumentRead }
+  | {
+      id: number;
+      type: 'documentRead';
+      read: ResidentDocumentRead;
+      /** Answered `superseded` instead when the document's version differs. */
+      expectVersion?: string;
+    }
   | {
       id: number;
       type: 'sync';
@@ -122,6 +216,8 @@ export type ResidentEngineWorkerRequest =
        * from the layout it runs and returns that layout as `layoutJson`.
        */
       layoutExtras?: string;
+      layoutReply?: 'meta';
+      headersFootersEpoch?: number;
       displayWindow?: [number, number];
       retainBuiltPages?: boolean;
       provisionalPages?: number;
@@ -222,11 +318,18 @@ export type ResidentEngineWorkerResponse = (
       engineProfile?: YrsEngineApplyProfile;
       caret?: YrsResidentCaretSnapshot;
       selection?: YrsSelection | null;
+      /** The same selection as sticky positions, for the host to resolve against its content. */
+      selectionCursor?: CollaborationCursor | null;
       /** The presented frame carries the worker-painted caret line. */
       caretPainted?: boolean;
       replayMs?: number;
       replayedPages?: number;
       layoutRevision?: number;
+      /** The document version the frame lays out. */
+      documentVersion?: string;
+      documentPreview?: boolean;
+      /** The frame lays out the whole document as opened, before any change. */
+      documentAsOpened?: boolean;
       /** Characters an applyDelete removed. */
       deletedUnits?: number;
       /** The worker replica's yrs state vector after this operation, so the
@@ -234,6 +337,8 @@ export type ResidentEngineWorkerResponse = (
       stateVector?: ArrayBuffer;
       /** The region layout the worker ran, for a request carrying `layoutExtras`. */
       layoutJson?: string;
+      layoutMeta?: LayoutMetaV1 | { v: number };
+      layoutJsonStatus?: 'ok' | 'stale';
       /** `layoutJson` covers only the first pages of the body. */
       layoutProvisional?: boolean;
       /** An `open` reply: the opened package's host metadata JSON. */
@@ -244,11 +349,16 @@ export type ResidentEngineWorkerResponse = (
       requirementsJson?: string;
       /** An `encodeState` reply: the document state as one yrs v1 update. */
       state?: ArrayBuffer;
+      peerMetadata?: ArrayBuffer;
+      peerMetadataReason?: string;
+      /** @internal */
+      saved?: ArrayBuffer;
       revisionCount?: number;
       /** @internal */
       proposals?: DocxProposalRegistryState;
       /** @internal */
       version?: string;
+      repair?: ArrayBuffer | null;
       /** @internal */
       proposal?: ResidentProposalResponse;
       /** @internal */
@@ -258,6 +368,8 @@ export type ResidentEngineWorkerResponse = (
       id: number;
       ok: false;
       error: string;
+      /** @internal */
+      code?: 'save-unavailable';
       residentUnavailable?: boolean;
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;

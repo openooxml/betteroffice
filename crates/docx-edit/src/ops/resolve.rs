@@ -455,6 +455,9 @@ impl EditingDoc {
                 }
                 let story = story_ref(&txn, &range.story)?;
                 check_range(&story, &txn, range.start, len)?;
+                let (start, end) =
+                    crate::ops::code_point_range(&story, &txn, range.start, range.end);
+                let range = &StoryRange::new(range.story.clone(), start, end);
                 let removed_tables = resolve_table_row_revisions(
                     &mut txn,
                     &story,

@@ -256,7 +256,10 @@ pub(crate) fn today(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match ctx.now_serial {
         Some(s) => num(s.floor()),
-        None => err(ErrorValue::Value),
+        None => {
+            ctx.record_unsupported_function();
+            err(ErrorValue::Value)
+        }
     }
 }
 
@@ -267,7 +270,10 @@ pub(crate) fn now(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     match ctx.now_serial {
         Some(s) => num(s),
-        None => err(ErrorValue::Value),
+        None => {
+            ctx.record_unsupported_function();
+            err(ErrorValue::Value)
+        }
     }
 }
 
@@ -642,7 +648,11 @@ fn month_name(field: &str) -> Option<i64> {
 }
 
 fn current_year(ctx: &EvalContext<'_>) -> Option<i64> {
-    let serial = ctx.now_serial?.floor() as i64;
+    let Some(now) = ctx.now_serial else {
+        ctx.record_unsupported_function();
+        return None;
+    };
+    let serial = now.floor() as i64;
     serial_to_ymd(serial).map(|(y, _, _)| y)
 }
 
