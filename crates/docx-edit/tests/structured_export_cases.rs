@@ -11,7 +11,7 @@ use docx_edit::structured::{
     StorySelection, UnlocatedReason, VerticalMerge, export_docx_markdown, export_docx_structured,
     export_package_structured, render_docx_markdown,
 };
-use docx_edit::{EditCtx, EditingDoc, RawOp, seed_from_docx};
+use docx_edit::{EditCtx, EditingDoc, RawOp, StoryRange, seed_from_docx};
 use fixture::{Package, image, para, run};
 use yrs::{Map, MapRef, ReadTxn, Transact};
 
@@ -496,6 +496,35 @@ fn comment_metadata(content: &DocxStructuredContent) -> docx_edit::structured::C
         .iter()
         .find_map(|story| story.comment.clone())
         .unwrap()
+}
+
+#[test]
+fn comment_zero_is_anchored_like_any_other() {
+    let xml = para(
+        "60000011",
+        &format!(
+            r#"<w:commentRangeStart w:id="0"/>{}<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>"#,
+            run("Annotated")
+        ),
+    );
+    let comments = format!(
+        r#"<w:comments {}><w:comment w:id="0" w:author="Ann">{}</w:comment></w:comments>"#,
+        fixture::namespaces(),
+        para("60000012", &run("Remark"))
+    );
+    let doc = open(
+        &Package::new(&xml)
+            .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+            .bytes(),
+    );
+    let span = |doc: &EditingDoc| {
+        let anchors = doc.resolve_comment("0").unwrap();
+        (anchors[0].story.clone(), anchors[0].start, anchors[0].end)
+    };
+    assert_eq!(span(&doc), ("body".to_owned(), 0, 9));
+    doc.set_comment_ranges("0", &[StoryRange::new("body", 2, 5)])
+        .unwrap();
+    assert_eq!(span(&doc), ("body".to_owned(), 2, 5));
 }
 
 #[test]
@@ -1940,6 +1969,50 @@ fn numbers_a_format_cannot_write_are_diagnosed() {
         diagnostic.code == DiagnosticCode::UnsupportedNumbering
             && diagnostic.message.contains("2000000000")
     }));
+}
+
+#[test]
+fn comments_in_cells_and_block_controls_are_anchored() {
+    let commented = |id: u32, text: &str| {
+        format!(
+            r#"<w:commentRangeStart w:id="{id}"/>{}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#,
+            run(text)
+        )
+    };
+    let xml = format!(
+        r#"{}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl><w:sdt><w:sdtPr><w:id w:val="6"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>{}"#,
+        para("0F600000", &commented(1, "Body")),
+        para("0F600001", &commented(1, "Cell")),
+        para("0F600002", &commented(2, "Controlled")),
+        para("0F600003", &run("Tail"))
+    );
+    let comments = format!(
+        r#"<w:comments {}>{}</w:comments>"#,
+        fixture::namespaces(),
+        [1, 2]
+            .map(|id| format!(
+                r#"<w:comment w:id="{id}" w:author="Ann">{}</w:comment>"#,
+                para(&format!("0F60001{id}"), &run("Remark"))
+            ))
+            .concat()
+    );
+    let doc = open(
+        &Package::new(&xml)
+            .part("comments.xml", "rIdComments", COMMENTS, COMMENTS, &comments)
+            .bytes(),
+    );
+    let spans = |id: &str| {
+        doc.resolve_comment(id)
+            .unwrap()
+            .into_iter()
+            .map(|anchor| (anchor.story, anchor.start, anchor.end))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        spans("1"),
+        [("body".to_owned(), 0, 4), ("body:t0:r0c0".to_owned(), 0, 4)]
+    );
+    assert_eq!(spans("2"), [("body:sdt0".to_owned(), 0, 10)]);
 }
 
 #[test]

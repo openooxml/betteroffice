@@ -1,5 +1,13 @@
 {
   "_lang": "he",
+  "worker": {
+    "previousRecovery": null,
+    "preparing": "העורך בהכנה. העריכה תהיה זמינה בקרוב.",
+    "failed": "העריכה אינה זמינה. הורידו את המצגת ששוחזרה.",
+    "disabled": "תכונה זו אינה זמינה במצב עריכה זה.",
+    "recovery": null,
+    "image": null
+  },
   "toolbar": {
     "label": null,
     "save": "שמירה",

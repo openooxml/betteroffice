@@ -58,6 +58,31 @@ pub(crate) fn measure_paragraph(
     Some(extent_from_out(extent))
 }
 
+/// The paragraph's narrowest width without a line breaking inside a word,
+/// per [`ooxml_text::min_content_width_typed`]; `None` when the typed path
+/// cannot measure it.
+pub(crate) fn min_content_width(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Option<f64> {
+    let block = block_in(paragraph, content_width)?;
+    let defaults = defaults_in(&config.defaults)?;
+    let request = MeasureRequest {
+        block: &block,
+        max_width: content_width as f32,
+        font_chains: FontChains::BTree(&config.font_chains),
+        defaults: &defaults,
+        compat: compat_in(&config.compat)?,
+        floating_zones: None,
+        paragraph_y_offset: None,
+        authoritative_shaping: config.authoritative_shaping,
+    };
+    crate::min_content_width_typed_resident(&request)
+        .ok()
+        .map(f64::from)
+}
+
 fn block_in(paragraph: &ParagraphBlock, content_width: f64) -> Option<BlockIn> {
     let attrs = paragraph.attrs.as_ref();
     let indent = attrs.and_then(|attrs| attrs.indent.as_ref());
@@ -291,12 +316,32 @@ fn rotation_bounds_in(bounds: Option<&Value>) -> Option<Option<RotationBoundsIn>
     }
 }
 
+const WIDENED_SLOTS: usize = 4096;
+
+thread_local! {
+    /// [`normalize_output`] results by `f32` bits, one per slot; an empty slot
+    /// holds NaN bits, which are never looked up.
+    static WIDENED: std::cell::RefCell<Box<[(u32, f64)]>> =
+        std::cell::RefCell::new(vec![(u32::MAX, 0.0); WIDENED_SLOTS].into_boxed_slice());
+}
+
 fn normalize_output(value: f32) -> f64 {
     if !value.is_finite() {
         return f64::from(value);
     }
-    let mut buffer = zmij::Buffer::new();
-    serde_json::from_str(buffer.format_finite(value)).unwrap_or_else(|_| f64::from(value))
+    let bits = value.to_bits();
+    let slot = (bits.wrapping_mul(0x9e37_79b1) >> 20) as usize;
+    WIDENED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let entry = &mut cache[slot];
+        if entry.0 != bits {
+            let mut buffer = zmij::Buffer::new();
+            let widened = serde_json::from_str(buffer.format_finite(value))
+                .unwrap_or_else(|_| f64::from(value));
+            *entry = (bits, widened);
+        }
+        entry.1
+    })
 }
 
 fn extent_from_out(extent: ooxml_text::ParagraphExtentOut) -> crate::types::ParagraphExtent {
@@ -334,6 +379,7 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
                 .collect()
         }),
         float_skip_before: row.float_skip_before.map(normalize_output),
+        marker_tab_offset: row.marker_tab_offset.map(normalize_output),
         run_advances: row.run_advances.map(|advances| {
             advances
                 .into_iter()
@@ -544,7 +590,12 @@ mod parity_tests {
             bits = bits.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             corpus.push(f32::from_bits(bits));
         }
-        for value in corpus.into_iter().filter(|value| value.is_finite()) {
+        let finite: Vec<f32> = corpus
+            .into_iter()
+            .filter(|value| value.is_finite())
+            .collect();
+        // The second pass reads the values the first one cached.
+        for value in finite.iter().chain(finite.iter().rev()).copied() {
             let encoded = serde_json::to_string(&value).unwrap();
             let expected: f64 = serde_json::from_str(&encoded).unwrap();
             assert_eq!(
@@ -698,6 +749,36 @@ mod parity_tests {
         );
     }
 
+    /// Marker tab offsets survive typed conversion with JSON-equivalent precision.
+    #[test]
+    fn list_marker_tab_overrun_matches_the_json_path() {
+        let fixture = fixture();
+        let attrs = crate::types::ParagraphAttrs {
+            list_marker: Some("1.2.3.4.5.6.7.8.9".to_owned()),
+            list_marker_font_family: Some("Liberation Sans".to_owned()),
+            list_marker_font_size: Some(12.0),
+            indent: Some(crate::types::ParagraphIndent {
+                left: Some(113.4),
+                right: None,
+                first_line: None,
+                hanging: Some(113.4),
+            }),
+            default_tab_stop_twips: Some(709.0),
+            ..Default::default()
+        };
+        assert_parity(
+            "list-marker-tab-overrun",
+            &paragraph(
+                vec![text_run(&"numbered item text ".repeat(20))],
+                Some(attrs),
+            ),
+            400.0,
+            &fixture.config,
+            None,
+            0.0,
+        );
+    }
+
     #[test]
     fn field_run_matches_the_json_path() {
         let fixture = fixture();
@@ -707,6 +788,8 @@ mod parity_tests {
             raw_type: None,
             instruction: None,
             fallback: Some("42".to_owned()),
+            locked: false,
+            nested_sequences: Vec::new(),
             pm_start: None,
             pm_end: None,
         })];

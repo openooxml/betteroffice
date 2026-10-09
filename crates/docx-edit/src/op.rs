@@ -247,8 +247,13 @@ pub(crate) fn global_of_loc<T: ReadTxn>(
     txn: &T,
     loc: &Loc,
 ) -> Result<u32, OpError> {
-    let bounds = para_bounds(story, txn)
-        .into_iter()
+    global_in_bounds(&para_bounds(story, txn), loc)
+}
+
+/// [`global_of_loc`] over a story's [`para_bounds`], read once for many locations.
+pub(crate) fn global_in_bounds(all: &[ParaBounds], loc: &Loc) -> Result<u32, OpError> {
+    let bounds = all
+        .iter()
         .find(|bounds| bounds.para_id == loc.para)
         .ok_or_else(|| OpError::UnknownPara(loc.para.clone()))?;
     if loc.offset > bounds.len() {
@@ -268,14 +273,20 @@ pub(crate) fn loc_of_global<T: ReadTxn>(
     txn: &T,
     index: u32,
 ) -> Result<Loc, OpError> {
-    let all = para_bounds(story, txn);
+    loc_in_bounds(story_id, &para_bounds(story, txn), index)
+}
+
+/// [`loc_of_global`] over a story's [`para_bounds`], read once for many indices.
+pub(crate) fn loc_in_bounds(
+    story_id: &str,
+    all: &[ParaBounds],
+    index: u32,
+) -> Result<Loc, OpError> {
     let last = all
         .last()
-        .cloned()
         .ok_or_else(|| OpError::UnknownStory(story_id.to_owned()))?;
     let bounds = all
-        .into_iter()
-        .find(|bounds| index <= bounds.pilcrow)
+        .get(all.partition_point(|bounds| bounds.pilcrow < index))
         .unwrap_or(last);
     Ok(Loc {
         story: story_id.to_owned(),
@@ -295,9 +306,10 @@ pub(crate) fn loc_range_in_txn<T: ReadTxn>(
     start: u32,
     end: u32,
 ) -> Result<LocRange, OpError> {
+    let all = para_bounds(story, txn);
     Ok(LocRange {
-        start: loc_of_global(story_id, story, txn, start)?,
-        end: loc_of_global(story_id, story, txn, end)?,
+        start: loc_in_bounds(story_id, &all, start)?,
+        end: loc_in_bounds(story_id, &all, end)?,
     })
 }
 

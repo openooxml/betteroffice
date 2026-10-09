@@ -1,4 +1,6 @@
 import type {
+  TablePayload,
+  TablePayloadRow,
   YrsCellBorders,
   YrsCellLoc,
   YrsContentControlValue,
@@ -10,6 +12,7 @@ import type {
   YrsTableLoc,
   YrsTableRange,
 } from '@betteroffice/docx/yrs';
+import { storyOffsetForLoc, storyPlainText, tableAnchors, tablePlainText } from '@betteroffice/docx/yrs';
 import { computeSplitDialogDefaults, pixelsToEmu } from '@betteroffice/docx/utils';
 import type { ImageLayoutTarget, SetImageWrapTypeOptions } from '@betteroffice/docx/docx';
 import type { TableContextInfo } from './types';
@@ -89,8 +92,7 @@ export interface YrsHyperlinkHit {
 }
 
 export function yrsStoryOffsetForLoc(session: YrsSession, loc: YrsLoc): number {
-  const span = session.locateParagraph(loc.story, loc.paraId);
-  return span.start + loc.offset;
+  return storyOffsetForLoc(session, loc);
 }
 
 export function yrsLocForStoryOffset(
@@ -227,31 +229,29 @@ export function yrsSelectedText(session: YrsSession): string {
     .join('');
 }
 
-interface TablePayloadCell {
-  story: string;
-  tcPr?: Record<string, unknown>;
-}
-
-interface TablePayloadRow {
-  cells: TablePayloadCell[];
-}
-
-interface TablePayload {
-  tblPr?: Record<string, unknown>;
-  grid?: unknown[];
-  rows: TablePayloadRow[];
-}
-
-interface TableCellAnchor {
-  row: number;
-  column: number;
-  rowspan: number;
-  colspan: number;
-  story: string;
-}
-
-function positiveSpan(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : 1;
+/**
+ * The current selection as plain text for the clipboard: tabs and line breaks
+ * as characters, tables and a multi-cell selection as tab-separated rows.
+ */
+export function yrsSelectionPlainText(session: YrsSession): string {
+  const table = currentYrsTableTarget(session);
+  if (table && !sameCell(table.range.anchor, table.range.head)) {
+    const payload = tablePayload(session, table.range.anchor);
+    const { anchor, head } = table.range;
+    return payload
+      ? tablePlainText(session, payload, {
+          top: Math.min(anchor.row, head.row),
+          bottom: Math.max(anchor.row, head.row),
+          left: Math.min(anchor.column, head.column),
+          right: Math.max(anchor.column, head.column),
+        }).join('\n')
+      : '';
+  }
+  const range = currentYrsSelectionRange(session);
+  if (!range) return '';
+  const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
+  const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
+  return start === end ? '' : storyPlainText(session, range.story, start, end);
 }
 
 function tablePayload(session: YrsSession, table: YrsTableLoc): TablePayload | null {
@@ -275,33 +275,6 @@ export function currentYrsTableProperties(
 ): Record<string, unknown> | undefined {
   const resolved = resolveYrsTableTarget(session);
   return resolved ? resolved.payload()?.tblPr : undefined;
-}
-
-function tableAnchors(payload: TablePayload): { anchors: TableCellAnchor[]; columns: number } {
-  const occupied: boolean[][] = Array.from({ length: payload.rows.length }, () => []);
-  const anchors: TableCellAnchor[] = [];
-  let columns = payload.grid?.length ?? 0;
-
-  payload.rows.forEach((row, rowIndex) => {
-    let column = 0;
-    for (const cell of row.cells ?? []) {
-      while (occupied[rowIndex]?.[column]) column += 1;
-      const rowspan = positiveSpan(cell.tcPr?.rowspan);
-      const colspan = positiveSpan(cell.tcPr?.colspan);
-      anchors.push({ row: rowIndex, column, rowspan, colspan, story: cell.story });
-      for (let targetRow = rowIndex; targetRow < rowIndex + rowspan; targetRow += 1) {
-        const slots = occupied[targetRow] ?? [];
-        occupied[targetRow] = slots;
-        for (let targetColumn = column; targetColumn < column + colspan; targetColumn += 1) {
-          slots[targetColumn] = true;
-        }
-      }
-      column += colspan;
-      columns = Math.max(columns, column);
-    }
-  });
-
-  return { anchors, columns };
 }
 
 function sameTable(a: YrsTableLoc, b: YrsTableLoc): boolean {

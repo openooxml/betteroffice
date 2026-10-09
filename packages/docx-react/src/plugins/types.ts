@@ -199,12 +199,11 @@ export interface DocxPluginGeometry {
   /** @experimental DOM access that a data-only geometry facade may replace in a minor release. */
   dom: RenderedDomContext;
   toOverlayRect(rect: DocxPluginRect): DocxPluginRect | null;
-  /**
-   * Client coordinates to the text under them, with an edit batch target at `layout.version`;
-   * null outside text, while input is pending and until the pages show this layout. Selection
-   * and focus stay where they are.
-   */
+  /** Returns the text under client coordinates without moving selection or focus.
+   * @deprecated Use {@link readPositionAtPoint}. Worker viewers return a cached answer or null. */
   getPositionAtPoint(clientX: number, clientY: number): DocxPluginPointPosition | null;
+  /** Reads the point after pending input commits; returns null if this layout changes while waiting. */
+  readPositionAtPoint(clientX: number, clientY: number): Promise<DocxPluginPointPosition | null>;
   /**
    * Every visible fragment in overlay-layer pixels. The anchor is the collapsed end of the
    * last fragment, a wholly hidden target's boundary, or its paragraph; pageRect is its page.
@@ -341,6 +340,10 @@ export interface DocxPluginDefinition<S> {
   initialize?(context: DocxPluginContext<S>): MaybePromise<void>;
   onEvent?(context: DocxPluginContext<S>, event: DocxPluginEvent): MaybePromise<void>;
   panel?: DocxPluginPanel<S>;
+  /**
+   * May render during a pending layout with `context.geometry` and `context.snapshot.layout` null;
+   * `geometry` is then the previous layout's.
+   */
   overlay?: ComponentType<{ context: DocxPluginContext<S>; geometry: DocxPluginGeometry }>;
   getSidebarItems?(context: DocxPluginContext<S>): readonly DocxPluginSidebarItem<S>[];
   commands?: readonly DocxPluginCommand<S>[];

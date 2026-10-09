@@ -13,7 +13,10 @@ use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
-use crate::{KIND_KEY, PARA_ID, PPR_CHANGE, is_pilcrow, map_string, out_len};
+use crate::{
+    DEL, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, StoryRange, is_pilcrow, map_string,
+    out_len,
+};
 
 /// One formatting-run chunk of a story, snapshotted for index-stable reverse walks.
 pub(crate) struct Chunk {
@@ -38,6 +41,32 @@ impl Chunk {
         matches!(self.attrs.get(key), Some(value) if *value != Any::Null)
     }
 
+    pub fn is_block_embed<T: ReadTxn>(&self, txn: &T) -> bool {
+        matches!(&self.kind, ChunkKind::Embed(Some(map)) if map_string(map, txn, KIND_KEY)
+            .is_some_and(|kind| crate::segments::is_block_embed(&kind)))
+    }
+
+    pub fn block_revisions<T: ReadTxn>(&self, txn: &T) -> Option<[Option<Any>; 2]> {
+        if !self.is_block_embed(txn) {
+            return None;
+        }
+        let table = match &self.kind {
+            ChunkKind::Embed(Some(map))
+                if map_string(map, txn, KIND_KEY).as_deref() == Some("table") =>
+            {
+                table::table_revisions(map, txn)
+            }
+            _ => [None, None],
+        };
+        Some([INS, DEL].map(|key| {
+            self.attrs
+                .get(key)
+                .filter(|stamp| **stamp != Any::Null)
+                .cloned()
+                .or_else(|| table[usize::from(key == DEL)].clone())
+        }))
+    }
+
     /// The `author` of an `ins`/`del` revision value on this chunk, if any.
     pub fn revision_author(&self, key: &str) -> Option<String> {
         let Some(Any::Map(revision)) = self.attrs.get(key) else {
@@ -50,7 +79,7 @@ impl Chunk {
     }
 }
 
-fn revision_id_for_author(value: &Any, author: &str) -> Option<String> {
+pub(crate) fn revision_id_for_author(value: &Any, author: &str) -> Option<String> {
     let Any::Map(revision) = value else {
         return None;
     };
@@ -195,6 +224,42 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
     chunks
 }
 
+pub(crate) fn block_embed_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    snapshot_range(story, txn, index, index.saturating_add(1))
+        .first()
+        .is_some_and(|chunk| chunk.is_block_embed(txn))
+}
+
+pub(crate) fn inherit_block_revisions(
+    txn: &mut TransactionMut<'_>,
+    story: &TextRef,
+    index: u32,
+    map: &MapRef,
+    revisions: &[Option<Any>; 2],
+) {
+    for ((attr_key, ppr_key), stamp) in [(INS, PPR_INS), (DEL, PPR_DEL)].into_iter().zip(revisions)
+    {
+        if let Some(stamp) = stamp {
+            map.insert(txn, ppr_key, stamp.clone());
+            story.format(
+                txn,
+                index,
+                1,
+                Attrs::from([(attr_key.into(), stamp.clone())]),
+            );
+        }
+    }
+}
+
+pub(crate) fn paragraph_content_before<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    index > 0
+        && snapshot_range(story, txn, index - 1, index)
+            .last()
+            .is_some_and(|chunk| {
+                !matches!(chunk.kind, ChunkKind::Pilcrow(_)) && !chunk.is_block_embed(txn)
+            })
+}
+
 /// The story's last pilcrow as `(index, map)`.
 pub(crate) fn last_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T) -> Option<(u32, MapRef)> {
     let mut offset = 0;
@@ -251,4 +316,137 @@ pub(crate) fn adopt_pilcrow(
 
 pub(crate) fn utf16_len(text: &str) -> u32 {
     text.encode_utf16().count() as u32
+}
+
+/// Whether UTF-16 `offset` falls between the two units of a surrogate pair in `text`.
+fn inside_pair(text: &str, offset: u32) -> bool {
+    text_boundary(text, offset).0
+}
+
+fn text_boundary(text: &str, offset: u32) -> (bool, u32) {
+    let mut at = 0;
+    let mut width = 0;
+    for ch in text.chars() {
+        if at >= offset {
+            return (false, width);
+        }
+        width = ch.len_utf16() as u32;
+        at += width;
+        if at > offset {
+            return (true, width);
+        }
+    }
+    (false, if at == offset { width } else { 0 })
+}
+
+/// `index` moved off the middle of a surrogate pair in `chunks`: back to the pair's start, or
+/// past its end when `forward`. yrs splits such an index after the pair while the new item's
+/// id assumes the index itself, which corrupts the story.
+fn code_point_index(chunks: &[Chunk], index: u32, forward: bool) -> u32 {
+    code_point_boundary(chunks, index, forward).0
+}
+
+fn code_point_boundary(chunks: &[Chunk], index: u32, forward: bool) -> (u32, u32) {
+    let Some(chunk) = chunks
+        .partition_point(|chunk| chunk.start < index)
+        .checked_sub(1)
+        .and_then(|slot| chunks.get(slot))
+    else {
+        return (index, 0);
+    };
+    let ChunkKind::Text(text) = &chunk.kind else {
+        return (index, 0);
+    };
+    let (inside, width) = text_boundary(text, index - chunk.start);
+    let snapped = match (inside, forward) {
+        (false, _) => index,
+        (true, false) => index - 1,
+        (true, true) => index + 1,
+    };
+    (snapped, width)
+}
+
+/// Chunks covering the units on both sides of `index`, after moving `index` off the middle of
+/// a surrogate pair to the pair's start.
+pub(crate) fn position_chunks<T: ReadTxn>(story: &TextRef, txn: &T, index: &mut u32) -> Vec<Chunk> {
+    let take =
+        |index: u32| snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1));
+    let chunks = take(*index);
+    let snapped = code_point_index(&chunks, *index, false);
+    if snapped == *index {
+        return chunks;
+    }
+    *index = snapped;
+    take(snapped)
+}
+
+/// Chunks covering `range` and the unit on each side, after widening `range` to whole code
+/// points (a collapsed range moves to the pair's start).
+pub(crate) fn range_chunks<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    range: &mut StoryRange,
+) -> Vec<Chunk> {
+    range_chunks_observed(story, txn, range).0
+}
+
+pub(crate) fn range_chunks_observed<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    range: &mut StoryRange,
+) -> (Vec<Chunk>, bool) {
+    let take = |range: &StoryRange| {
+        snapshot_range(
+            story,
+            txn,
+            range.start.saturating_sub(1),
+            range.end.saturating_add(1),
+        )
+    };
+    let chunks = take(range);
+    let start = code_point_index(&chunks, range.start, false);
+    let (end, width) = if range.start == range.end {
+        (start, 0)
+    } else {
+        code_point_boundary(&chunks, range.end, true)
+    };
+    let single = width != 0
+        && end.checked_sub(start) == Some(width)
+        && (start, end) == (range.start, range.end);
+    if (start, end) == (range.start, range.end) {
+        return (chunks, single);
+    }
+    range.start = start;
+    range.end = end;
+    (take(range), single)
+}
+
+/// `[start, end)` widened to whole code points, for ops that take no chunk snapshot; a
+/// collapsed range moves to the pair's start.
+pub(crate) fn code_point_range<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    start: u32,
+    end: u32,
+) -> (u32, u32) {
+    let mut range = (start, end);
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        if offset >= end {
+            break;
+        }
+        if let Out::Any(Any::String(text)) = &diff.insert {
+            if offset < start && inside_pair(text, start - offset) {
+                range.0 = start - 1;
+            }
+            if start < end && inside_pair(text, end - offset) {
+                range.1 = end + 1;
+            }
+        }
+        offset += out_len(&diff.insert);
+    }
+    if start == end {
+        range.1 = range.0;
+    }
+    range
 }

@@ -5,10 +5,11 @@
 //! once and returns each run keyed by its head, plus the interior members, so
 //! the placement walk can skip blocks a group already accounted for.
 //!
-//! [`measure_keep_with_next_group`] turns a group into the height the contract
-//! actually demands: every member paragraph in full (spacing before, measured
-//! height, spacing after) plus one witness slice of the follower — never the
-//! follower in full, since the binding is only to where it begins. The witness
+//! [`measure_keep_with_next_group_at`] turns a group into the height the
+//! contract actually demands below the cursor: every member paragraph in full
+//! plus one witness slice of the follower — never the follower in full, since
+//! the binding is only to where it begins — with the spacing between them
+//! collapsed as placement collapses it. The witness
 //! is a paragraph's shortest legally placeable leading slice
 //! ([`paragraph_min_leading_slice`]), a table's initial header/body slice, the
 //! height of an image or text box, and nothing at all for any other follower
@@ -18,9 +19,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
-use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
-use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent};
+use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::table_row_break::{RowBreaks, first_table_fragment_height};
+use crate::types::{
+    BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent, TableBlock,
+    TableExtent,
+};
 
 /// Lines below which widow/orphan control forbids every internal break, since
 /// each side of one needs two lines.
@@ -63,8 +67,10 @@ fn is_bound_paragraph(block: &LayoutBlock) -> bool {
 ///
 /// A run grows while the next block is another keep-with-next paragraph; it
 /// ends at a break block, a non-paragraph block, a paragraph without keepNext,
-/// or the end of the list. When the terminator is a plain paragraph it becomes
-/// the run's follower, since the run must land on the follower's page.
+/// a paragraph that starts a new page, or the end of the list. When the
+/// terminator is a plain paragraph it becomes the run's follower, since the run
+/// must land on the follower's page. A paragraph that starts a new page is
+/// never a follower: Word lets the page break win over keepNext.
 pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
     let mut groups_by_head: BTreeMap<usize, KeepWithNextGroup> = BTreeMap::new();
     let mut interior_members: BTreeSet<usize> = BTreeSet::new();
@@ -79,7 +85,10 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         let mut members: Vec<usize> = vec![cursor];
         let mut tail_index = cursor;
         let mut probe = cursor + 1;
-        while probe < measured.len() && is_bound_paragraph(&measured[probe].block) {
+        while probe < measured.len()
+            && is_bound_paragraph(&measured[probe].block)
+            && !paragraph_breaks_before(&measured[probe].block)
+        {
             members.push(probe);
             tail_index = probe;
             probe += 1;
@@ -89,6 +98,7 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
         // supported flow object. Forced/section breaks terminate it.
         let after_tail = tail_index + 1;
         let follower = if after_tail < measured.len()
+            && !paragraph_breaks_before(&measured[after_tail].block)
             && matches!(
                 measured[after_tail].block,
                 LayoutBlock::Paragraph(_)
@@ -170,12 +180,66 @@ pub fn paragraph_min_leading_slice(block: &ParagraphBlock, measure: &ParagraphEx
 }
 
 /// Vertical space (px) the group needs for its keepNext contract to hold on a
-/// single page: the members in full plus the follower's witness slice.
+/// single page, measured from a fresh cursor; see
+/// [`measure_keep_with_next_group_at`].
 pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[MeasuredBlock]) -> f64 {
-    // follower's witness slice first: zero when there is no follower, or when
-    // it is not a laid-out paragraph
+    measure_keep_with_next_group_at(group, measured, |before| before, 0.0, f64::INFINITY)
+}
+
+/// Vertical space (px) the group needs below the cursor for its keepNext
+/// contract to hold on a single page: the members' lines plus the follower's
+/// witness slice, each gap collapsed to the larger of the space-after above
+/// it and the space-before below it, as placement collapses them.
+/// `leading` resolves the head's space-before at the cursor, `deferred` is
+/// the space-after the cursor still owes the block above it, and `capacity`
+/// is a blank page's content height, past which placement lets a table's
+/// keep-with-next row chain split.
+pub fn measure_keep_with_next_group_at(
+    group: &KeepWithNextGroup,
+    measured: &[MeasuredBlock],
+    leading: impl Fn(f64) -> f64,
+    deferred: f64,
+    capacity: f64,
+) -> f64 {
+    measure_keep_with_next_group_witnessing(group, measured, leading, deferred, capacity, true)
+}
+
+/// [`measure_keep_with_next_group_at`] with per-cell table witnesses only on
+/// pages without float bands (`split_first_row`). Otherwise a headerless table
+/// witnesses its whole first row unless taller than `capacity`.
+pub(crate) fn measure_keep_with_next_group_witnessing(
+    group: &KeepWithNextGroup,
+    measured: &[MeasuredBlock],
+    leading: impl Fn(f64) -> f64,
+    deferred: f64,
+    capacity: f64,
+    split_first_row: bool,
+) -> f64 {
+    let mut budget = 0.0;
+    let mut owed = deferred;
+    for (position, &index) in group.members.iter().enumerate() {
+        let MeasuredBlock { block, measure } = &measured[index];
+        let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) = (block, measure)
+        else {
+            continue;
+        };
+        let before = get_spacing_before(block);
+        let before = if position == 0 {
+            leading(before)
+        } else {
+            before
+        };
+        let lines: f64 = measure
+            .lines
+            .iter()
+            .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+            .sum();
+        budget += before.max(owed) + lines;
+        owed = get_spacing_after(block);
+    }
+
     let follower = group.follower.and_then(|index| measured.get(index));
-    let witness_line = match follower.map(|mb| &mb.measure) {
+    let witness = match follower.map(|mb| &mb.measure) {
         Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => {
             match follower.map(|mb| &mb.block) {
                 Some(LayoutBlock::Paragraph(block)) => paragraph_min_leading_slice(block, p),
@@ -184,7 +248,7 @@ pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[Measu
         }
         Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
             Some(LayoutBlock::Table(block)) => {
-                first_table_fragment_height(block, table, &build_table_row_break_info(block, table))
+                table_leading_slice(block, table, capacity, split_first_row)
             }
             _ => 0.0,
         },
@@ -192,27 +256,99 @@ pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[Measu
         Some(BlockExtent::TextBox(text_box)) => text_box.height,
         _ => 0.0,
     };
-
-    let mut budget = witness_line;
-    for &index in &group.members {
-        let MeasuredBlock { block, measure } = &measured[index];
-        let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) = (block, measure)
-        else {
-            continue;
-        };
-        let height = if is_empty_paragraph(block) {
-            measure
-                .lines
-                .iter()
-                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-                .sum()
-        } else {
-            measure.total_height
-        };
-        budget += get_spacing_before(block) + height + get_spacing_after(block);
+    match follower.map(|mb| &mb.block) {
+        Some(LayoutBlock::Paragraph(block)) => {
+            budget += get_spacing_before(block).max(owed) + witness
+        }
+        _ if witness > 0.0 => budget += owed + witness,
+        _ => {}
     }
-
     budget
+}
+
+/// Height (px) of the shortest first fragment placement gives a table: its
+/// header band and first body slice (its first line when the paragraph rules
+/// leave that row no break in the room under the band), or the smallest slice
+/// of a headerless table's first row (the whole row when it cannot split, or
+/// when `!split_first_row` and the row fits `capacity`), extended to the end
+/// of any keep-with-next row chain starting in them that fits `capacity` along
+/// with the rows above it. A floating table keeps its line slice, as it is not
+/// placed in the flow.
+/// Per-cell witnesses are used only when `split_first_row` (no float bands).
+fn table_leading_slice(
+    block: &TableBlock,
+    measure: &TableExtent,
+    capacity: f64,
+    split_first_row: bool,
+) -> f64 {
+    let breaks = RowBreaks::new(block, measure);
+    if block.floating.is_some() {
+        return first_table_fragment_height(block, measure, breaks.lines());
+    }
+    let mut first = first_table_fragment_height(block, measure, &breaks.kept);
+    let headers = block
+        .rows
+        .iter()
+        .take_while(|row| row.is_header.unwrap_or(false))
+        .count();
+    let oversized_first_row = measure
+        .rows
+        .first()
+        .is_some_and(|row| row.height > capacity)
+        && !block
+            .rows
+            .first()
+            .is_some_and(|row| row.cant_split.unwrap_or(false) || row.is_exact_height());
+    if headers == 0 && !measure.rows.is_empty() && (split_first_row || oversized_first_row) {
+        first = breaks.fresh_slice(0, 0.0, capacity);
+        if split_first_row {
+            first = first.min(breaks.first_cell_slice(0, 0.0, capacity).unwrap_or(first));
+        }
+    } else if headers > 0
+        && headers < measure.rows.len()
+        && !block
+            .rows
+            .get(headers)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+    {
+        let band: f64 = measure.rows[..headers].iter().map(|row| row.height).sum();
+        let body = if band <= capacity {
+            capacity - band
+        } else {
+            capacity
+        };
+        if breaks.kept_oversized(headers, 0.0, body) {
+            first = band + breaks.fresh_slice(headers, 0.0, body);
+        }
+        if split_first_row
+            && band <= capacity
+            && let Some(slice) = breaks.first_cell_slice(headers, 0.0, body)
+        {
+            first = first.min(band + slice);
+        }
+    }
+    let mut top = 0.0;
+    let mut slice = first;
+    for (row, keep) in measure
+        .rows
+        .iter()
+        .zip(crate::hooks::row_keep_chains(block, measure))
+        .take(headers + 1)
+    {
+        let keep = crate::hooks::row_keep_height(
+            keep,
+            block,
+            measure,
+            &breaks,
+            capacity,
+            !split_first_row,
+        );
+        if keep > 0.0 && top + keep <= capacity {
+            slice = slice.max(top + keep);
+        }
+        top += row.height;
+    }
+    slice
 }
 
 /// Whether a paragraph forbids splitting its own lines across a page (keepLines).
@@ -290,6 +426,7 @@ mod tests {
     fn make_line(line_height: f64) -> TypesetRow {
         TypesetRow {
             line_height,
+            marker_tab_offset: None,
             ..Default::default()
         }
     }
@@ -334,6 +471,55 @@ mod tests {
             .zip(measures)
             .map(|(block, measure)| MeasuredBlock { block, measure })
             .collect()
+    }
+
+    #[test]
+    fn a_paragraph_that_starts_a_new_page_ends_a_keep_with_next_run() {
+        let page_break_before = |text: &str, keep_next: bool| {
+            paragraph(
+                vec![text_run(text)],
+                Some(ParagraphAttrs {
+                    keep_next: keep_next.then_some(true),
+                    page_break_before: Some(true),
+                    ..Default::default()
+                }),
+            )
+        };
+        let line = || make_paragraph_measure(vec![make_line(20.0)]);
+        let measured = to_measured_blocks(
+            vec![
+                make_paragraph_block("Heading", true),
+                page_break_before("Chapter", true),
+                make_paragraph_block("Body", false),
+                make_paragraph_block("Heading", true),
+                page_break_before("Chapter", false),
+                make_paragraph_block("Heading", true),
+                paragraph(
+                    vec![text_run("Chapter")],
+                    Some(ParagraphAttrs {
+                        page_break_before_run: Some(true),
+                        ..Default::default()
+                    }),
+                ),
+            ],
+            vec![line(), line(), line(), line(), line(), line(), line()],
+        );
+
+        let scan = analyze_keep_with_next(&measured);
+        let groups: Vec<(Vec<usize>, Option<usize>)> = scan
+            .groups_by_head
+            .values()
+            .map(|group| (group.members.clone(), group.follower))
+            .collect();
+        assert_eq!(
+            groups,
+            vec![
+                (vec![0], None),
+                (vec![1], Some(2)),
+                (vec![3], None),
+                (vec![5], None)
+            ]
+        );
     }
 
     #[test]

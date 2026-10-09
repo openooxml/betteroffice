@@ -1,8 +1,12 @@
 export { PptxEditor } from './PptxEditor';
+export type { PptxWorkerEditorApi } from './worker/createWorkerEditorApi';
+export type { PptxWorkerEditorProps } from './worker/PptxWorkerEditor';
 export type {
   PptxEditorApi,
   PptxEditorCollaborationOptions,
   PptxEditorProps,
+  PptxWorkerViewerApi,
+  PptxWorkerViewerProps,
   PptxPointPosition,
   PptxTextSelection,
   PptxTextSelectionTarget,

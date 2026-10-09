@@ -17,6 +17,7 @@ import { PagedEditor, type PagedEditorRef } from '../PagedEditor';
 import { createCommentIdAllocator } from '../commentFactories';
 import type { EditorMode } from '../internals/editing-modes';
 import { useDocxEditorRefApi } from './useDocxEditorRefApi';
+import type { DocxHostSearch } from './useHostSearch';
 import { useYrsCoreSession, type YrsCoreSession } from './useYrsCoreSession';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
@@ -70,6 +71,7 @@ async function setup(options: { flush?: () => void; mode?: EditorMode } = {}) {
   const hook = renderHook(() => {
     const ref = useRef<DocxEditorRef>(null);
     useDocxEditorRefApi({
+      hostSearch: {} as DocxHostSearch,
       ref,
       document: null,
       documentFromYrs: () => null,
@@ -237,6 +239,7 @@ function Mounted({
   coreRef.current = host ? core : null;
   const modeRef = useRef<EditorMode>('editing');
   useDocxEditorRefApi({
+    hostSearch: {} as DocxHostSearch,
     ref: apiRef,
     document: host,
     documentFromYrs: () => editorRef.current?.getDocument() ?? null,

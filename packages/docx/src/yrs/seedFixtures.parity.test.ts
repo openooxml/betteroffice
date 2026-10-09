@@ -20,6 +20,7 @@ const REQUIRED_NODES: Record<string, string[]> = {
   'bookmarks-fields': ['bookmarkStart', 'bookmarkEnd', 'simpleField', 'complexField', 'instrText'],
   comments: ['commentRangeStart', 'commentRangeEnd', 'commentReference'],
   'content-controls': ['blockSdt', 'inlineSdt'],
+  'field-code-marks': ['complexField', 'instrText', 'table'],
   hyperlinks: ['hyperlink', 'bookmarkStart'],
   images: ['drawing', 'image', 'inline'],
   lists: ['paragraph'],
@@ -335,6 +336,36 @@ describe('DOCX seeding across document features', () => {
       }
     } finally {
       for (const session of sessions) session.destroy();
+    }
+  });
+
+  it('seeds raw scheme colours for picture outlines in both seeders', async () => {
+    const bytes = buildFixtureDocx('images');
+    const parsed = await parseDocx(bytes.buffer as ArrayBuffer, { preloadFonts: false });
+    const projected = await createYrsSession({ clientId: 48002 });
+    const engine = await createYrsSession({ clientId: 48002 });
+    try {
+      documentToYrs(projected, parsed);
+      engine.seedFromDocx(bytes);
+      expectEquivalentStories(engine, projected);
+      for (const session of [engine, projected]) {
+        const images = session.storySegments('body').flatMap((segment) =>
+          segment.kind === 'embed' &&
+          segment.embedKind === 'image' &&
+          segment.payload.alt === 'Scheme outline'
+            ? [segment.payload]
+            : []
+        );
+        expect(images).toHaveLength(1);
+        expect(images[0].borderColorValue).toEqual({
+          themeColor: 'background1',
+          luminanceModulation: 0.75,
+        });
+        expect(images[0]).not.toHaveProperty('borderWidth');
+      }
+    } finally {
+      projected.destroy();
+      engine.destroy();
     }
   });
 
