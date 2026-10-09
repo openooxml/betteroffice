@@ -50,6 +50,10 @@ afterAll(async () => {
 function yrsCore(): YrsCoreSession {
   return {
     session,
+    sessionGeneration: 0,
+    replicaReady: true,
+    requestReplica: () => {},
+    workerProposalsReady: false,
     storyBlocks: () => null,
     bodyBlocks: () => null,
     inputPositionMap: () => null,
@@ -57,6 +61,13 @@ function yrsCore(): YrsCoreSession {
     locToDisplayPosition: () => null,
     documentFromYrs: () => null,
     publishDirectInput: () => {},
+    previewing: false,
+    handoffFrom: null,
+    opening: false,
+    notifyFramePresented: () => {},
+    failOpening: () => false,
+    scheduleCompatibilityWarm: () => {},
+    cancelCompatibilityWarm: () => {},
   };
 }
 

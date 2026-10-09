@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import numbers
 import os
@@ -27,15 +28,48 @@ from ._betteroffice_xlsx import (
 )
 from ._betteroffice_xlsx import Workbook as _Workbook
 from ._betteroffice_xlsx import XlsxError, __version__
+from ._betteroffice_xlsx import export_xlsx_markdown_json as _export_xlsx_markdown_json
+from ._betteroffice_xlsx import export_xlsx_structured_json as _export_xlsx_structured_json
+from ._betteroffice_xlsx import render_xlsx_markdown_json as _render_xlsx_markdown_json
+from .edits import (
+    EditRequest,
+    EditResult,
+    EditStep,
+    FindRequest,
+    FindResult,
+    RangeTarget,
+    ReadRequest,
+    ReadResult,
+    ValidationResult,
+)
+from .exports import (
+    ExportOptions,
+    ExportScope,
+    MarkdownContent,
+    MarkdownOptions,
+    MarkdownResult,
+    StructuredContent,
+    StructuredResult,
+)
 
 __all__ = [
     "Calculation",
     "CellError",
     "CellValue",
     "CollaborativeStateError",
+    "EditRequest",
+    "EditResult",
+    "EditStep",
+    "ExportOptions",
+    "ExportScope",
+    "FindRequest",
+    "FindResult",
     "History",
     "InvalidUpdateError",
     "MAX_COLLABORATION_BYTES",
+    "MarkdownContent",
+    "MarkdownOptions",
+    "MarkdownResult",
     "Mutation",
     "NotCollaborativeError",
     "Proposal",
@@ -43,13 +77,22 @@ __all__ = [
     "ParseError",
     "Png",
     "RangeError",
+    "RangeTarget",
+    "ReadRequest",
+    "ReadResult",
     "RenderError",
     "Sheet",
     "SheetKey",
     "StaleProposalError",
+    "StructuredContent",
+    "StructuredResult",
+    "ValidationResult",
     "Workbook",
     "XlsxError",
     "__version__",
+    "export_xlsx_markdown",
+    "export_xlsx_structured",
+    "render_xlsx_markdown",
 ]
 
 CellValue = Union[None, bool, float, str, CellError]
@@ -59,9 +102,8 @@ SheetKey = Union[int, str]
 class Sheet:
     """One sheet, bound to its workbook.
 
-    Assigning writes what a user would type, so a leading ``=`` makes a formula
-    and recalculates its dependents. Indexing reads the current value, which for
-    an untouched cell is whatever the file cached.
+    Assignments use format-aware input parsing and recalculate dependents;
+    indexing reads the current value.
     """
 
     __slots__ = ("_index", "_workbook")
@@ -317,6 +359,92 @@ class Workbook:
     def reject_proposal(self, proposal_id: str) -> bool:
         return self._inner.reject_proposal(proposal_id)
 
+    def version(self) -> str:
+        """The session-scoped version of the committed workbook state.
+
+        Committed edits, peer updates, undo, redo and a recalculation that changes values or
+        what an export reports about results move it; the active sheet and proposals do not.
+        """
+        return self._inner.version()
+
+    def read_cells(self, request: ReadRequest) -> ReadResult:
+        """Cells with the version they were read at; empty ``ranges`` reads the sheet catalog."""
+        return json.loads(self._inner.read_cells_json(json.dumps(request)))
+
+    def find_text(self, request: FindRequest) -> FindResult:
+        """Exact, case-sensitive search over display text, one match per cell."""
+        return json.loads(self._inner.find_text_json(json.dumps(request)))
+
+    def validate_edits(self, request: EditRequest) -> ValidationResult:
+        """Resolve, stage and rehearse a batch like :meth:`apply_edits`, changing nothing."""
+        return json.loads(self._inner.validate_edits_json(json.dumps(request)))
+
+    def apply_edits(self, request: EditRequest) -> EditResult:
+        """Apply every step as one recalculated change, or refuse with nothing changed.
+
+        Refusals come back as ``{"ok": False, "version", "failure"}``; a malformed request
+        raises ``ValueError``.
+        """
+        return json.loads(self._inner.apply_edits_json(json.dumps(request)))
+
+    def export_structured(
+        self,
+        *,
+        scope: "list[ExportScope] | None" = None,
+        include_hidden_sheets: bool = False,
+        include_hidden_rows: bool = False,
+        include_hidden_columns: bool = False,
+        include_defined_names: bool = True,
+        include_hidden_names: bool = False,
+        max_cells: int = 100_000,
+        max_bytes: int = 8_388_608,
+    ) -> StructuredResult:
+        """Export sparse cells, sheet metadata and diagnostics with the version read at.
+
+        Nothing is recalculated: formula results are the stored values. Options it cannot
+        honor come back as ``{"ok": False, "version", "failure"}``; malformed ones raise
+        ``ValueError``.
+        """
+        options = _export_options(
+            scope,
+            include_hidden_sheets,
+            include_hidden_rows,
+            include_hidden_columns,
+            include_defined_names,
+            include_hidden_names,
+            max_cells,
+            max_bytes,
+        )
+        return json.loads(self._inner.export_structured_json(options))
+
+    def export_markdown(
+        self,
+        *,
+        scope: "list[ExportScope] | None" = None,
+        include_hidden_sheets: bool = False,
+        include_hidden_rows: bool = False,
+        include_hidden_columns: bool = False,
+        include_defined_names: bool = True,
+        include_hidden_names: bool = False,
+        max_cells: int = 100_000,
+        max_bytes: int = 8_388_608,
+        markdown_options: "MarkdownOptions | None" = None,
+    ) -> MarkdownResult:
+        """:meth:`export_structured` rendered as Markdown from the same read."""
+        options = _export_options(
+            scope,
+            include_hidden_sheets,
+            include_hidden_rows,
+            include_hidden_columns,
+            include_defined_names,
+            include_hidden_names,
+            max_cells,
+            max_bytes,
+        )
+        return json.loads(
+            self._inner.export_markdown_json(options, json.dumps(markdown_options or {}))
+        )
+
     @property
     def active_sheet(self) -> int:
         return self._inner.active_sheet
@@ -388,6 +516,77 @@ class Workbook:
 
     def __repr__(self) -> str:
         return f"Workbook(sheets={self.sheet_count})"
+
+
+def export_xlsx_structured(
+    data: "bytes | bytearray | memoryview", *, options: "ExportOptions | None" = None
+) -> StructuredContent:
+    """Export ``.xlsx`` bytes as read, without recalculating or reading a clock.
+
+    The same bytes and options always give the same content. Unusable options raise
+    ``ValueError``; unreadable bytes raise :class:`ParseError`.
+    """
+    return json.loads(_export_xlsx_structured_json(_as_bytes(data), json.dumps(options or {})))
+
+
+def export_xlsx_markdown(
+    data: "bytes | bytearray | memoryview",
+    *,
+    options: "ExportOptions | None" = None,
+    markdown_options: "MarkdownOptions | None" = None,
+) -> MarkdownContent:
+    """:func:`export_xlsx_structured` rendered as Markdown."""
+    return json.loads(
+        _export_xlsx_markdown_json(
+            _as_bytes(data), json.dumps(options or {}), json.dumps(markdown_options or {})
+        )
+    )
+
+
+def render_xlsx_markdown(
+    content: StructuredContent,
+    *,
+    max_rows: int = 200,
+    max_columns: int = 50,
+    max_cells: int = 10_000,
+    max_bytes: int = 8_388_608,
+) -> MarkdownContent:
+    """Render structured content as Markdown; content that does not validate raises ``ValueError``."""
+    options = {
+        "maxRows": max_rows,
+        "maxColumns": max_columns,
+        "maxCells": max_cells,
+        "maxBytes": max_bytes,
+    }
+    return json.loads(
+        _render_xlsx_markdown_json(
+            json.dumps(content, separators=(",", ":")), json.dumps(options)
+        )
+    )
+
+
+def _export_options(
+    scope: "list[ExportScope] | None",
+    include_hidden_sheets: bool,
+    include_hidden_rows: bool,
+    include_hidden_columns: bool,
+    include_defined_names: bool,
+    include_hidden_names: bool,
+    max_cells: int,
+    max_bytes: int,
+) -> str:
+    options: dict = {
+        "includeHiddenSheets": include_hidden_sheets,
+        "includeHiddenRows": include_hidden_rows,
+        "includeHiddenColumns": include_hidden_columns,
+        "includeDefinedNames": include_defined_names,
+        "includeHiddenNames": include_hidden_names,
+        "maxCells": max_cells,
+        "maxBytes": max_bytes,
+    }
+    if scope is not None:
+        options["scope"] = list(scope)
+    return json.dumps(options)
 
 
 def _as_input(value: object) -> str:

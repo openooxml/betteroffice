@@ -21,6 +21,5 @@ The style part is deliberately resolvable: 56 of the 61 tables in the corpus
 carry a `tableStyleId` and only 2 of 13 distinct ids fail to resolve, so the
 resolving case is the one worth pinning first.
 
-Today the frame renders as a placeholder, and `layout.rs` painted the first cell
-as loose slide text on top of it. See the [DrawingML table
+See the [DrawingML table
 reference](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.table).

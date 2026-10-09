@@ -20,6 +20,17 @@ describe('DocumentLoadGeneration', () => {
     expect(errors).toEqual([before, after]);
   });
 
+  test('a failed load reports no further errors, and the next load does', () => {
+    const loads = new DocumentLoadGeneration();
+    const failed = loads.begin();
+    const errors: string[] = [];
+    const report = (error: Error) => errors.push(error.message);
+    loads.fail(failed);
+    loads.reportError(failed, new Error('after failure'), report);
+    loads.reportError(loads.begin(), new Error('next load'), report);
+    expect(errors).toEqual(['next load']);
+  });
+
   test('rejects stale completion without resolving the current load', async () => {
     const loads = new DocumentLoadGeneration();
     const generationA = loads.begin();

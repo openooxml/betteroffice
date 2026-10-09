@@ -26,7 +26,7 @@ fn lines(list: &SurfaceDisplayList, id: u32) -> &[PositionedTextLine] {
 }
 
 #[test]
-fn exact_spacing_preserves_the_first_baseline_and_scales_with_autofit() {
+fn exact_spacing_centres_its_line_and_survives_autofit() {
     let session = DeckSession::open(DECK, 3141).unwrap();
     let renderer = renderer();
     let snapshot = session.snapshot().unwrap();
@@ -48,8 +48,11 @@ fn exact_spacing_preserves_the_first_baseline_and_scales_with_autofit() {
     let exact = lines(&exact, 4);
     let natural = lines(&natural, 4);
     assert_eq!(exact.len(), 2);
+    // An exact spacing taller than the face centres it, so the baseline drops
+    // by half of what the spacing added.
+    let added = (exact[0].height - natural[0].height) / 2.0;
     assert!(
-        (exact[0].baseline - natural[0].baseline).abs() < 0.001,
+        (exact[0].baseline - natural[0].baseline - added).abs() < 0.001,
         "exact baseline {}, natural {}",
         exact[0].baseline,
         natural[0].baseline
@@ -73,11 +76,12 @@ fn exact_spacing_preserves_the_first_baseline_and_scales_with_autofit() {
         .unwrap()
         .display_list;
     let scaled = lines(&scaled, 4);
-    assert!((scaled[1].baseline - scaled[0].baseline - 48.0).abs() < 0.001);
-    assert!(
-        (scaled[0].baseline - scaled[0].y - (natural[0].baseline - natural[0].y) * 0.5).abs()
-            < 0.001
-    );
+    assert!((scaled[1].baseline - scaled[0].baseline - 96.0).abs() < 0.001);
+    // The face halves with the autofit scale, the exact spacing does not, and
+    // the line box centres what is left over.
+    let ascent = (natural[0].baseline - natural[0].y) * 0.5;
+    let centred = ascent + (96.0 - natural[0].height * 0.5) / 2.0;
+    assert!((scaled[0].baseline - scaled[0].y - centred).abs() < 0.001);
 }
 
 #[test]
@@ -97,11 +101,10 @@ fn fixture_spacing_cascades_from_master_layout_and_shape_lists() {
         );
         assert_eq!(lines[0].runs[0].color, "#2040B0");
     }
-    // 300px shape top + (1854 + 67) / 2048 em of Arial at 32pt. PowerPoint
-    // 16.113 puts this baseline at ~341.4px, so the hhea ascent is closer than
-    // the usWin ascent it replaced (338.625) but still not PowerPoint's own.
-    for id in [5, 6] {
-        assert!((lines(&list, id)[0].baseline - 340.0208).abs() < 0.001);
+    // 300px shape top + Arial's hhea ascent at 32pt + half the room the
+    // paragraph's own spacing adds over what the face measures.
+    for (id, baseline) in [(5, 346.209_6), (6, 353.889_6)] {
+        assert!((lines(&list, id)[0].baseline - baseline).abs() < 0.001);
     }
     let font_based = lines(&list, 3);
     let control = lines(&list, 7);

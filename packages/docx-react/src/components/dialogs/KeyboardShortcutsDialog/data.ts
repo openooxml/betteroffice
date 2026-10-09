@@ -5,6 +5,12 @@
  */
 
 import type { TranslationKey } from '@betteroffice/docx-i18n';
+import { DOCX_COMMAND_DESCRIPTORS, formatChord } from '../../../commands/descriptors';
+import type {
+  DocxCommandArgs,
+  DocxCommandId,
+  DocxCommandShortcut,
+} from '../../../commands/types';
 import type { KeyboardShortcut, ShortcutCategory } from '../KeyboardShortcutsDialog';
 
 /**
@@ -35,53 +41,229 @@ export const CATEGORY_ORDER: ShortcutCategory[] = [
   'other',
 ];
 
-/**
- * Default keyboard shortcuts (with translation keys for name/description)
- */
-export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
-  // File
-  {
+interface CommandHelp<K extends DocxCommandId = DocxCommandId> {
+  id: string;
+  command: K;
+  args?: DocxCommandArgs[K];
+  name: string;
+  nameKey: TranslationKey;
+  description: string;
+  descriptionKey: TranslationKey;
+  category: ShortcutCategory;
+  common?: boolean;
+}
+
+const help = (entry: CommandHelp): CommandHelp => entry;
+
+/** Help text of editor commands; their keys come from the command descriptors. */
+const COMMAND_HELP: readonly CommandHelp[] = [
+  help({
     id: 'save',
+    command: 'save',
     name: 'Save',
     nameKey: 'dialogs.keyboardShortcuts.shortcuts.save',
     description: 'Save document',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.saveDescription',
-    keys: 'Ctrl+S',
     category: 'file',
     common: true,
-  },
-  {
+  }),
+  help({
+    id: 'open',
+    command: 'open',
+    name: 'Open',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.open',
+    description: 'Open a document',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.openDescription',
+    category: 'file',
+  }),
+  help({
     id: 'print',
+    command: 'print',
     name: 'Print',
     nameKey: 'dialogs.keyboardShortcuts.shortcuts.print',
     description: 'Print document',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.printDescription',
-    keys: 'Ctrl+P',
     category: 'file',
-  },
-
-  // Editing
-  {
+  }),
+  help({
     id: 'undo',
+    command: 'undo',
     name: 'Undo',
     nameKey: 'dialogs.keyboardShortcuts.shortcuts.undo',
     description: 'Undo last action',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.undoDescription',
-    keys: 'Ctrl+Z',
     category: 'editing',
     common: true,
-  },
-  {
+  }),
+  help({
     id: 'redo',
+    command: 'redo',
     name: 'Redo',
     nameKey: 'dialogs.keyboardShortcuts.shortcuts.redo',
     description: 'Redo last action',
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.redoDescription',
-    keys: 'Ctrl+Y',
-    altKeys: 'Ctrl+Shift+Z',
     category: 'editing',
     common: true,
-  },
+  }),
+  help({
+    id: 'find',
+    command: 'find',
+    name: 'Find',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.find',
+    description: 'Find text in document',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.findDescription',
+    category: 'editing',
+    common: true,
+  }),
+  help({
+    id: 'replace',
+    command: 'replace',
+    name: 'Find & Replace',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.findReplace',
+    description: 'Find and replace text',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.findReplaceDescription',
+    category: 'editing',
+  }),
+  help({
+    id: 'insert-link',
+    command: 'insertLink',
+    name: 'Insert Link',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.insertLink',
+    description: 'Insert or edit a hyperlink',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.insertLinkDescription',
+    category: 'editing',
+  }),
+  help({
+    id: 'bold',
+    command: 'bold',
+    name: 'Bold',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.bold',
+    description: 'Toggle bold formatting',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.boldDescription',
+    category: 'formatting',
+    common: true,
+  }),
+  help({
+    id: 'italic',
+    command: 'italic',
+    name: 'Italic',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.italic',
+    description: 'Toggle italic formatting',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.italicDescription',
+    category: 'formatting',
+    common: true,
+  }),
+  help({
+    id: 'underline',
+    command: 'underline',
+    name: 'Underline',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.underline',
+    description: 'Toggle underline formatting',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.underlineDescription',
+    category: 'formatting',
+    common: true,
+  }),
+  help({
+    id: 'strikethrough',
+    command: 'strikethrough',
+    name: 'Strikethrough',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.strikethrough',
+    description: 'Toggle strikethrough',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.strikethroughDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'subscript',
+    command: 'subscript',
+    name: 'Subscript',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.subscript',
+    description: 'Toggle subscript',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.subscriptDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'superscript',
+    command: 'superscript',
+    name: 'Superscript',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.superscript',
+    description: 'Toggle superscript',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.superscriptDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'align-left',
+    command: 'alignment',
+    args: { value: 'left' },
+    name: 'Align Left',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.alignLeft',
+    description: 'Left align paragraph',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.alignLeftDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'align-center',
+    command: 'alignment',
+    args: { value: 'center' },
+    name: 'Align Center',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.alignCenter',
+    description: 'Center align paragraph',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.alignCenterDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'align-right',
+    command: 'alignment',
+    args: { value: 'right' },
+    name: 'Align Right',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.alignRight',
+    description: 'Right align paragraph',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.alignRightDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'align-justify',
+    command: 'alignment',
+    args: { value: 'both' },
+    name: 'Justify',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.justify',
+    description: 'Justify paragraph',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.justifyDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'indent',
+    command: 'indent',
+    name: 'Increase Indent',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.increaseIndent',
+    description: 'Increase paragraph indent',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.increaseIndentDescription',
+    category: 'formatting',
+  }),
+  help({
+    id: 'outdent',
+    command: 'outdent',
+    name: 'Decrease Indent',
+    nameKey: 'dialogs.keyboardShortcuts.shortcuts.decreaseIndent',
+    description: 'Decrease paragraph indent',
+    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.decreaseIndentDescription',
+    category: 'formatting',
+  }),
+];
+
+/** Shortcuts of editor commands, as bound by the command descriptors. */
+export const COMMAND_SHORTCUTS: KeyboardShortcut[] = COMMAND_HELP.flatMap(
+  ({ command, args, ...entry }) => {
+    const key = JSON.stringify(args ?? null);
+    const chords = (DOCX_COMMAND_DESCRIPTORS[command].shortcuts as readonly DocxCommandShortcut[])
+      .filter((shortcut) => JSON.stringify(shortcut.args) === key)
+      .map((shortcut) => formatChord(shortcut.chord, false));
+    if (chords.length === 0) return [];
+    return [{ ...entry, keys: chords[0], ...(chords[1] ? { altKeys: chords[1] } : {}) }];
+  }
+);
+
+/** Keys the text input and the browser handle, outside the editor commands. */
+const INPUT_SHORTCUTS: KeyboardShortcut[] = [
   {
     id: 'delete',
     name: 'Delete',
@@ -90,25 +272,6 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.deleteDescription',
     keys: 'Del',
     altKeys: 'Backspace',
-    category: 'editing',
-  },
-  {
-    id: 'find',
-    name: 'Find',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.find',
-    description: 'Find text in document',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.findDescription',
-    keys: 'Ctrl+F',
-    category: 'editing',
-    common: true,
-  },
-  {
-    id: 'replace',
-    name: 'Find & Replace',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.findReplace',
-    description: 'Find and replace text',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.findReplaceDescription',
-    keys: 'Ctrl+H',
     category: 'editing',
   },
 
@@ -151,119 +314,6 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
     descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.pastePlainTextDescription',
     keys: 'Ctrl+Shift+V',
     category: 'clipboard',
-  },
-
-  // Formatting
-  {
-    id: 'bold',
-    name: 'Bold',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.bold',
-    description: 'Toggle bold formatting',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.boldDescription',
-    keys: 'Ctrl+B',
-    category: 'formatting',
-    common: true,
-  },
-  {
-    id: 'italic',
-    name: 'Italic',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.italic',
-    description: 'Toggle italic formatting',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.italicDescription',
-    keys: 'Ctrl+I',
-    category: 'formatting',
-    common: true,
-  },
-  {
-    id: 'underline',
-    name: 'Underline',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.underline',
-    description: 'Toggle underline formatting',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.underlineDescription',
-    keys: 'Ctrl+U',
-    category: 'formatting',
-    common: true,
-  },
-  {
-    id: 'strikethrough',
-    name: 'Strikethrough',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.strikethrough',
-    description: 'Toggle strikethrough',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.strikethroughDescription',
-    keys: 'Ctrl+Shift+X',
-    category: 'formatting',
-  },
-  {
-    id: 'subscript',
-    name: 'Subscript',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.subscript',
-    description: 'Toggle subscript',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.subscriptDescription',
-    keys: 'Ctrl+=',
-    category: 'formatting',
-  },
-  {
-    id: 'superscript',
-    name: 'Superscript',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.superscript',
-    description: 'Toggle superscript',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.superscriptDescription',
-    keys: 'Ctrl+Shift+=',
-    category: 'formatting',
-  },
-  {
-    id: 'align-left',
-    name: 'Align Left',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.alignLeft',
-    description: 'Left align paragraph',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.alignLeftDescription',
-    keys: 'Ctrl+L',
-    category: 'formatting',
-  },
-  {
-    id: 'align-center',
-    name: 'Align Center',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.alignCenter',
-    description: 'Center align paragraph',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.alignCenterDescription',
-    keys: 'Ctrl+E',
-    category: 'formatting',
-  },
-  {
-    id: 'align-right',
-    name: 'Align Right',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.alignRight',
-    description: 'Right align paragraph',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.alignRightDescription',
-    keys: 'Ctrl+R',
-    category: 'formatting',
-  },
-  {
-    id: 'align-justify',
-    name: 'Justify',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.justify',
-    description: 'Justify paragraph',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.justifyDescription',
-    keys: 'Ctrl+J',
-    category: 'formatting',
-  },
-  {
-    id: 'indent',
-    name: 'Increase Indent',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.increaseIndent',
-    description: 'Increase paragraph indent',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.increaseIndentDescription',
-    keys: 'Tab',
-    category: 'formatting',
-  },
-  {
-    id: 'outdent',
-    name: 'Decrease Indent',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.decreaseIndent',
-    description: 'Decrease paragraph indent',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.decreaseIndentDescription',
-    keys: 'Shift+Tab',
-    category: 'formatting',
   },
 
   // Selection
@@ -381,35 +431,6 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
 
   // View
   {
-    id: 'zoom-in',
-    name: 'Zoom In',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.zoomIn',
-    description: 'Increase zoom level',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.zoomInDescription',
-    keys: 'Ctrl++',
-    altKeys: 'Ctrl+Scroll Up',
-    category: 'view',
-  },
-  {
-    id: 'zoom-out',
-    name: 'Zoom Out',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.zoomOut',
-    description: 'Decrease zoom level',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.zoomOutDescription',
-    keys: 'Ctrl+-',
-    altKeys: 'Ctrl+Scroll Down',
-    category: 'view',
-  },
-  {
-    id: 'zoom-reset',
-    name: 'Reset Zoom',
-    nameKey: 'dialogs.keyboardShortcuts.shortcuts.resetZoom',
-    description: 'Reset zoom to 100%',
-    descriptionKey: 'dialogs.keyboardShortcuts.shortcuts.resetZoomDescription',
-    keys: 'Ctrl+0',
-    category: 'view',
-  },
-  {
     id: 'shortcuts',
     name: 'Keyboard Shortcuts',
     nameKey: 'dialogs.keyboardShortcuts.shortcuts.keyboardShortcuts',
@@ -420,6 +441,11 @@ export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [
     category: 'view',
   },
 ];
+
+/**
+ * Default keyboard shortcuts (with translation keys for name/description)
+ */
+export const DEFAULT_SHORTCUTS: KeyboardShortcut[] = [...COMMAND_SHORTCUTS, ...INPUT_SHORTCUTS];
 
 /**
  * Get all default shortcuts

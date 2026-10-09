@@ -1,12 +1,11 @@
 import { useCallback, useRef } from 'react';
 import type { Comment } from '@betteroffice/docx/types/content';
-import {
-  createDocx,
-  injectReplyRangeMarkers,
-  injectTCReplyRangeMarkers,
-  repackDocx,
-} from '@betteroffice/docx/docx';
 import { readDocxFileFromInput, type DocxInput } from '@betteroffice/docx/utils';
+import {
+  ResidentWorkerSaveUnavailableError,
+  saveEditorDocument,
+  type YrsSession,
+} from '@betteroffice/docx/yrs';
 import { openPrintWindow } from '@betteroffice/docx';
 import {
   rasterizeDisplayListPages,
@@ -14,8 +13,75 @@ import {
   type ImageResolver,
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
+import { flushedSession } from '../editorBatches';
+import {
+  awaitWorkerOpenReplica,
+  requestWorkerOpenReplica,
+  workerOpenDocumentHeld,
+  workerOpenReplicaStarted,
+} from '../internals/workerOpenReplica';
+import { workerOpenSave, type WorkerOpenSave } from '../internals/workerOpenSave';
+import { isWorkerViewer } from '../internals/workerViewer';
+import { registeredWorkerProposalAuthority, hasEditorWorkerProposalRounds } from '../internals/workerProposalAuthority';
+import type { DocxEditorProps } from '../../DocxEditor';
+import type { DocxImageInsert, DocxSaveOutcome } from './useDocxCommands';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
+
+/**
+ * Saves in the document's worker; null when the save falls back to the main
+ * thread. A viewer has no main-thread copy, so it saves in its worker or not at all.
+ */
+function saveInWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  viewer: boolean,
+  comments: Comment[],
+  assertCurrent: () => void,
+  experimentalWorkerOpen: boolean
+): Promise<ArrayBuffer | null> | null {
+  const saver = workerOpenSave(session);
+  if (!saver || (!viewer && !saver.available())) {
+    if (viewer) throw new ResidentWorkerSaveUnavailableError('No document worker');
+    return null;
+  }
+  return saveWithWorker(pagedEditorRef, session, saver, viewer, comments, assertCurrent, experimentalWorkerOpen);
+}
+
+async function saveWithWorker(
+  pagedEditorRef: React.RefObject<PagedEditorRef | null>,
+  session: YrsSession,
+  saver: WorkerOpenSave,
+  viewer: boolean,
+  comments: Comment[],
+  assertCurrent: () => void,
+  experimentalWorkerOpen: boolean
+): Promise<ArrayBuffer | null> {
+  let peer: YrsSession | undefined;
+  if (!viewer && workerOpenReplicaStarted(session)) {
+    await awaitWorkerOpenReplica(session);
+    peer = (await flushedSession(pagedEditorRef, experimentalWorkerOpen)).session;
+    assertCurrent();
+  }
+  if (!viewer && saver.sourceReplaced?.()) return null;
+  const task = () => {
+    assertCurrent();
+    if (!viewer && !saver.available()) {
+      throw new ResidentWorkerSaveUnavailableError('No document worker');
+    }
+    return saver.save(comments, peer);
+  };
+  try {
+    const authority = hasEditorWorkerProposalRounds(session) ? null : registeredWorkerProposalAuthority(session);
+    const buffer = await (authority ? authority.save(task) : task());
+    assertCurrent();
+    return buffer;
+  } catch (error) {
+    assertCurrent();
+    if (viewer || !(error instanceof ResidentWorkerSaveUnavailableError)) throw error;
+    return null;
+  }
+}
 
 function toFileIOError(error: unknown, fallbackMessage: string): Error {
   return error instanceof Error ? error : new Error(fallbackMessage);
@@ -32,64 +98,50 @@ const PRINT_CANVAS_CSS =
   'img.print-page:last-child { break-after: auto; }\n' +
   '@page { margin: 0; size: auto; }';
 
-// Print once fonts + images have settled, then close. Prints as soon as
-// everything is ready (usually well under the cap) with a hard timeout so a
-// browser that never resolves `fonts.ready`/`decode()` still prints.
-function finishPrint(w: Window, images: HTMLImageElement[] = []): void {
-  let done = false;
-  const runPrint = () => {
-    if (done || w.closed) return;
-    done = true;
-    w.focus();
-    w.print();
-    w.close();
-  };
-  Promise.all([
+// Resolves once fonts + images have settled (usually well under the cap), with
+// a hard timeout so a browser that never resolves `fonts.ready`/`decode()`
+// still prints.
+function settled(w: Window, images: HTMLImageElement[]): Promise<void> {
+  const loaded = Promise.all([
     w.document.fonts?.ready ?? Promise.resolve(),
     ...images.map((img) => img.decode().catch(() => undefined)),
-  ]).then(runPrint, runPrint);
-  setTimeout(runPrint, 2000);
+  ]).then(() => undefined, () => undefined);
+  return Promise.race([loaded, new Promise<void>((resolve) => setTimeout(resolve, 2000))]);
 }
 
-/** Prints display-list pages as PNG images without interpolating data into markup. */
-function printDisplayListPages(
+/** Fills `w` with display-list pages as PNG images without interpolating data into markup. */
+async function renderDisplayListPages(
+  w: Window,
   displayList: DisplayList,
   resolveImage: ImageResolver,
-  onPrint?: () => void
-): void {
-  const w = openPrintWindow('Print', '');
-  if (!w) {
-    window.print();
-    onPrint?.();
-    return;
-  }
+  fontFamilies: ReadonlyMap<string, string> | undefined
+): Promise<void> {
   const style = w.document.createElement('style');
   style.textContent = PRINT_CANVAS_CSS;
   w.document.head.appendChild(style);
-
-  void rasterizeDisplayListPages(displayList, { resolveImage }).then(
-    (canvases) => {
-      const images: HTMLImageElement[] = [];
-      for (const canvas of canvases) {
-        try {
-          const img = w.document.createElement('img');
-          img.className = 'print-page';
-          img.src = canvas.toDataURL('image/png');
-          w.document.body.appendChild(img);
-          images.push(img);
-        } catch {
-          // Skip an unexpectedly tainted page without exposing markup.
-        }
-      }
-      finishPrint(w, images);
-      onPrint?.();
-    },
-    () => {
-      w.close();
-      window.print();
-      onPrint?.();
+  const canvases = await rasterizeDisplayListPages(displayList, { resolveImage, fontFamilies });
+  const images: HTMLImageElement[] = [];
+  for (const canvas of canvases) {
+    try {
+      const img = w.document.createElement('img');
+      img.className = 'print-page';
+      img.src = canvas.toDataURL('image/png');
+      w.document.body.appendChild(img);
+      images.push(img);
+    } catch {
+      // Skip an unexpectedly tainted page without exposing markup.
     }
-  );
+  }
+  await settled(w, images);
+}
+
+/** A print window opened during a user gesture, filled once the document has settled. */
+export interface DocxPrintJob {
+  /** Renders `displayList` into the reserved window and waits for its pages to load. */
+  prepare(displayList: DisplayList): Promise<void>;
+  /** Prints the prepared pages; false when the reserved window was closed first. */
+  print(): boolean;
+  cancel(): void;
 }
 
 /**
@@ -102,11 +154,15 @@ function printDisplayListPages(
  */
 export function useFileIO({
   pagedEditorRef,
-  displayList,
+  experimentalWorkerOpen = false,
+  viewerSession,
   resolveImage,
+  shownImageResolver,
+  fontFamilies,
   comments,
   documentName,
   onSave,
+  onSaveRequest,
   downloadOnSave = true,
   onOpen,
   onError,
@@ -116,11 +172,17 @@ export function useFileIO({
   focusActiveEditor,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
-  displayList: DisplayList | null;
+  experimentalWorkerOpen?: boolean;
+  viewerSession?: boolean;
   resolveImage: ImageResolver;
+  /** The resolver of the frame published last; print reads it once its display list settles. */
+  shownImageResolver?: () => ImageResolver;
+  /** The CSS family each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string>;
   comments: Comment[];
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
+  onSaveRequest?: DocxEditorProps['onSaveRequest'];
   downloadOnSave?: boolean;
   onOpen: ((file: File) => void | Promise<void>) | undefined;
   onError: ((error: Error) => void) | undefined;
@@ -130,61 +192,141 @@ export function useFileIO({
   focusActiveEditor: () => void;
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageInsertRef = useRef<DocxImageInsert | null>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
+  const saveRequestRef = useRef<Promise<DocxSaveOutcome> | null>(null);
+  const viewerSessionRef = useRef(viewerSession);
+  viewerSessionRef.current = viewerSession;
 
   const handleSave = useCallback(
     async (): Promise<ArrayBuffer | null> => {
+      const initialSession = pagedEditorRef.current?.getYrsSession();
       try {
-        const document = pagedEditorRef.current?.getDocument();
-        if (!document) return null;
+        if (!pagedEditorRef.current) return null;
+        const viewer = (!!initialSession && workerOpenDocumentHeld(initialSession)) ||
+          (viewerSessionRef.current ?? isWorkerViewer(pagedEditorRef.current));
+        const assertCurrent = () => {
+          if (pagedEditorRef.current?.getYrsSession() !== initialSession) {
+            throw new Error('The document changed while saving');
+          }
+        };
+        if (initialSession) {
+          const pending = saveInWorker(pagedEditorRef, initialSession, viewer, comments, assertCurrent, experimentalWorkerOpen);
+          const inWorker = pending && (await pending);
+          if (inWorker) {
+            onSave?.(inWorker);
+            return inWorker;
+          }
+          if (!viewer && workerOpenSave(initialSession)) {
+            await requestWorkerOpenReplica(initialSession);
+            assertCurrent();
+          }
+        }
+        const authority = initialSession && hasEditorWorkerProposalRounds(initialSession)
+          ? registeredWorkerProposalAuthority(initialSession) : null;
+        if (authority) {
+          const task = async (): Promise<ArrayBuffer | null> => {
+            const { editor, session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
+            assertCurrent();
+            if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
+            const projected = editor.getDocument();
+            if (!projected) return null;
+            const buffer = await saveEditorDocument(session, projected, comments);
+            if (pagedEditorRef.current?.getYrsSession() !== session) {
+              throw new Error('The document changed while saving');
+            }
+            projected.originalBuffer = buffer;
 
-        // Sync React comments state (including new replies) back to the document model
-        document.package.document.comments = comments;
-
-        // Inject commentRangeStart/End for reply comments that share the parent's range.
-        // Pages/Word require every comment (including replies) to have range markers in document.xml.
-        injectReplyRangeMarkers(document.package.document.content, comments);
-        // Also inject range markers for comments that reply to tracked changes.
-        injectTCReplyRangeMarkers(document.package.document.content, comments);
-
-        const buffer = document.originalBuffer
-          ? await repackDocx(document)
-          : await createDocx(document);
-        document.originalBuffer = buffer;
+            return buffer;
+          };
+          const buffer = await authority.save(task);
+          if (buffer) onSave?.(buffer);
+          return buffer;
+        }
+        const { editor, session } = await flushedSession(pagedEditorRef, experimentalWorkerOpen);
+        assertCurrent();
+        if (session.isDisplayOnly?.()) throw new Error('The document is still opening');
+        const projected = editor.getDocument();
+        if (!projected) return null;
+        const buffer = await saveEditorDocument(session, projected, comments);
+        if (pagedEditorRef.current?.getYrsSession() !== session) {
+          throw new Error('The document changed while saving');
+        }
+        projected.originalBuffer = buffer;
 
         onSave?.(buffer);
         return buffer;
       } catch (error) {
-        onError?.(toFileIOError(error, 'Failed to save document'));
+        onError?.(pagedEditorRef.current?.getYrsSession() !== initialSession
+          ? new Error('The document changed while saving')
+          : toFileIOError(error, 'Failed to save document'));
         return null;
       }
     },
-    [pagedEditorRef, comments, onSave, onError]
+    [pagedEditorRef, comments, onSave, onError, experimentalWorkerOpen]
   );
 
-  const handleDirectPrint = useCallback(() => {
-    if (!displayList) {
-      window.print();
-      onPrint?.();
-      return;
-    }
-    printDisplayListPages(displayList, resolveImage, onPrint);
-  }, [displayList, resolveImage, onPrint]);
+  const reservePrint = useCallback((): DocxPrintJob => {
+    const w = openPrintWindow('Print', '');
+    return {
+      async prepare(displayList) {
+        if (w && !w.closed) {
+          await renderDisplayListPages(
+            w,
+            displayList,
+            shownImageResolver?.() ?? resolveImage,
+            fontFamilies
+          );
+        }
+      },
+      print() {
+        if (!w) {
+          window.print();
+        } else {
+          if (w.closed) return false;
+          w.focus();
+          w.print();
+          w.close();
+        }
+        onPrint?.();
+        return true;
+      },
+      cancel() {
+        if (w && !w.closed) w.close();
+      },
+    };
+  }, [resolveImage, shownImageResolver, fontFamilies, onPrint]);
 
-  const handleDownloadDocument = useCallback(async () => {
-    const buffer = await handleSave();
-    if (!buffer || !downloadOnSave) return;
-    const blob = new Blob([buffer], {
-      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  const handleDownloadDocument = useCallback((): Promise<DocxSaveOutcome> => {
+    if (saveRequestRef.current) return saveRequestRef.current;
+    const pending = Promise.resolve().then(async (): Promise<DocxSaveOutcome> => {
+      const session = pagedEditorRef.current?.getYrsSession();
+      if (onSaveRequest && (await onSaveRequest()) !== true) return 'requested';
+      if (session !== pagedEditorRef.current?.getYrsSession()) {
+        throw new Error('The document changed during the save request');
+      }
+      const buffer = await handleSave();
+      if (!buffer) return 'failed';
+      if (!downloadOnSave) return 'saved';
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      return 'saved';
+    }).catch((error): DocxSaveOutcome => {
+      onError?.(toFileIOError(error, 'Failed to save document'));
+      return 'failed';
+    }).finally(() => {
+      if (saveRequestRef.current === pending) saveRequestRef.current = null;
     });
-    const url = URL.createObjectURL(blob);
-    const a = window.document.createElement('a');
-    a.href = url;
-    a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
-    a.click();
-    // Defer revoke so Safari has time to start the download.
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-  }, [handleSave, documentName, downloadOnSave]);
+    saveRequestRef.current = pending;
+    return pending;
+  }, [handleSave, documentName, downloadOnSave, onSaveRequest, onError, pagedEditorRef]);
 
   const handleOpenDocument = useCallback(() => {
     docxInputRef.current?.click();
@@ -218,13 +360,17 @@ export function useFileIO({
     [loadBuffer, onDocumentNameChange, onError, onOpen]
   );
 
-  const handleInsertImageClick = useCallback(() => {
+  /** Opens the picker; `insert` stays with the file chosen in it through decoding. */
+  const handleInsertImageClick = useCallback((insert?: DocxImageInsert) => {
+    imageInsertRef.current = insert ?? null;
     imageInputRef.current?.click();
   }, []);
 
   const handleImageFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
+      const insert = imageInsertRef.current;
+      imageInsertRef.current = null;
       // Reset the input so the same file can be selected again
       e.target.value = '';
       if (!file) return;
@@ -241,18 +387,27 @@ export function useFileIO({
             height = Math.round(height * (INSERT_IMAGE_MAX_WIDTH_PX / width));
             width = INSERT_IMAGE_MAX_WIDTH_PX;
           }
-          const rId = `rId_img_${Date.now()}_${Math.round(Math.random() * 1e9)}`;
+          const picture = {
+            src: dataUrl,
+            alt: file.name,
+            width,
+            height,
+            wrapType: 'inline',
+            displayMode: 'inline',
+            distTop: 0,
+            distBottom: 0,
+            distLeft: 0,
+            distRight: 0,
+          };
+          if (insert) {
+            void insert(picture).then((result) => {
+              if (result.ok && result.status === 'executed') focusActiveEditor();
+            });
+            return;
+          }
           const inserted = pagedEditorRef.current?.applyYrsCommand({
             type: 'insertImage',
-            image: {
-              src: dataUrl,
-              alt: file.name,
-              width,
-              height,
-              rId,
-              wrapType: 'inline',
-              displayMode: 'inline',
-            },
+            image: picture,
           });
           if (inserted) focusActiveEditor();
         };
@@ -269,7 +424,7 @@ export function useFileIO({
     imageInputRef,
     docxInputRef,
     handleSave,
-    handleDirectPrint,
+    reservePrint,
     handleDownloadDocument,
     handleOpenDocument,
     handleDocxFileChange,

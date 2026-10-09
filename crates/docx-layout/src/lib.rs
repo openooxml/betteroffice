@@ -56,16 +56,27 @@
 //! measurement surface is re-exported here as well and the wasm-visible font
 //! registry lives in this file. Everything below the wrappers is pure and
 //! native-testable.
+//!
+//! Font ids index one measurement font store. A host running several
+//! documents in one module gives each a [`MeasureFonts`] and holds
+//! [`MeasureFonts::enter`] around every call that registers fonts, measures,
+//! lays out, builds a display list or reads glyph outlines. Callers that never
+//! create one use the module's own store. Once any [`MeasureFonts`] is alive,
+//! using fonts with none entered returns an error from module-level wasm
+//! exports and panics for internal callers that miss `enter`.
 
 mod anchor;
 pub mod canonical;
+mod extent_key;
 pub mod hooks;
 pub mod page_flow;
 pub mod paragraph_spacing;
 pub mod place;
+pub mod placement;
 pub mod prescan;
 pub mod regions;
 pub mod resolve_lines;
+mod transcode;
 pub mod types;
 
 pub mod break_policy;
@@ -80,12 +91,15 @@ pub mod hit;
 pub mod keep_together;
 pub mod measure_blocks;
 pub mod section_breaks;
+pub mod sequence_fields;
 pub mod session;
 pub mod table_grid;
 pub mod table_row_break;
 
 mod typed_measure;
 
+use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use wasm_bindgen::prelude::*;
 
 #[cfg(target_arch = "wasm32")]
@@ -182,12 +196,13 @@ pub fn layout_document_json(input: &str) -> Result<String, JsValue> {
 }
 
 /// Builds a display list from a `{ measured, options, layout }` JSON envelope,
-/// threading the module-global measurement fonts. With fonts registered, runs
+/// threading the measurement fonts in use. With fonts registered, runs
 /// whose font chains resolve are shaped into glyph runs; with none registered
 /// every run stays a text primitive.
 pub fn build_display_list_value(input: &str) -> Result<display_list::DisplayList, String> {
-    MEASURE_FONTS
-        .with(|store| display_list::build_display_list_value_with_fonts(input, &store.borrow()))
+    with_measure_fonts(|store| {
+        display_list::build_display_list_value_with_fonts(input, &store.borrow())
+    })
 }
 
 /// Resident counterpart to [`build_display_list_value`]. Large measured and
@@ -198,7 +213,7 @@ pub fn build_display_list_value_from_resident(
     layout: &types::Layout,
     extras: &str,
 ) -> Result<display_list::DisplayList, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::build_display_list_value_from_resident_with_fonts(
             pagination,
             layout,
@@ -214,7 +229,7 @@ pub fn build_display_list_value_from_resident_observed(
     extras: &str,
     observe_phase: &mut impl FnMut(),
 ) -> Result<display_list::DisplayList, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::build_display_list_value_from_resident_with_fonts_observed(
             pagination,
             layout,
@@ -239,13 +254,62 @@ pub fn build_resident_display_list_observed(
     ),
     String,
 > {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::build_resident_display_list_with_fonts_observed(
             pagination,
             layout,
             extras,
             &store.borrow(),
             observe_phase,
+        )
+    })
+}
+
+/// [`build_resident_display_list_observed`] building only the pages `build`
+/// selects; the rest are unbuilt placeholders.
+pub fn build_resident_display_list_partial_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    extras: &str,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<
+    (
+        display_list::ResidentDisplayInput,
+        display_list::DisplayList,
+    ),
+    String,
+> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_list_partial_with_fonts_observed(
+            pagination,
+            layout,
+            extras,
+            &store.borrow(),
+            build,
+            observe_phase,
+        )
+    })
+}
+
+pub use display_list::release_resident_display_pages;
+
+/// Build unbuilt pages of an engine-owned display list; returns the pages built.
+pub fn build_resident_display_pages(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    list: &mut display_list::DisplayList,
+    pages: &[usize],
+) -> Result<Vec<usize>, String> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_pages_with_fonts(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            list,
+            pages,
         )
     })
 }
@@ -262,7 +326,7 @@ pub fn build_display_list_value_from_resident_incremental(
     rebuilt_page_end: usize,
     position_deltas: &std::collections::HashMap<String, i64>,
 ) -> Result<display_list::DisplayList, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::build_display_list_value_from_resident_incremental_with_fonts(
             pagination,
             layout,
@@ -286,7 +350,7 @@ pub fn update_display_list_value_from_resident_incremental(
     rebuilt_page_end: usize,
     position_deltas: &std::collections::HashMap<String, i64>,
 ) -> Result<bool, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::update_display_list_value_from_resident_incremental_with_fonts(
             pagination,
             layout,
@@ -310,7 +374,7 @@ pub fn update_display_list_value_from_resident_incremental_observed(
     position_deltas: &std::collections::HashMap<String, i64>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::update_display_list_value_from_resident_incremental_with_fonts_observed(
             pagination,
             layout,
@@ -326,6 +390,7 @@ pub fn update_display_list_value_from_resident_incremental_observed(
 }
 
 /// Page-scoped update using the engine's retained parsed display input.
+#[allow(clippy::too_many_arguments)]
 pub fn update_resident_display_list_incremental_observed(
     pagination: &types::Input,
     layout: &types::Layout,
@@ -333,10 +398,11 @@ pub fn update_resident_display_list_incremental_observed(
     previous: &mut display_list::DisplayList,
     rebuilt_page_start: usize,
     rebuilt_page_end: usize,
+    extra_pages: &[usize],
     position_deltas: &std::collections::HashMap<String, i64>,
     observe_phase: &mut impl FnMut(),
 ) -> Result<bool, String> {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         display_list::update_resident_display_list_incremental_with_fonts_observed(
             pagination,
             layout,
@@ -345,7 +411,71 @@ pub fn update_resident_display_list_incremental_observed(
             previous,
             rebuilt_page_start,
             rebuilt_page_end,
+            extra_pages,
             position_deltas,
+            observe_phase,
+        )
+    })
+}
+
+/// [`update_resident_display_list_incremental_observed`] that builds only the
+/// rebuilt pages `build` selects, replacing the others with unbuilt placeholders.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<bool, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_incremental_partial_with_fonts_observed(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            previous,
+            rebuilt_page_start,
+            rebuilt_page_end,
+            extra_pages,
+            position_deltas,
+            build,
+            observe_phase,
+        )
+    })
+}
+
+/// Page-scoped display update reporting retained suffix position shifts.
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_shifts_observed(
+    pagination: &types::Input,
+    layout: &types::Layout,
+    resident: &mut display_list::ResidentDisplayInput,
+    previous: &mut display_list::DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &std::collections::HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+) -> Result<Option<display_list::IncrementalDisplayShifts>, String> {
+    with_measure_fonts(|store| {
+        display_list::update_resident_display_list_incremental_partial_with_fonts_shifts(
+            pagination,
+            layout,
+            &store.borrow(),
+            resident,
+            previous,
+            rebuilt_page_start,
+            rebuilt_page_end,
+            extra_pages,
+            position_deltas,
+            build,
             observe_phase,
         )
     })
@@ -355,6 +485,7 @@ pub fn update_resident_display_list_incremental_observed(
 /// [`build_display_list_value`] and keep the typed result.
 #[wasm_bindgen]
 pub fn build_display_list_json(input: &str) -> Result<String, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     build_display_list_value(input)
         .and_then(|display_list| {
             serde_json::to_string(&display_list).map_err(|e| format!("serialize: {e}"))
@@ -390,6 +521,22 @@ pub fn vertical_move_json(
 #[wasm_bindgen]
 pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String, JsValue> {
     hit::range_rects_json(display_list, from as i64, to as i64).map_err(|e| JsValue::from_str(&e))
+}
+
+/// @internal
+#[wasm_bindgen]
+pub fn range_rects_on_pages_json(
+    display_list: &str,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String, JsValue> {
+    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
+        return Ok("[]".to_string());
+    };
+    hit::range_rects_on_pages_json(display_list, from as i64, to as i64, first_page, last_page)
+        .map_err(|e| JsValue::from_str(&e))
 }
 
 /// wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
@@ -494,6 +641,22 @@ pub fn range_rects_by_handle(handle: u32, from: f64, to: f64) -> Result<String, 
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// @internal
+#[wasm_bindgen]
+pub fn range_rects_on_pages_by_handle(
+    handle: u32,
+    from: f64,
+    to: f64,
+    first_page: f64,
+    last_page: f64,
+) -> Result<String, JsValue> {
+    let Some((first_page, last_page)) = hit::page_window(first_page, last_page) else {
+        return Ok("[]".to_string());
+    };
+    session::range_rects_on_pages_by_handle(handle, from as i64, to as i64, first_page, last_page)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
 /// wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
 /// range rects against a stored display list. `region` is
 /// `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
@@ -512,12 +675,92 @@ pub fn range_rects_region_by_handle(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+type SharedFontStore = std::rc::Rc<std::cell::RefCell<ooxml_text::FontStore>>;
+
 thread_local! {
-    /// Fonts registered for measurement. WASM is single-threaded, so a
-    /// thread_local doubles as the module-global store; native tests get an
-    /// isolated store per test thread.
-    static MEASURE_FONTS: std::cell::RefCell<ooxml_text::FontStore> =
-        std::cell::RefCell::new(ooxml_text::FontStore::new());
+    /// The module's own measurement font store, used when no [`MeasureFonts`]
+    /// exists. WASM is single-threaded, so a thread_local doubles as the
+    /// module-global store; native tests get one per test thread.
+    static MODULE_FONTS: SharedFontStore = SharedFontStore::default();
+    /// The entered [`MeasureFonts`], if any.
+    static ENTERED_FONTS: std::cell::RefCell<Option<SharedFontStore>> =
+        const { std::cell::RefCell::new(None) };
+    /// How many [`MeasureFonts`] are alive.
+    static SESSION_FONTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn module_fonts_usable() -> Result<(), String> {
+    if ENTERED_FONTS.with(|entered| entered.borrow().is_none())
+        && SESSION_FONTS.with(std::cell::Cell::get) > 0
+    {
+        return Err(
+            "measurement fonts belong to an open editing session; use the session's font methods"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Runs `read` against the entered measurement font store, else the module's
+/// own. Panics when a [`MeasureFonts`] is alive but none is entered: a caller
+/// forgot [`MeasureFonts::enter`] and would otherwise read the wrong store.
+fn with_measure_fonts<T>(read: impl FnOnce(&std::cell::RefCell<ooxml_text::FontStore>) -> T) -> T {
+    let store = ENTERED_FONTS
+        .with(|entered| entered.borrow().clone())
+        .unwrap_or_else(|| {
+            assert_eq!(
+                SESSION_FONTS.with(std::cell::Cell::get),
+                0,
+                "measurement fonts used outside MeasureFonts::enter while a session owns a store"
+            );
+            MODULE_FONTS.with(std::rc::Rc::clone)
+        });
+    read(&store)
+}
+
+/// A measurement font store of one session's own. Its ids start at zero and
+/// stay valid whatever other stores register or clear. While any is alive,
+/// fonts may only be used inside [`MeasureFonts::enter`].
+pub struct MeasureFonts(SharedFontStore);
+
+impl Default for MeasureFonts {
+    fn default() -> Self {
+        SESSION_FONTS.with(|count| count.set(count.get() + 1));
+        Self(SharedFontStore::default())
+    }
+}
+
+impl Drop for MeasureFonts {
+    fn drop(&mut self) {
+        let _ = SESSION_FONTS.try_with(|count| {
+            count.set(count.get() - 1);
+            if count.get() == 0 {
+                measure_blocks::clear_extent_cache();
+            }
+        });
+    }
+}
+
+impl MeasureFonts {
+    /// Makes this the store that registration, measurement, display building
+    /// and glyph outlines use until the returned scope drops, which puts the
+    /// replaced store back.
+    pub fn enter(&self) -> MeasureFontsScope {
+        let previous =
+            ENTERED_FONTS.with(|entered| entered.replace(Some(std::rc::Rc::clone(&self.0))));
+        MeasureFontsScope(previous)
+    }
+}
+
+/// The span a [`MeasureFonts`] is in use; see [`MeasureFonts::enter`].
+#[must_use]
+pub struct MeasureFontsScope(Option<SharedFontStore>);
+
+impl Drop for MeasureFontsScope {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        let _ = ENTERED_FONTS.try_with(|entered| entered.replace(previous));
+    }
 }
 
 /// Register a font for measurement from raw sfnt bytes; returns the font id
@@ -526,13 +769,8 @@ thread_local! {
 /// error at this boundary, mirroring `FontStore::register`.
 #[wasm_bindgen]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
-    MEASURE_FONTS.with(|store| {
-        store
-            .borrow_mut()
-            .register(bytes.to_vec())
-            .map(|id| id.to_u32())
-            .map_err(|e| JsValue::from_str(&e.to_string()))
-    })
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
+    register_measure_font_bytes(bytes).map_err(|e| JsValue::from_str(&e))
 }
 
 /// Register a measurement view of `base` carrying the vertical metrics and
@@ -543,10 +781,11 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 /// this one store, so a widened view measures and paints at one pitch.
 #[wasm_bindgen]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
         return Ok(base);
     };
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         store
             .borrow_mut()
             .register_substitute(ooxml_text::FontId::from_u32(base), requested)
@@ -557,18 +796,82 @@ pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Re
 
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
-#[wasm_bindgen]
 pub fn clear_measure_fonts() {
-    MEASURE_FONTS.with(|store| {
+    with_measure_fonts(|store| {
         *store.borrow_mut() = ooxml_text::FontStore::new();
     });
     measure_blocks::clear_extent_cache();
 }
 
+/// Drop every registered measurement font (ids restart at 0). Callers must
+/// re-register before the next `measure_paragraph_json`.
+#[wasm_bindgen(js_name = clear_measure_fonts)]
+pub fn clear_measure_fonts_wasm() -> Result<(), JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
+    clear_measure_fonts();
+    Ok(())
+}
+
 /// Unique id of the current measurement font store, for caches keyed by store
 /// contents. Changes whenever [`clear_measure_fonts`] installs a new store.
-pub(crate) fn measure_store_id() -> u64 {
-    MEASURE_FONTS.with(|store| store.borrow().id())
+pub fn measure_store_id() -> u64 {
+    with_measure_fonts(|store| store.borrow().id())
+}
+
+/// Which fonts measurement reads: the current store and how many fonts it holds. A cleared store
+/// is a new one and fonts are only ever added, so measurements taken under equal generations
+/// used the same fonts.
+pub fn measure_fonts_generation() -> (u64, usize) {
+    with_measure_fonts(|store| {
+        let store = store.borrow();
+        (store.id(), store.font_count())
+    })
+}
+
+pub fn measure_font_cache_identity(chains: &BTreeMap<String, Vec<u32>>) -> (u64, u64) {
+    let (store, fonts) = measure_fonts_generation();
+    let mut missing = Vec::new();
+    for &id in chains.values().flatten() {
+        if id as usize >= fonts {
+            missing.push(id);
+        }
+    }
+    missing.sort_unstable();
+    missing.dedup();
+    let mut hash = std::hash::DefaultHasher::new();
+    (fonts == 0).hash(&mut hash);
+    missing.hash(&mut hash);
+    (store, hash.finish())
+}
+
+/// Runs `run` against an empty measurement font store of its own, then puts the
+/// store in use back unchanged: fonts `run` registers never reach another
+/// session, and caches keyed by [`measure_store_id`] never mix the two.
+pub fn with_private_measure_fonts<T>(run: impl FnOnce() -> T) -> T {
+    let private = MeasureFonts::default();
+    let _scope = private.enter();
+    run()
+}
+
+/// Registers raw sfnt bytes in the current measurement font store.
+pub fn register_measure_font_bytes(bytes: &[u8]) -> Result<u32, String> {
+    with_measure_fonts(|store| {
+        store
+            .borrow_mut()
+            .register(bytes.to_vec())
+            .map(|id| id.to_u32())
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Reads what measurement font `id` measures with: the bytes it shapes and a descriptor of the
+/// metrics and advance scale layered over them. `None` for an id the store does not hold.
+pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Option<T> {
+    with_measure_fonts(|store| {
+        let store = store.borrow();
+        let (bytes, metrics, scale) = store.measured_face(ooxml_text::FontId::from_u32(id)).ok()?;
+        Some(read(bytes, &format!("{metrics:?}/{scale}")))
+    })
 }
 
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON
@@ -576,6 +879,7 @@ pub(crate) fn measure_store_id() -> u64 {
 /// must fall back to browser measurement for that block.
 #[wasm_bindgen]
 pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     measure_paragraph_json_resident(input).map_err(|e| JsValue::from_str(&e))
 }
 
@@ -583,7 +887,7 @@ pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
 /// string error avoids constructing a wasm `JsValue` when the editing engine
 /// remeasures a dirty paragraph inside a larger operation.
 pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
-    MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
+    with_measure_fonts(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
 }
 
 /// Typed form of [`measure_paragraph_json_resident`] against the same font
@@ -591,7 +895,14 @@ pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
 pub(crate) fn measure_paragraph_typed_resident(
     request: &ooxml_text::MeasureRequest<'_>,
 ) -> Result<ooxml_text::ParagraphExtentOut, ooxml_text::MeasureError> {
-    MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
+    with_measure_fonts(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
+}
+
+/// [`ooxml_text::min_content_width_typed`] against the resident font store.
+pub(crate) fn min_content_width_typed_resident(
+    request: &ooxml_text::MeasureRequest<'_>,
+) -> Result<f32, ooxml_text::MeasureError> {
+    with_measure_fonts(|store| ooxml_text::min_content_width_typed(&store.borrow(), request))
 }
 
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline
@@ -603,18 +914,18 @@ pub(crate) fn measure_paragraph_typed_resident(
 /// flipping y at draw time. `cmds` is empty for a blank glyph (space).
 #[wasm_bindgen]
 pub fn outline_glyph_json(font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
+    module_fonts_usable().map_err(|e| JsValue::from_str(&e))?;
     // Glyph ids are u16 in the sfnt spec; a value past that is out of range for
     // any font, so reject at the boundary rather than truncating.
     let glyph_id = u16::try_from(glyph_id).map_err(|_| {
         JsValue::from_str(&format!("glyph id {glyph_id} out of range for this font"))
     })?;
-    MEASURE_FONTS
-        .with(|store| {
-            store
-                .borrow()
-                .outline_glyph_json(ooxml_text::FontId::from_u32(font_id), glyph_id)
-        })
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    with_measure_fonts(|store| {
+        store
+            .borrow()
+            .outline_glyph_json(ooxml_text::FontId::from_u32(font_id), glyph_id)
+    })
+    .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 #[cfg(test)]
@@ -643,6 +954,53 @@ mod tests {
         assert_eq!(cmds.last().unwrap()["t"], "Z");
 
         clear_measure_fonts();
+    }
+
+    #[test]
+    fn entered_font_stores_nest_and_restore() {
+        let holds = |id| with_measure_face(id, |_, _| ()).is_some();
+        clear_measure_fonts();
+        register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        register_measure_font_bytes(LIBERATION_SANS).unwrap();
+        {
+            let (a, b) = (MeasureFonts::default(), MeasureFonts::default());
+            let _a = a.enter();
+            assert!(!holds(0));
+            assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(0));
+            {
+                let _b = b.enter();
+                assert!(!holds(0));
+                {
+                    let _a = a.enter();
+                    assert!(holds(0));
+                }
+                assert!(!holds(0));
+            }
+            assert!(holds(0));
+        }
+        assert!(holds(1));
+        let unentered = MeasureFonts::default();
+        assert!(std::panic::catch_unwind(|| holds(1)).is_err());
+        drop(unentered);
+        assert!(holds(1));
+    }
+
+    #[test]
+    fn module_fonts_usable_requires_enter_while_a_session_owns_fonts() {
+        assert_eq!(module_fonts_usable(), Ok(()));
+        let fonts = MeasureFonts::default();
+        let expected = Err(
+            "measurement fonts belong to an open editing session; use the session's font methods"
+                .to_string(),
+        );
+        assert_eq!(module_fonts_usable(), expected);
+        {
+            let _fonts = fonts.enter();
+            assert_eq!(module_fonts_usable(), Ok(()));
+        }
+        assert_eq!(module_fonts_usable(), expected);
+        drop(fonts);
+        assert_eq!(module_fonts_usable(), Ok(()));
     }
 
     fn options_json() -> serde_json::Value {

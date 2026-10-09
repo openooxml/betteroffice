@@ -11,7 +11,9 @@ const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
 const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 
-const NOT_FOUND = new Response('{"error":"Not found"}', { status: 404 });
+function notFound() {
+  return new Response('{"error":"Not found"}', { status: 404 });
+}
 
 function versions(...published: string[]) {
   return Response.json({ versions: Object.fromEntries(published.map((v) => [v, {}])) });
@@ -80,7 +82,7 @@ describe('npm publish targets', () => {
   test('a package that exists at its release version passes', async () => {
     const result = await guard('--npm', (name) => {
       const found = packages.find((entry) => entry.name === name);
-      return found ? versions(found.version) : NOT_FOUND;
+      return found ? versions(found.version) : notFound();
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`${packages[0]!.name}@${packages[0]!.version} is on npm.`);
@@ -96,7 +98,7 @@ describe('npm publish targets', () => {
   test('a package that does not exist fails, by name', async () => {
     const missing = packages[0]!.name;
     const result = await guard('--npm', (name) => {
-      if (name === missing) return NOT_FOUND;
+      if (name === missing) return notFound();
       const found = packages.find((entry) => entry.name === name);
       return versions(found!.version);
     });
@@ -120,7 +122,7 @@ describe('crates.io publish targets', () => {
 
   test('a crate that does not exist fails, by name', async () => {
     const result = await guard('--crates', (name) =>
-      name === crates[0] ? NOT_FOUND : Response.json({})
+      name === crates[0] ? notFound() : Response.json({})
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`${crates[0]} is not on crates.io.`);
@@ -130,7 +132,7 @@ describe('crates.io publish targets', () => {
   test('a bootstrap token creates missing crates, so a missing one only prints', async () => {
     const result = await guard(
       '--crates',
-      (name) => (name === crates[0] ? NOT_FOUND : Response.json({})),
+      (name) => (name === crates[0] ? notFound() : Response.json({})),
       { CRATES_IO_BOOTSTRAP_TOKEN: 'cio_bootstrap' }
     );
     expect(result.status).toBe(0);
@@ -152,9 +154,10 @@ describe('release wiring', () => {
       'node scripts/check-publish-targets.mjs --crates',
       'node scripts/check-publish-targets.mjs --npm'
     ]);
-    for (const step of guards) {
-      expect(step.if).toBe("steps.pending.outputs.publishing == 'true'");
-    }
+    expect(guards.map((step: any) => step.if)).toEqual([
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'",
+      "steps.pending.outputs.publishing == 'true'"
+    ]);
   });
 
   test('both registries are checked before the first upload of either', () => {
@@ -178,12 +181,14 @@ describe('release wiring', () => {
 describe('crates OIDC-first wiring', () => {
   const named = new Map(release.jobs.release.steps.map((step: any) => [step.name, step]));
 
-  test('the OIDC exchange always runs on the publish path', () => {
+  test('the OIDC exchange runs on the publish path unless crates are skipped', () => {
     const auth = named.get('Authenticate to crates.io');
     expect(auth.uses).toBe(
       'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
     );
-    expect(auth.if).toBe("steps.pending.outputs.publishing == 'true'");
+    expect(auth.if).toBe(
+      "steps.pending.outputs.publishing == 'true' && vars.RELEASE_SKIP_CRATES != 'true'"
+    );
   });
 
   test('an OIDC failure continues only when the bootstrap token is detected', () => {

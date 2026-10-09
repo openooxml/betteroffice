@@ -12,6 +12,51 @@
     "undo": null,
     "redo": null
   },
+  "commands": {
+    "fontSizeStep": null,
+    "numberFormat": null,
+    "decimalPlaces": null,
+    "borderStyle": null,
+    "moreTools": null,
+    "customFontSize": null,
+    "fontSizePoints": null,
+    "customZoom": null,
+    "zoomPercent": null,
+    "apply": null,
+    "cancel": null,
+    "reasons": {
+      "editorUnavailable": null,
+      "documentLoading": null,
+      "noDocument": null,
+      "readOnly": null,
+      "cellSelectionRequired": null,
+      "unsupportedSelection": null,
+      "multipleCellsRequired": null,
+      "multipleColumnsRequired": null,
+      "multipleRowsRequired": null,
+      "noMergedCells": null,
+      "collaborationUnsupported": null,
+      "nothingToUndo": null,
+      "nothingToRedo": null,
+      "pngUnavailable": null,
+      "noProposals": null,
+      "proposalNotFound": null,
+      "hostDisabled": null,
+      "unsupportedCommand": null,
+      "invalidArguments": null,
+      "inputFailed": null,
+      "documentReplaced": null,
+      "targetChanged": null,
+      "gestureActive": null,
+      "proposalStale": null,
+      "renderFailed": null,
+      "commandFailed": null,
+      "permissionDenied": "宿主应用未允许此插件使用此命令。",
+      "unsupportedPolicy": "插件尚不能运行此命令，请改用编辑批处理。",
+      "pluginUnavailable": "插件已不再处于活动状态。",
+      "aborted": "插件操作在命令运行前已取消。"
+    }
+  },
   "editor": {
     "appLabel": null,
     "demoCellText": null,
@@ -36,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "插件",
+    "panelTabs": "插件面板",
+    "collapsePanel": "折叠{title}",
+    "expandPanel": "展开{title}"
   }
 }

@@ -9,6 +9,8 @@ pub enum Error {
     Layout(docx_layout::LayoutError),
     DisplayList(String),
     ParagraphNotFound(String),
+    /// More than one body paragraph has the ID.
+    AmbiguousParagraph(String),
     UnsupportedParagraphEdit(String),
     Font(String),
     Image(String),
@@ -24,6 +26,8 @@ pub enum Error {
         max_pixels: u64,
     },
     Render(String),
+    /// A structured export refused its options.
+    Export(docx_edit::structured::ExportFailure),
 }
 
 impl fmt::Display for Error {
@@ -35,6 +39,9 @@ impl fmt::Display for Error {
             Self::Layout(error) => error.fmt(formatter),
             Self::DisplayList(error) => formatter.write_str(error),
             Self::ParagraphNotFound(id) => write!(formatter, "paragraph {id:?} was not found"),
+            Self::AmbiguousParagraph(id) => {
+                write!(formatter, "more than one paragraph has the ID {id:?}")
+            }
             Self::UnsupportedParagraphEdit(id) => {
                 write!(
                     formatter,
@@ -57,6 +64,7 @@ impl fmt::Display for Error {
                 "requested render is {width}x{height}px, exceeds the {max_pixels}-pixel allocation cap; lower the page dimensions"
             ),
             Self::Render(error) => formatter.write_str(error),
+            Self::Export(failure) => failure.fmt(formatter),
         }
     }
 }
@@ -68,8 +76,10 @@ impl std::error::Error for Error {
             Self::Edit(error) => Some(error),
             Self::Operation(error) => Some(error),
             Self::Layout(error) => Some(error),
+            Self::Export(failure) => Some(failure),
             Self::DisplayList(_)
             | Self::ParagraphNotFound(_)
+            | Self::AmbiguousParagraph(_)
             | Self::UnsupportedParagraphEdit(_)
             | Self::Font(_)
             | Self::Image(_)
@@ -102,5 +112,22 @@ impl From<docx_edit::OpError> for Error {
 impl From<docx_layout::LayoutError> for Error {
     fn from(error: docx_layout::LayoutError) -> Self {
         Self::Layout(error)
+    }
+}
+
+impl From<docx_edit::structured::ExportFailure> for Error {
+    fn from(failure: docx_edit::structured::ExportFailure) -> Self {
+        Self::Export(failure)
+    }
+}
+
+impl From<docx_edit::structured::ExportError> for Error {
+    fn from(error: docx_edit::structured::ExportError) -> Self {
+        match error {
+            docx_edit::structured::ExportError::Parse(message) => {
+                Self::Edit(docx_edit::EditError::InvalidUpdate(message))
+            }
+            docx_edit::structured::ExportError::Refused(failure) => Self::Export(failure),
+        }
     }
 }

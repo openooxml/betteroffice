@@ -5,16 +5,14 @@ The routing policy is deterministic: a single-subpath filed `Geometry` supplies 
 anchored to the resolved endpoints, otherwise the shape's `ShapeRouteStyle` — or the page's
 `RouteStyle` — selects a direct run or one horizontal-first or vertical-first orthogonal bend.
 Every 1-D shape takes this path, plain lines included, so a shape that carries no route style at
-all runs straight rather than assuming a connector's right angle. It does not emulate Visio
-obstacle avoidance; an unresolved route becomes a placeholder instead of a guessed
-line.
+all runs straight rather than assuming a connector's right angle. An unresolved route becomes a
+placeholder instead of a guessed line.
 
 Connector crossings render Visio line jumps at layout time: the more-horizontal leg bridges the
 more-vertical one under `LineJumpCode` 1 (mirrored for 2, z-order for 4 and 5), sized by
 `LineJumpFactorX/Y` times `LineToLineX/Y`, with per-connector `ConLineJumpCode` overrides.
-Arc and gap styles are supported; other jump styles and last-routed (3) crossings stay unbridged.
-Crossing detection is bounded: a page that exceeds the candidate or placed-jump budget renders
-with no line jumps at all rather than a partial set.
+Jumps draw in the arc and gap styles, and crossing detection is bounded by a candidate and a
+placed-jump budget.
 
 VSDX resolved-scene to display-list compiler and hit tester.
 

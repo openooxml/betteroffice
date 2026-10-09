@@ -10,5 +10,6 @@ formats resolve graphics identically.
 - `shape` — shape properties: outlines, fills, and effects
 - `picture` — picture fills and image references
 - `chart` — chart parsing and plot geometry, behind the `chart` feature
+- `png_encode` — a minimal PNG writer for decoded rasters, behind the `png` feature
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

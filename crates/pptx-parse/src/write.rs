@@ -83,6 +83,9 @@ pub struct ShapePatch {
     pub extent: Option<(i64, i64)>,
     /// Fills in transform pieces the source never spelled out.
     pub inherited: Option<InheritedTransform>,
+    /// The source spells out no transform of its own, so `inherited` also
+    /// sets the rotation and flips of an `a:xfrm` it already has.
+    pub materializes: bool,
     pub fill: Option<ShapeFill>,
     /// A default outline clears the stroke.
     pub outline: Option<ShapeOutline>,
@@ -1672,8 +1675,9 @@ fn shape_properties_mut<'a>(
 }
 
 /// Writes the edited transform halves. Pieces the source spells out and the
-/// edit did not change are left untouched; pieces the source lacks are
-/// materialized from the inherited transform, rotation and flips included.
+/// edit did not change are left untouched; pieces the source lacks come from
+/// the inherited transform, and so do the rotation and flips when the
+/// `a:xfrm` is new or the patch materializes it.
 fn patch_transform(
     element: &mut XmlElement,
     patch: &ShapePatch,
@@ -1697,7 +1701,8 @@ fn patch_transform(
             .ok_or_else(|| write_error(part, "shape has no properties element"))?,
         None => element,
     };
-    if parent.child_mut("xfrm").is_none() {
+    let created = parent.child_mut("xfrm").is_none();
+    if created {
         if offset.is_none() || extent.is_none() {
             return Err(write_error(
                 part,
@@ -1711,21 +1716,24 @@ fn patch_transform(
                 matches!(child, XmlNode::Element(element) if element.local_name() != "nvGraphicFramePr")
             })
             .unwrap_or(parent.children.len());
-        let mut created = XmlElement::new(transform_name);
-        if let Some(inherited) = patch.inherited {
-            if inherited.rotation_deg != 0.0 {
-                created.set_attribute("rot", format_fixed(inherited.rotation_deg * 60_000.0));
-            }
-            if inherited.flip_horizontal {
-                created.set_attribute("flipH", "1");
-            }
-            if inherited.flip_vertical {
-                created.set_attribute("flipV", "1");
-            }
-        }
-        parent.children.insert(position, XmlNode::Element(created));
+        parent
+            .children
+            .insert(position, XmlNode::Element(XmlElement::new(transform_name)));
     }
     let transform = parent.child_mut("xfrm").expect("transform ensured above");
+    if (created || patch.materializes)
+        && let Some(inherited) = patch.inherited
+    {
+        if inherited.rotation_deg != 0.0 {
+            transform.set_attribute("rot", format_fixed(inherited.rotation_deg * 60_000.0));
+        }
+        if inherited.flip_horizontal {
+            transform.set_attribute("flipH", "1");
+        }
+        if inherited.flip_vertical {
+            transform.set_attribute("flipV", "1");
+        }
+    }
     if let Some((x, y)) = offset
         && (patch.offset.is_some() || transform.child_mut("off").is_none())
     {

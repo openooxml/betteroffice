@@ -550,6 +550,33 @@ const DEFAULT_ALIGNMENT: Alignment = Alignment {
 };
 
 impl Stylesheet {
+    #[doc(hidden)]
+    pub fn snapshot_field_counts(&self) -> [usize; 7] {
+        let Self {
+            fonts,
+            fills,
+            borders,
+            cell_xfs,
+            num_fmts,
+            theme: _,
+            indexed_colors,
+            font_memo: _,
+            fill_memo: _,
+            border_memo: _,
+            xf_memo: _,
+            fmt_memo: _,
+        } = self;
+        [
+            fonts.len(),
+            fills.len(),
+            borders.len(),
+            cell_xfs.len(),
+            num_fmts.len(),
+            1,
+            indexed_colors.len(),
+        ]
+    }
+
     /// Resolve a color using this workbook's indexed palette and theme.
     pub fn resolve_color(&self, color: &Color) -> Option<String> {
         if let Color::Indexed(index @ 0..=63) = color
