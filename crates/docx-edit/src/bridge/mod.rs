@@ -3594,8 +3594,12 @@ fn formatting_equal(left: &RunFormatting, right: &RunFormatting) -> bool {
     left == right
         || (has_nonfinite(left)
             && has_nonfinite(right)
-            && serde_json::to_string(left).expect("RunFormatting serializes")
-                == serde_json::to_string(right).expect("RunFormatting serializes"))
+            && serde_json::to_string(left)
+                .and_then(|s| serde_json::from_str::<Value>(&s))
+                .expect("RunFormatting serializes")
+                == serde_json::to_string(right)
+                    .and_then(|s| serde_json::from_str::<Value>(&s))
+                    .expect("RunFormatting serializes"))
 }
 
 fn has_nonfinite(formatting: &RunFormatting) -> bool {
@@ -6442,6 +6446,14 @@ mod tests {
             comment_ids: Some(vec![f64::NAN]),
             ..RunFormatting::default()
         };
+        let positive_zero = RunFormatting {
+            letter_spacing: Some(0.0),
+            ..nan_size.clone()
+        };
+        let negative_zero = RunFormatting {
+            letter_spacing: Some(-0.0),
+            ..nan_size.clone()
+        };
 
         for (a, b) in [
             (&finite, &nan_size),
@@ -6452,6 +6464,7 @@ mod tests {
             (&nan_comments, &nan_comments2),
             (&nan_comments, &nan_in_field),
             (&nan_size, &nan_in_field),
+            (&positive_zero, &negative_zero),
         ] {
             assert_eq!(
                 formatting_equal(a, b),
